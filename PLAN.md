@@ -2954,8 +2954,16 @@ transfer, landed in increments:
   drained after each `SeatInput` wake → `DesktopShell` pump → composite →
   present with damage; seat loss tears the session down fail-loud
   (stderr reason, reserved exit codes, owner-checked release on every
-  exit path). Then D7d (the end-to-end QEMU vertical + login's
-  `graphical_available` flip).
+  exit path). **D7d's first stage is done:** the autoload QEMU vertical
+  boots a display world — the aarch64 boot publishes the ramfb scan-out
+  surface as a boot display node (`HwResourceKind::Framebuffer` grant +
+  `simple-framebuffer` match key), the signed framebuffer-service bundle
+  autoloads onto its grants, the whole unlock dialogue is typed at the
+  seat keyboard (the video console is the only console), and the run
+  proves both per-kind `INPUT_DELIVERED` witnesses, the unlock, and the
+  `DISPLAY_ENDPOINT` bind (`plans/DISPLAY.md` D7d). Remaining (D7d-2):
+  login's `graphical_available` flip + desktop-session spawn + the
+  host-side scan-out pixel readback.
   The virtio pointer feed into the seat channel is done — see above; the
   USB HID mouse joins through the same shared `from_device_event` mapping
   when its metal report pump lands. Then: relay the theme switch over live

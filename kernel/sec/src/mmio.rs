@@ -48,6 +48,9 @@ impl MmioGateError {
     /// * [`Self::Map`]`(`[`MmioError::NoVirtualSpace`]`)` →
     ///   [`Errno::LengthOutOfRange`] — the closest `abi-v1` variant for
     ///   "no room to satisfy the request".
+    /// * [`Self::Map`]`(`[`MmioError::OutOfMemory`]`)` →
+    ///   [`Errno::OutOfMemory`] — the mapper's bookkeeping allocation
+    ///   failed (deterministic OOM, retryable once memory frees).
     /// * Other internal mapper failures (page-table errors, guard
     ///   violations, unknown region, invalid config) collapse to
     ///   [`Errno::OutOfRange`] — these are kernel-side bugs with no
@@ -59,6 +62,7 @@ impl MmioGateError {
             Self::Map(MmioError::InvalidRegion | MmioError::NoVirtualSpace) => {
                 Errno::LengthOutOfRange
             }
+            Self::Map(MmioError::OutOfMemory) => Errno::OutOfMemory,
             Self::Map(_) => Errno::OutOfRange,
         }
     }

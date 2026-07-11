@@ -79,6 +79,11 @@ pub const USB_MOUSE_STORE_PATH: &[&[u8]] = &[b"Drivers", b"input", b"usb_mouse",
 /// same path the `-M virt` autoload vertical's fixture plants.
 pub const VIRTIO_KBD_STORE_PATH: &[&[u8]] = &[b"Drivers", b"input", b"virtio_kbd", b"Run"];
 
+/// Store path of the framebuffer display-service bundle: class `display`,
+/// the `framebuffer` leaf naming the (vendor-neutral) service that drives
+/// any platform-published linear scan-out surface.
+pub const FRAMEBUFFER_STORE_PATH: &[&[u8]] = &[b"Drivers", b"display", b"framebuffer", b"Run"];
+
 /// Store path of the USB mass-storage class-driver bundle: class `storage`,
 /// the `usb_msd` leaf naming the (vendor-neutral) driver.
 pub const USB_MSD_STORE_PATH: &[&[u8]] = &[b"Drivers", b"storage", b"usb_msd", b"Run"];
@@ -116,6 +121,7 @@ fn build_bundle(
         "rustos-drv-input-usb-kbd" => "drivers/input/usb_kbd",
         "rustos-drv-input-usb-mouse" => "drivers/input/usb_mouse",
         "rustos-drv-input-virtio-kbd" => "drivers/input/virtio_kbd",
+        "rustos-drv-display-framebuffer" => "drivers/display/framebuffer",
         "rustos-drv-storage-usb-msd" => "drivers/storage/usb_msd",
         "rustos-drv-storage-volmgr" => "drivers/storage/volmgr",
         other => return Err(format!("image: no source dir mapped for driver {other}")),
@@ -388,6 +394,36 @@ pub fn build_virtio_kbd_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
             CapabilityId::INPUT_INJECT,
         ],
         rustos_drv_input_virtio_input::BIND_KEYS,
+    )
+}
+
+/// Build and sign the framebuffer display-service bundle.
+///
+/// The zero-copy, lease-gated display half of the desktop present path
+/// (`plans/DISPLAY.md` D7b/D7d): it maps its granted scan-out surface
+/// (`CAP_MMIO_MAP` — the geometry rides the node's `Framebuffer`
+/// resource), maps each session's granted frame region at `Configure`
+/// (`CAP_SHM`), and binds the reserved `DISPLAY_ENDPOINT` rendezvous
+/// (`CAP_IPC_BIND_PRIVILEGED`) — and nothing more. Every present is gated
+/// kernel-side on the caller's live seat lease (`call_peer_seat`, no
+/// capability — the authority is serving the in-flight call). Carries
+/// `rustos_drv_display_framebuffer::BIND_KEYS`, so it autoloads against
+/// the boot display node the kernel publishes for its platform-programmed
+/// scan-out surface (and stays unbound on a headless boot, §18.4).
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_framebuffer_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        "rustos-drv-display-framebuffer",
+        &[
+            CapabilityId::MMIO_MAP,
+            CapabilityId::SHM,
+            CapabilityId::IPC_BIND_PRIVILEGED,
+        ],
+        rustos_drv_display_framebuffer::BIND_KEYS,
     )
 }
 

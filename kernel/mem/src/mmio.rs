@@ -36,7 +36,6 @@
 //! block, exactly mirroring [`crate::dma::DmaPool`].
 
 use alloc::collections::BTreeMap;
-use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 use core::ptr::NonNull;
@@ -68,6 +67,10 @@ pub enum MmioError {
     /// The mapper was constructed with an invalid request (zero
     /// capacity, or a virtual base that is not page aligned).
     InvalidMapConfig,
+    /// The kernel heap could not extend the slot-occupancy bitmap for a
+    /// window this deep into the virtual span. Deterministic OOM: the
+    /// request is refused as a value and the mapper is unchanged.
+    OutOfMemory,
 }
 
 impl From<PageTableError> for MmioError {
@@ -85,6 +88,7 @@ impl fmt::Display for MmioError {
             Self::UnknownRegion => f.write_str("mmio region not from this mapper"),
             Self::DirectMap => f.write_str("mmio region outside the direct physical map"),
             Self::InvalidMapConfig => f.write_str("mmio mapper config invalid"),
+            Self::OutOfMemory => f.write_str("mmio mapper bookkeeping allocation failed"),
         }
     }
 }
@@ -175,6 +179,13 @@ impl MmioWindowMap {
     /// Construct an allocator managing the virtual range
     /// `[base, base + capacity_pages * PAGE_SIZE)`.
     ///
+    /// `capacity_pages` is the window's structural ceiling (the virtual
+    /// span the process layout reserves), not an up-front cost: the
+    /// slot-occupancy bitmap starts empty and grows on demand as mappings
+    /// land deeper into the window, so a task that maps a few small
+    /// register blocks pays a few bytes while the same window can also
+    /// carry a multi-megabyte scan-out surface.
+    ///
     /// # Errors
     ///
     /// [`MmioError::InvalidMapConfig`] if `capacity_pages == 0`,
@@ -191,7 +202,7 @@ impl MmioWindowMap {
         Ok(Self {
             base,
             capacity_pages,
-            slot_used: vec![false; capacity_pages],
+            slot_used: Vec::new(),
             regions: BTreeMap::new(),
         })
     }
@@ -290,9 +301,7 @@ impl MmioWindowMap {
             .checked_add(len_u64)
             .ok_or(MmioError::InvalidRegion)?;
         let block_pages = data_pages.checked_add(2).ok_or(MmioError::NoVirtualSpace)?;
-        let leading_guard_slot = self
-            .find_free_run(block_pages)
-            .ok_or(MmioError::NoVirtualSpace)?;
+        let leading_guard_slot = self.alloc_free_run(block_pages)?;
         let first_data_slot = leading_guard_slot + 1;
         let trailing_guard_slot = leading_guard_slot + 1 + data_pages;
 
@@ -460,25 +469,39 @@ impl MmioWindowMap {
         VirtAddr::new(self.base.as_u64() + ((slot as u64) << PAGE_SHIFT))
     }
 
-    fn find_free_run(&self, len: usize) -> Option<usize> {
+    /// `true` when `slot` is occupied. A slot the bitmap has not grown to
+    /// yet has never been allocated, so it is free.
+    fn slot_is_used(&self, slot: usize) -> bool {
+        self.slot_used.get(slot).copied().unwrap_or(false)
+    }
+
+    /// First-fit a run of `len` free slots inside the window's structural
+    /// ceiling and grow the occupancy bitmap to cover it, fallibly: an
+    /// exhausted kernel heap refuses the request as a value and leaves the
+    /// mapper unchanged.
+    fn alloc_free_run(&mut self, len: usize) -> Result<usize, MmioError> {
         if len == 0 || len > self.capacity_pages {
-            return None;
+            return Err(MmioError::NoVirtualSpace);
         }
         let mut start = 0;
-        while start + len <= self.capacity_pages {
-            let mut ok = true;
+        'candidate: while start + len <= self.capacity_pages {
             for i in 0..len {
-                if self.slot_used[start + i] {
+                if self.slot_is_used(start + i) {
                     start = start + i + 1;
-                    ok = false;
-                    break;
+                    continue 'candidate;
                 }
             }
-            if ok {
-                return Some(start);
+            let needed = start + len;
+            if needed > self.slot_used.len() {
+                let extra = needed - self.slot_used.len();
+                self.slot_used
+                    .try_reserve(extra)
+                    .map_err(|_| MmioError::OutOfMemory)?;
+                self.slot_used.resize(needed, false);
             }
+            return Ok(start);
         }
-        None
+        Err(MmioError::NoVirtualSpace)
     }
 
     fn rollback_partial_map<P: PageTable>(

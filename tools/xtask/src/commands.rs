@@ -498,6 +498,12 @@ struct TestOptions {
     run_qemu: bool,
     /// Run the wasm32 browser-headless vertical (`--wasm`).
     run_wasm: bool,
+    /// Restrict the QEMU matrix to enrolments whose package name contains
+    /// this substring (`--only`, requires `--qemu`) — the debugging filter
+    /// for iterating on one vertical. The host `cargo test` stage is
+    /// skipped so a `--only` run exercises exactly the named guests; it is
+    /// never a substitute for the whole matrix.
+    only: Option<String>,
     /// Remaining arguments forwarded verbatim to `cargo test`.
     forward: Vec<OsString>,
 }
@@ -518,6 +524,7 @@ fn parse_test_options(args: &[OsString]) -> Result<TestOptions, String> {
     let mut count: Option<u32> = None;
     let mut soak = false;
     let mut secs: Option<u64> = None;
+    let mut only: Option<String> = None;
     let mut iter = args.iter();
     while let Some(a) = iter.next() {
         if a == "--qemu" {
@@ -526,6 +533,17 @@ fn parse_test_options(args: &[OsString]) -> Result<TestOptions, String> {
             run_wasm = true;
         } else if a == "--soak" {
             soak = true;
+        } else if a == "--only" {
+            let value = iter
+                .next()
+                .ok_or_else(|| "test: `--only` requires a package substring".to_string())?;
+            let text = value
+                .to_str()
+                .ok_or_else(|| "test: `--only` value is not valid UTF-8".to_string())?;
+            if text.is_empty() {
+                return Err("test: `--only` requires a non-empty substring".to_string());
+            }
+            only = Some(text.to_string());
         } else if a == "--count" || a == "--iterations" {
             let value = iter.next().ok_or_else(|| {
                 format!(
@@ -559,6 +577,11 @@ fn parse_test_options(args: &[OsString]) -> Result<TestOptions, String> {
                 .to_string(),
         );
     }
+    // `--only` scopes the QEMU matrix, so it is meaningless without it —
+    // refuse rather than silently ignore a filter the caller relied on.
+    if only.is_some() && !run_qemu {
+        return Err("test: `--only` requires `--qemu`".to_string());
+    }
     let budget = match duration {
         Some(d) => RunBudget::Duration(d),
         None => RunBudget::Count(count.unwrap_or(1)),
@@ -568,6 +591,7 @@ fn parse_test_options(args: &[OsString]) -> Result<TestOptions, String> {
         budget,
         run_qemu,
         run_wasm,
+        only,
         forward,
     })
 }
@@ -616,7 +640,7 @@ fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     // re-runs the binaries rather than rebuilding them each pass. The host
     // `cargo test` invocation builds incrementally on its own.
     if opts.run_qemu {
-        qemu_tests::build_all(ctx)?;
+        qemu_tests::build_all(ctx, opts.only.as_deref())?;
     }
     // `--wasm` boots the wasm32 vertical in a headless browser. It is
     // opt-in (like `--qemu`) because it needs node + puppeteer + Chrome;
@@ -632,18 +656,24 @@ fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     // (rather than inside each stage) means a duration budget covers the
     // matrix as a unit instead of being spent in full on each stage.
     opts.budget.for_each(|pass| {
-        let mut cmd = ctx.cargo();
-        cmd.args(["test", "--workspace", "--all-targets", "--locked"]);
-        cmd.args(&opts.forward);
-        let label = if opts.budget.is_repeated() {
-            format!("test (pass {pass})")
-        } else {
-            "test".to_string()
-        };
-        ctx.run(&label, cmd)?;
+        // A `--only` run is a debugging pass over the named guests alone;
+        // the whole-workspace host stage would drown the signal, so it is
+        // skipped (and a `--only` run is never a substitute for the full
+        // matrix).
+        if opts.only.is_none() {
+            let mut cmd = ctx.cargo();
+            cmd.args(["test", "--workspace", "--all-targets", "--locked"]);
+            cmd.args(&opts.forward);
+            let label = if opts.budget.is_repeated() {
+                format!("test (pass {pass})")
+            } else {
+                "test".to_string()
+            };
+            ctx.run(&label, cmd)?;
+        }
 
         if opts.run_qemu {
-            qemu_tests::run_once(ctx)?;
+            qemu_tests::run_once(ctx, opts.only.as_deref())?;
         }
         if opts.run_wasm {
             wasm_tests::run_once(ctx)?;
@@ -1104,7 +1134,7 @@ fn run_ci_long(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 
     // Build every QEMU enrolment once so the repeated runs re-execute the
     // binaries rather than rebuilding them each pass.
-    qemu_tests::build_all(ctx)?;
+    qemu_tests::build_all(ctx, None)?;
 
     // The flake hunt: host tests, QEMU integration tests, fuzz harnesses, and
     // proptest models, each run REPS× sequentially then REPS× concurrently.
@@ -1388,6 +1418,10 @@ fn build_image_driver_bundles(ctx: &Context) -> Result<DriverBundles, String> {
         (
             image_drivers::VIRTIO_KBD_STORE_PATH,
             image_drivers::build_virtio_kbd_bundle(ctx)?,
+        ),
+        (
+            image_drivers::FRAMEBUFFER_STORE_PATH,
+            image_drivers::build_framebuffer_bundle(ctx)?,
         ),
         (
             image_drivers::USB_MSD_STORE_PATH,

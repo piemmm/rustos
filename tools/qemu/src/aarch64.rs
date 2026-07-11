@@ -157,12 +157,13 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     }
 
     // Attach a virtio-mmio keyboard for the input vertical (the runner
-    // drives the scripted key through the QEMU monitor once the guest
-    // signals readiness) or for a human typing into the interactive
-    // window; here we only present the device. The interactive session
-    // also gets a virtio-mmio mouse for pointer input from the window.
+    // drives the scripted key or typed text through the QEMU monitor once
+    // the guest signals readiness) or for a human typing into the
+    // interactive window; here we only present the device. The interactive
+    // session also gets a virtio-mmio mouse for pointer input from the
+    // window.
     let interactive = spec.session == SessionKind::WindowedInteractive;
-    if spec.input_keyboard.is_some() || interactive {
+    if spec.input_keyboard.is_some() || spec.input_typing.is_some() || interactive {
         argv.push("-device".into());
         argv.push("virtio-keyboard-device".into());
     }
@@ -191,6 +192,7 @@ mod tests {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
+            input_typing: None,
             input_mouse: false,
             input_pointer_move: None,
             serial_input: Vec::new(),
@@ -370,6 +372,20 @@ mod tests {
             ready_marker: "ready".into(),
             key: "a".into(),
             ready_occurrences: 1,
+        });
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        assert!(argv.iter().any(|a| a == "virtio-keyboard-device"));
+    }
+
+    #[test]
+    fn argv_attaches_keyboard_when_typing_requested() {
+        // A typed-text script needs the same virtio keyboard the single-key
+        // injection attaches, even with no `input_keyboard` request.
+        let mut spec = fixture_spec(1);
+        spec.input_typing = Some(crate::KeyTyping {
+            ready_marker: "armed".into(),
+            ready_occurrences: 2,
+            text: "hunter2\n".into(),
         });
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         assert!(argv.iter().any(|a| a == "virtio-keyboard-device"));

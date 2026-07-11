@@ -298,9 +298,14 @@ pub const USER_BLOCK_OFFSET: u64 = 0x30_0000;
 /// one value, not a per-port copy.
 pub const MMIO_WINDOW_OFFSET: u64 = 0x4000_0000;
 
-/// Pages backing the device-window region (1 MiB): generous headroom over
-/// the few device windows a driver task maps.
-pub const MMIO_WINDOW_PAGES: usize = 256;
+/// Pages backing the device-window region: the window's full reserved
+/// virtual span (1 GiB, up to the DMA window above it). The span is the
+/// structural bound; the per-task window map's bookkeeping grows lazily
+/// with actual use, so a task mapping a few register blocks pays bytes
+/// while a display service can map a whole multi-megabyte scan-out
+/// surface out of the same window.
+pub const MMIO_WINDOW_PAGES: usize =
+    ((DMA_WINDOW_OFFSET - MMIO_WINDOW_OFFSET) / rustos_kernel_mem::PAGE_SIZE as u64) as usize;
 
 /// Offset of the guarded DMA-buffer virtual window above the image bias
 /// (`plans/PI.md` 5d-0-ii (c) DMA half): placed 2 GiB above the bias — above
@@ -325,10 +330,13 @@ pub const DMA_WINDOW_PAGES: usize = 256;
 /// value shared by every port for the same reason as [`MMIO_WINDOW_OFFSET`].
 pub const SHARED_WINDOW_OFFSET: u64 = 0xC000_0000;
 
-/// Pages backing the shared-memory window (1 MiB): generous headroom over
-/// the few small shared regions a driver task maps (an URB data buffer is
-/// a handful of pages).
-pub const SHARED_WINDOW_PAGES: usize = 256;
+/// Pages backing the shared-memory window: the window's full reserved
+/// virtual span (1 GiB, up to the anonymous-heap window above it). Like
+/// [`MMIO_WINDOW_PAGES`] the span is the structural bound and the window
+/// map grows its bookkeeping lazily, so a granted full-screen frame
+/// region maps out of the same window a small URB buffer does.
+pub const SHARED_WINDOW_PAGES: usize =
+    ((ANON_WINDOW_OFFSET - SHARED_WINDOW_OFFSET) / rustos_kernel_mem::PAGE_SIZE as u64) as usize;
 
 /// Offset of the non-`FIXED` anonymous-heap virtual window above the image
 /// bias (`plans/PI.md` 5d-0-ii (c)): placed 4 GiB above the bias — the

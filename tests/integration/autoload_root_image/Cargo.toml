@@ -1,6 +1,6 @@
 [package]
 name = "rustos-test-autoload-root-image"
-description = "Whole-disk encrypted-root image fixture carrying a kernel-signed virtio-input keyboard driver bundle in /System/Drivers/, for the plans/PI.md P10 5d-2-ii(b-2-iii) -M virt driver-loading-by-discovery autoload vertical. build.rs cross-compiles drivers/input/virtio_kbd PIE, converts it to an rxe relocated for the production spawn bias, and wraps it as the payload of a signed kind=UserSpace DriverManifest signed with the kernel's own driver-signing seed (build_support::KERNEL_DRIVER_SIGNING_SEED), so the bundle verifies against the kernel's embedded trust anchor. build_image() plants that bundle into the encrypted RustFS root the rustos-test-encrypted-root-image fixture builds, so the booted kernel discovers, verifies, and spawns it off the very volume it mounts."
+description = "Whole-disk encrypted-root image fixture carrying kernel-signed driver bundles (the virtio-input keyboard driver and the framebuffer display service) in /System/Drivers/, for the plans/PI.md P10 / plans/DISPLAY.md D7d -M virt driver-loading-by-discovery autoload verticals. build.rs cross-compiles each driver PIE, converts it to an rxe relocated for the production spawn bias, and wraps it as the payload of a signed kind=UserSpace DriverManifest signed with the kernel's own driver-signing seed (build_support::KERNEL_DRIVER_SIGNING_SEED), so every bundle verifies against the kernel's embedded trust anchor. build_image() plants the bundles into the encrypted RustFS root the rustos-test-encrypted-root-image fixture builds, so the booted kernel discovers, verifies, and spawns them off the very volume it mounts."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -46,6 +46,7 @@ rustos-itest-harness = { path = "../harness", version = "=0.0.0", features = [
 ] }
 rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# The driver's own §18.3 bind table, the single source the signed manifest is
+# Each driver's own §18.3 bind table, the single source its signed manifest is
 # authored from so the on-disk bundle and the driver cannot drift.
 rustos-drv-input-virtio-input = { path = "../../../drivers/input/virtio_input", version = "=0.0.0" }
+rustos-drv-display-framebuffer = { path = "../../../drivers/display/framebuffer", version = "=0.0.0" }

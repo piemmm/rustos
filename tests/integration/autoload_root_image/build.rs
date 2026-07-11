@@ -1,17 +1,19 @@
 //! Build-time generator for the autoload-root image fixture
-//! (`plans/PI.md` P10 5d-2-ii(b-2-iii)).
+//! (`plans/PI.md` P10 5d-2-ii(b-2-iii); `plans/DISPLAY.md` D7d).
 //!
 //! Unlike the per-vertical build scripts, this one is **host-only and target-
 //! independent**: the fixture's bytes are produced on the build host (the
 //! `tools/xtask` harness plants them on the test's virtio-blk backing), so the
-//! signed driver bundle must always be built, whatever the outer target. It:
+//! signed driver bundles must always be built, whatever the outer target. For
+//! each planted driver — the pure-Rust virtio-input keyboard driver
+//! (`drivers/input/virtio_kbd`) and the framebuffer display service
+//! (`drivers/display/framebuffer`) — it:
 //!
-//! 1. Cross-compiles the pure-Rust virtio-input keyboard driver
-//!    (`drivers/input/virtio_kbd`) **position-independent** for the freestanding
-//!    `aarch64-unknown-none` target — the architecture the `-M virt` vertical
-//!    boots — using the driver's own `Run.ld` (the production PIE layout the
-//!    bundle's payload links with), into a private target directory under
-//!    `OUT_DIR`.
+//! 1. Cross-compiles the driver's `Run` binary **position-independent** for
+//!    the freestanding `aarch64-unknown-none` target — the architecture the
+//!    `-M virt` vertical boots — using the driver's own `Run.ld` (the
+//!    production PIE layout the bundle's payload links with), into a private
+//!    target directory under `OUT_DIR`.
 //! 2. Converts the linked PIE ELF to an `rxe` blob
 //!    ([`rustos_itest_harness::elf2rxe::elf_to_rxe`]), baking relocations for the
 //!    shared [`rustos_itest_harness::USER_IMAGE_BIAS`] the production spawn
@@ -19,15 +21,14 @@
 //!    syscall CFI tag (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`) so
 //!    [`rustos_abi::rxe::LoadImage::parse`] accepts it.
 //! 3. Wraps that `rxe` as the payload of a signed `kind = UserSpace`
-//!    `DriverManifest` ([`rustos_itest_harness::driver_image`]) — requesting the
-//!    capabilities the driver needs (`CAP_MMIO_MAP`, `CAP_MEM_DMA`,
-//!    `CAP_INPUT_INJECT`), carrying the driver's own `BIND_KEYS`, and
-//!    **signed with the kernel's own driver-signing seed**
-//!    (`build_support::KERNEL_DRIVER_SIGNING_SEED`, the single source the kernel
-//!    build derives its embedded trust anchor from) so the
-//!    bundle verifies against `KERNEL_DRIVER_SIGNER_PUBKEY` at boot.
-//! 4. Emits the bundle bytes and the signer public key as a Rust source the
-//!    library `include!`s.
+//!    `DriverManifest` ([`rustos_itest_harness::driver_image`]) — requesting
+//!    exactly the capabilities the driver needs, carrying the driver crate's
+//!    own `BIND_KEYS`, and **signed with the kernel's own driver-signing
+//!    seed** (`build_support::KERNEL_DRIVER_SIGNING_SEED`, the single source
+//!    the kernel build derives its embedded trust anchor from) so the bundle
+//!    verifies against `KERNEL_DRIVER_SIGNER_PUBKEY` at boot.
+//! 4. Emits the bundle bytes — and the one shared signer public key — as a
+//!    Rust source the library `include!`s.
 //!
 //! Re-running `build.rs` produces byte-identical output, so the fixture is
 //! deterministic.
@@ -35,10 +36,11 @@
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rustos_abi::{CapabilityId, DriverKind};
+use rustos_abi::{CapabilityId, DriverBindKey, DriverKind};
+use rustos_itest_harness::dep_info::emit_dep_info_reruns;
 use rustos_itest_harness::driver_image::build_signed_driver_image;
 use rustos_itest_harness::elf2rxe::elf_to_rxe;
 use rustos_itest_harness::USER_IMAGE_BIAS;
@@ -56,6 +58,52 @@ mod build_support;
 /// Rust target triple of the freestanding aarch64 driver build.
 const AARCH64_TARGET: &str = "aarch64-unknown-none";
 
+/// One driver to build, sign, and embed.
+struct PlantedDriver {
+    /// Cargo package name (also the `Run` binary's name).
+    package: &'static str,
+    /// Crate directory relative to the workspace root.
+    crate_rel: &'static str,
+    /// The exact capability set the signed manifest requests.
+    caps: &'static [CapabilityId],
+    /// The driver crate's own canonical bind table.
+    bind_keys: &'static [DriverBindKey],
+    /// Name of the emitted `pub const` holding the bundle bytes.
+    const_name: &'static str,
+    /// One-line description for the emitted constant's rustdoc.
+    describe: &'static str,
+}
+
+/// The drivers the fixture plants — each signed from its crate's own
+/// canonical `BIND_KEYS`, so the on-disk bundle and the driver never drift.
+const PLANTED: &[PlantedDriver] = &[
+    PlantedDriver {
+        package: "rustos-drv-input-virtio-kbd",
+        crate_rel: "drivers/input/virtio_kbd",
+        caps: &[
+            CapabilityId::MMIO_MAP,
+            CapabilityId::MEM_DMA,
+            CapabilityId::IRQ_BIND,
+            CapabilityId::INPUT_INJECT,
+        ],
+        bind_keys: rustos_drv_input_virtio_input::BIND_KEYS,
+        const_name: "VIRTIO_KBD_BUNDLE",
+        describe: "virtio-input keyboard driver",
+    },
+    PlantedDriver {
+        package: "rustos-drv-display-framebuffer",
+        crate_rel: "drivers/display/framebuffer",
+        caps: &[
+            CapabilityId::MMIO_MAP,
+            CapabilityId::SHM,
+            CapabilityId::IPC_BIND_PRIVILEGED,
+        ],
+        bind_keys: rustos_drv_display_framebuffer::BIND_KEYS,
+        const_name: "FRAMEBUFFER_BUNDLE",
+        describe: "framebuffer display service",
+    },
+];
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
@@ -63,43 +111,61 @@ fn main() {
     let manifest_dir = manifest_dir.trim_end_matches('/');
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR");
 
-    let driver_dir = format!("{manifest_dir}/../../../drivers/input/virtio_kbd");
     let kernel_build_support =
         format!("{manifest_dir}/../../../kernel/rustos-kernel/src/build_support.rs");
-    println!("cargo:rerun-if-changed={driver_dir}/src/main.rs");
-    println!("cargo:rerun-if-changed={driver_dir}/Run.ld");
-    println!("cargo:rerun-if-changed={driver_dir}/Cargo.toml");
     println!("cargo:rerun-if-changed={kernel_build_support}");
 
-    let rxe = build_and_convert_driver(manifest_dir, &out_dir, &driver_dir);
+    let mut out = String::new();
+    out.push_str("// Auto-generated by build.rs. DO NOT EDIT.\n");
+    let mut signer_pubkey: Option<[u8; 32]> = None;
+    for driver in PLANTED {
+        let driver_dir = format!("{manifest_dir}/../../../{}", driver.crate_rel);
+        // The driver's Rust sources — its own and every transitive `lib/*`
+        // dependency — are registered from the inner build's dep-info after
+        // the compile below; only the inputs rustc does not record there
+        // (the linker script and the manifest) are named by hand.
+        println!("cargo:rerun-if-changed={driver_dir}/Run.ld");
+        println!("cargo:rerun-if-changed={driver_dir}/Cargo.toml");
 
-    // The bundle the kernel autoloads: the driver's own bind table, the
-    // capabilities it needs (mapped register window, coherent DMA, the device
-    // interrupt line it parks on, and keyboard injection), signed with the
-    // kernel's driver-signing seed.
-    let signed = build_signed_driver_image(
-        &build_support::KERNEL_DRIVER_SIGNING_SEED,
-        DriverKind::UserSpace,
-        &[
-            CapabilityId::MMIO_MAP,
-            CapabilityId::MEM_DMA,
-            CapabilityId::IRQ_BIND,
-            CapabilityId::INPUT_INJECT,
-        ],
-        rustos_drv_input_virtio_input::BIND_KEYS,
-        rustos_kernel_syscall::SYSCALL_TABLE_HASH,
-        &rxe,
+        let rxe = build_and_convert_driver(manifest_dir, &out_dir, &driver_dir, driver.package);
+        let signed = build_signed_driver_image(
+            &build_support::KERNEL_DRIVER_SIGNING_SEED,
+            DriverKind::UserSpace,
+            driver.caps,
+            driver.bind_keys,
+            rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+            &rxe,
+        );
+        // Every bundle is signed with the one kernel seed, so the derived
+        // public key must be identical across drivers; assert rather than
+        // silently emit a fixture whose tests would compare the wrong key.
+        assert!(
+            signer_pubkey.is_none() || signer_pubkey == Some(signed.signer_pubkey),
+            "one signing seed must derive one signer public key"
+        );
+        signer_pubkey = Some(signed.signer_pubkey);
+        write_bundle_const(&mut out, driver, &signed.image);
+    }
+    write_signer_const(
+        &mut out,
+        &signer_pubkey.expect("at least one driver is planted"),
     );
 
-    write_bundle_fixture(&out_dir, &signed.image, &signed.signer_pubkey);
+    let path = PathBuf::from(&out_dir).join("bundle.rs");
+    fs::write(&path, out).expect("write bundle.rs");
 }
 
-/// Compile the virtio-input keyboard driver PIE for the freestanding aarch64
+/// Compile `package` (in `driver_dir`) PIE for the freestanding aarch64
 /// target and convert the linked ELF into an `rxe` blob relocated for
 /// [`USER_IMAGE_BIAS`].
-fn build_and_convert_driver(manifest_dir: &str, out_dir: &str, driver_dir: &str) -> Vec<u8> {
+fn build_and_convert_driver(
+    manifest_dir: &str,
+    out_dir: &str,
+    driver_dir: &str,
+    package: &str,
+) -> Vec<u8> {
     let run_ld = format!("{driver_dir}/Run.ld");
-    let target_dir = format!("{out_dir}/virtio-kbd-target");
+    let target_dir = format!("{out_dir}/{package}-target");
 
     // Cargo fingerprints the RUSTFLAGS *string* (which names the linker script
     // by path) but not the script's *content*, so a `Run.ld` edit would not by
@@ -120,6 +186,13 @@ fn build_and_convert_driver(manifest_dir: &str, out_dir: &str, driver_dir: &str)
         .current_dir(manifest_dir)
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTFLAGS")
+        // The inner build produces the production bytes the fixture embeds;
+        // it must compile with plain rustc whatever tool drove the outer
+        // build (a `cargo clippy` outer run exports its lint driver through
+        // these wrappers, which would fail or skew the byte-producing
+        // compile).
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
         .env(
             "CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS",
             format!("-C relocation-model=pie -C link-arg=-pie -C link-arg=-T{run_ld}"),
@@ -127,7 +200,7 @@ fn build_and_convert_driver(manifest_dir: &str, out_dir: &str, driver_dir: &str)
         .args([
             "build",
             "-p",
-            "rustos-drv-input-virtio-kbd",
+            package,
             "--target",
             AARCH64_TARGET,
             "-Z",
@@ -136,30 +209,38 @@ fn build_and_convert_driver(manifest_dir: &str, out_dir: &str, driver_dir: &str)
             &target_dir,
         ])
         .status()
-        .expect("spawn cargo to build the virtio_kbd driver");
-    assert!(status.success(), "building the virtio_kbd driver failed");
+        .unwrap_or_else(|e| panic!("spawn cargo to build {package}: {e}"));
+    assert!(status.success(), "building {package} failed");
 
-    let elf_path = format!("{target_dir}/{AARCH64_TARGET}/debug/rustos-drv-input-virtio-kbd");
+    let elf_path = format!("{target_dir}/{AARCH64_TARGET}/debug/{package}");
     let elf = fs::read(&elf_path).unwrap_or_else(|e| panic!("read {elf_path}: {e}"));
+
+    // Register every source the inner build consumed — the driver's own
+    // files *and* its transitive workspace dependencies — so editing any of
+    // them rebuilds this fixture. A hand-kept list misses a `lib/*` edit and
+    // silently plants a stale driver bundle.
+    let dep_info = PathBuf::from(format!("{elf_path}.d"));
+    emit_dep_info_reruns(&dep_info, Path::new(manifest_dir));
 
     elf_to_rxe(
         &elf,
         &rustos_kernel_syscall::SYSCALL_TABLE_HASH,
         USER_IMAGE_BIAS,
     )
-    .expect("convert the virtio_kbd driver ELF into an rxe image")
+    .unwrap_or_else(|e| panic!("convert the {package} ELF into an rxe image: {e:?}"))
 }
 
-/// Emit the signed bundle bytes and signer public key as a Rust source the
-/// library includes.
-fn write_bundle_fixture(out_dir: &str, image: &[u8], pubkey: &[u8; 32]) {
-    let mut out = String::new();
-    out.push_str("// Auto-generated by build.rs. DO NOT EDIT.\n");
+/// Append one signed bundle's bytes as a documented `pub const`.
+fn write_bundle_const(out: &mut String, driver: &PlantedDriver, image: &[u8]) {
     out.push_str("/// Signed `kind = UserSpace` driver bundle whose payload is the\n");
-    out.push_str("/// virtio-input keyboard driver `rxe`, planted into the encrypted\n");
-    out.push_str("/// root's `/System/Drivers/` store and admitted through the kernel's\n");
+    let _ = writeln!(
+        out,
+        "/// {} `rxe`, planted into the encrypted root's",
+        driver.describe
+    );
+    out.push_str("/// `/System/Drivers/` store and admitted through the kernel's\n");
     out.push_str("/// signed autoload gate against `KERNEL_DRIVER_SIGNER_PUBKEY`.\n");
-    out.push_str("pub const VIRTIO_KBD_BUNDLE: &[u8] = &[");
+    let _ = write!(out, "pub const {}: &[u8] = &[", driver.const_name);
     for (i, b) in image.iter().enumerate() {
         if i % 16 == 0 {
             out.push_str("\n    ");
@@ -167,10 +248,14 @@ fn write_bundle_fixture(out_dir: &str, image: &[u8], pubkey: &[u8; 32]) {
         let _ = write!(out, "0x{b:02x}, ");
     }
     out.push_str("\n];\n");
-    out.push_str("/// Public key the bundle was signed with — derived from the kernel's\n");
-    out.push_str("/// driver-signing seed, so it equals the kernel's embedded trust\n");
-    out.push_str("/// anchor `KERNEL_DRIVER_SIGNER_PUBKEY` by construction.\n");
-    out.push_str("pub const VIRTIO_KBD_SIGNER_PUBKEY: [u8; 32] = [");
+}
+
+/// Append the shared signer public key as a documented `pub const`.
+fn write_signer_const(out: &mut String, pubkey: &[u8; 32]) {
+    out.push_str("/// Public key every planted bundle was signed with — derived from the\n");
+    out.push_str("/// kernel's driver-signing seed, so it equals the kernel's embedded\n");
+    out.push_str("/// trust anchor `KERNEL_DRIVER_SIGNER_PUBKEY` by construction.\n");
+    out.push_str("pub const DRIVER_SIGNER_PUBKEY: [u8; 32] = [");
     for (i, b) in pubkey.iter().enumerate() {
         if i % 8 == 0 {
             out.push_str("\n    ");
@@ -178,7 +263,4 @@ fn write_bundle_fixture(out_dir: &str, image: &[u8], pubkey: &[u8; 32]) {
         let _ = write!(out, "0x{b:02x}, ");
     }
     out.push_str("\n];\n");
-
-    let path = PathBuf::from(out_dir).join("bundle.rs");
-    fs::write(&path, out).expect("write bundle.rs");
 }

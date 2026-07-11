@@ -138,5 +138,6 @@ rustos-drv-bus-usb = { path = "../../drivers/bus/usb/xhci", version = "=0.0.0" }
 rustos-drv-input-usb-kbd = { path = "../../drivers/input/usb_kbd", version = "=0.0.0" }
 rustos-drv-input-usb-mouse = { path = "../../drivers/input/usb_mouse", version = "=0.0.0" }
 rustos-drv-input-virtio-input = { path = "../../drivers/input/virtio_input", version = "=0.0.0" }
+rustos-drv-display-framebuffer = { path = "../../drivers/display/framebuffer", version = "=0.0.0" }
 rustos-drv-storage-usb-msd = { path = "../../drivers/storage/usb_msd", version = "=0.0.0" }
 rustos-drv-storage-volmgr = { path = "../../drivers/storage/volmgr", version = "=0.0.0" }

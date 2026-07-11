@@ -118,6 +118,10 @@ pub struct ConfiguredFramebuffer {
     pub len_bytes: u32,
     /// Validated text geometry for the surface.
     pub geometry: Geometry,
+    /// Pixel encoding the firmware programmed the surface with — the
+    /// format the framebuffer request asked for, confirmed by the
+    /// firmware's acceptance of the allocation.
+    pub format: DisplayFormat,
 }
 
 /// Probe the attached display and allocate a matching scan-out surface
@@ -146,6 +150,7 @@ pub fn bring_up(transport: &mut dyn MailboxTransport) -> Option<ConfiguredFrameb
         phys_base,
         len_bytes: firmware.size_bytes,
         geometry,
+        format: request.format,
     })
 }
 
@@ -185,6 +190,10 @@ pub struct DiscoveredVideo {
     pub width_px: u32,
     /// Confirmed surface height in pixels.
     pub height_px: u32,
+    /// Distance in bytes between the start of consecutive scanlines.
+    pub stride_bytes: u32,
+    /// Pixel encoding the surface was programmed with.
+    pub format: DisplayFormat,
 }
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
@@ -421,6 +430,7 @@ mod metal {
             u64::from(configured.len_bytes),
             configured.geometry,
             mailbox.base,
+            configured.format,
         )
     }
 
@@ -470,7 +480,16 @@ mod metal {
                 stride: geometry.stride_px * 4,
             })
             .ok()?;
-        publish_console(fb_base, fb_len_bytes, geometry, doorbell_base)
+        // `DRM_FORMAT_XRGB8888` is little-endian packed `0xXXRRGGBB`, so
+        // the in-memory byte order is B, G, R, X — the `Bgra8888` wire
+        // format with the alpha byte ignored by the scan-out.
+        publish_console(
+            fb_base,
+            fb_len_bytes,
+            geometry,
+            doorbell_base,
+            super::DisplayFormat::Bgra8888,
+        )
     }
 
     /// Opaque black, the background the surface is cleared to before the cell
@@ -497,6 +516,7 @@ mod metal {
         fb_len_bytes: u64,
         geometry: Geometry,
         doorbell_base: u64,
+        format: super::DisplayFormat,
     ) -> Option<DiscoveredVideo> {
         let pixel_count = geometry.pixel_count();
         if u64::try_from(pixel_count.checked_mul(4)?).ok()? > fb_len_bytes {
@@ -525,6 +545,8 @@ mod metal {
             fb_len_bytes,
             width_px: geometry.width_px,
             height_px: geometry.height_px,
+            stride_bytes: geometry.stride_px * 4,
+            format,
         })
     }
 

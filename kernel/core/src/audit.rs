@@ -142,6 +142,14 @@ pub enum AuditEvent {
     /// the raw faulting address (diagnostics policy: no address-space
     /// layout leakage onto the log).
     TaskFaultKilled,
+    /// A task ended itself with a **nonzero** exit status.
+    ///
+    /// Emitted by the `exit` syscall handler so an abnormal termination is
+    /// visible on the system log even when no parent reaps the task — a
+    /// failing autoloaded service would otherwise vanish silently (fail
+    /// loud). The record carries the task id and the exit code; both are
+    /// program state, never secrets. A clean (`0`) exit stays quiet.
+    TaskExitedNonzero,
     /// The `/System/Security/Users` database was read off the mounted
     /// root volume and parsed (`crate::users`, `plans/PI.md` P11).
     UsersDbLoaded,
@@ -281,6 +289,7 @@ impl AuditEvent {
             Self::ProcessSpawnFailed => 4032,
             Self::DriverUnloaded => 4033,
             Self::TaskFaultKilled => 4034,
+            Self::TaskExitedNonzero => 4035,
             Self::UsersDbLoaded => 4040,
             Self::UsersDbRejected => 4041,
             Self::GroupsDbLoaded => 4043,
@@ -319,6 +328,7 @@ impl AuditEvent {
             Self::ProcessSpawnFailed => "process spawn failed",
             Self::DriverUnloaded => "driver unloaded",
             Self::TaskFaultKilled => "task killed by unresolvable user fault",
+            Self::TaskExitedNonzero => "task exited with nonzero status",
             Self::UsersDbLoaded => "users database loaded",
             Self::UsersDbRejected => "users database rejected",
             Self::GroupsDbLoaded => "groups database loaded",

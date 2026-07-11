@@ -1,11 +1,18 @@
-//! `plans/PI.md` P10 5d-2-ii(b-2-iii) QEMU integration test: boot the
-//! production aarch64 `rustos-kernel` pipeline on the `virt` board with a
-//! planted whole-disk encrypted-root image that carries a **kernel-signed
-//! virtio-input driver bundle** in `/System/Drivers/`, and prove the full
-//! **driver-loading-by-discovery autoload path** spawns one user-space
-//! driver instance per discovered virtio-input node (keyboard + mouse),
-//! which deliver an injected keystroke **and** an injected mouse motion to
-//! the kernel input-focus arbiter (`key_inject` and `pointer_inject`).
+//! `plans/PI.md` P10 5d-2-ii(b-2-iii) + `plans/DISPLAY.md` D7d (first
+//! stage) QEMU integration test: boot the production aarch64
+//! `rustos-kernel` pipeline on the `virt` board **as a display world** —
+//! a `ramfb` display beside the virtio keyboard and mouse — with a
+//! planted whole-disk encrypted-root image that carries the
+//! **kernel-signed virtio-input driver bundle and the framebuffer
+//! display-service bundle** in `/System/Drivers/`, and prove the full
+//! **driver-loading-by-discovery autoload path**: one user-space driver
+//! instance per discovered virtio-input node (keyboard + mouse)
+//! delivering typed keys and an injected mouse motion to the kernel
+//! input-focus arbiter, the typed passphrase unlocking the encrypted
+//! root through the video console end to end, and the display service
+//! autoloading against the boot display node the kernel publishes for
+//! its ramfb scan-out surface and binding the reserved
+//! `DISPLAY_ENDPOINT`.
 //!
 //! ## What this test asserts — and how it differs from its siblings
 //!
@@ -20,26 +27,32 @@
 //! This vertical composes them on the production boot path: it attaches the
 //! shared `rustos_test_autoload_root_image` whole-disk image (a three-partition
 //! disk whose **read-only `/System` volume** carries the signed `virtio_kbd`
-//! bundle at the volume-relative `Drivers/input/virtio_kbd/Run`, design B) as a
-//! virtio-blk-mmio device **and** a `virtio-keyboard-device`, and boots
-//! `boot_aarch64::boot` verbatim. The production path then:
+//! bundle at the volume-relative `Drivers/input/virtio_kbd/Run` and the
+//! signed framebuffer display-service bundle at
+//! `Drivers/display/framebuffer/Run`, design B) as a virtio-blk-mmio device
+//! **plus** a `ramfb` display, a `virtio-keyboard-device`, and a
+//! `virtio-mouse-device`, and boots `boot_aarch64::boot` verbatim. The
+//! production path then:
 //!
-//! 1. **Discovers** the virtio-block root *and* the virtio-input keyboard node
-//!    (bootstrap-floor virtio-MMIO enumeration). The input node carries its
+//! 1. **Discovers** the virtio-block root *and* the virtio-input nodes
+//!    (bootstrap-floor virtio-MMIO enumeration). Each input node carries its
 //!    register window, a coherent DMA constraint, **and** its discovered GICv2
-//!    interrupt line as capability-grant requests; the full
-//!    hardware tree is stashed for the init seam.
+//!    interrupt line as capability-grant requests; the framebuffer boot
+//!    console comes up on the `ramfb` scan-out and the boot publishes the
+//!    surface as the boot display node (a `Framebuffer` grant request keyed
+//!    `simple-framebuffer`); the full hardware tree is stashed for the init
+//!    seam.
 //! 2. **Admits the unlock kthread**, which brings the root block device up over
 //!    the device-IRQ path, mounts the read-only `/System` volume, and serves
 //!    its signed driver store over the capability-gated IPC endpoint.
 //! 3. **Reactive user-space autoload (Design D)**: the long-running
 //!    `devmgr` service reads the hardware tree, lists the `/System` store over
-//!    the IPC service, matches the signed `virtio_kbd` bundle to the discovered
-//!    virtio-input node (`lib/devmatch`), and asks the kernel to load it; the
-//!    kernel re-runs the full signed gate (verified against the embedded
-//!    `KERNEL_DRIVER_SIGNER_PUBKEY`) and **spawns it into its own user-space
-//!    process** with exactly that node's resource grants (register window, DMA,
-//!    and the IRQ line) plus the delegated `CAP_INPUT_INJECT`.
+//!    the IPC service, matches each signed bundle to its discovered node
+//!    (`lib/devmatch` — the `virtio_kbd` bundle to each virtio-input node,
+//!    the display bundle to the boot display node), and asks the kernel to
+//!    load each; the kernel re-runs the full signed gate (verified against
+//!    the embedded `KERNEL_DRIVER_SIGNER_PUBKEY`) and **spawns each into its
+//!    own user-space process** with exactly its node's resource grants.
 //! 4. Each spawned driver instance maps its register window, brings its
 //!    virtio-input device up, **then binds its granted interrupt line and
 //!    parks on `irq_wait`** (interrupt-driven, never a busy poll; the bind
@@ -48,26 +61,45 @@
 //!    each device interrupt pumps decoded events into the arbiter — key
 //!    edges via `key_inject`, pointer records via `pointer_inject`.
 //!
-//! ## Why the PASS keys on both per-kind first-delivery witnesses
+//! ## Why the PASS keys on four witnesses
 //!
-//! The audit sink reports PASS once it has seen `AuditEvent::InputDelivered`
-//! (`EventId` 4050) for **both** input kinds — the per-kind one-shot
-//! witnesses the `key_inject` / `pointer_inject` handlers emit the first
-//! time a driver of each class delivers to the arbiter (`kind=key` /
-//! `kind=pointer`; no event content, count, or timing). Reaching them
-//! requires every preceding step to have succeeded: the `/System` volume
-//! mounted and served, the store listed, the signed bundle verified, each
-//! node matched, one user-space driver instance spawned per node and
-//! granted its resources plus `CAP_INPUT_INJECT`, each device brought up,
-//! its interrupt bound and routed, the injected keystroke decoded and
-//! delivered, and the injected mouse motion decoded (the shared
-//! `PointerInput::from_device_event` mapping) and delivered. The harness
-//! injects the key only once both driver instances have armed their
-//! interrupts (the audited `irq_bind` syscall, twice), and injects the
-//! mouse motion only once the key witness's `kind=key` line appears on
-//! serial — so each witness is attributable to its own injection. A run
-//! where any step fails never reaches both witnesses, so the harness times
-//! out — the documented fail-loud behaviour.
+//! The audit sink reports PASS once it has seen all of:
+//!
+//! 1. `AuditEvent::InputDelivered` (`EventId` 4050) with `kind=key` — the
+//!    one-shot witness the `key_inject` handler emits the first time a
+//!    keyboard-class driver delivers to the arbiter; here, the first
+//!    typed passphrase character.
+//! 2. `AuditEvent::InputDelivered` with `kind=pointer` — its pointer
+//!    sibling, from the injected mouse motion (the shared
+//!    `PointerInput::from_device_event` mapping).
+//! 3. `AuditEvent::UsersDbLoaded` — the users database was read off the
+//!    unlocked encrypted root, so the passphrase **typed at the virtio
+//!    keyboard** traversed the seat text sink, the video console's
+//!    keyboard queue, and the unlock kthread's prompt, and unlocked the
+//!    root end to end (the typed-dialogue facility the D7d login stage
+//!    builds on).
+//! 4. The kernel/ipc `CallEndpointCreated` (`EventId` 3040) whose
+//!    `endpoint` field is the reserved `DISPLAY_ENDPOINT` — the
+//!    autoloaded framebuffer display service resolved its granted
+//!    scan-out surface and bound its rendezvous under
+//!    `CAP_IPC_BIND_PRIVILEGED` (only the display service may bind a
+//!    reserved endpoint id, so the witness is unforgeable by any other
+//!    process in the image).
+//!
+//! Reaching them requires every preceding step to have succeeded: the
+//! `/System` volume mounted and served, the store listed, each signed
+//! bundle verified, each node matched (the virtio-input transports and
+//! the boot display node the kernel publishes for its ramfb surface), one
+//! user-space process spawned per matched node with exactly its node's
+//! grants, each device brought up, the typed keys decoded and delivered,
+//! the passphrase accepted, and the display service's surface resolved
+//! from its `Framebuffer` grant. The harness types only once both input
+//! driver instances have armed their interrupts (the audited `irq_bind`
+//! syscall, twice), and injects the mouse motion only once the key
+//! witness's `kind=key` line appears on serial — so each witness is
+//! attributable to its own injection. A run where any step fails never
+//! reaches all four witnesses, so the harness times out — the documented
+//! fail-loud behaviour.
 //!
 //! ## Embedded `virt` device tree
 //!
@@ -103,6 +135,7 @@ mod kernel {
     use rustos_kernel::aarch64::boot as boot_aarch64;
     use rustos_kernel_core::AuditEvent;
     use rustos_log::{Event, Sink};
+    use rustos_util::fmt::format_hex_u64;
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`). The boot pipeline discovers the board from it
@@ -125,14 +158,18 @@ mod kernel {
         unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     /// Sink that replays every event through [`SERIAL_SINK`] and reports PASS
-    /// to QEMU once **both** per-kind first-input-delivery witnesses have
-    /// appeared (`kind=key` and `kind=pointer`) — proof that the autoloaded
-    /// user-space virtio-input driver instances came up and delivered a key
-    /// edge *and* a pointer record to the input-focus arbiter (the full
-    /// discovery → signed gate → spawn → inject path, per input class).
+    /// to QEMU once all four witnesses have appeared: the per-kind
+    /// first-input-delivery one-shots (`kind=key` and `kind=pointer` — the
+    /// autoloaded user-space virtio-input driver instances delivering), the
+    /// users-database load (the passphrase typed at the virtio keyboard
+    /// unlocked the encrypted root end to end), and the reserved
+    /// `DISPLAY_ENDPOINT` bind (the autoloaded framebuffer display service
+    /// came up on its granted surface).
     struct AutoloadInputSink {
         key_delivered: AtomicBool,
         pointer_delivered: AtomicBool,
+        users_db_loaded: AtomicBool,
+        display_endpoint_bound: AtomicBool,
     }
 
     impl AutoloadInputSink {
@@ -140,22 +177,15 @@ mod kernel {
             Self {
                 key_delivered: AtomicBool::new(false),
                 pointer_delivered: AtomicBool::new(false),
+                users_db_loaded: AtomicBool::new(false),
+                display_endpoint_bound: AtomicBool::new(false),
             }
         }
-    }
 
-    impl Sink for AutoloadInputSink {
-        fn write_event(&self, event: &Event<'_>) {
-            // Replay through the serial sink so the QEMU transcript records the
-            // full boot + unlock + autoload + input timeline (the harness also
-            // gates its mouse injection on the `kind=key` line of this replay).
-            SerialSink::new().write_event(event);
-            if event.id.0 != AuditEvent::InputDelivered.id().0 {
-                return;
-            }
-            // Attribute the witness by its `kind` field; an unrecognised
-            // field value flips neither latch (fail closed — a malformed
-            // witness can never satisfy the PASS condition).
+        /// Latch the per-kind input witness from an `InputDelivered`
+        /// record's `kind` field; an unrecognised value flips neither latch
+        /// (fail closed — a malformed witness can never satisfy PASS).
+        fn note_input_delivered(&self, event: &Event<'_>) {
             for field in event.fields {
                 if field.key != "kind" {
                     continue;
@@ -170,8 +200,49 @@ mod kernel {
                     _ => {}
                 }
             }
+        }
+
+        /// Latch the display-service witness when a `CallEndpointCreated`
+        /// record names the reserved `DISPLAY_ENDPOINT` — compared against
+        /// the exact hex spelling the kernel/ipc audit fields render
+        /// (`format_hex_u64`), so the match can neither false-positive on a
+        /// different endpoint nor drift from the emitter.
+        fn note_endpoint_created(&self, event: &Event<'_>) {
+            let mut expected_buf = [0u8; 16];
+            let expected =
+                format_hex_u64(rustos_abi::display_ipc::DISPLAY_ENDPOINT, &mut expected_buf);
+            for field in event.fields {
+                if field.key != "endpoint" {
+                    continue;
+                }
+                if let rustos_log::FieldValue::Str(value) = field.value {
+                    if value == expected {
+                        self.display_endpoint_bound.store(true, Ordering::Release);
+                    }
+                }
+            }
+        }
+    }
+
+    impl Sink for AutoloadInputSink {
+        fn write_event(&self, event: &Event<'_>) {
+            // Replay through the serial sink so the QEMU transcript records the
+            // full boot + unlock + autoload + input timeline (the harness also
+            // gates its mouse injection on the `kind=key` line of this replay).
+            SerialSink::new().write_event(event);
+            if event.id.0 == AuditEvent::InputDelivered.id().0 {
+                self.note_input_delivered(event);
+            } else if event.id.0 == AuditEvent::UsersDbLoaded.id().0 {
+                self.users_db_loaded.store(true, Ordering::Release);
+            } else if event.id.0 == rustos_kernel_ipc::AuditEvent::CallEndpointCreated.id().0 {
+                self.note_endpoint_created(event);
+            } else {
+                return;
+            }
             if self.key_delivered.load(Ordering::Acquire)
                 && self.pointer_delivered.load(Ordering::Acquire)
+                && self.users_db_loaded.load(Ordering::Acquire)
+                && self.display_endpoint_bound.load(Ordering::Acquire)
             {
                 qemu_exit::exit_success();
             }

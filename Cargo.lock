@@ -1860,12 +1860,15 @@ dependencies = [
 name = "rustos-test-autoload-input-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
+ "rustos-abi",
  "rustos-arch-aarch64",
  "rustos-itest-harness",
  "rustos-kalloc",
  "rustos-kernel",
  "rustos-kernel-core",
+ "rustos-kernel-ipc",
  "rustos-log",
+ "rustos-util",
 ]
 
 [[package]]
@@ -1874,6 +1877,7 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-devmatch",
+ "rustos-drv-display-framebuffer",
  "rustos-drv-input-virtio-input",
  "rustos-drvhost",
  "rustos-itest-harness",
@@ -3588,6 +3592,7 @@ dependencies = [
  "rustos-drv-bus-pcie-brcm",
  "rustos-drv-bus-usb",
  "rustos-drv-bus-usb-vl805",
+ "rustos-drv-display-framebuffer",
  "rustos-drv-input-usb-kbd",
  "rustos-drv-input-usb-mouse",
  "rustos-drv-input-virtio-input",

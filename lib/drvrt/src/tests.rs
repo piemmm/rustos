@@ -382,6 +382,41 @@ fn maps_a_sub_window_at_a_nonzero_offset() {
 }
 
 #[test]
+fn maps_a_framebuffer_scanout_window() {
+    // Regression: a boot display node grants its scan-out surface as a
+    // `Framebuffer` resource (geometry-carrying), and the host must treat
+    // it as a mappable CPU-addressed window exactly like a plain register
+    // block — the display service's bring-up failed closed when it did not.
+    const FB_HANDLE: u64 = 7;
+    const FB_BASE: u64 = 0x4120_0000;
+    let mode = rustos_abi::driver::display::DisplayMode {
+        width_px: 8,
+        height_px: 4,
+        stride_bytes: 32,
+        format: rustos_abi::driver::display::DisplayFormat::Bgra8888,
+    };
+    let fb = HwResource::framebuffer(FB_BASE, &mode).expect("valid mode");
+    let len = usize::try_from(fb.length()).expect("small surface");
+
+    let mock = MockSyscalls::new();
+    let base = mock.back(FB_HANDLE, len, 0);
+    let host = RtDriverHost::new(
+        caps(&[CapabilityId::MMIO_MAP]),
+        mock,
+        &[GrantedResource::new(FB_HANDLE, fb)],
+        None,
+    )
+    .unwrap();
+
+    let window = host.map_window(FB_BASE, len).expect("scan-out map");
+    assert_eq!(window.phys_base(), FB_BASE);
+    assert_eq!(window.len(), len);
+    window.write_u32(0, 0x00FF_00FF).expect("in-bounds write");
+    let readback = unsafe { (base as *const u32).read() };
+    assert_eq!(readback, 0x00FF_00FF);
+}
+
+#[test]
 fn translates_a_bar_inside_the_outbound_bus_window() {
     let mock = MockSyscalls::new();
     let base = mock.back(BUSWIN_HANDLE, OUTBOUND_SIZE as usize, 0);

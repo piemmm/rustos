@@ -388,8 +388,9 @@ default.
 
 ### Stage D7 — the display-client present path (the graphical session goes live)
 
-**Status: in progress — D7a, D7b, and D7c done; D7d (the end-to-end
-QEMU vertical) is next.** D1–D6 made the seat an
+**Status: in progress — D7a, D7b, and D7c done; D7d's first stage
+(the display-world autoload vertical) is done, its second (login flip +
+session spawn + pixel readback) is next.** D1–D6 made the seat an
 enforced, revocable kernel object and derived the present right from the
 live lease — but the only presenters so far are kernel-side fixtures. D7 is the
 missing transport: a user-space window-manager session presenting
@@ -521,13 +522,28 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
   90–97, owner-checked `display_release` on every exit path — never a
   spin or a blind repaint. The bundle's image planting and spawn ride
   D7d.
-- **D7d — end to end.** The autoload QEMU vertical world grows a display
-  node + the framebuffer service + the spawned session: injected key and
-  `mouse_move` reach the session through the seat channels, the
-  composited frame reaches the scanout surface, and the readback proves
-  the pixels. `userland/session/login` flips `graphical_available` when
-  (and only when) the display service and session bundles are present
-  (`plans/PI.md` P10's final step rides this).
+- **D7d — end to end. `[~]` — first stage done.** The autoload QEMU
+  vertical world is a *display* world: the aarch64 boot publishes the
+  ramfb scan-out surface as a boot display node (a
+  `HwResourceKind::Framebuffer` grant + `simple-framebuffer` match key),
+  the signed framebuffer-service bundle is discovered in the on-volume
+  store and spawned onto that node's grants, and the vertical proves —
+  with the whole dialogue typed at the seat keyboard, since the video
+  console is the only console — the typed passphrase unlocking the root,
+  both per-kind `INPUT_DELIVERED` witnesses from the autoloaded
+  user-space input drivers, and the service's `DISPLAY_ENDPOINT` bind
+  under `CAP_IPC_BIND_PRIVILEGED`. Landed with it: the drvrt host maps
+  `Framebuffer` grants; the per-task MMIO/shared window ceilings are the
+  reserved 1 GiB spans with lazily grown, fail-closed bookkeeping (a
+  scan-out surface no longer OOMs a 1 MiB hand ceiling); and fixture
+  build scripts register the inner build's dep-info so an embedded
+  driver bundle can never go stale (`tests/integration/harness`
+  `dep_info`). **Remaining (D7d-2):** `userland/session/login` flips
+  `graphical_available` when (and only when) the display service and
+  session bundles are present, spawns the D7c session, and the vertical
+  grows the scan-out pixel readback (host-side screendump) proving the
+  composited frame reached the surface (`plans/PI.md` P10's final step
+  rides this).
 
 **Explicitly not in D7:** a GPU/3D or video-decode pipeline (the
 protocol's damage + direct-scanout shape is designed so those extend it

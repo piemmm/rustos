@@ -57,7 +57,7 @@ fn anon_errno(err: AnonError) -> Errno {
 /// direct-map failure is [`Errno::BadAddress`].
 fn mmio_errno(err: MmioError) -> Errno {
     match err {
-        MmioError::NoVirtualSpace => Errno::OutOfMemory,
+        MmioError::NoVirtualSpace | MmioError::OutOfMemory => Errno::OutOfMemory,
         MmioError::InvalidRegion | MmioError::InvalidMapConfig => Errno::OutOfRange,
         MmioError::UnknownRegion => Errno::NotFound,
         // `PageTable`, `DirectMap`, and any future (`#[non_exhaustive]`)

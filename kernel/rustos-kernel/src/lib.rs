@@ -143,6 +143,18 @@ pub mod driver_loader;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
 pub mod root_storage;
 
+// The boot-display publication step (`plans/DISPLAY.md` D7d): turns the
+// architecture port's discovered framebuffer-boot-console scan-out facts
+// into a display-class hardware-tree node carrying the geometry-carrying
+// `Framebuffer` grant request and the canonical `simple-framebuffer`
+// match key, so the user-space display service autoloads against the boot
+// display exactly like any other discovered device. Architecture-neutral
+// (plain discovered values in, `lib/abi` node out) and host-tested on the
+// CI host; gated, like `root_storage` whose buffered tree it feeds, on
+// the two instruction sets where the boot tree assembly compiles.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
+pub mod boot_display;
+
 // The runtime hardware-inventory store (Design D, D1 —
 // `.junie/next-pi-prompt.md`): the single source of truth for the
 // discovered hardware tree, seeded by the boot

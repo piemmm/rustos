@@ -198,6 +198,35 @@ pub struct KeyInjection {
     pub ready_occurrences: u32,
 }
 
+/// A deterministic typed-text injection request for an interactive
+/// vertical whose console input is the seat keyboard, not the serial line
+/// — the multi-key sibling of [`KeyInjection`].
+///
+/// With a display attached the guest's primary console takes input only
+/// from its own keyboard, so a dialogue (a passphrase, a login) cannot be
+/// scripted over serial. The runner instead attaches a
+/// `virtio-keyboard-device`, waits for [`ready_marker`](Self::ready_marker)
+/// on the serial console (proving the keyboard driver is armed — typed
+/// keys buffer as type-ahead until the guest's reader drains them), then
+/// types [`text`](Self::text) one `sendkey` per character through the QEMU
+/// monitor. Keys are **paced**: each is held briefly and the next is sent
+/// only after the previous hold has elapsed, so repeated characters
+/// ("tt") arrive as distinct press/release edges and are never coalesced
+/// by the device (deterministic, not timing-lucky).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeyTyping {
+    /// Serial-console substring the runner waits for before typing.
+    pub ready_marker: String,
+    /// How many times [`ready_marker`](Self::ready_marker) must appear
+    /// before typing starts (minimum 1) — the same per-driver-instance
+    /// counting as [`KeyInjection::ready_occurrences`].
+    pub ready_occurrences: u32,
+    /// The text to type. Every character must be printable ASCII, `\n`
+    /// (sent as `ret`), or `\t` (sent as `tab`); the runner fails the run
+    /// on the first untypable character (fail closed, never skipped).
+    pub text: String,
+}
+
 /// A deterministic pointer-motion injection request for an input vertical
 /// — the mouse analogue of [`KeyInjection`].
 ///
@@ -339,6 +368,12 @@ pub struct Spec {
     /// serial console. `None` attaches no input device. Used by the
     /// aarch64 virtio-input vertical; other arches ignore it today.
     pub input_keyboard: Option<KeyInjection>,
+    /// When `Some`, attach a `virtio-keyboard-device` and type the
+    /// described text through paced monitor `sendkey`s once its readiness
+    /// marker appears — the scripted-dialogue path for a guest whose
+    /// primary console is the display, where [`Spec::serial_input`]
+    /// cannot reach. Only the aarch64 argv honours it today.
+    pub input_typing: Option<KeyTyping>,
     /// When `true`, attach a `virtio-mouse-device` after the keyboard —
     /// the same two-identical-virtio-input-nodes topology an interactive
     /// session presents — so a vertical can prove the keyboard is still
@@ -390,6 +425,7 @@ impl Spec {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
+            input_typing: None,
             input_mouse: false,
             input_pointer_move: None,
             serial_input: Vec::new(),
@@ -427,6 +463,7 @@ impl Spec {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
+            input_typing: None,
             input_mouse: false,
             input_pointer_move: None,
             serial_input: Vec::new(),
@@ -449,6 +486,7 @@ impl Spec {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
+            input_typing: None,
             input_mouse: false,
             input_pointer_move: None,
             serial_input: Vec::new(),
@@ -530,6 +568,26 @@ impl Spec {
         if let Some(k) = &mut self.input_keyboard {
             k.ready_occurrences = n.max(1);
         }
+        self
+    }
+
+    /// Attach a `virtio-keyboard-device` and type `text` through paced
+    /// monitor `sendkey`s once `ready_marker` has appeared `occurrences`
+    /// times (clamped at `>= 1`) on the serial console. Used by a vertical
+    /// whose guest console is the display: the dialogue is typed at the
+    /// seat keyboard, buffering as type-ahead until the guest reads it.
+    #[must_use]
+    pub fn with_typed_keys(
+        mut self,
+        ready_marker: impl Into<String>,
+        occurrences: u32,
+        text: impl Into<String>,
+    ) -> Self {
+        self.input_typing = Some(KeyTyping {
+            ready_marker: ready_marker.into(),
+            ready_occurrences: occurrences.max(1),
+            text: text.into(),
+        });
         self
     }
 
@@ -631,8 +689,10 @@ impl Runner {
         // `sendkey` / `mouse_move` once the guest is ready. The socket is
         // server-side in QEMU (created at startup, well before the guest's
         // readiness marker) and the runner connects as a client.
-        let monitor = (spec.input_keyboard.is_some() || spec.input_pointer_move.is_some())
-            .then(MonitorSocket::reserve);
+        let monitor = (spec.input_keyboard.is_some()
+            || spec.input_typing.is_some()
+            || spec.input_pointer_move.is_some())
+        .then(MonitorSocket::reserve);
         if let Some(mon) = &monitor {
             cmd.arg("-chardev");
             let mut chardev = OsString::from("socket,id=rustos-mon,server=on,wait=off,path=");
@@ -742,6 +802,7 @@ fn supervise(
     let SerialDrain {
         captured,
         marker_seen,
+        typing_marker_seen,
         pointer_marker_seen,
         reader,
     } = spawn_serial_drain(&mut child, spec);
@@ -780,9 +841,21 @@ fn supervise(
     let mut serial_search_from = 0usize;
     let done = 'run: loop {
         if let Some(status) = child.try_wait()? {
-            break 'run exit_reason(spec, serial_step, injections.pointer_sent, status);
+            break 'run exit_reason(
+                spec,
+                serial_step,
+                injections.pointer_sent,
+                injections.typing_done(spec),
+                status,
+            );
         }
-        if let Err(e) = injections.drive(spec, monitor, &marker_seen, &pointer_marker_seen) {
+        if let Err(e) = injections.drive(
+            spec,
+            monitor,
+            &marker_seen,
+            &typing_marker_seen,
+            &pointer_marker_seen,
+        ) {
             let _ = child.kill();
             let _ = child.wait();
             break 'run DoneReason::InjectionFailed(e);
@@ -960,7 +1033,7 @@ impl Drop for MonitorSocket {
 }
 
 /// The running background stdout drain of a spawned QEMU child: the
-/// shared captured-serial buffer, the key-injection readiness flag, and
+/// shared captured-serial buffer, the per-injection readiness flags, and
 /// the drain thread's handle ([`spawn_serial_drain`]).
 struct SerialDrain {
     /// Everything the guest has printed on serial so far.
@@ -968,6 +1041,9 @@ struct SerialDrain {
     /// Set once the key injection's readiness marker has appeared the
     /// required number of times.
     marker_seen: Arc<AtomicBool>,
+    /// Set once the typed-text injection's readiness marker has appeared
+    /// the required number of times.
+    typing_marker_seen: Arc<AtomicBool>,
     /// Set once the pointer injection's readiness marker has appeared.
     pointer_marker_seen: Arc<AtomicBool>,
     /// The drain thread, joined once the child has exited.
@@ -988,6 +1064,7 @@ struct SerialDrain {
 fn spawn_serial_drain(child: &mut Child, spec: &Spec) -> SerialDrain {
     let captured = Arc::new(Mutex::new(String::new()));
     let marker_seen = Arc::new(AtomicBool::new(false));
+    let typing_marker_seen = Arc::new(AtomicBool::new(false));
     let pointer_marker_seen = Arc::new(AtomicBool::new(false));
     let reader = {
         let captured = Arc::clone(&captured);
@@ -1000,6 +1077,13 @@ fn spawn_serial_drain(child: &mut Child, spec: &Spec) -> SerialDrain {
                 Arc::clone(&marker_seen),
             ));
         }
+        if let Some(t) = &spec.input_typing {
+            markers.push((
+                t.ready_marker.clone(),
+                t.ready_occurrences.max(1),
+                Arc::clone(&typing_marker_seen),
+            ));
+        }
         if let Some(p) = &spec.input_pointer_move {
             markers.push((p.ready_marker.clone(), 1, Arc::clone(&pointer_marker_seen)));
         }
@@ -1010,6 +1094,7 @@ fn spawn_serial_drain(child: &mut Child, spec: &Spec) -> SerialDrain {
     SerialDrain {
         captured,
         marker_seen,
+        typing_marker_seen,
         pointer_marker_seen,
         reader,
     }
@@ -1055,6 +1140,59 @@ fn drain_stream(
     }
 }
 
+/// The QEMU `QKeyCode` (or `shift-` combination) that types `c`.
+///
+/// Covers the full printable-ASCII set on the default (US) keymap QEMU
+/// translates `sendkey` names through, plus `\n` (`ret`) and `\t`
+/// (`tab`). Every other character is refused with an error naming it —
+/// the run then fails rather than silently typing a corrupted script
+/// (fail closed, never a skipped or guessed key).
+fn qkeycode_for(c: char) -> Result<String, String> {
+    // The base (unshifted) names for the non-alphanumeric keys.
+    let plain = |name: &str| Ok(name.to_string());
+    let shifted = |name: &str| Ok(format!("shift-{name}"));
+    match c {
+        'a'..='z' | '0'..='9' => Ok(c.to_string()),
+        'A'..='Z' => Ok(format!("shift-{}", c.to_ascii_lowercase())),
+        '\n' => plain("ret"),
+        '\t' => plain("tab"),
+        ' ' => plain("spc"),
+        '-' => plain("minus"),
+        '=' => plain("equal"),
+        '[' => plain("bracket_left"),
+        ']' => plain("bracket_right"),
+        ';' => plain("semicolon"),
+        '\'' => plain("apostrophe"),
+        '`' => plain("grave_accent"),
+        '\\' => plain("backslash"),
+        ',' => plain("comma"),
+        '.' => plain("dot"),
+        '/' => plain("slash"),
+        '!' => shifted("1"),
+        '@' => shifted("2"),
+        '#' => shifted("3"),
+        '$' => shifted("4"),
+        '%' => shifted("5"),
+        '^' => shifted("6"),
+        '&' => shifted("7"),
+        '*' => shifted("8"),
+        '(' => shifted("9"),
+        ')' => shifted("0"),
+        '_' => shifted("minus"),
+        '+' => shifted("equal"),
+        '{' => shifted("bracket_left"),
+        '}' => shifted("bracket_right"),
+        ':' => shifted("semicolon"),
+        '"' => shifted("apostrophe"),
+        '~' => shifted("grave_accent"),
+        '|' => shifted("backslash"),
+        '<' => shifted("comma"),
+        '>' => shifted("dot"),
+        '?' => shifted("slash"),
+        other => Err(format!("no QKeyCode mapping for character {other:?}")),
+    }
+}
+
 /// The one-shot marker-gated monitor injections [`supervise`] drives on
 /// every poll tick: whether each requested injection has been sent, and
 /// the **single** still-open monitor connection every injection shares.
@@ -1067,8 +1205,23 @@ fn drain_stream(
 struct InjectionState {
     key_sent: bool,
     pointer_sent: bool,
+    /// Characters of the typed-text script already sent (`text.len()`
+    /// when done, or when no typing was requested).
+    typed: usize,
+    /// The earliest instant the next typed key may be sent — the pacing
+    /// that keeps every press/release pair distinct on the device.
+    next_typed_key_at: Instant,
     conn: Option<UnixStream>,
 }
+
+/// Milliseconds a typed key is held down (`sendkey <key> <hold>`).
+const TYPED_KEY_HOLD_MS: u32 = 40;
+
+/// Minimum interval between consecutive typed keys. Strictly longer than
+/// [`TYPED_KEY_HOLD_MS`], so each key's release lands before the next
+/// press — a repeated character ("tt") is two clean edges, never a
+/// redundant press the device would coalesce.
+const TYPED_KEY_INTERVAL: Duration = Duration::from_millis(80);
 
 impl InjectionState {
     /// Each `*_sent` flag starts "done" when its injection was not
@@ -1077,8 +1230,18 @@ impl InjectionState {
         Self {
             key_sent: spec.input_keyboard.is_none(),
             pointer_sent: spec.input_pointer_move.is_none(),
+            typed: 0,
+            next_typed_key_at: Instant::now(),
             conn: None,
         }
+    }
+
+    /// `true` once every requested typed character has been sent.
+    fn typing_done(&self, spec: &Spec) -> bool {
+        // `Option::is_none_or` needs Rust 1.82; the workspace MSRV is older.
+        spec.input_typing
+            .as_ref()
+            .map_or(true, |t| self.typed >= t.text.chars().count())
     }
 
     /// Send whichever requested injections have just become ready.
@@ -1092,6 +1255,7 @@ impl InjectionState {
         spec: &Spec,
         monitor: Option<&MonitorSocket>,
         key_seen: &AtomicBool,
+        typing_seen: &AtomicBool,
         pointer_seen: &AtomicBool,
     ) -> Result<(), String> {
         // Safe to unwrap inside the closures: each `*_sent` flag is only
@@ -1100,6 +1264,30 @@ impl InjectionState {
             let key = &spec.input_keyboard.as_ref().expect("key present").key;
             self.send(monitor, "key", &format!("sendkey {key}"))?;
             self.key_sent = true;
+        }
+        if let Some(typing) = &spec.input_typing {
+            // Paced: at most one key per call, and only once the previous
+            // key's hold has fully elapsed, so repeated characters arrive
+            // as distinct press/release edges.
+            if self.typed < typing.text.chars().count()
+                && typing_seen.load(Ordering::Acquire)
+                && Instant::now() >= self.next_typed_key_at
+            {
+                let c = typing
+                    .text
+                    .chars()
+                    .nth(self.typed)
+                    .expect("index bounded by the count above");
+                let key =
+                    qkeycode_for(c).map_err(|e| format!("typed-text injection failed: {e}"))?;
+                self.send(
+                    monitor,
+                    "typed-text",
+                    &format!("sendkey {key} {TYPED_KEY_HOLD_MS}"),
+                )?;
+                self.typed += 1;
+                self.next_typed_key_at = Instant::now() + TYPED_KEY_INTERVAL;
+            }
         }
         if !self.pointer_sent && pointer_seen.load(Ordering::Acquire) {
             let mv = spec.input_pointer_move.as_ref().expect("motion present");
@@ -1143,14 +1331,16 @@ impl InjectionState {
 }
 
 /// Classify a child exit observed by [`supervise`]: an exit before the
-/// serial-input script completed, or before a requested pointer motion
-/// was ever sent, means the exchange the vertical was meant to prove
-/// never happened — the run fails even when the guest itself reported
-/// success. Otherwise the guest's own exit status decides the outcome.
+/// serial-input script completed, before a requested pointer motion was
+/// ever sent, or before a requested typed-text script finished, means the
+/// exchange the vertical was meant to prove never happened — the run
+/// fails even when the guest itself reported success. Otherwise the
+/// guest's own exit status decides the outcome.
 fn exit_reason(
     spec: &Spec,
     serial_step: usize,
     pointer_injected: bool,
+    typing_done: bool,
     status: std::process::ExitStatus,
 ) -> DoneReason {
     if serial_step < spec.serial_input.len() {
@@ -1164,6 +1354,13 @@ fn exit_reason(
     if !pointer_injected {
         return DoneReason::InjectionFailed(
             "pointer injection never sent: its readiness marker was not seen before exit".into(),
+        );
+    }
+    if !typing_done {
+        return DoneReason::InjectionFailed(
+            "typed-text script incomplete: its readiness marker was not seen (or the guest \
+             exited mid-script)"
+                .into(),
         );
     }
     DoneReason::Exited(status.code().unwrap_or(-1))
@@ -1349,6 +1546,56 @@ mod tests {
     }
 
     #[test]
+    fn with_typed_keys_records_the_script_and_clamps_occurrences() {
+        let s = Spec::for_aarch64_kernel("/tmp/k").with_typed_keys("armed", 0, "root\n");
+        let t = s.input_typing.expect("typing recorded");
+        assert_eq!(t.ready_marker, "armed");
+        assert_eq!(t.ready_occurrences, 1, "occurrences clamp at >= 1");
+        assert_eq!(t.text, "root\n");
+    }
+
+    #[test]
+    fn qkeycode_map_covers_the_typed_dialogue_characters() {
+        // The exact character classes the interactive verticals type:
+        // lowercase words, digits, space, hyphen, and the line terminator.
+        assert_eq!(qkeycode_for('a').as_deref(), Ok("a"));
+        assert_eq!(qkeycode_for('z').as_deref(), Ok("z"));
+        assert_eq!(qkeycode_for('7').as_deref(), Ok("7"));
+        assert_eq!(qkeycode_for(' ').as_deref(), Ok("spc"));
+        assert_eq!(qkeycode_for('-').as_deref(), Ok("minus"));
+        assert_eq!(qkeycode_for('\n').as_deref(), Ok("ret"));
+        assert_eq!(qkeycode_for('\t').as_deref(), Ok("tab"));
+    }
+
+    #[test]
+    fn qkeycode_map_shifts_uppercase_and_shifted_symbols() {
+        assert_eq!(qkeycode_for('A').as_deref(), Ok("shift-a"));
+        assert_eq!(qkeycode_for('!').as_deref(), Ok("shift-1"));
+        assert_eq!(qkeycode_for('_').as_deref(), Ok("shift-minus"));
+        assert_eq!(qkeycode_for('?').as_deref(), Ok("shift-slash"));
+        assert_eq!(qkeycode_for('"').as_deref(), Ok("shift-apostrophe"));
+    }
+
+    #[test]
+    fn qkeycode_map_refuses_untypable_characters() {
+        // Non-ASCII and control characters have no deterministic key
+        // sequence; the run fails rather than typing a corrupted script.
+        assert!(qkeycode_for('é').is_err());
+        assert!(qkeycode_for('\u{1b}').is_err());
+    }
+
+    #[test]
+    fn every_printable_ascii_character_is_typable() {
+        for b in 0x20u8..=0x7e {
+            let c = b as char;
+            assert!(
+                qkeycode_for(c).is_ok(),
+                "printable ASCII {c:?} must have a QKeyCode mapping"
+            );
+        }
+    }
+
+    #[test]
     fn with_virtio_net_records_a_capture_free_interface() {
         let s = Spec::for_x86_64_kernel("/tmp/k").with_virtio_net();
         assert_eq!(s.net_devices.len(), 1);
@@ -1391,6 +1638,7 @@ mod tests {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
+            input_typing: None,
             input_mouse: false,
             input_pointer_move: None,
             serial_input: Vec::new(),

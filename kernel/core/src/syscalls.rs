@@ -2264,6 +2264,28 @@ where
         // exists. The dispatcher's `SyscallInvoked` audit record (the `EXIT`
         // spec sets `audit = true`) still carries the code for the log.
         self.process_wait.record_exit(caller.task_id, code);
+        // A nonzero status is an abnormal termination: record it with a
+        // stable event id so a failing service is visible on the system
+        // log even when nothing reaps it (fail loud) — the task id and
+        // exit code are program state, never secrets. A clean exit stays
+        // quiet.
+        if code != 0 {
+            crate::audit::emit(
+                self.audit,
+                Level::Warn,
+                AuditEvent::TaskExitedNonzero,
+                &[
+                    Field {
+                        key: "task",
+                        value: rustos_log::FieldValue::UnsignedInt(caller.task_id.0),
+                    },
+                    Field {
+                        key: "code",
+                        value: rustos_log::FieldValue::SignedInt(i64::from(code)),
+                    },
+                ],
+            );
+        }
         // The scheduler reap itself is driven by the reschedule path, not
         // here (`plans/SPAWN.md` SP2b) — the dispatch hook returns
         // `DispatchOutcome::Reschedule { action: Exit, .. }` and the
@@ -16762,6 +16784,55 @@ mod tests {
         assert_eq!(h.exit(&ctx, 42), Ok(0));
         // The producer saw this task's id and its exit code.
         assert_eq!(*producer.last_exit.lock(), Some((7, 42)));
+    }
+
+    /// A **nonzero** `exit` additionally emits the stable
+    /// `TaskExitedNonzero` audit record naming the task and the code, so a
+    /// failing service is visible on the system log even when nothing
+    /// reaps it (fail loud); a clean exit emits no such record.
+    #[test]
+    fn exit_audits_a_nonzero_status_and_stays_quiet_on_success() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(9, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(9),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        // A clean exit stays quiet.
+        assert_eq!(h.exit(&ctx, 0), Ok(0));
+        assert!(sink
+            .snapshot()
+            .iter()
+            .all(|e| e.id != AuditEvent::TaskExitedNonzero.id()));
+
+        // A nonzero exit is recorded with the task id and the code.
+        assert_eq!(h.exit(&ctx, 81), Ok(0));
+        let exits: Vec<_> = sink
+            .snapshot()
+            .into_iter()
+            .filter(|e| e.id == AuditEvent::TaskExitedNonzero.id())
+            .collect();
+        assert_eq!(exits.len(), 1);
+        assert_eq!(exits[0].level, rustos_log::Level::Warn);
+        assert!(exits[0]
+            .fields
+            .contains(&(String::from("task"), String::from("9"))));
+        assert!(exits[0]
+            .fields
+            .contains(&(String::from("code"), String::from("81"))));
     }
 
     /// `rlimit_get` for a registered caller copies the effective limit out:

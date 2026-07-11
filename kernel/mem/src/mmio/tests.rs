@@ -180,6 +180,38 @@ fn exhausted_virtual_window_reports_no_space() {
 }
 
 #[test]
+fn scanout_sized_window_maps_in_a_span_ceiling() {
+    // A ~4 MiB linear scan-out surface (1024 data pages) maps out of a
+    // window whose ceiling is a whole reserved 1 GiB virtual span, and
+    // the occupancy bitmap grows only as far as the mapping actually
+    // reaches: the ceiling is structural, never an up-front cost.
+    let phys = sim();
+    let span_pages = 0x4000_0000usize / PAGE_SIZE;
+    let mut map = fresh(&phys, span_pages);
+    let len = 1024 * PAGE_SIZE;
+    let region = map.map(0x8000_0000, len).expect("scan-out surface maps");
+    assert_eq!(region.len(), len);
+    assert_eq!(map.mapped_pages(), 1024);
+    // 1024 data slots plus the two guard slots — and nothing more.
+    assert_eq!(map.window.slot_used.len(), 1024 + 2);
+    assert_eq!(map.window.capacity_pages(), span_pages);
+}
+
+#[test]
+fn request_beyond_the_span_ceiling_fails_closed() {
+    // An 8-page ceiling cannot hold 7 data pages + 2 guards; the
+    // request is refused as a value before any page-table mutation.
+    let phys = sim();
+    let mut map = fresh(&phys, 8);
+    assert_eq!(
+        map.map(0x8000_0000, 7 * PAGE_SIZE),
+        Err(MmioError::NoVirtualSpace)
+    );
+    assert_eq!(map.live(), 0);
+    assert_eq!(map.mapped_pages(), 0);
+}
+
+#[test]
 fn guard_slots_are_left_unmapped() {
     // Guard pages bracketing the register window are never mapped, so
     // a register-block over-run faults instead of reaching a

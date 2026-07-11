@@ -62,6 +62,15 @@ struct QemuTest {
     /// the serial console. Used by the aarch64 virtio-input vertical to
     /// make a real device→driver input event deterministic.
     keyboard: Option<(&'static str, &'static str)>,
+    /// When `Some((marker, occurrences, text))`, attach a
+    /// `virtio-keyboard-device` and type `text` through paced monitor
+    /// `sendkey`s once `marker` has appeared `occurrences` times on the
+    /// serial console. The typed-dialogue path for a guest whose primary
+    /// console is the display (a `ramfb` world), which the `serial` script
+    /// cannot reach: typed keys buffer as console type-ahead until the
+    /// guest's reader drains them. Used by the autoload vertical to type
+    /// the unlock passphrase at the seat keyboard.
+    typed_keys: Option<(&'static str, u32, &'static str)>,
     /// When `Some((marker, dx, dy))`, additionally attach a
     /// `virtio-mouse-device` after the keyboard — the
     /// two-identical-virtio-input-nodes topology an interactive session
@@ -164,7 +173,8 @@ const UNLOCK_PASSPHRASE_LINE: &str = "unlock-vertical correct horse battery stap
 /// one-shot, wedging the re-prompt (and the dots) until a key was pressed.
 const WRONG_UNLOCK_PASSPHRASE_PREFIX: &str = "abc";
 
-/// Serial marker after which the autoload-input vertical injects a key.
+/// Serial marker after which the autoload-input vertical begins typing the
+/// unlock passphrase at the virtio keyboard.
 ///
 /// The autoloaded user-space virtio-input keyboard driver is *interrupt
 /// driven*: `VirtioInput::open_armed` brings the device to `DRIVER_OK`,
@@ -189,17 +199,27 @@ const WRONG_UNLOCK_PASSPHRASE_PREFIX: &str = "abc";
 /// the line on the driver's first park) rather than dropped against an
 /// un-ready device. It is the user-space analogue of the in-kernel
 /// `input_virtio_mmio` vertical's "eventq armed" readiness marker
-/// (inject only once the driver can receive).
+/// (inject only once the driver can receive). The typed characters buffer
+/// as console type-ahead in the seat's keyboard queue until the in-kernel
+/// unlock kthread's `Root filesystem passphrase:` prompt drains them — the
+/// prompt itself renders on the video console, never on serial, so the
+/// typing is gated on the armed-driver witness rather than the prompt text.
 const AUTOLOAD_INPUT_KEY_MARKER: &str = "sc=irq_bind";
+
+/// How many times [`AUTOLOAD_INPUT_KEY_MARKER`] must appear before typing:
+/// once per autoloaded input-driver instance (keyboard + mouse), so the
+/// keyboard's own arming — possibly the second — is never raced.
+const AUTOLOAD_INPUT_ARMED_OCCURRENCES: u32 = 2;
 
 /// Serial marker after which the autoload-input vertical injects the mouse
 /// motion: the serial rendering of the **key** kind's one-shot
 /// `InputDelivered` audit witness (`EventId` 4050 with `kind=key`), emitted
-/// the moment the injected keystroke reached the input-focus arbiter. Gating
-/// the motion on it orders the two injections — key first, pointer second —
-/// so the vertical's PASS condition (both per-kind witnesses observed by the
-/// guest sink) attributes each input class separately: the keystroke cannot
-/// satisfy the pointer witness and vice versa.
+/// the moment the first typed passphrase character reached the input-focus
+/// arbiter. Gating the motion on it orders the injections — keys first,
+/// pointer second — so the vertical's PASS condition (both per-kind
+/// witnesses observed by the guest sink) attributes each input class
+/// separately: a keystroke cannot satisfy the pointer witness and vice
+/// versa.
 const AUTOLOAD_INPUT_POINTER_MARKER: &str = "first input delivered to focus arbiter kind=key";
 
 /// The relative mouse motion the autoload-input vertical injects
@@ -282,6 +302,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -301,6 +322,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -328,6 +350,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -356,6 +379,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -386,6 +410,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -417,6 +442,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -449,6 +475,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -482,6 +509,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -510,6 +538,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -543,6 +572,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -577,6 +607,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -614,6 +645,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -646,6 +678,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -679,6 +712,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -715,6 +749,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -735,6 +770,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -770,6 +806,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -798,6 +835,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -828,6 +866,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -851,6 +890,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::Fat32,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -875,6 +915,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::Rustfs,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -902,6 +943,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -924,6 +966,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -955,6 +998,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -981,6 +1025,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1008,6 +1053,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1034,6 +1080,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1067,6 +1114,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1103,6 +1151,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1133,6 +1182,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1162,6 +1212,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1191,6 +1242,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1213,6 +1265,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1234,6 +1287,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1257,6 +1311,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1284,6 +1339,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1315,6 +1371,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1341,6 +1398,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1355,6 +1413,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1372,6 +1431,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1408,6 +1468,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1434,6 +1495,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1458,6 +1520,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1485,6 +1548,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: true,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1513,6 +1577,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: true,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1545,6 +1610,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: true,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1575,6 +1641,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1627,6 +1694,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[
             ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
@@ -1685,6 +1753,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1715,6 +1784,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1750,6 +1820,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1788,6 +1859,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1831,6 +1903,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1868,6 +1941,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1905,6 +1979,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1935,6 +2010,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1967,6 +2043,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2001,6 +2078,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2020,6 +2098,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2053,6 +2132,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2090,6 +2170,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2125,6 +2206,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2161,6 +2243,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2198,6 +2281,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2234,6 +2318,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2271,6 +2356,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2303,6 +2389,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2336,6 +2423,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2372,6 +2460,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2414,6 +2503,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2448,6 +2538,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2490,6 +2581,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2523,6 +2615,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2555,6 +2648,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2591,6 +2685,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2627,6 +2722,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2662,6 +2758,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2692,6 +2789,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2720,6 +2818,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2747,6 +2846,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::UsersRoot,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2780,6 +2880,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2838,6 +2939,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[
             (
@@ -2898,6 +3000,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[
             ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
@@ -2980,6 +3083,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::MemsoakRootDisk,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[
             ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
@@ -3029,6 +3133,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[
             ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
@@ -3060,45 +3165,63 @@ const TESTS: &[QemuTest] = &[
             ("776005", "exit\n"),
         ],
     },
-    // `plans/PI.md` design B / B2: the pre-unlock driver-loading-by-discovery
-    // autoload vertical. `rustos-test-autoload-input-qemu-aarch64` boots the
+    // `plans/PI.md` design B / B2 + `plans/DISPLAY.md` D7d (first stage): the
+    // pre-unlock driver-loading-by-discovery autoload vertical, booted as a
+    // *display* world. `rustos-test-autoload-input-qemu-aarch64` boots the
     // *production* aarch64 pipeline on the `virt` board with the
     // `FsDisk::AutoloadRootDisk` whole-disk image — whose read-only `/System`
-    // volume carries a kernel-signed virtio-input keyboard driver bundle in its
-    // `Drivers/` store — and an attached `virtio-keyboard-device`. The boot
-    // binds the virtio-blk root and discovers the virtio-input node; the unlock
-    // kthread mounts the read-only `/System` volume and its autoload hook scans
-    // that volume's signed store **before** any passphrase prompt, verifies the
-    // bundle against the kernel's embedded driver trust anchor, matches it to
-    // the discovered virtio-input node, and spawns it into its own user-space
-    // process (granted the node's resources plus the delegated
-    // `CAP_INPUT_INJECT`). The runner then types the fixture passphrase to
-    // unlock the encrypted root; once the unlock-service install message appears
-    // (the keyboard driver was spawned earlier, pre-unlock), it injects a key
-    // through the QEMU monitor; the autoloaded driver decodes it and delivers it
-    // to the input-focus arbiter via `key_inject`. PASS the instant the
-    // kernel-side audit sink sees the one-shot `AuditEvent::InputDelivered`
-    // (`EventId(4050)`) — the witness that an autoloaded *user-space* input
-    // driver is live and delivering input (design-B keyboard-up-before-unlock).
-    // A 120-second budget covers the boot + bounded PBKDF2 + autoload + driver
-    // bring-up + injection on QEMU TCG.
+    // volume carries the kernel-signed virtio-input keyboard driver bundle
+    // *and* the framebuffer display-service bundle in its `Drivers/` store —
+    // plus an attached `ramfb` display, a `virtio-keyboard-device`, and a
+    // `virtio-mouse-device`. With the display attached the framebuffer boot
+    // console comes up, the boot publishes the scan-out surface as the boot
+    // display node, and the video console is the *only* console (the UART
+    // carries the debug log alone), so the whole dialogue is typed at the
+    // seat keyboard, never over serial. The boot binds the virtio-blk root
+    // and discovers the virtio-input nodes; the unlock kthread mounts the
+    // read-only `/System` volume and its autoload hook scans that volume's
+    // signed store **before** any passphrase prompt, verifies each bundle
+    // against the kernel's embedded driver trust anchor, matches the
+    // keyboard/mouse bundles to the virtio-input nodes and the display
+    // bundle to the boot display node, and spawns each into its own
+    // user-space process with exactly its node's resource grants. Once both
+    // input-driver instances have armed their interrupts (the audited
+    // `irq_bind` syscall, twice), the runner types the fixture passphrase +
+    // Enter at the virtio keyboard (paced `sendkey`s; the characters buffer
+    // as console type-ahead until the video-console passphrase prompt drains
+    // them); the first delivered keystroke emits the `kind=key` witness,
+    // after which the runner injects the mouse motion. PASS once the
+    // kernel-side audit sink has seen all four witnesses: `InputDelivered`
+    // for both kinds (an autoloaded *user-space* driver instance delivered
+    // each input class), `UsersDbLoaded` (the typed passphrase unlocked the
+    // encrypted root end to end), and `CallEndpointCreated` for the reserved
+    // `DISPLAY_ENDPOINT` (the autoloaded display service came up on its
+    // granted surface and bound its rendezvous under
+    // `CAP_IPC_BIND_PRIVILEGED`). A 150-second budget covers the boot +
+    // bounded PBKDF2 + autoload + driver bring-up + the ~4 s paced typing +
+    // video-console rendering on QEMU TCG.
     QemuTest {
         package: "rustos-test-autoload-input-qemu-aarch64",
         binary: "rustos-test-autoload-input-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
-        timeout: Duration::from_secs(120),
+        timeout: Duration::from_secs(150),
         disk_sectors: None,
         virtio_net: false,
-        ramfb: false,
+        ramfb: true,
         fs_disk: FsDisk::AutoloadRootDisk,
-        keyboard: Some((AUTOLOAD_INPUT_KEY_MARKER, "a")),
+        keyboard: None,
+        typed_keys: Some((
+            AUTOLOAD_INPUT_KEY_MARKER,
+            AUTOLOAD_INPUT_ARMED_OCCURRENCES,
+            UNLOCK_PASSPHRASE_LINE,
+        )),
         pointer_move: Some((
             AUTOLOAD_INPUT_POINTER_MARKER,
             AUTOLOAD_INPUT_POINTER_MOVE.0,
             AUTOLOAD_INPUT_POINTER_MOVE.1,
         )),
-        serial: &[("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE)],
+        serial: &[],
     },
     // Stage W11 (`plans/WIRING.md` §3):
     // `rustos-test-virtio-net-mmio-aarch64` is the aarch64 `virt`-board
@@ -3122,6 +3245,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -3151,6 +3275,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: true,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -3173,6 +3298,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -3199,6 +3325,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -3229,6 +3356,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -3261,6 +3389,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -3296,6 +3425,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -3326,6 +3456,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -3362,6 +3493,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -3393,6 +3525,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: Some(("virtio-qemu: virtio-input eventq armed", "a")),
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -3425,6 +3558,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: Some(("virtio-qemu: virtio-input eventq armed", "a")),
+        typed_keys: None,
         pointer_move: None,
         serial: &[],
     },
@@ -3438,24 +3572,50 @@ const RISCV64_TARGET: &str = "riscv64gc-unknown-none-elf";
 /// `Spec::for_aarch64_kernel` constructor in [`run_one`].
 const AARCH64_TARGET: &str = "aarch64-unknown-none";
 
-/// Build every enrolled QEMU test once.
+/// The enrolments selected by an optional `--only` package-substring
+/// filter: every test whose package name contains `only`, or the whole
+/// table when no filter is given.
+///
+/// An empty selection is refused rather than silently running nothing — a
+/// mistyped filter must fail loudly, never report a vacuous green run.
+fn enrolled(only: Option<&str>) -> Result<Vec<&'static QemuTest>, String> {
+    let selected: Vec<&'static QemuTest> = match only {
+        Some(needle) => TESTS
+            .iter()
+            .filter(|t| t.package.contains(needle))
+            .collect(),
+        None => TESTS.iter().collect(),
+    };
+    if selected.is_empty() {
+        return Err(format!(
+            "test --qemu: `--only {}` matches no enrolled package",
+            only.unwrap_or_default()
+        ));
+    }
+    Ok(selected)
+}
+
+/// Build every selected QEMU test once.
 ///
 /// Call this before the (possibly repeated) [`run_once`] passes so a soak
 /// re-runs the binaries rather than rebuilding them each pass ('s no-flaky-tests rule: the value of repetition is in the *runs*).
-pub fn build_all(ctx: &Context) -> Result<(), String> {
-    eprintln!("xtask: [test --qemu] {} test(s) enrolled", TESTS.len());
+/// `only` restricts the build to the enrolments whose package name contains
+/// it — the `--only` debugging filter.
+pub fn build_all(ctx: &Context, only: Option<&str>) -> Result<(), String> {
+    let selected = enrolled(only)?;
+    eprintln!("xtask: [test --qemu] {} test(s) enrolled", selected.len());
     // Resolve the C toolchain once, up front, and export its path so every
     // CCOMPAT C-program build script uses the authoritative override rather
     // than re-running the full `clang`/`ld.lld` search per crate and target.
     prime_c_toolchain();
-    // Group the enrolled packages by target triple and build each triple in a
+    // Group the selected packages by target triple and build each triple in a
     // single `cargo build`. One invocation per triple (rather than one per
     // enrolment) lets cargo compile that triple's packages concurrently and
     // share a single build-lock acquisition, instead of serialising behind the
     // lock once per test. The QEMU *runs* then execute concurrently under a
     // host-CPU budget — see [`run_once`] and `commands::parallel`.
     for target in build_targets() {
-        let packages: Vec<&str> = TESTS
+        let packages: Vec<&str> = selected
             .iter()
             .filter(|t| t.target == target)
             .map(|t| t.package)
@@ -3586,7 +3746,10 @@ fn build_targets() -> Vec<&'static str> {
 /// That keeps every guest's wall-clock deadline as reachable as it is for a
 /// solo run (no TCG starvation), so co-scheduling does not make a test flaky. On a single-core host the budget collapses to one and the matrix
 /// runs strictly sequentially.
-pub fn run_once(ctx: &Context) -> Result<(), String> {
+/// `only` restricts the pass to the enrolments whose package name contains
+/// it — the `--only` debugging filter ([`enrolled`]).
+pub fn run_once(ctx: &Context, only: Option<&str>) -> Result<(), String> {
+    let selected = enrolled(only)?;
     let target_dir = ctx.target_dir();
     let budget = parallel::host_parallelism();
     // Resolve the memoised (`'static`) application-bundle store before the
@@ -3594,8 +3757,8 @@ pub fn run_once(ctx: &Context) -> Result<(), String> {
     // reference rather than the borrowed context.
     let apps = super::image_apps::app_store_files(ctx)?;
     let apps_with_memsoak = super::image_apps::memsoak_store_files(ctx)?;
-    let jobs: Vec<Job> = TESTS
-        .iter()
+    let jobs: Vec<Job> = selected
+        .into_iter()
         .map(|t| {
             let label = format!("test --qemu (run {}) cpus={}", t.package, t.cpus);
             let weight = usize::try_from(t.cpus).unwrap_or(1);
@@ -3836,6 +3999,14 @@ fn finish_run(t: &QemuTest, kernel: &Path, mut spec: Spec) -> Result<(), String>
     // runner inject the key once the guest signals readiness on serial.
     if let Some((marker, key)) = t.keyboard {
         spec = spec.with_virtio_keyboard(marker, key);
+    }
+
+    // Attach a `virtio-keyboard-device` and type the scripted dialogue at
+    // it once its readiness marker has appeared the required number of
+    // times — the console-input path for a display-console guest, where
+    // the serial script cannot reach.
+    if let Some((marker, occurrences, text)) = t.typed_keys {
+        spec = spec.with_typed_keys(marker, occurrences, text);
     }
 
     // Attach the pointer sibling after the keyboard — the interactive

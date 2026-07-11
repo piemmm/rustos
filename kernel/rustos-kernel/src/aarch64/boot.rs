@@ -739,8 +739,10 @@ pub fn boot(
             // bootstrap root block driver before entering the core — the storage analogue of the
             // keyboard bind gate. Read-only: it mounts nothing; the
             // production mount path consumes the binding in the following
-            // increment (`plans/PI.md` Chunk B-2).
-            audit_root_storage_binding(dtb, log_sink);
+            // increment (`plans/PI.md` Chunk B-2). The early-discovered
+            // video facts ride along so the boot display is published into
+            // the same buffered tree (`plans/DISPLAY.md` D7d).
+            audit_root_storage_binding(dtb, early.video, log_sink);
             enter_kernel_core(arch, layout.map, log_sink, audit_sink, log_level, hw_tree)
         }
     }
@@ -788,7 +790,17 @@ impl HwNodeSink for DiscoveredTreeSink {
 /// consumes the binding in the following increment. A null/unreadable
 /// tree, a malformed walk, or no block device simply leaves the root
 /// unbound — never aborting the boot.
-fn audit_root_storage_binding(dtb: u64, log_sink: &'static (dyn Sink + Sync)) {
+///
+/// `video` carries the framebuffer boot console's discovered scan-out
+/// facts when one came up; the surface is published into the same
+/// buffered tree as the boot display node (`plans/DISPLAY.md` D7d), so
+/// the user-space display service autoloads against it. `None` (a
+/// UART-only boot) publishes no display node.
+fn audit_root_storage_binding(
+    dtb: u64,
+    video: Option<video::DiscoveredVideo>,
+    log_sink: &'static (dyn Sink + Sync),
+) {
     if dtb == 0 {
         return;
     }
@@ -862,6 +874,25 @@ fn audit_root_storage_binding(dtb: u64, log_sink: &'static (dyn Sink + Sync)) {
                 // kernel's life, and the MMU is on (the caller enabled it).
                 let fdt = unsafe { Fdt::from_ptr(dtb as *const u8) }.ok()?;
                 crate::aarch64::root_unlock::device_spi(&fdt, slot_base)
+            },
+            &mut sink,
+        );
+    }
+
+    // Publish the framebuffer boot console's scan-out surface as the boot
+    // display node (`plans/DISPLAY.md` D7d), into the same buffered tree the
+    // block and input probes feed, so the pre-unlock autoload matches the
+    // user-space display service against it. A degenerate mode is skipped
+    // fail-closed inside the observer, and `DiscoveredTreeSink` never fills,
+    // so the emit cannot fail — the discard mirrors the observers above.
+    if let Some(video) = video {
+        let _ = crate::boot_display::observe_boot_display(
+            &crate::boot_display::BootScanout {
+                base: video.fb_base,
+                width_px: video.width_px,
+                height_px: video.height_px,
+                stride_bytes: video.stride_bytes,
+                format: video.format,
             },
             &mut sink,
         );

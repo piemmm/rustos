@@ -197,14 +197,25 @@ record under the `log` phase and halts.
 | 4030 | Info  | `PROCESS_SPAWNED`            | audit  |
 | 4031 | Error | `PROCESS_SPAWN_DENIED`       | audit  |
 | 4032 | Error | `PROCESS_SPAWN_FAILED`       | audit  |
+| 4033 | Info  | `DRIVER_UNLOADED`            | audit  |
+| 4034 | Warn  | `TASK_FAULT_KILLED`          | audit  |
+| 4035 | Warn  | `TASK_EXITED_NONZERO`        | audit  |
 | 4040 | Info  | `USERS_DB_LOADED`            | audit  |
 | 4041 | Error | `USERS_DB_REJECTED`          | audit  |
 | 4042 | Info  | `DRIVER_STORE_SCANNED`      | audit  |
+| 4043 | Info  | `GROUPS_DB_LOADED`          | audit  |
+| 4044 | Error | `GROUPS_DB_REJECTED`        | audit  |
 | 4045 | Info  | `USER_ADMIN_APPLIED`        | audit  |
 | 4046 | Warn  | `USER_ADMIN_REJECTED`       | audit  |
 | 4050 | Info  | `INPUT_DELIVERED`           | audit  |
 | 4051 | Info  | `SEAT_SWITCHED`             | audit  |
 | 4052 | Warn  | `SEAT_LEASE_REVOKED`        | audit  |
+| 4053 | Info  | `SEAT_CREATED`              | audit  |
+| 4054 | Warn  | `SEAT_DESTROYED`            | audit  |
+| 4060 | Info  | `ENTROPY_RESERVE_SEEDED`    | audit  |
+| 4061 | Info  | `ENTROPY_RESERVE_UNSEEDED`  | audit  |
+| 4062 | Info  | `BOOT_ID_MINTED`            | audit  |
+| 4063 | Info  | `BOOT_ID_UNAVAILABLE`       | audit  |
 
 `INPUT_DELIVERED` is the one-shot input-path witness (`AGENTS.md` §18.3 /
 §20, `plans/PI.md` P11). The `key_inject` syscall handler emits it the

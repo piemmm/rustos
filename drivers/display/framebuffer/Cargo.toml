@@ -22,13 +22,18 @@ workspace = true
 # native Tier-1 targets and an inert host stub elsewhere (`src/main.rs` /
 # `build.rs`), mirroring `drivers/input/virtio_kbd`.
 
-# Everything the freestanding program links is pulled in only for the
-# bare-metal targets the binary is actually built for; on the host the binary
-# is an inert stub with no dependencies.
-[target.'cfg(target_os = "none")'.dependencies]
-# The `abi-v1` surface (`Display`, `DisplayMode`, the display_ipc protocol,
-# `CapabilityId`, and the `sole_framebuffer` grant resolver).
+# The `abi-v1` surface: the lib target's canonical `BIND_KEYS`
+# (`DriverBindKey`, `HwMatchKey`, the shared `simple-framebuffer`
+# constant) on every build, plus the freestanding binary's `Display`,
+# `DisplayMode`, display_ipc protocol, `CapabilityId`, and the
+# `sole_framebuffer` grant resolver.
+[dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+
+# Everything else the freestanding program links is pulled in only for the
+# bare-metal targets the binary is actually built for; on the host the binary
+# is an inert stub with no further dependencies.
+[target.'cfg(target_os = "none")'.dependencies]
 # The capability-set type the rt-backed `DriverHost` is built over.
 rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 # The display-service protocol engine (`DisplayServer` + the `SeatCheck` /

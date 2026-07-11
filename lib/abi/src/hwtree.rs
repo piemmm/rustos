@@ -487,6 +487,16 @@ impl HwResourceKind {
     }
 }
 
+/// Device-tree `compatible` model name of a firmware/platform-programmed
+/// linear scan-out surface (the FDT `simple-framebuffer` binding).
+///
+/// The single definition shared by the platform discovery that publishes
+/// a boot display node carrying a [`HwResourceKind::Framebuffer`]
+/// resource and the display-service driver's bind table
+/// (`drivers/display/framebuffer`), so the emitted match key and the
+/// driver's `BIND_KEYS` can never drift.
+pub const SIMPLE_FRAMEBUFFER_COMPATIBLE: &[u8] = b"simple-framebuffer";
+
 /// One resource a hardware-tree node exposes, expressed as a
 /// capability-grant request.
 ///

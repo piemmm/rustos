@@ -228,6 +228,7 @@ mod tests {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
+            input_typing: None,
             input_mouse: false,
             input_pointer_move: None,
             serial_input: Vec::new(),

@@ -31,6 +31,12 @@
 
 pub mod elf2rxe;
 
+/// Dep-info-driven `cargo:rerun-if-changed` emission for build scripts that
+/// run an inner `cargo build` and embed its output: freshness is derived
+/// from the compiler's own dep-info record, never a hand-kept source list
+/// that rots and ships a stale embedded binary.
+pub mod dep_info;
+
 /// The M1 demand-paged file-mapping fixture: the single definition of the
 /// fixture file the `file_map_qemu_*` verticals serve kernel-side and probe
 /// from EL0 (geometry constants, content generator, `RUSTOS_FM_*` env

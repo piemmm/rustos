@@ -1,6 +1,6 @@
 [package]
 name = "rustos-test-autoload-input-qemu-aarch64"
-description = "plans/PI.md design B / B2 QEMU integration test: boot the production aarch64 rustos-kernel pipeline (boot_aarch64::boot) on the virt board with a planted three-partition disk whose read-only /System volume carries a kernel-signed virtio-input keyboard driver bundle in its Drivers/ store, and a virtio-keyboard device attached. The production boot path binds the virtio-blk root, the in-kernel unlock kthread mounts the read-only /System volume and its autoload hook (root_mount::autoload_system_drivers -> unlock_service::AutoloadHook -> driver_autoload::autoload_from_mounted_root) scans the signed store BEFORE the passphrase prompt, verifies the bundle against the kernel's embedded driver trust anchor, matches it to the discovered virtio-input node, and spawns it into its own user-space process. The runner injects a keystroke; the autoloaded driver decodes it and delivers it to the kernel input-focus arbiter via key_inject. PASS once AuditEvent::InputDelivered (EventId 4050) is observed — the one-shot witness that an autoloaded user-space input driver is live and delivering input before unlock (design-B keyboard-up-before-unlock)."
+description = "plans/PI.md design B / B2 + plans/DISPLAY.md D7d (first stage) QEMU integration test: boot the production aarch64 rustos-kernel pipeline (boot_aarch64::boot) on the virt board as a display world — a ramfb display, a virtio keyboard, and a virtio mouse attached — with a planted three-partition disk whose read-only /System volume carries the kernel-signed virtio-input keyboard driver bundle and the framebuffer display-service bundle in its Drivers/ store. The production boot path binds the virtio-blk root, brings the framebuffer boot console up, publishes the scan-out surface as the boot display node, and the in-kernel unlock kthread's autoload hook scans the signed store BEFORE the passphrase prompt, verifies each bundle against the kernel's embedded driver trust anchor, matches each to its discovered node, and spawns each into its own user-space process. The runner types the fixture passphrase at the virtio keyboard and injects a mouse motion. PASS once four witnesses are observed: AuditEvent::InputDelivered for kind=key and kind=pointer (autoloaded user-space input drivers delivering), AuditEvent::UsersDbLoaded (the typed passphrase unlocked the encrypted root end to end), and the kernel/ipc CallEndpointCreated for the reserved DISPLAY_ENDPOINT (the autoloaded display service bound its rendezvous)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -33,6 +33,15 @@ path = "src/main.rs"
 rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
 rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
 rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+# The kernel/ipc audit vocabulary: the `CallEndpointCreated` event id the
+# display-service witness keys on — the shared definition, never a magic
+# number.
+rustos-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
+# The reserved `DISPLAY_ENDPOINT` id the display-service witness matches.
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# `format_hex_u64` — the same renderer the kernel/ipc audit fields use, so
+# the witness compares the exact on-wire spelling.
+rustos-util = { path = "../../../lib/util", version = "=0.0.0" }
 rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 

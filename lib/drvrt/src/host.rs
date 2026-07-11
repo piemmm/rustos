@@ -213,9 +213,10 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
     /// Find the grant covering the mappable window `[req_base, req_base + len)`
     /// and the request's offset into that grant's mapped window.
     ///
-    /// Only [`HwResourceKind::Mmio`] (CPU/identity space) and
-    /// [`HwResourceKind::BusWindow`] (outbound PCIe-bus space) grants are
-    /// mappable register windows. A [`BusWindow`](HwResourceKind::BusWindow)
+    /// Only [`HwResourceKind::Mmio`] (CPU/identity space),
+    /// [`HwResourceKind::Framebuffer`] (a CPU-addressed scan-out window),
+    /// and [`HwResourceKind::BusWindow`] (outbound PCIe-bus space) grants
+    /// are mappable windows. A [`BusWindow`](HwResourceKind::BusWindow)
     /// is addressed in PCIe-bus space (its [`translated_base`]), so a BAR the
     /// driver names by its bus address resolves to the same offset into the
     /// CPU window the kernel mapped — the bridge's bus→CPU translation, performed once here rather than in the
@@ -229,10 +230,10 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
         let req_end = req_base.checked_add(len as u64)?;
         for slot in self.grants.iter().flatten() {
             let window_start = match slot.resource.kind() {
-                Some(HwResourceKind::Mmio) => slot.resource.base(),
+                Some(HwResourceKind::Mmio | HwResourceKind::Framebuffer) => slot.resource.base(),
                 Some(HwResourceKind::BusWindow) => slot.resource.translated_base(),
                 // A DMA constraint, IRQ line, or port range is not a mappable
-                // register window (validate the kind).
+                // window (validate the kind).
                 _ => continue,
             };
             let window_end = window_start.checked_add(slot.resource.length())?;
