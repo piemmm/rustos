@@ -141,6 +141,34 @@ impl Compositor {
         true
     }
 
+    /// The desktop background colour behind every window (always opaque).
+    #[must_use]
+    pub const fn background(&self) -> Color {
+        self.background
+    }
+
+    /// Set the desktop background colour, returning whether it changed.
+    ///
+    /// A runtime theme switch is one call here: the whole screen is marked
+    /// dirty so the next composite repaints every pixel over the new
+    /// background — windows and the cursor are re-blended on top unchanged.
+    /// The alpha is forced to opaque exactly as at
+    /// [`new`](Self::new): the root surface has nothing behind it. Setting
+    /// the colour already in effect changes nothing and returns `false`, so
+    /// the caller can skip a redundant present.
+    pub fn set_background(&mut self, background: Color) -> bool {
+        let background = Color {
+            a: 255,
+            ..background
+        };
+        if background == self.background {
+            return false;
+        }
+        self.background = background;
+        self.damage.add(self.screen_rect());
+        true
+    }
+
     /// The display density of the output the window named by `id` is on, or
     /// `None` for an unknown id.
     ///

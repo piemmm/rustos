@@ -26,6 +26,14 @@ Because the root background is forced opaque, the final screen is always
 fully opaque and its premultiplied channels equal their straight-alpha
 form on scan-out.
 
+The background is set at construction and changeable at runtime:
+`Compositor::set_background` (a runtime theme switch is one call here)
+forces the new colour opaque exactly as `new` does, marks the whole screen
+dirty so the next composite repaints every pixel over it — windows and the
+cursor re-blend on top unchanged — and returns `false` without damaging
+anything when the colour is already in effect, so a caller can skip a
+redundant present.
+
 ## Hardware acceleration
 
 When the display driver exposes the optional

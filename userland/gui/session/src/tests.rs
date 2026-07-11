@@ -1008,6 +1008,85 @@ fn selecting_the_appearance_toggle_switches_the_theme() {
 }
 
 #[test]
+fn selecting_the_appearance_toggle_recolours_the_desktop() {
+    let mut shell = shell();
+    // Build the compositor over the active (dark) theme's desktop colour,
+    // exactly as the live session binary does at bring-up.
+    let mode = DisplayMode {
+        width_px: 1920,
+        height_px: 1080,
+        stride_bytes: 1920 * 4,
+        format: DisplayFormat::Rgba8888,
+    };
+    let mut comp =
+        Compositor::new(mode, shell.desktop_background()).expect("the compositor allocates");
+    let dark = comp.background();
+    let start = start_button_point(shell.session());
+
+    shell
+        .pump(
+            &mut MemoryInput::new(&[moved(start.x, start.y), PRIMARY_PRESS]),
+            &mut comp,
+        )
+        .expect("source does not fault");
+    let toggle_row = *shell
+        .session()
+        .taskbar()
+        .menu_layout(Scale::ONE)
+        .entries
+        .last()
+        .expect("the menu has an appearance-toggle row");
+    shell
+        .pump(
+            &mut MemoryInput::new(&[
+                moved(toggle_row.left() + 1, toggle_row.top() + 1),
+                PRIMARY_PRESS,
+            ]),
+            &mut comp,
+        )
+        .expect("source does not fault");
+
+    assert_ne!(
+        comp.background(),
+        dark,
+        "the toggle recoloured the desktop behind the windows"
+    );
+    assert_eq!(
+        comp.background(),
+        shell.desktop_background(),
+        "the compositor background tracks the active theme's desktop colour"
+    );
+    comp.composite();
+    assert_eq!(
+        comp.back_buffer().get(0, 0),
+        Some(comp.background().premultiply()),
+        "the recomposed desktop pixel shows the new theme"
+    );
+}
+
+#[test]
+fn sync_background_relays_a_programmatic_theme_switch() {
+    let mut shell = shell();
+    let mode = DisplayMode {
+        width_px: 1920,
+        height_px: 1080,
+        stride_bytes: 1920 * 4,
+        format: DisplayFormat::Rgba8888,
+    };
+    let mut comp =
+        Compositor::new(mode, shell.desktop_background()).expect("the compositor allocates");
+
+    assert!(
+        !shell.sync_background(&mut comp),
+        "a compositor built over the active theme is already in step"
+    );
+
+    shell.session_mut().toggle_appearance();
+    assert!(shell.sync_background(&mut comp));
+    assert_eq!(comp.background(), shell.desktop_background());
+}
+
+#[test]
 fn pump_propagates_a_source_fault_after_applying_prior_events() {
     let mut shell = shell();
     let mut comp = compositor();

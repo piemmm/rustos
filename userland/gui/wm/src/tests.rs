@@ -181,6 +181,52 @@ fn background_fills_screen() {
 }
 
 #[test]
+fn set_background_repaints_the_whole_screen() {
+    let mut c = Compositor::new(mode(2, 2), BLUE).expect("compositor");
+    c.composite();
+
+    assert!(c.set_background(RED));
+    assert_eq!(c.background(), RED);
+    assert!(c.has_damage(), "a changed background dirties the screen");
+    assert_eq!(c.composite(), Rect::new(0, 0, 2, 2));
+    assert_eq!(frame_pixel(&c, 0, 0), [255, 0, 0, 255]);
+    assert_eq!(frame_pixel(&c, 1, 1), [255, 0, 0, 255]);
+}
+
+#[test]
+fn set_background_same_colour_is_a_no_op() {
+    let mut c = Compositor::new(mode(2, 2), BLUE).expect("compositor");
+    c.composite();
+
+    assert!(!c.set_background(BLUE));
+    assert!(!c.has_damage(), "an unchanged background dirties nothing");
+}
+
+#[test]
+fn set_background_forces_opaque() {
+    let mut c = Compositor::new(mode(2, 2), BLUE).expect("compositor");
+    c.composite();
+
+    // A translucent spelling of the current colour is the same opaque
+    // background, so nothing changes; a translucent new colour lands opaque.
+    assert!(!c.set_background(Color { a: 9, ..BLUE }));
+    assert!(c.set_background(Color { a: 0, ..RED }));
+    assert_eq!(c.background(), RED);
+}
+
+#[test]
+fn set_background_keeps_windows_on_top() {
+    let mut c = Compositor::new(mode(4, 4), BLUE).expect("compositor");
+    c.add_window(Point::new(0, 0), opaque(2, 2, RED));
+    c.composite();
+
+    assert!(c.set_background(Color::rgb(0, 255, 0)));
+    c.composite();
+    assert_eq!(frame_pixel(&c, 0, 0), [255, 0, 0, 255]);
+    assert_eq!(frame_pixel(&c, 3, 3), [0, 255, 0, 255]);
+}
+
+#[test]
 fn bgra_channel_order_is_honoured() {
     let m = DisplayMode {
         format: DisplayFormat::Bgra8888,

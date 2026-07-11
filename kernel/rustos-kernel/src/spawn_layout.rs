@@ -25,11 +25,12 @@
 //! glue) are the deliberate trait carve-out and stay beside each port;
 //! the values they *consume* live here once.
 
-use rustos_abi::{CapabilityId, CapabilityQuery};
+use rustos_abi::{CapabilityId, CapabilityQuery, LoadImage};
 use rustos_caps::CapabilitySet;
 #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
 use rustos_kernel_core::EmbeddedProgram;
 use rustos_kernel_core::ProgramRegistry;
+use rustos_kernel_mem::{derive_user_layout, UserLayout};
 
 use crate::program_manifests::INIT_MANIFEST;
 #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
@@ -274,18 +275,33 @@ pub fn init_caps() -> CapabilitySet {
     caps
 }
 
-/// Offset of the user stack base above the image bias (1 MiB into the high
-/// user region). The `rustos-rt` runtime carves scratch space off the
-/// stack, so the stack must comfortably exceed it.
-pub const USER_STACK_OFFSET: u64 = 0x10_0000;
-
-/// User stack pages (1.125 MiB): generous headroom over the runtime's
-/// scratch span plus call frames.
+/// User stack pages (1.125 MiB): generous headroom over the `rustos-rt`
+/// runtime's scratch span plus call frames (the runtime carves scratch
+/// space off the stack, so the stack must comfortably exceed it).
 pub const USER_STACK_PAGES: u64 = 288;
 
-/// Offset of the startup-vector block above the image bias (3 MiB up, well
-/// clear of the program image and the stack).
-pub const USER_BLOCK_OFFSET: u64 = 0x30_0000;
+/// Derive the stack and startup-vector-block placement for one spawned
+/// image (the [`rustos_kernel_mem::derive_user_layout`] mechanism bound
+/// to this workspace's layout policy): [`USER_STACK_PAGES`] stack pages,
+/// with the device window at [`MMIO_WINDOW_OFFSET`] as the ceiling the
+/// layout must stay below.
+///
+/// The placement scales with the image instead of capping it at a fixed
+/// slot — the former fixed 1 MiB stack offset silently collided with any
+/// program whose mapped image outgrew it (the desktop session's `Run`
+/// was refused at spawn the moment its BSS crossed the boundary), the
+/// capacity-ceiling defect this derivation replaces. Every port consumes
+/// this one definition, so the layout policy cannot diverge per
+/// architecture.
+///
+/// Fails closed with `None` — the caller refuses the spawn — when the
+/// layout cannot fit below the device window or an address computation
+/// overflows.
+#[must_use]
+pub fn user_layout(image: &LoadImage, bias: u64) -> Option<UserLayout> {
+    let ceiling = bias.checked_add(MMIO_WINDOW_OFFSET)?;
+    derive_user_layout(image, bias, USER_STACK_PAGES, ceiling)
+}
 
 /// Offset of the device-window virtual region above the image bias
 /// (`plans/PI.md` 5d-0-ii (b′)): placed 1 GiB above the image bias — far

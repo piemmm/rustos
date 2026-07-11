@@ -101,7 +101,9 @@ pub use reclaim_audit::{log_cache_poisoned, log_cache_refused, ReclaimAuditEvent
 pub use seal::{EntropySource, NonceSequence, SealError, SealKey};
 pub use sensitive::SensitiveBuffer;
 pub use slab::{Slab, SlabError, SlabHandle, SoftwareTagCheck};
-pub use spawn::{build_process_image, ProcessImage, SpawnError, UserStack};
+pub use spawn::{
+    build_process_image, derive_user_layout, ProcessImage, SpawnError, UserLayout, UserStack,
+};
 pub use swap::{EncryptedSwap, SwapBackend, SwapError, SwapPage, SWAP_RECORD_LEN};
 pub use uaccess::{copy_in, copy_out, UaccessError};
 pub use vmm::{

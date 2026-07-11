@@ -2980,9 +2980,19 @@ transfer, landed in increments:
   reached the surface.
   The virtio pointer feed into the seat channel is done — see above; the
   USB HID mouse joins through the same shared `from_device_event` mapping
-  when its metal report pump lands. Then: relay the theme switch over live
-  IPC; wire the two default apps to live VFS/shell channels + WM-presented
-  windows.
+  when its metal report pump lands. **The theme-switch relay is done:** the
+  seat-input toggle resolves in the session registry, `DesktopShell::handle`
+  re-colours the compositor's desktop in the same frame as the re-themed bar
+  (`sync_background` over the runtime `Compositor::set_background` —
+  opaque-forced, equal-colour no-op, full-screen damage), and the session
+  loop's per-wake damage present carries the repaint over the display IPC;
+  the one theme→render conversion (`From<Rgba> for Color`) also seeds the
+  compositor at bring-up. Host-verified through the exact shell/compositor
+  code the `Run` binary drives (wm + session tests); a click-driven QEMU
+  screendump of the live toggle rides the app-window/pointer vertical work,
+  which needs the runner's pointer-button injection and a second verified
+  dump. Then: wire the two default apps to live VFS/shell channels +
+  WM-presented windows.
 - The platform-RNG `EntropySource` that seeds the reserve — **DONE**
   (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `rustos_arch_api::entropy`
   slice (x86_64 `RDSEED`/`RDRAND`, aarch64 `RNDR` `Supported`; riscv64 `Zkr` /

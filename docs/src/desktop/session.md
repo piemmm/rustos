@@ -28,9 +28,12 @@ edge (`AGENTS.md` §17.4). Nothing outside `userland/gui/*` depends on it
 - Selecting the start menu's appearance-toggle entry
   (`MenuAction::ToggleAppearance`) is the one response the session acts on
   itself. It calls `ThemeRegistry::toggle_appearance`, re-themes the taskbar in
-  place, and returns `SessionEvent::AppearanceChanged(ThemeId)`. The embedder
-  relays the now-active theme — `DesktopSession::active_theme` — to the window
-  manager and the apps.
+  place, and returns `SessionEvent::AppearanceChanged(ThemeId)`.
+  `DesktopShell::handle` relays the switch to the window manager itself —
+  `sync_background` brings the compositor's desktop colour in step with the
+  active theme through `Compositor::set_background`, in the same frame as the
+  re-themed bar — and the embedder relays the now-active theme
+  (`DesktopSession::active_theme`) to the apps.
 - Every other response is `SessionEvent::Forward`ed unchanged: a launcher or
   session-control selection, a task activation, a notification or clock press.
   Those need capabilities the session does not hold, so the embedder performs
@@ -49,7 +52,10 @@ the same control without going through a menu. `toggle_appearance` and
 is never duplicated (`AGENTS.md` §2.2). `set_theme` fails closed with
 `ThemeError::UnknownTheme` on an unregistered id, and `register_theme` with
 `ThemeError::DuplicateId`, each leaving the active theme and the taskbar
-untouched (`AGENTS.md` §5.4 / §2.9).
+untouched (`AGENTS.md` §5.4 / §2.9). An embedder that switches the theme this
+way (through `DesktopShell::session_mut`) then calls
+`DesktopShell::sync_background` and `present` to relay the switch to the
+screen — the same two calls `handle` makes for the menu toggle.
 
 ## Presenting the taskbar through the window manager
 
@@ -151,10 +157,12 @@ on a running system, an in-memory queue in tests, `AGENTS.md` §7):
   through the `SessionInputRouter` and returning a `ShellOutcome` per event —
   `Ignored`, a `WindowManager` action the embedder may observe, or a
   `Session` event;
-- a taskbar action is `resolve`d (the light/dark toggle is applied here, a
-  task activate/minimise outcome is applied to the compositor, every other
-  response forwarded) and the bar is re-presented, so an opened/closed menu, a
-  re-themed bar, or a changed task highlight reaches the screen; a
+- a taskbar action is `resolve`d (the light/dark toggle is applied here — the
+  compositor's desktop background is re-coloured to the new theme through
+  `sync_background` — a task activate/minimise outcome is applied to the
+  compositor, every other response forwarded) and the bar is re-presented, so
+  an opened/closed menu, a re-themed bar and desktop, or a changed task
+  highlight reaches the screen; a
   window-manager action re-presents only when it moved focus between tasks,
   so motion and drags stay cheap;
 - a faulting `InputSource` ends the `pump` with its `Errno`; the events drained
@@ -165,7 +173,7 @@ The shell holds no framebuffer and grants itself no authority: the `Compositor`
 is the embedder's and is passed in on each call. A loaded notification-icon set
 is installed with `set_icons`, a title-bar drag armed with `begin_move`, and
 the desktop torn down with `teardown`. A session-level effect the shell cannot
-perform with its own state — relaying the switched theme to the WM and apps,
+perform with its own state — relaying the switched theme to the apps,
 performing a session control, launching an app — is surfaced as a
 `ShellOutcome` for the embedder, which holds those capabilities (`AGENTS.md`
 §16.5).

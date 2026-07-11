@@ -70,8 +70,12 @@ present, so there is no unknown-id path to surface. The taskbar's start menu
 surfaces this control as a `MenuAction::ToggleAppearance` entry; the taskbar
 holds no registry, so it only reports the action and the session glue
 (`userland/gui/session`, `rustos-desktop-session`) performs the switch on the
-shared registry and re-applies the new theme to the window manager, taskbar,
-and apps. See [Desktop session glue](./session.md).
+shared registry and re-applies the new theme: the taskbar is re-themed in
+place, the window manager's desktop background is re-coloured through the
+compositor's runtime `set_background` (full-screen damage, so the next present
+repaints every pixel over the new colour), and the now-active theme is
+surfaced to the apps as `SessionEvent::AppearanceChanged`. See
+[Desktop session glue](./session.md).
 
 ## Tests
 

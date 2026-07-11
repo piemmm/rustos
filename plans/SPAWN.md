@@ -580,8 +580,12 @@ landing):**
   behind the `LiveUserSpace` boundary and admits the task with it, so a
   production EL0/ring-3/U-mode process's `mem_map` / `mmio_map` / `dma_alloc`
   mutate its own space through the `live_producers` per-CPU slot (the shared
-  MMIO/ANON/DMA window offsets live once in `spawn_layout`, §2.2). wasm32's
-  linear-memory model is an honest n/a (declared).
+  MMIO/ANON/DMA window offsets live once in `spawn_layout`, §2.2; the stack
+  and startup-block placement is *derived per spawn* from the image's mapped
+  top with guard gaps — `rustos_kernel_mem::derive_user_layout` bound by
+  `spawn_layout::user_layout`, one definition for every port — so an image
+  of any size below the device window spawns, never capped by a fixed
+  offset). wasm32's linear-memory model is an honest n/a (declared).
 
 **Done when (SP5 overall):** an EL0 process can obtain and release anonymous
 `RW` memory at runtime via `abi-v1` on aarch64 `-M virt`, zeroed on map and

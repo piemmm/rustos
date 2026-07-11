@@ -40,7 +40,7 @@ use alloc::vec::Vec;
 use rustos_abi::Errno;
 use rustos_icon::IconSet;
 use rustos_taskbar::{TaskbarConfig, TaskbarRenderer, TaskbarResponse};
-use rustos_wm::{Compositor, InputEvent, InputResponse, Point, Scale, Surface, WindowId};
+use rustos_wm::{Color, Compositor, InputEvent, InputResponse, Point, Scale, Surface, WindowId};
 
 use crate::input::{SessionInputResponse, SessionInputRouter};
 use crate::presenter::TaskbarPresenter;
@@ -230,6 +230,30 @@ impl DesktopShell {
         true
     }
 
+    /// The active theme's desktop colour as the compositor's colour type,
+    /// through the one shared theme→render edge (`From<Rgba> for Color`).
+    ///
+    /// The embedder builds the compositor over this colour
+    /// ([`Compositor::new`]); after that,
+    /// [`sync_background`](Self::sync_background) keeps the two in step.
+    #[must_use]
+    pub fn desktop_background(&self) -> Color {
+        Color::from(self.session.active_theme().palette().desktop)
+    }
+
+    /// Bring the compositor's desktop background in step with the active
+    /// theme, returning whether it changed.
+    ///
+    /// [`handle`](Self::handle) calls this itself when the start menu's
+    /// appearance toggle switches the theme, so the desktop behind the
+    /// windows re-paints in the same frame as the re-themed bar; an embedder
+    /// that switches the theme programmatically (through
+    /// [`session_mut`](Self::session_mut)) calls it, then
+    /// [`present`](Self::present), to relay the switch itself.
+    pub fn sync_background(&mut self, compositor: &mut Compositor) -> bool {
+        compositor.set_background(self.desktop_background())
+    }
+
     /// Bring the compositor up to date with the taskbar's current model and the
     /// active theme: repaint and place the bar and, while the start menu is
     /// open, its popup.
@@ -272,6 +296,9 @@ impl DesktopShell {
                         .activate(compositor, &mut self.router, id, outcome);
                 }
                 let event = self.session.resolve(response);
+                if let SessionEvent::AppearanceChanged(_) = event {
+                    self.sync_background(compositor);
+                }
                 self.present(compositor);
                 ShellOutcome::Session(event)
             }

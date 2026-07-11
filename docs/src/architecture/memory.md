@@ -578,8 +578,12 @@ cryptographic layer they are required to route through.
 
 ## 7c. Anonymous user memory (`mem_map` / `mem_unmap`)
 
-A spawned process boots with exactly its fixed spawn-time image
-(code/data/bss plus a fixed user stack, `plans/SPAWN.md` SP2/SP3). The
+A spawned process boots with exactly its fixed spawn-time image:
+code/data/bss plus a fixed-size user stack and the startup-vector block,
+placed above the image's mapped top with an unmapped guard page between
+each region (`rustos_kernel_mem::derive_user_layout`, bound to the shared
+policy in `spawn_layout::user_layout` — the placement scales with the
+image instead of capping it at a fixed slot; `plans/SPAWN.md` SP2/SP3). The
 `mem_map` (`abi-v1` no. 14) / `mem_unmap` (no. 15) syscalls are the one
 mechanism by which a process obtains and releases *additional* memory at
 runtime — the foundation the `lib/rt` userland heap allocator (§7d) layers its

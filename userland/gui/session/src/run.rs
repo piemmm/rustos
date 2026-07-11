@@ -69,7 +69,7 @@ mod program {
     };
     use rustos_display::{DisplayClient, DisplayTransport, RemoteDisplay};
     use rustos_taskbar::TaskbarConfig;
-    use rustos_wm::{Color, Compositor, Rect};
+    use rustos_wm::{Compositor, Rect};
 
     /// Exit code when the boot seat's lease could not be acquired (held by
     /// another session, or the manifest lacks `CAP_DISPLAY`). A reserved,
@@ -284,16 +284,7 @@ mod program {
             TaskbarConfig::bottom_bar(mode.width_px, mode.height_px),
             APPEARANCE_LABEL,
         );
-        let desktop = shell.session().active_theme().palette().desktop;
-        let Some(mut compositor) = Compositor::new(
-            mode,
-            Color {
-                r: desktop.r,
-                g: desktop.g,
-                b: desktop.b,
-                a: desktop.a,
-            },
-        ) else {
+        let Some(mut compositor) = Compositor::new(mode, shell.desktop_background()) else {
             return fail(EXIT_BAD_MODE, "compositor rejected the queried mode");
         };
         let screen = Rect::new(0, 0, mode.width_px, mode.height_px);

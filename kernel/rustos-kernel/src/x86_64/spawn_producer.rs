@@ -88,12 +88,6 @@ const PHYSMAP_SPAN: u64 = 1 << 30;
 /// — the same window PID 1 uses.
 const IDENTITY_GIB: usize = 4;
 
-/// User stack base: the shared [`spawn_layout::USER_STACK_OFFSET`] above
-/// this image's bias, mirroring the PID-1 layout (the layout offsets and
-/// sizes are shared across the ports in [`crate::spawn_layout`]).
-const USER_STACK_BASE: u64 = CHILD_USER_BIAS + spawn_layout::USER_STACK_OFFSET;
-/// User virtual address the startup-vector block is written at.
-const USER_BLOCK_BASE: u64 = CHILD_USER_BIAS + spawn_layout::USER_BLOCK_OFFSET;
 /// Base of a spawned child's device-window virtual region
 /// (`plans/PI.md` 5d-0-ii (b′)): the retained [`LiveSpace`]'s
 /// [`rustos_kernel_mem::MmioWindowMap`] hands each `mmio_map` a
@@ -275,15 +269,20 @@ impl ProcessSpawn for X86_64ProcessSpawn {
         // is a kernel build defect, surfaced as a stable errno.
         let image = LoadImage::parse(rxe, &SYSCALL_TABLE_HASH).map_err(|_| Errno::BadMagic)?;
 
+        // Place the stack and startup block above the image's mapped top
+        // through the shared per-spawn derivation (one definition across
+        // the ports); an image too large for the user region fails closed.
+        let layout = spawn_layout::user_layout(&image, CHILD_USER_BIAS).ok_or(Errno::NoSpace)?;
+
         let request = SpawnRequest {
             image: &image,
             image_bytes: rxe,
             bias: CHILD_USER_BIAS,
             stack: UserStack {
-                base: USER_STACK_BASE,
+                base: layout.stack_base,
                 page_count: spawn_layout::USER_STACK_PAGES,
             },
-            start_block_base: USER_BLOCK_BASE,
+            start_block_base: layout.block_base,
             args,
             env,
             canary: spawn_layout::CHILD_CANARY,

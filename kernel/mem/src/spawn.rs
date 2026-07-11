@@ -63,6 +63,67 @@ pub struct UserStack {
     pub page_count: u64,
 }
 
+/// Where one spawned image's user stack and startup-vector block live,
+/// derived from the image by [`derive_user_layout`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserLayout {
+    /// Page-aligned user virtual address of the lowest stack page.
+    pub stack_base: u64,
+    /// Page-aligned user virtual address of the startup-vector block.
+    pub block_base: u64,
+}
+
+/// Derive the stack and startup-vector-block placement for one spawned
+/// image: the stack's lowest page sits one unmapped guard page above the
+/// image's highest mapped page, and the block one unmapped guard page
+/// above the stack top, so an overrun off the image or the stack faults
+/// on the gap instead of silently corrupting its neighbour.
+///
+/// The placement scales with the image instead of capping it at a fixed
+/// slot — a fixed stack offset silently collides with any program whose
+/// mapped image outgrows it, refusing the spawn the moment a binary
+/// crosses the boundary (the capacity-ceiling defect this derivation
+/// replaces).
+///
+/// `ceiling` is the first user address the layout must not reach (the
+/// caller's lowest reserved window above the image region). The block's
+/// ABI-bounded worst case ([`process::PROCESS_START_MAX_TOTAL_LEN`]) is
+/// reserved below it, so no argument vector can collide with the window.
+///
+/// Fails closed with `None` — the caller refuses the spawn — when
+/// `stack_pages` is zero, the layout cannot fit below `ceiling`, or an
+/// address computation overflows.
+#[must_use]
+pub fn derive_user_layout(
+    image: &LoadImage,
+    bias: u64,
+    stack_pages: u64,
+    ceiling: u64,
+) -> Option<UserLayout> {
+    let page = PAGE_SIZE as u64;
+    if stack_pages == 0 {
+        return None;
+    }
+    // Highest relocated one-past-the-end address across the image's mapped
+    // pages. Segment virtual addresses are page-aligned and `page_count`
+    // rounds `mem_size` up, so the top stays page-aligned.
+    let mut image_top = bias;
+    for segment in image.segments() {
+        let base = segment.relocated_vaddr(bias).ok()?;
+        let bytes = segment.page_count().checked_mul(page)?;
+        image_top = image_top.max(base.checked_add(bytes)?);
+    }
+    let stack_base = image_top.checked_add(page)?;
+    let stack_top = stack_base.checked_add(stack_pages.checked_mul(page)?)?;
+    let block_base = stack_top.checked_add(page)?;
+    let block_reserve = process::PROCESS_START_MAX_TOTAL_LEN.checked_next_multiple_of(page)?;
+    let layout_end = block_base.checked_add(block_reserve)?;
+    (layout_end <= ceiling).then_some(UserLayout {
+        stack_base,
+        block_base,
+    })
+}
+
 /// The register state a freshly built process image is entered with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessImage {
@@ -307,7 +368,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{build_process_image, ProcessImage, SpawnError, UserStack};
+    use super::{build_process_image, derive_user_layout, ProcessImage, SpawnError, UserStack};
     use crate::frame::{Frame, PhysAddr, PAGE_SIZE};
     use crate::loader::LoadError;
     use crate::phys::SimPhysMap;
@@ -680,5 +741,114 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, SpawnError::Load(LoadError::OutOfFrames));
+    }
+
+    // ---- derive_user_layout ------------------------------------------
+
+    const LAYOUT_BIAS: u64 = 64 << 30;
+    const LAYOUT_STACK_PAGES: u64 = 288;
+    // The lowest reserved window above the image region (1 GiB up, the
+    // production device-window offset).
+    const LAYOUT_CEILING: u64 = LAYOUT_BIAS + 0x4000_0000;
+    const PAGE: u64 = PAGE_SIZE as u64;
+
+    /// A zero-content image whose segments are `(vaddr, pages)`; the first
+    /// segment is executable so it can carry the entry point.
+    fn layout_bytes(segs: &[(u64, u64)]) -> Vec<u8> {
+        let specs: Vec<SegSpec> = segs
+            .iter()
+            .enumerate()
+            .map(|(i, &(vaddr, pages))| SegSpec {
+                vaddr,
+                file_size: 0,
+                mem_size: pages * PAGE,
+                perm: if i == 0 {
+                    RxePermission::ReadExecute
+                } else {
+                    RxePermission::ReadOnly
+                },
+                content: Vec::new(),
+            })
+            .collect();
+        image_bytes(segs[0].0, &specs).0
+    }
+
+    #[test]
+    fn layout_places_stack_and_block_above_the_image_with_guard_gaps() {
+        // The regression shape: a BSS page at 1 MiB above the bias,
+        // exactly where a fixed 1 MiB stack offset used to place the
+        // stack's first page and refuse the spawn on the collision.
+        let bytes = layout_bytes(&[(0x1_0000, 2), (0x10_0000, 1)]);
+        let image = LoadImage::parse(&bytes, &TAG).unwrap();
+
+        let layout = derive_user_layout(&image, LAYOUT_BIAS, LAYOUT_STACK_PAGES, LAYOUT_CEILING)
+            .expect("layout fits");
+
+        let image_top = LAYOUT_BIAS + 0x10_0000 + PAGE;
+        assert_eq!(layout.stack_base, image_top + PAGE);
+        let stack_top = layout.stack_base + LAYOUT_STACK_PAGES * PAGE;
+        assert_eq!(layout.block_base, stack_top + PAGE);
+        assert_eq!(layout.stack_base % PAGE, 0);
+        assert_eq!(layout.block_base % PAGE, 0);
+    }
+
+    #[test]
+    fn layout_scales_with_the_image_instead_of_capping_it() {
+        let small_bytes = layout_bytes(&[(0x1_0000, 1)]);
+        let small_image = LoadImage::parse(&small_bytes, &TAG).unwrap();
+        let large_bytes = layout_bytes(&[(0x1_0000, 4096)]);
+        let large_image = LoadImage::parse(&large_bytes, &TAG).unwrap();
+
+        let small = derive_user_layout(
+            &small_image,
+            LAYOUT_BIAS,
+            LAYOUT_STACK_PAGES,
+            LAYOUT_CEILING,
+        )
+        .expect("small image fits");
+        let large = derive_user_layout(
+            &large_image,
+            LAYOUT_BIAS,
+            LAYOUT_STACK_PAGES,
+            LAYOUT_CEILING,
+        )
+        .expect("large image fits");
+
+        assert!(small.stack_base < large.stack_base);
+        assert!(large.stack_base >= LAYOUT_BIAS + 0x1_0000 + 4096 * PAGE + PAGE);
+    }
+
+    #[test]
+    fn layout_reaching_the_ceiling_is_refused() {
+        // A (hostile or corrupt) image whose mapped top leaves no room for
+        // the stack and the ABI-bounded startup block below the ceiling
+        // fails closed.
+        let pages = (LAYOUT_CEILING - LAYOUT_BIAS) / PAGE - LAYOUT_STACK_PAGES;
+        let bytes = layout_bytes(&[(0, pages)]);
+        let image = LoadImage::parse(&bytes, &TAG).unwrap();
+
+        assert!(
+            derive_user_layout(&image, LAYOUT_BIAS, LAYOUT_STACK_PAGES, LAYOUT_CEILING).is_none()
+        );
+    }
+
+    #[test]
+    fn layout_address_overflow_is_refused() {
+        // The segment decodes on its own, but adding the bias overflows;
+        // the derivation fails closed rather than wrapping.
+        let bytes = layout_bytes(&[((u64::MAX - (1 << 35)) & !(PAGE - 1), 1)]);
+        let image = LoadImage::parse(&bytes, &TAG).unwrap();
+
+        assert!(
+            derive_user_layout(&image, LAYOUT_BIAS, LAYOUT_STACK_PAGES, LAYOUT_CEILING).is_none()
+        );
+    }
+
+    #[test]
+    fn layout_with_zero_stack_pages_is_refused() {
+        let bytes = layout_bytes(&[(0x1_0000, 1)]);
+        let image = LoadImage::parse(&bytes, &TAG).unwrap();
+
+        assert!(derive_user_layout(&image, LAYOUT_BIAS, 0, LAYOUT_CEILING).is_none());
     }
 }

@@ -73,12 +73,6 @@ include!(concat!(env!("OUT_DIR"), "/init_rxe.rs"));
 /// `spawn_session_qemu_riscv64` vertical uses.
 const IDENTITY_GIB: usize = 4;
 
-/// User stack base: the shared [`spawn_layout::USER_STACK_OFFSET`] above
-/// this image's bias (the layout offsets and sizes are shared across the
-/// ports in [`crate::spawn_layout`]).
-const USER_STACK_BASE: u64 = INIT_USER_BIAS + spawn_layout::USER_STACK_OFFSET;
-/// User virtual address the startup-vector block is written at.
-const USER_BLOCK_BASE: u64 = INIT_USER_BIAS + spawn_layout::USER_BLOCK_OFFSET;
 /// Base of PID 1's device-window virtual region (`plans/PI.md`
 /// 5d-0-ii (b′)): the retained [`LiveSpace`]'s
 /// [`rustos_kernel_mem::MmioWindowMap`] hands each `mmio_map` a
@@ -199,15 +193,22 @@ impl InitSpawn for RiscvInitSpawn {
             return;
         };
 
+        // Place the stack and startup block above the image's mapped top
+        // through the shared per-spawn derivation (one definition across
+        // the ports); an image too large for the user region fails closed.
+        let Some(layout) = spawn_layout::user_layout(&image, INIT_USER_BIAS) else {
+            return;
+        };
+
         let request = SpawnRequest {
             image: &image,
             image_bytes: INIT_RXE,
             bias: INIT_USER_BIAS,
             stack: UserStack {
-                base: USER_STACK_BASE,
+                base: layout.stack_base,
                 page_count: spawn_layout::USER_STACK_PAGES,
             },
-            start_block_base: USER_BLOCK_BASE,
+            start_block_base: layout.block_base,
             args: spawn_layout::INIT_ARGS,
             env: &[],
             canary: spawn_layout::INIT_CANARY,
