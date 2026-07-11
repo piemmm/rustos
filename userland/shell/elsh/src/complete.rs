@@ -4,8 +4,14 @@
 //! The engine is pure and read-only: it inspects the line with the shell's
 //! own quoting-aware lexer ([`crate::lexer::tokenize_with_spans`]) — never a
 //! second, completion-only tokeniser — and reaches the filesystem only
-//! through the injected [`WordLister`] seam, so it can be tested without a
+//! through the injected [`DirLister`] seam, so it can be tested without a
 //! kernel and can never run a command, write a file, or change `$?`.
+//!
+//! The *path* completion policy (the directory-part/leaf split, the dotfile
+//! rule, the prefix filter, the common-prefix Tab extension) is the shared
+//! `lib/complete` engine; this module owns only what is the shell's —
+//! word roles from the shell's own lexer, shell-escaping of inserts, and
+//! the command and resource-reference candidate classes.
 //!
 //! What is completed, by the word's role in the line:
 //!
@@ -30,34 +36,12 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::Errno;
 use rustos_resref::KnownNamespace;
+
+pub use rustos_complete::{DirEntryInfo, DirLister};
 
 use crate::builtin::BUILTIN_NAMES;
 use crate::lexer::{tokenize_with_spans, RedirOp, Token};
-
-/// One directory entry the [`WordLister`] reports.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DirEntryInfo {
-    /// The entry's name (no path).
-    pub name: String,
-    /// `true` if the entry is a directory.
-    pub is_dir: bool,
-}
-
-/// The engine's read-only filesystem seam: list a directory's entries.
-///
-/// On a running kernel this is backed by `fs_open`/`fs_readdir` (every
-/// permission check stays kernel-side); in tests it is an in-memory fixture.
-/// Listing is the only filesystem operation completion may perform.
-pub trait WordLister {
-    /// List the entries of `dir` (`"."` means the working directory).
-    ///
-    /// # Errors
-    ///
-    /// The host's [`Errno`]; the engine degrades to no candidates.
-    fn list_dir(&self, dir: &str) -> Result<Vec<DirEntryInfo>, Errno>;
-}
 
 /// One completion candidate.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -116,7 +100,7 @@ pub fn complete(
     line: &str,
     cursor: usize,
     path_var: Option<&str>,
-    lister: &dyn WordLister,
+    lister: &dyn DirLister,
 ) -> Completion {
     let chars: Vec<char> = line.chars().collect();
     let cursor = cursor.min(chars.len());
@@ -266,7 +250,7 @@ fn escape_word(name: &str) -> String {
 fn command_candidates(
     word: &str,
     path_var: Option<&str>,
-    lister: &dyn WordLister,
+    lister: &dyn DirLister,
     out: &mut Vec<Candidate>,
 ) {
     for &name in BUILTIN_NAMES {
@@ -338,33 +322,15 @@ fn resource_candidates(word: &str, offer_all: bool, out: &mut Vec<Candidate>) {
     }
 }
 
-/// Filesystem path candidates: list the word's directory part (the working
-/// directory for a bare name) and offer the entries matching its leaf
-/// prefix. Hidden (dot) entries are offered only when the prefix asks for
-/// them; a directory candidate ends in `/` and stays open for further
-/// completion.
-fn path_candidates(word: &str, lister: &dyn WordLister, out: &mut Vec<Candidate>) {
-    let (dir_part, leaf) = match word.rfind('/') {
-        Some(i) => (&word[..=i], &word[i + 1..]),
-        None => ("", word),
-    };
-    let list_target = if dir_part.is_empty() {
-        "."
-    } else if dir_part == "/" {
-        "/"
-    } else {
-        dir_part.trim_end_matches('/')
-    };
-    let Ok(entries) = lister.list_dir(list_target) else {
-        return;
-    };
-    for entry in entries {
-        if !entry.name.starts_with(leaf) {
-            continue;
-        }
-        if entry.name.starts_with('.') && !leaf.starts_with('.') {
-            continue;
-        }
+/// Filesystem path candidates: the shared `lib/complete` policy (the
+/// word's directory part is listed — the working directory for a bare
+/// name — leaf-prefix matches are offered, and hidden (dot) entries only
+/// when the prefix asks for them), dressed in the shell's presentation: a
+/// shell-escaped insert, and a directory candidate ending in `/` that
+/// stays open for further completion.
+fn path_candidates(word: &str, lister: &dyn DirLister, out: &mut Vec<Candidate>) {
+    let (dir_part, _) = rustos_complete::split_path_word(word);
+    for entry in rustos_complete::path_matches(word, ".", lister) {
         let mut insert = String::from(dir_part);
         insert.push_str(&escape_word(&entry.name));
         let (display, closing) = if entry.is_dir {
@@ -383,7 +349,7 @@ fn path_candidates(word: &str, lister: &dyn WordLister, out: &mut Vec<Candidate>
 
 #[cfg(test)]
 mod tests {
-    use super::{complete, Candidate, DirEntryInfo, WordLister};
+    use super::{complete, Candidate, DirEntryInfo, DirLister};
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use rustos_abi::Errno;
@@ -415,7 +381,7 @@ mod tests {
         }
     }
 
-    impl WordLister for MapLister {
+    impl DirLister for MapLister {
         fn list_dir(&self, dir: &str) -> Result<Vec<DirEntryInfo>, Errno> {
             self.dirs
                 .iter()

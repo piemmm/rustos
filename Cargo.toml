@@ -39,6 +39,7 @@ members = [
     "lib/caps",
     "lib/cmdres",
     "lib/collections",
+    "lib/complete",
     "lib/compress",
     "lib/crt0",
     "lib/crypto",

@@ -20,19 +20,26 @@ Stability tier: **experimental**.
   a backing with no stored stamp shows `-`, never a fabricated date).
 - **Sorting**: name, extension, size, or modification stamp, ascending or
   descending, with directories always grouped first (`s` opens the menu).
-- **Hidden entries**: dotfiles are hidden by default; `.` toggles them.
+- **Hidden entries**: dotfiles are hidden by default; `H` toggles them.
+  When the file pane omits hidden entries, one advisory record per
+  change goes out on the Standard Information Stream (fd 3),
+  best-effort and ignorable.
 - **Status/message lines**: the listed path, entry count, sort order,
   volume free space (via the System Information API's `MOUNT_LIST` query,
   best-effort), and errors or key hints.
 - **File operations**: copy (`c`), move (`m`), rename (`r`), delete (`d`,
-  confirmed), and mkdir (`M`). Destinations are parsed by the shared
-  `lib/path` grammar; a transfer onto itself or into its own subtree is
-  refused before any I/O; a move renames atomically on one volume and
-  falls back to copy-then-remove across volumes; an existing target file
-  pauses the operation for a per-file overwrite/skip/cancel answer; a
-  failure mid-copy removes the partial target and surfaces the errno.
+  confirmed — the confirmation is a persisted setting), and mkdir (`M`).
+  Destinations are parsed by the shared `lib/path` grammar and Tab
+  completes them through the shared `lib/complete` engine; a transfer
+  onto itself or into its own subtree is refused before any I/O; a move
+  renames atomically on one volume and falls back to copy-then-remove
+  across volumes; an existing target file pauses the operation for a
+  per-file overwrite/skip/cancel answer; a failure mid-copy removes the
+  partial target and surfaces the errno. `.` repeats the last operation
+  on the current selection.
 - **Tagging and batches**: `t` toggles a tag (marked `*`), `T` tags by a
-  `lib/glob` pattern, `i` inverts, `C` clears; while anything is tagged,
+  `lib/glob` pattern or a `size:`/`date:` range, `i` inverts, `C` clears;
+  while anything is tagged,
   `c`/`m`/`d` run over the whole tagged set in tag order, continuing past
   per-entry failures and listing every failure on a report overlay — a
   batch is never silently partial. Succeeded entries untag; failures stay
@@ -43,6 +50,12 @@ Stability tier: **experimental**.
   timed tick (the kernel parks each wait; never a busy poll), records
   unreadable directories instead of stopping, and pages the flattened
   list so a huge branch fills only as far as asked (`Space` loads more).
+- **Volumes**: `V` lists the mounted volumes (target, filesystem type,
+  free/total when reported) over the System Information API's mount
+  walk; Enter re-roots the session at the chosen root.
+- **Settings**: `S` toggles the delete confirmations, persisted in the
+  user's own `Settings/fstree/` through the `Fs` seam (fail-safe parse:
+  a corrupt file leaves every confirmation on).
 - **Help**: `-h`/`-?` and the `?` overlay render the bundle's own `Help/`
   document through the shared `lib/help` engine — nothing embedded.
 
@@ -51,9 +64,11 @@ Stability tier: **experimental**.
 `↑↓←→`/`h j k l` navigate; `Enter` expands/collapses (tree) or descends
 (files); `Tab` switches panes; `s` sorts; `c` copies; `m` moves; `r`
 renames; `d` deletes; `M` makes a directory; `a` edits the mode bits;
-`t` tags; `T` tags by glob; `i` inverts tags; `C` clears tags; `u`
-counts disk usage; `v` flattens the branch (`Space` loads the next page,
-`Esc` returns); `.` toggles hidden entries; `?` shows help; `q` quits.
+`t` tags; `T` tags by glob or range; `i` inverts tags; `C` clears tags;
+`u` counts disk usage; `v` flattens the branch (`Space` loads the next
+page, `Esc` returns); `H` toggles hidden entries; `.` repeats the last
+operation; `V` lists volumes; `S` opens settings; `?` shows help; `q`
+quits.
 
 ## Design
 

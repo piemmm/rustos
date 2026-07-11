@@ -45,10 +45,12 @@ mod program {
     use rustos_abi::fs::{DirEntry, OpenFlags, FS_IO_MAX, FS_MODE_MASK};
     use rustos_abi::{Errno, FileKind, InputMode, UnlinkFlags, STDOUT};
     use rustos_curses::{InputMode as CursesInputMode, Screen, Size, StreamTty};
-    use rustos_fstree::{run, Fs, FsEntry, Model, RenameOutcome, VolumeSpace};
+    use rustos_fstree::{
+        run, Fs, FsEntry, Info, Model, RenameOutcome, Settings, VolumeInfo, VolumeSpace,
+    };
     use rustos_help::{own_short_help, BundleHelp};
     use rustos_procinfo::{for_each_mount, IpcTransport};
-    use rustos_rt::io::{write_stderr_line, Stdout, Write};
+    use rustos_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
     use rustos_rt::File;
     use rustos_sandbox::decode::DecodeService;
     use rustos_sandbox::host::ParserSandbox;
@@ -394,6 +396,50 @@ mod program {
                 Err(_) => None,
             }
         }
+
+        fn list_volumes(&mut self) -> Vec<VolumeInfo> {
+            // The same System Information API mount walk the space figure
+            // uses, one row per mount. Best-effort by contract: an
+            // unreachable service yields an empty list and the volume
+            // list says so — never an error, never a fabricated volume.
+            let mut volumes = Vec::new();
+            let walked = for_each_mount(&IpcTransport, |record| {
+                let Ok(target) = core::str::from_utf8(record.target_bytes()) else {
+                    return Ok(());
+                };
+                let fstype =
+                    String::from(core::str::from_utf8(record.fstype_bytes()).unwrap_or("?"));
+                let usage = record.usage();
+                let block = u64::from(usage.block_size);
+                // A volume that cannot report its size (an all-zero
+                // usage) shows an absent figure, never a zero-byte disk.
+                let space = (usage.total_blocks > 0).then(|| VolumeSpace {
+                    free_bytes: usage.free_blocks.saturating_mul(block),
+                    total_bytes: usage.total_blocks.saturating_mul(block),
+                });
+                volumes.push(VolumeInfo {
+                    target: String::from(target),
+                    fstype,
+                    space,
+                });
+                Ok(())
+            });
+            match walked {
+                Ok(()) => volumes,
+                Err(_) => Vec::new(),
+            }
+        }
+    }
+
+    /// The production advisory stream: fd 3, best-effort and non-blocking
+    /// by the stream's contract — an unattached fd or a short write is
+    /// never an error a session depends on.
+    struct RtInfo;
+
+    impl Info for RtInfo {
+        fn info(&mut self, record: &[u8]) {
+            let _ = StdInfo.write_all(record);
+        }
     }
 
     /// Whether `path` lives under the mount target `target` (`/` covers
@@ -491,6 +537,7 @@ mod program {
         };
 
         let mut fs = RtFs::new();
+        let mut info = RtInfo;
         // The parser sandbox the disassembly viewer decodes in: this
         // binary re-spawned in the worker role through the kernel's
         // reserved self token (the kernel substitutes the path it admitted
@@ -506,6 +553,15 @@ mod program {
                 return 1;
             }
         };
+        // The persisted preferences live in the user's own settings tree;
+        // no home (or no file) is the ordinary default state.
+        let home = rustos_rt::env_var(b"HOME")
+            .and_then(|raw| core::str::from_utf8(raw).ok())
+            .map(String::from);
+        if let Some(home) = &home {
+            model.settings = Settings::load(&mut fs, home);
+        }
+        model.settings_home = home;
 
         // The raw input discipline: keystrokes reach the session verbatim
         // with no local echo. Restored to the cooked default on exit so
@@ -525,7 +581,7 @@ mod program {
         // where the terminal has one (restoring the covered content on
         // exit), an in-place erase otherwise.
         let entered = screen.enter_full_screen();
-        let result = run(&mut model, &mut fs, &mut sandbox, &mut screen);
+        let result = run(&mut model, &mut fs, &mut sandbox, &mut screen, &mut info);
         let left = screen.leave_full_screen();
 
         let _ = rustos_rt::set_input_mode(InputMode::Cooked);

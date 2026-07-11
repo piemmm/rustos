@@ -42,11 +42,26 @@ pub struct VolumeSpace {
     pub total_bytes: u64,
 }
 
+/// One published storage root the volume list (`V`) offers: where it is
+/// mounted, what backs it, and its space figures when known.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VolumeInfo {
+    /// The mount target — the path the tree opens when the volume is
+    /// chosen.
+    pub target: String,
+    /// The mounted filesystem's type name (`rustfs`, `ext4`, …), as the
+    /// mount table reports it.
+    pub fstype: String,
+    /// Free/total bytes, or `None` when the volume cannot report them
+    /// (shown as absent, never fabricated).
+    pub space: Option<VolumeSpace>,
+}
+
 /// The filesystem operations the landed stages perform: listings, the
-/// mode editor's stat/set pair, and the mutating operations the file
-/// commands drive (probe, streamed read/write, create, mkdir, unlink,
-/// rename). Later stages extend this trait in place together with the
-/// callers they introduce.
+/// volume list, the mode editor's stat/set pair, and the mutating
+/// operations the file commands drive (probe, streamed read/write,
+/// create, mkdir, unlink, rename). Later stages extend this trait in
+/// place together with the callers they introduce.
 pub trait Fs {
     /// List every entry of the directory `path`, in any order (the model
     /// sorts them).
@@ -61,6 +76,12 @@ pub trait Fs {
     /// Report the free/total space of the volume backing `path`, or `None`
     /// when the figure is unavailable (best-effort; never an error).
     fn volume_space(&mut self, path: &str) -> Option<VolumeSpace>;
+
+    /// The published storage roots the session can open — the mounted
+    /// volumes as the System Information API reports them. Best-effort by
+    /// contract: an unreachable service yields an empty list (the volume
+    /// list then says no volumes were reported), never an error.
+    fn list_volumes(&mut self) -> Vec<VolumeInfo>;
 
     /// The current permission bits of the entry at `path` (a resolve-only
     /// stat — no read authority is requested), for the mode editor's

@@ -32,6 +32,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use rustos_complete::common_prefix;
 use rustos_curses::Event;
 use rustos_vt::{EraseMode, Op};
 
@@ -593,28 +594,6 @@ impl<'a> Session<'a> {
     }
 }
 
-/// The longest common prefix of the candidate insert texts, by character.
-fn common_prefix<'a>(mut items: impl Iterator<Item = &'a str>) -> String {
-    let Some(first) = items.next() else {
-        return String::new();
-    };
-    let mut prefix: Vec<char> = first.chars().collect();
-    for item in items {
-        let mut keep = 0;
-        for (a, b) in prefix.iter().zip(item.chars()) {
-            if *a != b {
-                break;
-            }
-            keep += 1;
-        }
-        prefix.truncate(keep);
-        if prefix.is_empty() {
-            break;
-        }
-    }
-    prefix.into_iter().collect()
-}
-
 /// Encode a run of terminal operations through the one shared `lib/vt`
 /// emitter. The encoded bytes are UTF-8 by construction; encoding failure
 /// degrades to writing nothing (fail closed, never a panic).
@@ -626,7 +605,7 @@ fn encode_ops(ops: &[Op]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{common_prefix, Completer, Editor, ReadOutcome, Session};
+    use super::{Completer, Editor, ReadOutcome, Session};
     use crate::complete::{Candidate, Completion};
     use crate::test_support::RecordingConsole;
     use alloc::string::{String, ToString};
@@ -895,12 +874,5 @@ mod tests {
             last_paint.chars().count() <= 40 + 8,
             "one paint never exceeds the width plus its escape tail: {last_paint:?}"
         );
-    }
-
-    #[test]
-    fn common_prefix_is_charwise() {
-        assert_eq!(common_prefix(["notes", "notebooks"].into_iter()), "note");
-        assert_eq!(common_prefix(["a", "b"].into_iter()), "");
-        assert_eq!(common_prefix(core::iter::empty()), "");
     }
 }

@@ -26,9 +26,11 @@ The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 only dependencies are the audited `lib/*` crates
 [`rustos-abi`](../../../lib/abi) (the stable `Errno` on the host seam),
 [`rustos-cmdres`](../../../lib/cmdres) (the one command-word search policy,
-which completion enumerates), [`rustos-curses`](../../../lib/curses) (the
-shared key-event decoder), [`rustos-resref`](../../../lib/resref) (the one
-resource-reference spelling parser and registry), and
+which completion enumerates), [`rustos-complete`](../../../lib/complete)
+(the one path-candidate completion policy, which the shell dresses in its
+escaping and candidate classes), [`rustos-curses`](../../../lib/curses)
+(the shared key-event decoder), [`rustos-resref`](../../../lib/resref)
+(the one resource-reference spelling parser and registry), and
 [`rustos-vt`](../../../lib/vt) (the shared terminal vocabulary the editor
 renders through and the plain reader's line discipline), so the shell
 never links a kernel or driver crate (`AGENTS.md` §17.4).

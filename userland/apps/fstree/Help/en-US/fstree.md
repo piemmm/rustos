@@ -41,9 +41,12 @@ Keys:
 - `c` — copy the selected entry: a prompt asks for the destination.
   A relative destination lands in the listed directory; a destination
   that is an existing directory receives the copy inside it under the
-  source's name. A directory is copied with everything under it.
-  Copying an entry onto itself or a directory into its own subtree is
-  refused before anything is written.
+  source's name. `Tab` completes the typed path — a unique match is
+  filled in (a directory staying open with its `/`), several matches
+  extend to their shared stem or are listed. A directory is copied
+  with everything under it. Copying an entry onto itself or a
+  directory into its own subtree is refused before anything is
+  written.
 - `m` — move the selected entry, asked for the destination the same
   way. Within one volume the move is an atomic rename; across volumes
   the entry is copied and the source then removed.
@@ -51,15 +54,21 @@ Keys:
   with the current name.
 - `d` — delete the selected entry after a confirmation; only `y`
   proceeds. Deleting a directory removes everything under it, and the
-  confirmation says so.
+  confirmation says so. The confirmation can be turned off in the
+  settings menu (`S`).
 - `M` — create a directory in the listed directory, asked for its name.
 - `a` — edit the selected entry's permission bits: an octal prompt
   pre-filled with the current mode. Enter applies (only the entry's owner
   may change it — the kernel refuses anyone else), Esc cancels.
 - `t` — tag or untag the selected file-pane entry and step down, so
   repeated presses mark a run. Tagged entries carry a `*` marker.
-- `T` — tag by pattern: a glob (`*`, `?`, `[...]`) matched against the
-  visible names; every match is added to the tagged set.
+- `T` — tag by pattern: a glob (`*`, `?`, `[...]`) matched against
+  the visible names, or a range — `size:MIN..MAX` (bytes, `K`/`M`/
+  `G`/`T` suffixes, either bound may be left open: `size:1M..`,
+  `size:..64K`) or `date:YYYY-MM-DD..YYYY-MM-DD` (modification date,
+  end date included; an entry whose backing stores no stamp never
+  date-matches). Every match is added to the tagged set; a malformed
+  pattern or range tags nothing and says why.
 - `i` — invert the tags across the visible entries.
 - `C` — clear every tag.
 - `f` — filter the file pane by a filename glob, applied live as it is
@@ -91,14 +100,28 @@ Keys:
   are named relative to the flattened branch. Search results (`/`,
   `F`) fill this same view, so their rows are taggable and operable
   exactly like a flattened listing.
-- `.` — toggle hidden (dot-named) entries in both panes.
+- `H` — toggle hidden (dot-named) entries in both panes.
+- `.` — repeat the last file operation on the current selection: a
+  copy or move goes into the same destination directory again, a
+  delete asks again per the confirmation setting. With no operation
+  yet, the key says so.
+- `V` — list the mounted volumes: each row shows the mount point, the
+  filesystem type, and the free/total bytes when the volume reports
+  them. `Enter` re-roots the whole session at the chosen volume;
+  `Esc` closes the list. When no volumes are reported the key says
+  so.
+- `S` — the settings menu: `1` toggles the single-delete
+  confirmation, `2` the batch-delete confirmation. Changes persist in
+  your own `Settings/fstree/` and load at the next start; without a
+  home directory they last the session and the menu says so.
 - `?` — show this help over the panes; any key dismisses it.
 - `q` — quit, restoring the terminal.
 
 While entries are tagged, `c`, `m`, and `d` operate on the whole
 tagged set instead of the selection: `c`/`m` ask for an existing
-destination directory the entries land in, and `d` confirms the batch
-delete. Entries are processed in tag order; a failed entry never
+destination directory the entries land in (`Tab` completes it), and
+`d` confirms the batch delete (unless that confirmation is turned
+off in the settings menu). Entries are processed in tag order; a failed entry never
 stops the rest, and the completion report counts what succeeded while
 a report screen lists every failure by name — a batch is never
 silently partial. Entries that succeeded are untagged; failures stay
@@ -120,6 +143,11 @@ Information service can report them), whether hidden entries are
 shown, the active filename filter, and — while anything is tagged —
 the tagged count and byte total. A file whose backing format stores
 no modification stamp shows `-` in the stamp column.
+
+When the file pane omits hidden entries, the session also notes the
+omission on the Standard Information Stream (fd 3) — one advisory
+record per change, capturable with `fstree 3>info.jsonl`; the
+session itself is unaffected.
 
 The viewers: `Enter` on a regular file opens it read-only in a
 full-screen viewer.

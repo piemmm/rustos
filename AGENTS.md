@@ -563,6 +563,15 @@ rustos/
 │   │                    #   launch path and the man command's bundle lookup
 │   │                    #   (§2.2). Spelling only — no I/O, no authority.
 │   ├── collections/     # no_std collections not in core/alloc.
+│   ├── complete/        # Shared filename-completion engine: the one
+│   │                    #   directory-part/leaf path-candidate policy
+│   │                    #   (dotfile rule, prefix filter, longest-common-
+│   │                    #   prefix Tab discipline) the shell's Tab
+│   │                    #   completion and fstree's destination prompts
+│   │                    #   import over an injected read-only listing
+│   │                    #   seam, never a second engine (§2.2). Fail
+│   │                    #   closed: a refused listing completes to
+│   │                    #   nothing, never a guess.
 │   ├── compress/        # First-party LZ codec; RustFS compresses every record
 │   │                    #   with it, no external dependency (§2.12, §16.4).
 │   ├── crt0/            # C-callable abi-v1 program startup object: the per-arch
