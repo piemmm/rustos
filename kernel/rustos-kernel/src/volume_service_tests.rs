@@ -234,10 +234,12 @@ fn serve(
     })
 }
 
-/// Build, register, and return the per-LUN block-service endpoint.
-fn register_endpoint(id: u64) -> StdArc<CallEndpoint> {
+/// Build, register, and return the per-LUN block-service endpoint, owned
+/// by the task `owner` (the serving driver's identity — the one the
+/// endpoint-teardown path matches on unplug).
+fn register_endpoint(id: u64, owner: u64) -> StdArc<CallEndpoint> {
     let creator = TaskCapabilities::derive(
-        TaskId(0x70_0001),
+        TaskId(owner),
         UserId(0),
         CapabilitySet::empty(),
         CapabilitySet::empty(),
@@ -303,6 +305,24 @@ fn identity_with_storage_member() -> rustos_kernel_sec::IdentityTable {
     identity.verify(&SINK).expect("identity table")
 }
 
+/// Format a FAT32 image carrying `hello.txt` with `payload` under the
+/// caller-minted BPB `serial`, returning the image and its volume
+/// identity.
+fn fat32_image(serial: u32, payload: &[u8]) -> (RamBlock, [u8; 16]) {
+    let mut fs = Fat32::format(RamBlock::new(SECTORS_64MIB), serial).expect("format");
+    let root = fs.root();
+    fs.create(root, b"hello.txt", NodeKind::RegularFile)
+        .expect("create");
+    fs.write_at(root, b"hello.txt", 0, payload).expect("write");
+    let image = fs.into_block();
+    let identity = Fat32::open(RamBlock {
+        data: image.data.clone(),
+    })
+    .expect("probe")
+    .volume_identity();
+    (image, identity)
+}
+
 /// The storage-group identity map governs ordinary users on the attached
 /// volume: every node appears system-owned under the storage group, files
 /// `rw-rw-r--`, so a member reads and writes, a non-member reads but is
@@ -364,6 +384,9 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
     // boot statics). ---
     let pressure: &'static MemoryPressure = Box::leak(Box::new(MemoryPressure::over(&AMPLE)));
     VOLUME_SERVICE.install(&SINK, pressure);
+    // The production boot wiring also registers the service as the
+    // endpoint-vanish observer (the surprise-removal trigger).
+    rustos_kernel_core::callreg::install_vanish_observer(&VOLUME_SERVICE);
     // Arm the storage-group identity map (production: the root unlock
     // resolves the group by name and installs its gid) and install the
     // identity table the `fs_*` group resolution reads.
@@ -380,26 +403,12 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
         .expect("install the default-layout mount table once");
 
     // --- The volume: a formatted FAT32 image carrying one file. ---
-    let image = {
-        let mut fs = Fat32::format(RamBlock::new(SECTORS_64MIB)).expect("format");
-        let root = fs.root();
-        fs.create(root, b"hello.txt", NodeKind::RegularFile)
-            .expect("create");
-        fs.write_at(root, b"hello.txt", 0, b"runtime volume payload")
-            .expect("write");
-        fs.into_block()
-    };
-    // The identity the attach path will derive from the same bytes.
-    let expected_identity = Fat32::open(RamBlock {
-        data: image.data.clone(),
-    })
-    .expect("probe")
-    .volume_identity();
+    let (image, expected_identity) = fat32_image(0x0D15_C001, b"runtime volume payload");
     let device_blocks = (image.data.len() / BLOCK_SIZE) as u64;
 
     // --- The served block service. ---
     let endpoint_id = 0xB1D0_5E17_0000_0001_u64;
-    let endpoint = register_endpoint(endpoint_id);
+    let endpoint = register_endpoint(endpoint_id, 0x70_0001);
     let device = StdArc::new(Mutex::new(ServedDevice {
         block: image,
         flushes: 0,
@@ -474,5 +483,147 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
     assert!(
         device.lock().unwrap().flushes >= 1,
         "detach commits the device cache"
+    );
+
+    dirty_surprise_removal_scenario(window_ptr, facility);
+    clean_surprise_removal_scenario(window_ptr, facility);
+}
+
+/// The per-scenario facts for [`attach_then_yank`]: the owning task, the
+/// endpoint id, the image's minted serial, the shared-region creator, the
+/// catalog name, and whether the journal is dirtied before the yank.
+struct YankScenario {
+    owner: u64,
+    endpoint_id: u64,
+    serial: u32,
+    region_task: u64,
+    name: &'static [u8],
+    dirty: bool,
+}
+
+/// One served, attached FAT32 volume for the surprise-removal scenarios,
+/// yanked by tearing its endpoint's owner down. Returns the volume's
+/// identity after the server thread has ended.
+fn attach_then_yank(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+    scenario: &YankScenario,
+) -> [u8; 16] {
+    let endpoint = register_endpoint(scenario.endpoint_id, scenario.owner);
+    let (image, identity) = fat32_image(scenario.serial, b"scenario payload");
+    let blocks = (image.data.len() / BLOCK_SIZE) as u64;
+    let device = StdArc::new(Mutex::new(ServedDevice {
+        block: image,
+        flushes: 0,
+    }));
+    let stop = StdArc::new(AtomicBool::new(false));
+    let server = serve(
+        StdArc::clone(&endpoint),
+        window_ptr as usize,
+        StdArc::clone(&device),
+        StdArc::clone(&stop),
+    );
+    let (_va, region) =
+        sharedreg::create(facility, TaskId(scenario.region_task), 8).expect("region");
+    VOLUME_SERVICE
+        .attach(&VolumeAttachRequest {
+            endpoint: scenario.endpoint_id,
+            window: region,
+            first_lba: 0,
+            blocks,
+            fstype: VolumeFsType::Fat32,
+            name: scenario.name,
+        })
+        .expect("attach scenario volume");
+    if scenario.dirty {
+        // Dirty the volume's journal through the production write path.
+        let path = std::format!(
+            "/Storage/{}/hello.txt",
+            core::str::from_utf8(scenario.name).expect("ascii name")
+        );
+        FS_SERVICE
+            .write(0, &NoCaps, &path, 0, false, b"D")
+            .expect("write dirties the journal");
+    }
+    // Yank the stick: the serving driver dies and the kernel tears its
+    // endpoint down, which drives the vanish observer synchronously.
+    rustos_kernel_core::callreg::teardown_owned_by(scenario.owner, &SINK);
+    stop.store(true, Ordering::Relaxed);
+    server.join().expect("scenario server thread");
+    identity
+}
+
+/// Surprise removal with uncommitted writes (`plans/DEVICES.md` D4a): the
+/// volume becomes unavailable-dirty — root visible, every operation
+/// failing closed, plain detach refused.
+fn dirty_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestFacility) {
+    let identity = attach_then_yank(
+        window_ptr,
+        facility,
+        &YankScenario {
+            owner: 0x70_1002,
+            endpoint_id: 0xB1D0_5E17_0000_0002,
+            serial: 0x0D15_C002,
+            region_task: 0x70_0003,
+            name: b"usb2",
+            dirty: true,
+        },
+    );
+    let mut buf = [0u8; 32];
+    assert_eq!(
+        VOLUME_FOREST.resolve(&identity),
+        Some(vec![String::from("Storage"), String::from("usb2")]),
+        "an unavailable-dirty volume's durable root stays visible"
+    );
+    assert_eq!(
+        FS_SERVICE
+            .read(0, &NoCaps, "/Storage/usb2/hello.txt", 0, &mut buf)
+            .err(),
+        Some(Errno::DeviceFault),
+        "new I/O on an unavailable-dirty volume fails closed, cache included"
+    );
+    assert_eq!(
+        VOLUME_SERVICE.detach(&VolumeDetachRequest {
+            volume_id: identity
+        }),
+        Err(Errno::DeviceFault),
+        "a plain detach never discards the retained set"
+    );
+}
+
+/// Surprise removal with nothing uncommitted: the volume is simply
+/// retracted — no drama.
+fn clean_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestFacility) {
+    let identity = attach_then_yank(
+        window_ptr,
+        facility,
+        &YankScenario {
+            owner: 0x70_1004,
+            endpoint_id: 0xB1D0_5E17_0000_0003,
+            serial: 0x0D15_C003,
+            region_task: 0x70_0005,
+            name: b"usb3",
+            dirty: false,
+        },
+    );
+    let mut buf = [0u8; 32];
+    assert_eq!(
+        VOLUME_FOREST.resolve(&identity),
+        None,
+        "a clean surprise removal retracts the durable root"
+    );
+    assert_eq!(
+        FS_SERVICE
+            .read(0, &NoCaps, "/Storage/usb3/hello.txt", 0, &mut buf)
+            .err(),
+        Some(Errno::NotFound),
+        "the retracted mount fails closed"
+    );
+    assert_eq!(
+        VOLUME_SERVICE.detach(&VolumeDetachRequest {
+            volume_id: identity
+        }),
+        Err(Errno::NotFound),
+        "nothing remains to detach"
     );
 }

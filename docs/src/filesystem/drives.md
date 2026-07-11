@@ -461,9 +461,12 @@ event IDs (`AGENTS.md` §5.4, §19.4): `fs.root.{discovered,attached}`,
 `fs.root.publish.{allow,deny}`, `fs.alias.create.{allow,deny}`,
 `fs.alias.remove.{allow,deny}`, `fs.alias.resolve.deny`,
 `fs.view.bind.{allow,deny}`, `fs.flags.relax.{allow,deny}`,
-`fs.raw_device.open.{allow,deny}`, `fs.hotplug.root_{added,removed}`, and
-`fs.conflict.alias_ambiguous`. No secret, key, capability-token value, or
-private path content beyond the audit subsystem's policy set is logged.
+`fs.raw_device.open.{allow,deny}`, `fs.hotplug.root_{added,removed}`,
+`fs.hotplug.surprise_removal.{clean,dirty,lost}` (a vanished device with
+nothing uncommitted / with its uncommitted writes retained / after retention
+was abandoned), and `fs.conflict.alias_ambiguous`. No secret, key,
+capability-token value, or private path content beyond the audit subsystem's
+policy set is logged.
 
 ## 24. Required tests
 

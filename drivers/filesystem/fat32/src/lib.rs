@@ -848,6 +848,16 @@ impl<B: Block> Fat32<B> {
     /// Lay down a fresh, empty FAT32 volume on `block` and bring it
     /// online read-write.
     ///
+    /// `serial` is the caller-minted BPB volume serial — the four bytes
+    /// FAT32's content-derived identity is built on
+    /// ([`Fat32::volume_identity`]). The caller mints it (`mkfs.fat`
+    /// derives one from the clock; RustOS callers draw from their entropy
+    /// or provenance source) because two volumes formatted with one
+    /// serial are indistinguishable to the volume forest, so a duplicate
+    /// can never mount while its twin is attached. Zero is refused: the
+    /// all-zero serial is the "none recorded" value and would collide
+    /// every freshly formatted volume with every other.
+    ///
     /// The geometry is derived from the device size: a sectors-per-cluster
     /// is chosen (mirroring `mkfs.fat` thresholds) to keep the cluster count inside
     /// the FAT32 range, the two mirrored FATs are sized so every data
@@ -862,18 +872,22 @@ impl<B: Block> Fat32<B> {
     /// * [`DriverError::BadMagic`] if the device logical-block size is not
     ///   a power of two in `512..=4096` (a valid FAT32 sector size), or if
     ///   the bytes written somehow fail [`Fat32::open`]'s validation.
-    /// * [`DriverError::OutOfRange`] if the device is too small to host a
-    ///   valid FAT32 volume (fewer than the FAT32 minimum of 65525 data
-    ///   clusters) or has more sectors than the 32-bit BPB count addresses.
+    /// * [`DriverError::OutOfRange`] if `serial` is zero, if the device is
+    ///   too small to host a valid FAT32 volume (fewer than the FAT32
+    ///   minimum of 65525 data clusters), or if it has more sectors than
+    ///   the 32-bit BPB count addresses.
     /// * [`DriverError::DeviceFault`] if a block read or write fails.
     ///
     /// # Capabilities
     ///
     /// Reached only through the driver's [`DriverHandle`].
-    pub fn format(mut block: B) -> Result<Self, DriverError> {
+    pub fn format(mut block: B, serial: u32) -> Result<Self, DriverError> {
         const RESERVED_SECTORS: u16 = 32;
         const NUM_FATS: u8 = 2;
 
+        if serial == 0 {
+            return Err(DriverError::OutOfRange);
+        }
         let geometry = block.geometry()?;
         let bps = geometry.block_size;
         if !(512..=MAX_BLOCK_SIZE).contains(&bps) || !bps.is_power_of_two() {
@@ -940,6 +954,7 @@ impl<B: Block> Fat32<B> {
         put_le32(&mut boot, 36, fat_size_32);
         put_le32(&mut boot, 44, 2); // root directory first cluster
         boot[66] = 0x29; // extended boot signature
+        boot[67..71].copy_from_slice(&serial.to_le_bytes());
         boot[71..82].copy_from_slice(b"NO NAME    ");
         boot[82..90].copy_from_slice(b"FAT32   ");
         boot[510] = 0x55;

@@ -203,7 +203,9 @@ fn provision(passphrase: &[u8]) -> Result<([u8; UNLOCK_DESCRIPTOR_LEN], VolumeKe
 /// `tools/mkimage` performs. Returns the partition's
 /// on-disk bytes.
 fn build_boot_partition(descriptor: &[u8]) -> Result<Vec<u8>, DriverError> {
-    let mut fs = Fat32::format(MemDisk::new(FAT_BOOT_SECTORS))?;
+    // A fixed test serial: the fixture's boot partition never meets the
+    // volume forest.
+    let mut fs = Fat32::format(MemDisk::new(FAT_BOOT_SECTORS), 0x0B00_7F1E)?;
     let root = fs.root();
     fs.create(root, ROOT_UNLOCK_NAME.as_bytes(), NodeKind::RegularFile)?;
     let written = fs.write_at(root, ROOT_UNLOCK_NAME.as_bytes(), 0, descriptor)?;

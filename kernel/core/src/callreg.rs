@@ -96,19 +96,11 @@ pub fn unregister(id: EndpointId) -> Option<Arc<CallEndpoint>> {
     CALL_ENDPOINTS.lock().remove(&id)
 }
 
-/// Tear down every endpoint owned by the exiting task `owner`: unbind it and
-/// [`CallEndpoint::destroy`] it (cancelling its in-flight calls), returning
-/// how many were torn down.
-///
-/// A user-space service may exit (cleanly, by fault, or killed) while callers
-/// are blocked in `ipc_call` awaiting its replies. Without this, those
-/// callers would park forever on a dead endpoint; destroying the endpoint
-/// flips every outstanding call to [`rustos_kernel_ipc::ReplyOutcome::Cancelled`]
-/// so the next poll abandons fail-closed. The
-/// caller wakes the parked callers (via [`crate::waitq::call_wake`]) when the
-/// return value is non-zero — kept out of this registry function so it stays
-/// pure registry mechanics.
-pub fn unregister_owned_by(owner: u64, audit: &dyn Sink) -> usize {
+/// Unbind and [`CallEndpoint::destroy`] every endpoint owned by the exiting
+/// task `owner` (cancelling its in-flight calls), returning the ids that
+/// were torn down. Pure registry mechanics; the wake and the vanish
+/// notification live in [`teardown_owned_by`].
+fn unregister_owned_by(owner: u64, audit: &dyn Sink) -> Vec<EndpointId> {
     // Collect-then-remove under one lock acquisition: gather the owned ids,
     // then drop the lock before destroying (each `destroy` takes the
     // endpoint's *own* interior lock, never this registry lock).
@@ -124,7 +116,56 @@ pub fn unregister_owned_by(owner: u64, audit: &dyn Sink) -> usize {
     for ep in &removed {
         ep.destroy(audit);
     }
-    removed.len()
+    removed.iter().map(|ep| ep.id()).collect()
+}
+
+/// An observer of endpoint teardown: told, after the fact, that an owner's
+/// endpoints were destroyed. The runtime volume service listens here so a
+/// surprise-removed disk's volume reacts the moment its serving driver
+/// dies (`plans/DEVICES.md` D4).
+pub trait EndpointVanishObserver: Sync {
+    /// `id` was unbound and destroyed because its owning task ended. Runs
+    /// in the tearing-down task's context after parked callers were woken:
+    /// the observer may take sleeping locks, but every in-flight call on
+    /// the endpoint has already been cancelled, so nothing it waits on can
+    /// depend on the dead endpoint.
+    fn endpoint_vanished(&self, id: EndpointId);
+}
+
+/// The set-once vanish observer, installed by the boot path. Fail-closed
+/// `None` before install: teardown simply has no listener.
+static VANISH_OBSERVER: rustos_sync::OnceCell<&'static dyn EndpointVanishObserver> =
+    rustos_sync::OnceCell::new();
+
+/// Install the endpoint-vanish observer. First-wins and idempotent, like
+/// the other late-installed boot seams.
+pub fn install_vanish_observer(observer: &'static dyn EndpointVanishObserver) {
+    let _ = VANISH_OBSERVER.set(observer);
+}
+
+/// Tear down every endpoint owned by the exiting task `owner`, wake the
+/// callers its destruction cancelled, and notify the vanish observer.
+///
+/// A user-space service may exit (cleanly, by fault, or killed) while
+/// callers are blocked in `ipc_call` awaiting its replies. Without this,
+/// those callers would park forever on a dead endpoint; destroying the
+/// endpoint flips every outstanding call to
+/// [`rustos_kernel_ipc::ReplyOutcome::Cancelled`] so the next poll abandons
+/// fail-closed. The observer is notified strictly **after**
+/// [`crate::waitq::call_wake`]: a caller parked mid-call on the dead
+/// endpoint may hold a lock the observer needs, and the wake is what lets
+/// that caller finish and release it.
+pub fn teardown_owned_by(owner: u64, audit: &dyn Sink) {
+    let removed = unregister_owned_by(owner, audit);
+    if removed.is_empty() {
+        return;
+    }
+    crate::waitq::call_wake();
+    if let Ok(Some(observer)) = VANISH_OBSERVER.get() {
+        for id in removed {
+            observer.endpoint_vanished(id);
+        }
+    }
 }
 
 /// `true` if `id` is currently bound. Diagnostic / test observer.

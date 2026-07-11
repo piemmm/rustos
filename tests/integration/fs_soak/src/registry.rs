@@ -106,8 +106,9 @@ impl SoakFs for Ext4<RamBlock> {
 impl SoakFs for Fat32<RamBlock> {
     fn format_volume(block: RamBlock) -> Result<Self, DriverError> {
         // FAT has no inode table; its directory entries live in the data
-        // region, so the formatter takes no inode budget.
-        Fat32::format(block)
+        // region, so the formatter takes no inode budget. The serial is a
+        // fixed test value: soak volumes never meet the volume forest.
+        Fat32::format(block, 0x50A5_FA32)
     }
 
     fn remount(self) -> Result<Self, DriverError> {

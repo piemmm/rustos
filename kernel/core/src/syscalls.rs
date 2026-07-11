@@ -1467,11 +1467,11 @@ where
         // before dropping its capability record: a user-space service
         // that dies (cleanly, by fault, or killed) must not leave callers
         // blocked in `ipc_call` forever — destroying its endpoints
-        // cancels their in-flight calls, and waking `CALL_WAITQ` re-runs
-        // each parked caller's poll so it abandons fail-closed.
-        if crate::callreg::unregister_owned_by(task.0, self.audit) > 0 {
-            crate::waitq::call_wake();
-        }
+        // cancels their in-flight calls, waking `CALL_WAITQ` re-runs
+        // each parked caller's poll so it abandons fail-closed, and the
+        // vanish observer lets the volume layer react to an unplugged
+        // disk's dead block service.
+        crate::callreg::teardown_owned_by(task.0, self.audit);
         // Release every shared-memory mapping this task held, dropping
         // each reference and zeroing + freeing any region whose last
         // reference this releases (zero-on-free). The registry scrubs a

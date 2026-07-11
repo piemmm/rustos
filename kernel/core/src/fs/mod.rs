@@ -53,6 +53,7 @@ pub mod mount;
 mod mounted;
 pub mod path;
 pub mod perm;
+pub mod retained;
 pub mod service;
 mod vfs;
 pub mod volsvc;
@@ -70,6 +71,7 @@ pub use path::{
     resolve_machine_alias, Path, MAX_COMPONENT_LEN, MAX_PATH_COMPONENTS, ROOT_TEMPLATE,
 };
 pub use perm::{Access, AclEntry, AclWho, Credentials, Metadata, Mode};
+pub use retained::{FlushBlock, JournaledBlock, RetainedWrites};
 pub use service::{FilesystemService, NullFilesystemService, ReaddirEntry, NULL_FILESYSTEM};
 pub use vfs::Vfs;
 pub use volsvc::{NullVolumeService, VolumeService, NULL_VOLUME_SERVICE};
@@ -248,12 +250,11 @@ impl VfsError {
     /// [`Errno::NotEmpty`] (`ENOTEMPTY` — `rmdir --ignore-fail-on-non-empty`
     /// tolerates exactly this). `abi-v1` has no dedicated `EISDIR`/`EINVAL`,
     /// so those collapse onto [`Errno::OutOfRange`]; the read-only refusal
-    /// is reported as [`Errno::PermissionDenied`]. `abi-v1` likewise has no
-    /// dedicated `EIO`, so [`Self::Io`] collapses onto
-    /// [`Errno::NotImplemented`], mirroring how
-    /// [`DriverError::DeviceFault`](rustos_abi::driver::DriverError)
-    /// already maps. The precise [`VfsError`] is retained in-kernel for
-    /// logging.
+    /// is reported as [`Errno::PermissionDenied`]. An unrecoverable backing
+    /// fault ([`Self::Io`]) is [`Errno::DeviceFault`] — the `EIO` analogue,
+    /// and what a surprise-removed volume's operations report — mirroring
+    /// how [`DriverError::DeviceFault`](rustos_abi::driver::DriverError)
+    /// maps. The precise [`VfsError`] is retained in-kernel for logging.
     #[must_use]
     pub const fn to_errno(self) -> Errno {
         match self {
@@ -264,7 +265,9 @@ impl VfsError {
             Self::AlreadyExists => Errno::AlreadyExists,
             Self::NotEmpty => Errno::NotEmpty,
             Self::CrossVolume => Errno::CrossVolume,
-            Self::Io => Errno::NotImplemented,
+            // An unrecoverable backing fault is reported as what it is: the
+            // device failed (or vanished), never "interface not implemented".
+            Self::Io => Errno::DeviceFault,
         }
     }
 }
@@ -305,7 +308,7 @@ mod tests {
         assert_eq!(VfsError::NotADirectory.to_errno(), Errno::NotADirectory);
         assert_eq!(VfsError::NotEmpty.to_errno(), Errno::NotEmpty);
         assert_eq!(VfsError::CrossVolume.to_errno(), Errno::CrossVolume);
-        assert_eq!(VfsError::Io.to_errno(), Errno::NotImplemented);
+        assert_eq!(VfsError::Io.to_errno(), Errno::DeviceFault);
     }
 
     #[test]

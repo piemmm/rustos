@@ -880,6 +880,10 @@ fn node_info_reports_no_allocation_for_an_empty_file() {
     assert_eq!(fs.node_info(file).expect("info").allocated, 0);
 }
 
+/// The caller-minted BPB volume serial the format tests lay volumes down
+/// with; production callers mint a fresh one per volume.
+const TEST_SERIAL: u32 = 0x1234_5678;
+
 /// Tests for [`Fat32::format`]: laying down a genuine, mountable FAT32
 /// volume on a fresh device, sized large enough to be a real FAT32
 /// filesystem, and the data-exhaustion (`NoSpace`) extreme. These use a
@@ -949,7 +953,7 @@ mod format {
 
     #[test]
     fn format_produces_a_mountable_empty_volume() {
-        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB)).expect("format");
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
         let root = fs.root();
         assert_eq!(
             fs.node_info(root).expect("root info").kind,
@@ -963,7 +967,7 @@ mod format {
     #[test]
     fn format_then_reopen_round_trips_files_and_directories() {
         let dev = {
-            let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB)).expect("format");
+            let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
             let root = fs.root();
             fs.create(root, b"Notes.txt", NodeKind::RegularFile)
                 .expect("create file");
@@ -995,7 +999,7 @@ mod format {
 
     #[test]
     fn stats_track_allocation_and_identity_is_remount_stable() {
-        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB)).expect("format");
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
         let identity = fs.volume_identity();
         assert_ne!(
             identity, [0u8; 16],
@@ -1031,7 +1035,7 @@ mod format {
 
     #[test]
     fn security_is_uniform_and_stores_are_refused() {
-        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB)).expect("format");
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
         let root = fs.root();
         fs.create(root, b"file.txt", NodeKind::RegularFile)
             .expect("create");
@@ -1055,7 +1059,7 @@ mod format {
 
     #[test]
     fn filling_a_formatted_volume_reports_no_space() {
-        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB)).expect("format");
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
         let root = fs.root();
         fs.create(root, b"BIG.DAT", NodeKind::RegularFile)
             .expect("create");
@@ -1082,7 +1086,7 @@ mod format {
 
     #[test]
     fn rename_within_directory_preserves_contents() {
-        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB)).expect("format");
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
         let root = fs.root();
         fs.create(root, b"A.TXT", NodeKind::RegularFile).unwrap();
         fs.write_at(root, b"A.TXT", 0, b"hello").unwrap();
@@ -1096,7 +1100,7 @@ mod format {
 
     #[test]
     fn rename_missing_source_is_not_found() {
-        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB)).expect("format");
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
         let root = fs.root();
         assert_eq!(
             fs.rename(root, b"X", root, b"Y"),
@@ -1107,7 +1111,7 @@ mod format {
     #[test]
     fn rename_across_directories_persists() {
         let dev = {
-            let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB)).expect("format");
+            let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
             let root = fs.root();
             let src = fs.create(root, b"SRC", NodeKind::Directory).unwrap();
             let dst = fs.create(root, b"DST", NodeKind::Directory).unwrap();
@@ -1129,7 +1133,7 @@ mod format {
 
     #[test]
     fn rename_overwrites_existing_file() {
-        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB)).expect("format");
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
         let root = fs.root();
         fs.create(root, b"A.TXT", NodeKind::RegularFile).unwrap();
         fs.write_at(root, b"A.TXT", 0, b"AAAA").unwrap();
@@ -1146,7 +1150,7 @@ mod format {
 
     #[test]
     fn rename_refuses_kind_mismatch_and_nonempty_dir_target() {
-        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB)).expect("format");
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
         let root = fs.root();
         fs.create(root, b"F.TXT", NodeKind::RegularFile).unwrap();
         fs.create(root, b"D", NodeKind::Directory).unwrap();
@@ -1166,7 +1170,7 @@ mod format {
     #[test]
     fn rename_moves_a_directory_across_parents() {
         let dev = {
-            let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB)).expect("format");
+            let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
             let root = fs.root();
             let p1 = fs.create(root, b"P1", NodeKind::Directory).unwrap();
             let p2 = fs.create(root, b"P2", NodeKind::Directory).unwrap();
@@ -1190,7 +1194,7 @@ mod format {
 
     #[test]
     fn rename_refuses_moving_directory_into_its_subtree() {
-        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB)).expect("format");
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
         let root = fs.root();
         let a = fs.create(root, b"A", NodeKind::Directory).unwrap();
         let b = fs.create(a, b"B", NodeKind::Directory).unwrap();
@@ -1200,7 +1204,7 @@ mod format {
 
     #[test]
     fn rename_rejects_bad_destination_name() {
-        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB)).expect("format");
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
         let root = fs.root();
         fs.create(root, b"A.TXT", NodeKind::RegularFile).unwrap();
         assert_eq!(
@@ -1218,8 +1222,29 @@ mod format {
         // 8 MiB is far below the FAT32 minimum cluster count.
         let too_small = (8 << 20) / 512;
         assert_eq!(
-            Fat32::format(VecBlock::new(too_small)).map(|_| ()),
+            Fat32::format(VecBlock::new(too_small), TEST_SERIAL).map(|_| ()),
             Err(DriverError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn format_refuses_a_zero_serial() {
+        // The all-zero serial is the "none recorded" value: laying it
+        // down would give every fresh volume one shared identity.
+        assert_eq!(
+            Fat32::format(VecBlock::new(SECTORS_64MIB), 0).map(|_| ()),
+            Err(DriverError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn distinct_serials_yield_distinct_identities() {
+        let a = Fat32::format(VecBlock::new(SECTORS_64MIB), 0x0000_0001).expect("format a");
+        let b = Fat32::format(VecBlock::new(SECTORS_64MIB), 0x0000_0002).expect("format b");
+        assert_ne!(
+            a.volume_identity(),
+            b.volume_identity(),
+            "the caller-minted serial distinguishes otherwise identical volumes"
         );
     }
 }

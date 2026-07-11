@@ -4385,7 +4385,7 @@ per-increment guarantees.
 
 ## DEVICES — device inventory commands + USB mass storage (`plans/DEVICES.md`)
 
-**Status: in progress (DEVICE1 V1–V3 done; DEVICE2 D1–D2 done; D3–D4 remain).**
+**Status: in progress (DEVICE1 V1–V3 done; DEVICE2 D1–D3 and D4a done; D4b–D4c remain).**
 DEVICE1 adds the `lspci` and `lsusb` system command apps: they render the
 discovered PCI/USB nodes from the existing `CAP_SYSINFO_HW`-gated
 hardware-tree query, naming devices through the `lib/devids` lookup crate
@@ -4484,9 +4484,23 @@ an ownerless FAT32 attach mounts under (system-owned, group `0o775`/`0o664`,
 `set_security` refused; owner-model volumes untouched, no gid → fail-closed
 restrictive default), and `Storage:` catalog enumeration (`MountTable::
 direct_children` merged into `fs_readdir`, deduplicated, structural
-entries). D4 remains: the surprise-removal state machine (retained
-uncommitted writes, syslog events, force-unmount, and verified re-insert
-replay). See `plans/DEVICES.md` for the binding design and staging.
+entries). D4a (done) landed the surprise-removal state machine: the
+`kernel/core::fs::retained` uncommitted-write journal (`RetainedWrites` +
+`JournaledBlock` with watermark device flushes over the new `FlushBlock`
+seam, budget/pressure-bounded, wiped on release), the
+`callreg::teardown_owned_by` endpoint-vanish observer seam (wake first,
+then notify), and the volume-service transitions — clean unplug retracts
+(event 4176); dirty enters unavailable-dirty with the set retained (4177);
+abandoned retention enters unavailable-lost (4178); an unavailable
+volume's registry slot is re-pointed at a fail-closed stand-in so even
+cached reads report `DeviceFault`, and a plain detach of it is refused —
+plus two defects fixed en route with regression tests (`VfsError::Io` now
+maps to `Errno::DeviceFault`, and `Fat32::format` takes a caller-minted
+non-zero BPB serial so two fresh FAT32 volumes no longer share one
+identity). D4b–D4c remain: force-unmount (`unmount --force`, the detach
+force flag, the sysinfo availability mark) and verified re-insert
+(mutation evidence + retained-write replay). See `plans/DEVICES.md` for
+the binding design and staging.
 
 ---
 

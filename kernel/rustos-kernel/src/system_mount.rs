@@ -334,8 +334,11 @@ pub fn install_system_mount<B: Block + 'static>(
 ) {
     // Wire the runtime volume attach/detach service with the same audit
     // sink and pressure gauge the boot mounts use; until the mount table
-    // below is published its operations still fail closed.
+    // below is published its operations still fail closed. The service
+    // also observes endpoint teardown, so a surprise-removed disk's
+    // volume transitions the moment its serving driver dies.
     crate::volume_service::VOLUME_SERVICE.install(audit, pressure);
+    rustos_kernel_core::callreg::install_vanish_observer(&crate::volume_service::VOLUME_SERVICE);
     // Locate the `/System` extent on a first window, then drop it so the
     // second, owned window is the one promoted into the `'static` mount.
     let extent = {

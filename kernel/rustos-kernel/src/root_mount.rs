@@ -1668,7 +1668,8 @@ mod tests {
     /// performs. Returns the mounted-and-flushed device,
     /// ready to hand straight to [`read_root_unlock_descriptor`].
     fn author_boot_partition(payload: &[u8]) -> FatVecBlock {
-        let mut fs = Fat32::format(FatVecBlock::new(FAT_BOOT_SECTORS)).expect("FAT32 formats");
+        let mut fs =
+            Fat32::format(FatVecBlock::new(FAT_BOOT_SECTORS), 0x0B00_7001).expect("FAT32 formats");
         let root = fs.root();
         fs.create(root, ROOT_UNLOCK_NAME.as_bytes(), NodeKind::RegularFile)
             .expect("the descriptor file is created");
@@ -1682,7 +1683,8 @@ mod tests {
 
     /// An empty FAT boot partition carrying no `root.unlock` file.
     fn empty_boot_partition() -> FatVecBlock {
-        let mut fs = Fat32::format(FatVecBlock::new(FAT_BOOT_SECTORS)).expect("FAT32 formats");
+        let mut fs =
+            Fat32::format(FatVecBlock::new(FAT_BOOT_SECTORS), 0x0B00_7002).expect("FAT32 formats");
         fs.flush().expect("the partition flushes");
         fs.into_block()
     }

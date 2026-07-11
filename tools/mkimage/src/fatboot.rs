@@ -71,6 +71,12 @@ pub fn config_txt(with_armstub: bool, console_baud: u32) -> String {
     text
 }
 
+/// The boot partition's fixed BPB volume serial. Fixed (not minted per
+/// image) so builds stay bit-reproducible; the boot partition is read by
+/// the firmware and the kernel's unlock path only and is never published
+/// into the volume forest, so the serial carries no identity duty.
+const BOOT_FAT_SERIAL: u32 = 0x5253_4F53; // "RSOS"
+
 /// Author the FAT32 boot partition: format `sectors` sectors and plant the
 /// firmware blobs, `config.txt`, `kernel8.img`, and the root volume's
 /// `unlock_descriptor` (the encoded
@@ -88,7 +94,7 @@ pub fn build_boot_partition(
     console_baud: u32,
 ) -> Result<Vec<u8>, MkimageError> {
     let dev = MemBlock::new(sectors).map_err(MkimageError::BootPartition)?;
-    let mut fs = Fat32::format(dev).map_err(MkimageError::BootPartition)?;
+    let mut fs = Fat32::format(dev, BOOT_FAT_SERIAL).map_err(MkimageError::BootPartition)?;
 
     let with_armstub = firmware.iter().any(|f| f.name == "armstub8.bin");
     let config = config_txt(with_armstub, console_baud);

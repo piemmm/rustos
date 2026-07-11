@@ -650,47 +650,116 @@ volume-policy service.
 
 ### 2.5 D4 — surprise removal, force-unmount, verified re-insert
 
-- **Clean state first.** The filesystem layer tracks per-volume dirty
-  state; `SYNCHRONIZE CACHE` is issued on quiesce. A volume with no
-  uncommitted data at unplug simply unpublishes: alias marked
-  unavailable, root retracted, one syslog event — no drama (drives.md
-  §10.3).
-- **Dirty surprise removal.** When the HCD retracts the interface node
-  while uncommitted writes exist:
-  1. the block layer fails in-flight I/O with a typed error (never a
-     hang or unbounded retry, §26.5);
-  2. the volume enters **`unavailable-dirty`**: the root and alias stay
-     visible but fail closed for new I/O; the uncommitted write-back set
-     is retained in RAM under a bounded, memory-pressure-aware budget
-     (§26.3) — if the budget cannot be honoured the state degrades to
-     `unavailable-lost` and says so;
-  3. a syslog/audit event with a stable id records volume identity, the
-     amount of unwritten data, and the retention outcome (§19.4), and a
-     user-facing notification is emitted through the session's
-     notification surface so the human learns immediately (§2.24).
-- **Force unmount.** `unmount --force <name>` (extending the existing
-  mount tooling, coreutils-adjacent spelling per §16.7) discards the
-  retained set, unpublishes the root, and logs the deliberate data loss
-  with its own event id. Capability-gated to the volume's mount
-  authority; fails closed otherwise.
-- **Verified re-insert.** On re-attach, `volmgr` matches the new volume
-  against each `unavailable-dirty` record by durable identity (volume
-  UUID/id) **and proves non-mutation before replaying**: the filesystem
-  driver compares its mutation evidence — RustFS generation/root
-  checksum; ext4 superblock write-time/mount-count/checksums; FAT32
-  FSInfo + a bounded re-read comparison of the exact regions the retained
-  writes depend on (declared per driver through the filesystem capability
-  API, honestly weaker for weaker formats). Provably unmutated → the
-  retained writes replay, the volume returns to service, and the recovery
-  is logged. Any doubt → fail closed: the volume mounts fresh and
+Staged as three sub-increments, each green alone on the whole-project
+gate (§7): the retention journal and the surprise-removal state machine
+first, then the force-unmount exit, then the verified re-insert replay.
+
+#### 2.5.1 D4a — retained writes + the surprise-removal state machine. **Done.**
+
+- **The retention journal.** Every filesystem driver in the tree is
+  write-through (`flush()` is a no-op), so the only bytes an unplug can
+  lose are those the device accepted since its last committed flush.
+  `kernel/core::fs::retained` holds exactly that set: `RetainedWrites`
+  (per-LBA coalesced copies of written device blocks, bounded by the
+  documented heap fraction — `CacheBudget::from_backing` — and gated per
+  growth by `MemoryPressure::growth_permitted`; every buffer wiped on
+  release) and `JournaledBlock`, the `Block` wrapper the attach path
+  threads between the kernel blkio client and the partition window. It
+  records successful writes, marks the journal **lost** on a failed
+  write (the medium's state is unknown — the set may no longer be the
+  complete delta), drops discarded ranges, and past a commit watermark
+  (hard/16) issues the device flush (SCSI `SYNCHRONIZE CACHE`, via the
+  new `FlushBlock` seam `BlkClient` implements) and empties the journal
+  on success — the quiesce-time flush, and what keeps a long copy
+  committing steadily instead of ballooning to the budget. A committed
+  flush also resets a lost journal: nothing is uncommitted after it.
+- **The unplug trigger** is endpoint teardown:
+  `callreg::teardown_owned_by` (the one definition both the exit syscall
+  and the driver-store teardown call) destroys the dead task's
+  endpoints, wakes the cancelled callers, then notifies the set-once
+  `EndpointVanishObserver` — the volume service, installed at boot next
+  to `VOLUME_SERVICE.install`. Ordering is load-bearing: the observer
+  runs strictly **after** `call_wake`, so a caller parked mid-call on
+  the dead endpoint can finish and release any lock the observer needs.
+- **The transitions** (`RuntimeVolumeService::handle_vanished`,
+  idempotent and non-parking — the attached-volume registry moved behind
+  a `SpinLock`, with a separate `SleepLock` serialising whole
+  attach/detach operations): clean journal → the volume simply retracts
+  (unmount, unregister, unpublish; event 4176 — no drama, drives.md
+  §10); dirty → **`unavailable-dirty`** (event 4177 with the retained
+  byte count); retention abandoned → **`unavailable-lost`** (event
+  4178, "uncommitted data existed and was not retained"). An unavailable
+  volume's registry slot is re-pointed at the fail-closed
+  `UnavailableFs` stand-in, so **every** operation — including reads
+  `CachedFs` could otherwise have served from plaintext cache — reports
+  `DeviceFault`, while the mount, alias, and `id::` root stay visible.
+  A plain `volume_detach` of an unavailable volume is refused
+  (`volume_unavailable_{dirty,lost}`): discarding the retained set is
+  D4b's audited force-unmount, never an implicit side effect. drives.md
+  §23 carries the new `fs.hotplug.surprise_removal.{clean,dirty,lost}`
+  events.
+- **Defects fixed en route (§2.18), each with a regression test:**
+  `VfsError::Io` mapped to `Errno::NotImplemented`, misreporting a dead
+  device as "interface intentionally inert" — now `Errno::DeviceFault`;
+  and `Fat32::format` wrote a **zero BPB volume serial**, so any two
+  RustOS-formatted FAT32 volumes shared one content-derived identity and
+  the second could never attach while the first was mounted — `format`
+  now takes a caller-minted serial and refuses zero (the ext4
+  nil-`s_uuid` precedent; `tools/mkimage`'s boot partition uses a fixed,
+  documented serial so images stay bit-reproducible — that FAT is never
+  published in the volume forest).
+- Host-proven: the `retained` unit suite (coalescing, watermark commit,
+  refused flush keeps the set, budget/pressure exhaustion → lost, failed
+  write → lost, commit resets lost, discard drops its range) and two new
+  lifecycle scenarios over served volumes — a dirty unplug (root stays
+  published, reads fail `DeviceFault` cache included, plain detach
+  refused) and a clean unplug (root retracted, mount gone, nothing left
+  to detach). Live path: Pi 4 metal acceptance (QEMU models no Pi USB —
+  the D2/D3 precedent).
+- **Deliberate staging.** The user-facing session notification (§2.24)
+  is not emitted yet: no system notification service exists to carry it
+  (the taskbar's notification area is an in-process GUI model, not an
+  IPC surface), so the syslog/audit record is the D4a channel and the
+  notification emit lands with the session-notification surface when one
+  exists. sysinfo `MOUNT_LIST` does not yet mark availability; it joins
+  D4b, whose force-unmount tooling needs the observable state.
+
+#### 2.5.2 D4b — force-unmount
+
+- `unmount --force <name>` (extending the existing mount tooling,
+  coreutils-adjacent spelling per §16.7) discards the retained set,
+  unpublishes the root, and logs the deliberate data loss with its own
+  event id (4179 is reserved next to the D4a events). Capability-gated
+  to the volume's mount authority (`CAP_FS_MOUNT`); fails closed
+  otherwise.
+- The ABI evolves in place (§2.13 — `abi-v1` is unfrozen):
+  `VolumeDetachRequest` gains the force flag, and the kernel detach path
+  distinguishes the audited force-discard of an unavailable volume from
+  the flush-first clean detach.
+- sysinfo `MOUNT_LIST` gains the availability mark so the mount tooling
+  can show `unavailable-dirty`/`unavailable-lost` rather than a volume
+  that looks healthy.
+
+#### 2.5.3 D4c — verified re-insert
+
+- On re-attach, `volmgr` matches the new volume against each
+  `unavailable-dirty` record by durable identity (volume UUID/id) **and
+  proves non-mutation before replaying**: the filesystem driver compares
+  its mutation evidence — RustFS generation/root checksum; ext4
+  superblock write-time/mount-count/checksums; FAT32 FSInfo + a bounded
+  re-read comparison of the exact regions the retained writes depend on
+  (declared per driver through the filesystem capability API, honestly
+  weaker for weaker formats). Provably unmutated → the retained writes
+  replay, the volume returns to service, and the recovery is logged. Any
+  doubt → fail closed: the volume mounts fresh and
   read-only-until-acknowledged, the retained set is kept (budget
   permitting) for explicit salvage or `--force` discard, and the
   conflict is logged. Never silently merge (§5.4, §26.5).
 - Tests: host simulations of unplug-with-dirty-data (retain → replay on
-  identical image; retain → refuse on mutated image; budget exhaustion →
-  `unavailable-lost`; force-unmount discard), each with its syslog
-  assertion; a QEMU vertical driving detach/re-attach of a `usb-storage`
-  image where the emulated path exists.
+  identical image; retain → refuse on mutated image; force-unmount
+  discard), each with its syslog assertion; a QEMU vertical driving
+  detach/re-attach of a `usb-storage` image where the emulated path
+  exists.
 
 ### 2.6 DEVICE2 increment order
 
@@ -704,8 +773,11 @@ volume-policy service.
   + deterministic naming. **Done** (§2.4.3).
 - **D3d** mount-policy permissions (`storage` group identity map) + the
   `Storage:` catalog enumeration. **Done** (§2.4.4).
-- **D4** surprise-removal state machine, force-unmount, verified
-  re-insert.
+- **D4a** retained uncommitted writes + the surprise-removal state
+  machine. **Done** (§2.5.1).
+- **D4b** force-unmount (`unmount --force`, the detach force flag, the
+  sysinfo availability mark).
+- **D4c** verified re-insert (mutation evidence + retained-write replay).
 
 D3 is deliberately after D2 so automount is proven against a real
 hot-pluggable block source, but its volume-forest core is bus-neutral
