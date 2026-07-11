@@ -2233,6 +2233,65 @@ const TESTS: &[QemuTest] = &[
         pointer_move: None,
         serial: &[],
     },
+    // The SP11c demand-grown user-stack vertical
+    // (`docs/src/architecture/memory.md` §7c): the end-to-end proof that a
+    // spawned process's stack grows on fault inside its reserved span,
+    // bounded by the settable `StackBytes` limit, with the below-span guard
+    // page staying fatal. The chassis installs the production
+    // `KernelDispatchHook` through a `DispatchCallbackSlot` (production
+    // `LiveMemMap` producer backing both `mem_map` and the stack-growth
+    // fault path, a real `KernelProcessWait`, a `ProgramRegistry` carrying
+    // the three child roles with parameters derived from the one shared
+    // `spawn_layout` policy) and binds the production user-fault resolver
+    // to the same slot. The four-role fixture program's parent is spawned
+    // through the production `InitSpawnCtx::spawn_driver_process` seam and
+    // drives the children through production `spawn` + `wait`: `grow`
+    // recurses far past the eagerly committed stack top, verifying every
+    // frame's bytes survive the fault-driven growth (exit 0); `limit`
+    // lowers its own `StackBytes` soft bound via `rlimit_set` and recurses
+    // past it — fault-killed, exit 139; `guard` reads the unmapped guard
+    // page below the reserved span — fault-killed, exit 139. PASS once the
+    // chassis reaps a parent exit of 0; every failure site carries a
+    // distinct finisher (the parent's diagnostic exit code is folded in).
+    // Single CPU and a 60-second budget match the other
+    // boot-then-do-fixed-work aarch64 tests.
+    QemuTest {
+        package: "rustos-test-stack-grow-qemu-aarch64",
+        binary: "rustos-test-stack-grow-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        typed_keys: &[],
+        screendump: None,
+        pointer_move: None,
+        serial: &[],
+    },
+    // The riscv64 twin of the stack-grow vertical above: the same
+    // four-role fixture program and production `KernelDispatchHook`
+    // chassis, driven on the riscv64 `virt` board through the S-mode trap
+    // path (load *and* store/AMO U-mode page faults offered to the
+    // production resolver) and the riscv64 production spawn producer.
+    QemuTest {
+        package: "rustos-test-stack-grow-qemu-riscv64",
+        binary: "rustos-test-stack-grow-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        typed_keys: &[],
+        screendump: None,
+        pointer_move: None,
+        serial: &[],
+    },
     // The S8b parser-sandbox vertical (`docs/src/security/sandbox.md`;
     // `.junie/fstree-next-plan.md` S8b): prove the `lib/sandbox` seam end
     // to end over the S8a kernel sandbox spawn mode on the aarch64 `virt`

@@ -209,7 +209,7 @@ pub use procwait::{
     NULL_PROCESS_WAIT,
 };
 pub use random::{reserve_errno, BootReserve, NullEntropy, RandomReserve};
-pub use rlimit::{authorize_set, LimitSet};
+pub use rlimit::{authorize_set, LimitSet, DEFAULT_STACK_LIMIT_BYTES};
 pub use seat::{
     seat_errno, PresentGate, SeatRegistry, KEYBOARD_CHANNEL_CAPACITY, NULL_SEAT_REGISTRY,
 };

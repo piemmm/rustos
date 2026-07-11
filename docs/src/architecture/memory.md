@@ -584,28 +584,39 @@ mapped top with an unmapped guard page between each region
 (`rustos_kernel_mem::derive_user_layout`, bound to the shared policy in
 `spawn_layout::user_layout` — the placement scales with the image instead
 of capping it at a fixed slot; `plans/SPAWN.md` SP2/SP3). The stack is a
-*reserved span* whose top `USER_STACK_COMMIT_PAGES` are eagerly mapped:
-the uncommitted remainder below the committed bottom is growth room the
-demand-grown stack path (`plans/SPAWN.md` SP11) backs on fault, bounded by
-the settable `StackBytes` resource limit, and the guard page below the
+*reserved span* (`USER_STACK_RESERVE_PAGES`, 8 MiB — derived from the one
+default stack policy value, `rustos_kernel_core::DEFAULT_STACK_LIMIT_BYTES`,
+which `LimitSet::DEFAULT` also carries as the `StackBytes` bound, so the
+settable default and the structural span can never silently diverge)
+whose top `USER_STACK_COMMIT_PAGES` (128 KiB) are eagerly mapped: a
+process pays only the stack it actually touches, and the uncommitted
+remainder below the committed bottom is growth room the demand-grown
+stack path (`plans/SPAWN.md` SP11) backs on fault, bounded by the
+settable `StackBytes` resource limit, while the guard page below the
 span stays unmapped so a true overrun still faults deterministically.
-The growth mechanism is landed: every admission path
+Every admission path
 (`SpawnCtx::admit_process` / `InitSpawnCtx::admit_init`) records the
 producer-derived span (`spawn_layout::stack_span`, one derivation across
 the ports) in the address-space registry beside the task's limits, and a
 user fault inside the span below the committed base — read or write, and
-offered *before* the write-fatal file rule (§7o) — backs the single
-faulting page with a fresh zeroed `RW` page through the installed
-`mem_map` producer, lowers the recorded committed base (the live usage
-`sysinfo limits` reports for `stack-bytes`), and re-freezes the registry
-snapshot. Growth stops fail-closed at the effective `StackBytes` soft
+offered *before* the write-fatal file rule (§7o) — backs **every page
+from the committed base down to the faulting page** with fresh zeroed
+`RW` pages through the installed `mem_map` producer, lowers the recorded
+committed base per page (the live usage `sysinfo limits` reports for
+`stack-bytes`), and re-freezes the registry snapshot once. Growth is
+contiguous by construction: a large frame whose first touch lands several
+pages below the committed base (the compiler owes no page-by-page probe
+order) can never strand an unmapped hole above the low-water mark, so
+"every span page at/above the committed base is resident" is an
+invariant. Growth stops fail-closed at the effective `StackBytes` soft
 bound (checked before any page is mapped), a fault below the span or on
 frame exhaustion stays fatal, and the audited kill names the class
-(`stack_limit` / `stack`). The shared policy still keeps
-`USER_STACK_RESERVE_PAGES == USER_STACK_COMMIT_PAGES` (288 pages,
-1.125 MiB), so no growth room exists in production yet; SP11c widens the
-reserve and shrinks the eager commit now that faults can grow the stack
-(wasm32's linear-memory model is an honest n/a). The
+(`stack_limit` / `stack`). The `-M virt` verticals
+(`tests/integration/stack_grow_qemu_aarch64` / `…_riscv64`, over the
+`stack_grow_program` fixture) prove growth, the `ulimit`-lowered bound
+kill, and the below-span guard kill end to end; the x86_64 board twin is
+staged (`plans/SPAWN.md` SP11e) on the x86_64 composable-bring-up
+prerequisite, and wasm32's linear-memory model is an honest n/a. The
 `mem_map` (`abi-v1` no. 14) / `mem_unmap` (no. 15) syscalls are the one
 mechanism by which a process obtains and releases *additional* memory at
 runtime — the foundation the `lib/rt` userland heap allocator (§7d) layers its

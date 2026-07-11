@@ -3846,24 +3846,23 @@ and fail-closed (§24.4) — this work must not loosen them.
   (§19.6). **No syscall/hash change.** Docs:
   `docs/src/architecture/resource-limits.md`, `docs/src/abi/sysinfo.md`,
   `docs/src/userland/{sysinfod,utilities}.md` + the two READMEs.
-- L5 — **in progress** (staged as `plans/SPAWN.md` **SP11**; notes in
-  `.junie/fix-fixed-stack-size.md`). The **user stack** is the remaining
-  §24.1 capacity: an eagerly committed, hand-picked 288-page constant with
-  `LimitKind::StackBytes` enforced nowhere. Target: a demand-grown stack
-  inside a reserved virtual span (guard page below the span preserved),
-  grown page-by-page through the existing user-fault-resolver +
-  `MemMap`-producer seams, bounded fail-closed by the settable `StackBytes`
-  soft limit. **SP11a (landed):** `derive_user_layout` takes a
-  reserve/commit pair and `UserLayout` carries `stack_reserve_base`;
-  `spawn_layout` splits the policy into `USER_STACK_RESERVE_PAGES` /
-  `USER_STACK_COMMIT_PAGES` (equal, 288, until the growth path lands, so
-  behaviour is unchanged). **SP11b (landed):** the kernel/core growth
-  path — the `StackSpan` registry record threaded through every admission
-  seam, `resolve_stack_fault` offered before the write-fatal file rule,
-  `StackBytes` enforced fail-closed at the growth path, committed-bytes
-  usage in the `TaskLimits` report, and the `stack_limit`/`stack` audited
-  fault classes — all host-proven. Remaining: SP11c (policy flip + QEMU
-  verticals), SP11d (docs finish).
+- L5 — **done on the MMU ports** (staged as `plans/SPAWN.md` **SP11**;
+  notes in `.junie/fix-fixed-stack-size.md`). The user stack is a
+  **demand-grown** stack inside an 8 MiB reserved virtual span (guard page
+  below the span preserved) with a 128 KiB eager commit: growth is
+  fault-driven and **contiguous** (every page from the committed base down
+  to the faulting page, so no unmapped hole can strand above the low-water
+  mark) through the existing user-fault-resolver + `MemMap`-producer
+  seams, bounded fail-closed by the settable `StackBytes` soft limit whose
+  default (`rustos_kernel_core::DEFAULT_STACK_LIMIT_BYTES` in
+  `LimitSet::DEFAULT`) is the one policy value the span is derived from.
+  Proven end to end by the aarch64 + riscv64 `-M virt` verticals
+  (`stack_grow_program` + `stack_grow_qemu_*`: transparent byte-verified
+  growth, `rlimit_set`-lowered bound fault-kill, below-span guard kill)
+  and the kernel/core host tests. Remaining: **SP11e** — the x86_64 board
+  twin, blocked on factoring the x86_64 bring-up into composable pieces a
+  test chassis can use (the set-once resolver slot is consumed by the
+  production `boot()`); wasm32 linear memory is the honest n/a.
 
 **Tests**
 - Default policy yields a workable capacity on both a tiny and a large

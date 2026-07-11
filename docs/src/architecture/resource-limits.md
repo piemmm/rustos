@@ -79,9 +79,13 @@ The kernel holds each task's effective limits as a `LimitSet` (one
 alongside the standard-stream descriptor table — both share the per-process
 lifecycle (established at spawn, withdrawn at exit) and the same `TaskId` key,
 so there is no parallel registry (`AGENTS.md` §2.2). A task with no imposed
-limit reads `LimitSet::DEFAULT`: every resource `RLIMIT_INFINITY` for now, the
-single place a discovered-hardware default policy slots in later (L3) without a
-second code path.
+limit reads `LimitSet::DEFAULT`: every resource `RLIMIT_INFINITY` except the
+stack, whose default bound (`DEFAULT_STACK_LIMIT_BYTES`, 8 MiB, soft and
+hard) is the one policy value the spawn layout also derives its reserved
+stack span from — the settable default and the structural span can never
+silently diverge, and by default a stack may grow to the whole span.
+`LimitSet::DEFAULT` stays the single place a discovered-hardware default
+policy slots in later (L3) without a second code path.
 
 - **`rlimit_get`** validates `kind` against the closed `LimitKind` set, reads
   the caller's *own* effective limit, and copies it out through the validated
@@ -116,15 +120,16 @@ resource**, before the resource is committed, and fails closed (`AGENTS.md`
   than silently ignored.
 - **`StackBytes` on the demand-grown stack fault path.** Each admitted
   process's reserved stack span (recorded at admission, see
-  [the memory page](./memory.md) §7c) grows one page per fault through the
-  stack-growth resolver, and the resolver checks the committed extent the
-  faulting page would reach against the task's soft `StackBytes` bound
+  [the memory page](./memory.md) §7c) grows on fault through the
+  stack-growth resolver — contiguously, every page from the committed base
+  down to the faulting page — and the resolver checks the committed extent
+  the faulting page would reach against the task's soft `StackBytes` bound
   *before* any page is mapped: a fault past the bound is refused, the task
   is fault-killed with the audited `stack_limit` class, and nothing is
   mapped (fail closed). The committed-bytes low-water mark is the live
   usage the `sysinfo limits` query reports for `stack-bytes`. A task at
-  the default `RLIMIT_INFINITY` grows to the structural span bound; a
-  lowered `ulimit` stack bound stops growth exactly where it says.
+  the default bound (the span itself) grows to the structural span bound;
+  a lowered `ulimit` stack bound stops growth exactly where it says.
 
 The remaining `LimitKind`s (`OpenStreams`, `Processes`) carry their
 soft/hard bounds and inherit correctly, but their *consuming-path*

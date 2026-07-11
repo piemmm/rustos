@@ -1175,11 +1175,17 @@ enforced nowhere yet). Session-to-session working notes:
   `spawn_layout::stack_span`. `resolve_stack_fault` sits beside
   `resolve_file_fault` and is offered first in
   `KernelDispatchHook::resolve_user_fault` — for reads *and* writes, so
-  the write-fatal file rule can never kill a growth fault — backing one
-  zeroed `RW` page per fault through the installed `MemMap` producer
-  (`MapFlags::FIXED`, `Errno::BadAddress` folded as the benign resident
-  race), lowering the committed base, and re-freezing the snapshot; the
-  `copy_in_user` retry offers stack growth too. `StackBytes` soft bound
+  the write-fatal file rule can never kill a growth fault — backing
+  **every page from the committed base down to the faulting page** with
+  zeroed `RW` pages through the installed `MemMap` producer
+  (`MapFlags::FIXED`, `Errno::BadAddress` folded per page as the benign
+  resident race), lowering the committed base per page (truthful even on
+  a mid-walk frame exhaustion), and re-freezing the snapshot once.
+  Contiguous growth is the invariant that makes a large frame's
+  first-touch-anywhere order safe: no unmapped hole can ever strand above
+  the low-water mark (the single-faulting-page walk it replaced wrongly
+  killed a later touch inside the skipped pages; host-regression-tested).
+  The `copy_in_user` retry offers stack growth too. `StackBytes` soft bound
   enforced before any page maps; committed bytes are the live usage the
   `TaskLimits` introspect report carries (`AddressSpaceBytes` usage now
   reports `mapped_aspace_bytes` there too — a noticed drift fixed in the
@@ -1188,24 +1194,60 @@ enforced nowhere yet). Session-to-session working notes:
   lifecycle, growth, bounds, the limit gate, the race/OOM folds, and the
   fault classes; `resource-limits.md`'s "not yet wired" list is down to
   `OpenStreams` / `Processes`.
-- **SP11c — policy flip + `-M virt` verticals `[ ]`.** Widen
-  `USER_STACK_RESERVE_PAGES` (proposal 2048 pages / 8 MiB; verify the
-  largest `Run` image still fits below the device window) and shrink
-  `USER_STACK_COMMIT_PAGES` (proposal 32 pages / 128 KiB; must cover the
-  `rustos-rt` scratch carve — verify first). Default `StackBytes` policy
-  = the span. QEMU verticals on the three MMU ports: recursion past the
-  committed top grows transparently; a lowered `ulimit` stack bound kills
-  with the audited class; the below-span guard still faults fatally
-  (extend `stack_overrun_qemu_*`).
-- **SP11d — docs finish `[ ]`.** With SP11c, rewrite the `memory.md` §7c
-  stack prose as the landed design (drop the staging note) and add the
-  README support-matrix row if per-arch state varies (wasm32 n/a).
+- **SP11c — policy flip + `-M virt` verticals `[x]`.** **Landed.**
+  `USER_STACK_RESERVE_PAGES` is 2048 pages (8 MiB), derived from the one
+  default stack policy value — `rustos_kernel_core::DEFAULT_STACK_LIMIT_BYTES`
+  (`kernel/core/src/rlimit.rs`), which `LimitSet::DEFAULT` carries as the
+  `StackBytes` bound (soft and hard: the span is the structural bound, so
+  a wider grant is meaningless without `CAP_RLIMIT_RAISE` *and* a wider
+  span) — so the settable default and the structural span share one
+  definition. `USER_STACK_COMMIT_PAGES` is 32 (128 KiB): ample for
+  `rustos-rt` startup (the 1 MiB "scratch carve" is the C-compat `crt0`'s,
+  reached only under the production growth path, and the c-program
+  verticals map their own bespoke fully-eager stacks). QEMU verticals
+  landed on aarch64 + riscv64: `tests/integration/stack_grow_program`
+  (four argv-selected roles — parent / grow / limit / guard, numeric
+  parameters passed via chassis argv derived from the one `spawn_layout`
+  policy) driven by `stack_grow_qemu_aarch64` / `…_riscv64` through the
+  production `KernelDispatchHook` + user-fault resolver + `LiveMemMap` +
+  production spawn/wait: growth past the commit is transparent and
+  byte-verified, a `rlimit_set`-lowered `StackBytes` bound fault-kills
+  (exit 139), and the below-span guard page stays fatal (exit 139).
+  `spawn_layout` is now a public module so the verticals import the
+  policy instead of copying it.
+- **SP11d — docs finish `[x]`.** **Landed.** `memory.md` §7c describes
+  the landed design (reserve/commit values, contiguous growth invariant,
+  vertical coverage); `resource-limits.md` carries the finite default
+  `StackBytes` prose. No README matrix row: the demand-grown stack is
+  arch-neutral kernel behaviour on every MMU port (wasm32 linear memory
+  stays the honest n/a), not a per-arch feature split.
+- **SP11e — x86_64 `-M virt` vertical `[ ]`.** The x86_64 twin of the
+  SP11c verticals. Blocked on a genuine port-infrastructure prerequisite:
+  the x86_64 user-fault-resolver slot is **set-once** and the production
+  `boot()` pipeline consumes it (`x86_64/boot.rs` installs
+  `production_user_fault` during `try_boot`), and the production hook
+  attributes a fault to *its own* scheduler's current task — so a
+  post-boot chassis can neither install its own resolver nor have the
+  production one serve its tasks. The aarch64/riscv64 chassis avoid this
+  by bringing their boards up themselves from composable arch-crate
+  pieces; x86_64 bring-up lives only inside `try_boot` (bin-crate-private
+  set-once statics: syscall TLS arena, per-CPU/GDT/TSS/IDT ordering,
+  LAPIC calibration), which a vertical must not fork (§2.2). The
+  deliverable is therefore: factor the x86_64 bring-up into reusable
+  pieces a test chassis can compose (the same seam shape the other two
+  ports already have), then land the `stack_grow_qemu_x86_64` twin — the
+  same prerequisite that has kept the `file_map`/`mem_map` x86_64
+  resolver siblings staged. Until then the x86_64 growth path is covered
+  by the arch-neutral host tests and the production wiring (identical
+  resolver install on the x86_64 boot).
 
 **Done when (SP11):** a first-party EL0 program can recurse past the
 spawn-time committed stack and keep running, bounded by a `ulimit`-settable
 `StackBytes` limit that kills it (audited) when exceeded; no process pays
 more eager stack frames than the committed top; the guard page below the
 span still faults; host + QEMU matrices and the headless build stay green.
+**Met on aarch64/riscv64 end to end (SP11c) and by host tests + identical
+production wiring on x86_64; the x86_64 board twin is SP11e.**
 
 ---
 

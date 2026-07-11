@@ -1460,21 +1460,31 @@ where
     ///
     /// The growth half of the demand-grown user stack (`plans/SPAWN.md`
     /// SP11): a fault inside the task's recorded stack span, below its
-    /// committed base, backs the single faulting page with a fresh zeroed
-    /// `RW` page through the installed anonymous-memory producer — the
-    /// same producer `mem_map` uses, mapping into the faulting task's own
-    /// live address space. Offered for reads and writes alike (a stack
-    /// push is a write). Growth is bounded by the task's effective
-    /// `StackBytes` soft bound, checked *before* the page is mapped: the
-    /// committed extent the faulting page would reach (span top minus the
-    /// faulting page base, counting any holes above it conservatively as
-    /// committed) must fit inside the bound, so a lowered `ulimit` stack
-    /// bound stops growth exactly where it says (fail closed). Everything
-    /// else is refused: a fault outside the span or at/above the committed
-    /// base (the guard page below the span stays fatal), a past-limit
-    /// fault, and frame exhaustion all report `false`, and the arch port
-    /// terminates the task. A page that became resident since the fault (a
-    /// concurrent resolution) is a benign race and reports `true`.
+    /// committed base, backs **every page from the committed base down to
+    /// the faulting page** with fresh zeroed `RW` pages through the
+    /// installed anonymous-memory producer — the same producer `mem_map`
+    /// uses, mapping into the faulting task's own live address space.
+    /// Growth is contiguous by construction: a large frame that first
+    /// touches an address several pages below the committed base (the
+    /// compiler owes no page-by-page probe order) can never leave an
+    /// unmapped hole above the low-water mark, so the invariant "every
+    /// span page at/above the committed base is resident" always holds and
+    /// a fault at/above the base is genuinely anomalous. Offered for reads
+    /// and writes alike (a stack push is a write). Growth is bounded by
+    /// the task's effective `StackBytes` soft bound, checked *before* any
+    /// page is mapped: the committed extent the faulting page would reach
+    /// (span top minus the faulting page base — with contiguous growth,
+    /// exactly the bytes that will be resident) must fit inside the bound,
+    /// so a lowered `ulimit` stack bound stops growth exactly where it
+    /// says (fail closed). Everything else is refused: a fault outside the
+    /// span or at/above the committed base (the guard page below the span
+    /// stays fatal), a past-limit fault, and frame exhaustion all report
+    /// `false`, and the arch port terminates the task. A page that became
+    /// resident since the fault (a concurrent resolution) is a benign race
+    /// folded per page: the walk commits it and moves on. Frame exhaustion
+    /// part-way leaves the low-water mark naming exactly the pages that
+    /// are resident (never a claim on frames the task does not hold) and
+    /// reports the fault unresolvable.
     ///
     /// `task` is the kernel-trusted current task of the faulting CPU,
     /// never a caller-supplied value.
@@ -1496,21 +1506,34 @@ where
         if span.top() - page_va > soft {
             return false;
         }
-        match self.mem_map.map(PAGE_SIZE, MapFlags::FIXED, page_va) {
-            Ok(_) => {
-                self.aspaces.write().commit_stack_page(task, page_va);
-                // The fault grew the live space; re-freeze the registry
-                // snapshot so the copy path can see the new page.
-                self.refreeze_task_aspace(task);
-                true
+        // Walk downward from the page below the committed base to the
+        // faulting page, committing each page as it is backed so the
+        // low-water mark is truthful even if the walk stops early.
+        // Cannot underflow: `page_va < committed_base` inside the growth
+        // room, so every `next` in the walk is `>= page_va > 0`.
+        let mut next = span.committed_base() - PAGE_SIZE as u64;
+        loop {
+            match self.mem_map.map(PAGE_SIZE, MapFlags::FIXED, next) {
+                // Freshly backed, or already resident because another
+                // resolution won the race — either way the page is there.
+                Ok(_) | Err(Errno::BadAddress) => {
+                    self.aspaces.write().commit_stack_page(task, next);
+                }
+                // Frame exhaustion or an uninstalled producer: fatal to
+                // the task and only the task — deterministic OOM, never a
+                // panic. Pages already committed above stay resident and
+                // recorded.
+                Err(_) => return false,
             }
-            // Already resident: another resolution won the race; the
-            // retried access succeeds as-is.
-            Err(Errno::BadAddress) => true,
-            // Frame exhaustion or an uninstalled producer: fatal to the
-            // task and only the task — deterministic OOM, never a panic.
-            Err(_) => false,
+            if next == page_va {
+                break;
+            }
+            next -= PAGE_SIZE as u64;
         }
+        // The fault grew the live space; re-freeze the registry snapshot
+        // once for the whole walk so the copy path can see the new pages.
+        self.refreeze_task_aspace(task);
+        true
     }
 
     /// Reclaim every kernel-held resource of a task that has terminated —
@@ -11795,7 +11818,10 @@ mod tests {
         // default policy for every other kind.
         let child = aspaces.read().limits(SecTaskId(pid));
         assert_eq!(child.get(LimitKind::Processes), parent_cap);
-        assert_eq!(child.get(LimitKind::StackBytes), ResourceLimit::UNLIMITED);
+        assert_eq!(
+            child.get(LimitKind::StackBytes),
+            LimitSet::DEFAULT.get(LimitKind::StackBytes)
+        );
     }
 
     /// The spawn admit path records the new child against the spawning
@@ -15562,15 +15588,20 @@ mod tests {
     /// A `MemMap` producer double for the stack-growth resolver: records
     /// each map request and returns a configurable result, so the growth,
     /// race, and exhaustion folds are exercised without a page table.
+    /// `fail_from` makes every map from the given zero-based call index
+    /// onward fail with `OutOfMemory`, so a mid-walk frame exhaustion is
+    /// exercisable too.
     struct StackGrowMemMap {
         maps: rustos_sync::SpinLock<Vec<(usize, u32, u64)>>,
         map_result: rustos_sync::SpinLock<Result<(), Errno>>,
+        fail_from: rustos_sync::SpinLock<Option<usize>>,
     }
     impl StackGrowMemMap {
         fn new() -> Self {
             Self {
                 maps: rustos_sync::SpinLock::new(Vec::new()),
                 map_result: rustos_sync::SpinLock::new(Ok(())),
+                fail_from: rustos_sync::SpinLock::new(None),
             }
         }
     }
@@ -15581,7 +15612,16 @@ mod tests {
             flags: rustos_abi::MapFlags,
             addr_hint: u64,
         ) -> Result<u64, Errno> {
-            self.maps.lock().push((len, flags.bits(), addr_hint));
+            let index = {
+                let mut maps = self.maps.lock();
+                maps.push((len, flags.bits(), addr_hint));
+                maps.len() - 1
+            };
+            if let Some(from) = *self.fail_from.lock() {
+                if index >= from {
+                    return Err(Errno::OutOfMemory);
+                }
+            }
             self.map_result.lock().map(|()| addr_hint)
         }
         fn unmap(&self, _base: u64, _len: usize) -> Result<(), Errno> {
@@ -15653,6 +15693,57 @@ mod tests {
         );
     }
 
+    /// A fault that jumps several pages below the committed base (a large
+    /// frame whose first touch is its lowest local — the compiler owes no
+    /// page-by-page probe order) backs **every** page from the committed
+    /// base down to the faulting page, never leaving an unmapped hole
+    /// above the low-water mark. Regression: the resolver used to back
+    /// only the faulting page, so a later touch inside the skipped pages
+    /// was at/above the lowered base, refused as "anomalous", and wrongly
+    /// killed the task.
+    #[test]
+    fn resolve_stack_fault_backs_every_skipped_page_on_a_multi_page_jump() {
+        let (producer, aspaces, h, _sink) = stack_fault_fixture();
+        let page = PAGE_SIZE as u64;
+        // Three pages below the committed base in one jump.
+        let fault_page = STACK_COMMITTED_BASE - 3 * page;
+        assert!(h.resolve_stack_fault(SecTaskId(2), fault_page + 7));
+        // The walk backed the two skipped pages and the faulting page,
+        // top-down, so the mark stayed truthful at every step.
+        assert_eq!(
+            *producer.maps.lock(),
+            std::vec![
+                (
+                    PAGE_SIZE,
+                    rustos_abi::MapFlags::FIXED.bits(),
+                    fault_page + 2 * page
+                ),
+                (
+                    PAGE_SIZE,
+                    rustos_abi::MapFlags::FIXED.bits(),
+                    fault_page + page
+                ),
+                (PAGE_SIZE, rustos_abi::MapFlags::FIXED.bits(), fault_page),
+            ]
+        );
+        assert_eq!(
+            aspaces
+                .read()
+                .stack_span(SecTaskId(2))
+                .expect("recorded")
+                .committed_base(),
+            fault_page
+        );
+        // A touch inside a formerly-skipped page is already resident: it
+        // is at/above the committed base, exactly the invariant the
+        // contiguous walk exists to keep.
+        assert!(!aspaces
+            .read()
+            .stack_span(SecTaskId(2))
+            .expect("recorded")
+            .in_growth_room(fault_page + page));
+    }
+
     /// Growth is confined to the recorded span below the committed base:
     /// the guard page below the span, an address at/above the committed
     /// base, and a task with no recorded span are all refused without the
@@ -15698,9 +15789,11 @@ mod tests {
     }
 
     /// A page that became resident since the fault (a concurrent
-    /// resolution) is a benign race reported as resolved — without moving
-    /// the committed base — while frame exhaustion refuses the fault
-    /// (deterministic OOM, never a panic).
+    /// resolution) is a benign race folded as resolved — the page is
+    /// there, so the walk commits it (idempotent with the winning
+    /// resolver's own commit) and the contiguous-residency invariant
+    /// holds — while frame exhaustion refuses the fault (deterministic
+    /// OOM, never a panic).
     #[test]
     fn resolve_stack_fault_folds_the_resident_race_and_fails_closed_on_oom() {
         let (producer, aspaces, h, _sink) = stack_fault_fixture();
@@ -15713,11 +15806,37 @@ mod tests {
                 .stack_span(SecTaskId(2))
                 .expect("recorded")
                 .committed_base(),
-            STACK_COMMITTED_BASE,
-            "a race resolution commits nothing it did not map"
+            fault,
+            "a resident race page is committed — it is backed, whoever won"
         );
         *producer.map_result.lock() = Err(Errno::OutOfMemory);
-        assert!(!h.resolve_stack_fault(SecTaskId(2), fault));
+        assert!(!h.resolve_stack_fault(SecTaskId(2), STACK_COMMITTED_BASE - 2 * PAGE_SIZE as u64));
+    }
+
+    /// Frame exhaustion part-way through a multi-page walk fails the fault
+    /// closed while the low-water mark names exactly the pages that were
+    /// backed before the exhaustion — the record never claims frames the
+    /// task does not hold, and the pages already backed stay resident.
+    #[test]
+    fn resolve_stack_fault_mid_walk_exhaustion_keeps_the_mark_truthful() {
+        let (producer, aspaces, h, _sink) = stack_fault_fixture();
+        let page = PAGE_SIZE as u64;
+        // The second map call (zero-based index 1) and everything after
+        // it exhausts.
+        *producer.fail_from.lock() = Some(1);
+        let fault_page = STACK_COMMITTED_BASE - 3 * page;
+        assert!(!h.resolve_stack_fault(SecTaskId(2), fault_page));
+        // Exactly one page was backed (the one just below the old base);
+        // the mark lowered to it and no further.
+        assert_eq!(producer.maps.lock().len(), 2, "one success, one refusal");
+        assert_eq!(
+            aspaces
+                .read()
+                .stack_span(SecTaskId(2))
+                .expect("recorded")
+                .committed_base(),
+            STACK_COMMITTED_BASE - page
+        );
     }
 
     /// A fault-kill inside the stack span names the stack classes: a

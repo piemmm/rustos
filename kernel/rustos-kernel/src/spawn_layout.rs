@@ -275,22 +275,31 @@ pub fn init_caps() -> CapabilitySet {
     caps
 }
 
-/// Reserved user stack span in pages (1.125 MiB today). The span is the
-/// structural bound the stack may ever occupy: its bottom guard page is
-/// what a runaway stack faults on, and the demand-grown stack path
+/// Reserved user stack span in pages (8 MiB — 2048 pages). The span is
+/// the structural bound the stack may ever occupy: its bottom guard page
+/// is what a runaway stack faults on, and the demand-grown stack path
 /// (`plans/SPAWN.md` SP11) backs pages inside it on fault, bounded by the
-/// task's settable stack resource limit. Until that growth path lands the
-/// reserve equals the committed top below, so every page is eagerly
-/// mapped exactly as before; SP11c widens the reserve and shrinks the
-/// commit once faults can grow the stack.
-pub const USER_STACK_RESERVE_PAGES: u64 = 288;
+/// task's settable stack resource limit. Derived from the one default
+/// stack policy value ([`rustos_kernel_core::DEFAULT_STACK_LIMIT_BYTES`],
+/// which `LimitSet::DEFAULT` carries as the `StackBytes` bound), so the
+/// settable default and the structural span can never silently diverge.
+pub const USER_STACK_RESERVE_PAGES: u64 =
+    rustos_kernel_core::DEFAULT_STACK_LIMIT_BYTES / rustos_kernel_mem::PAGE_SIZE as u64;
 
-/// Eagerly committed user stack pages at the top of the reserved span:
-/// generous headroom over the `rustos-rt` runtime's scratch span plus
-/// call frames (the runtime carves scratch space off the stack, so the
-/// committed top must comfortably exceed it until the fault-driven growth
-/// path lands).
-pub const USER_STACK_COMMIT_PAGES: u64 = 288;
+// The default stack policy must be a whole number of pages, or the span
+// derivation above would silently round it down.
+const _: () = assert!(
+    rustos_kernel_core::DEFAULT_STACK_LIMIT_BYTES % rustos_kernel_mem::PAGE_SIZE as u64 == 0
+);
+
+/// Eagerly committed user stack pages at the top of the reserved span
+/// (128 KiB — 32 pages): enough that a program's startup (`rustos-rt`
+/// `_start` → startup-vector validation → `main`'s first frames) never
+/// takes a growth fault, while the uncommitted remainder of the span is
+/// backed on demand by the fault-driven growth path — so a process pays
+/// only the stack it actually touches (RAM sized to the working set, not
+/// to the span).
+pub const USER_STACK_COMMIT_PAGES: u64 = 32;
 
 // The committed top must fit inside the reserved span; a policy that
 // violates this would refuse every spawn (the derivation fails closed),
