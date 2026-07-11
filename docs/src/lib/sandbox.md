@@ -47,6 +47,17 @@ Stability tier: **experimental**.
   lengths, tags, and instruction lengths are all bounds-checked before
   the caller acts on them, and truncation is reported honestly through
   `regions_truncated`/`symbols_truncated`, never silently.
+- **`helpdoc`** — the sandboxed help-document render: the `HelpService`
+  worker parses and renders a foreign bundle's document through
+  [`rustos-help`](./help.md), and the client `render_help` re-parses the
+  reply through the `rustos-vt` streaming parser, admitting only the
+  closed op set a help render can contain (printable text, line feeds,
+  the bold/underline SGR pairs) and re-encoding it canonically — a
+  forbidden escape or a truncated trailing sequence refuses the whole
+  reply, and a document-parse error round-trips typed (`HelpError`, code
+  for code). `man` is the consumer: it reads the document with its own
+  file authority (`rustos_help::load_raw`) and never parses it
+  in-process.
 - **`rt`** (feature `program`, freestanding targets only) — the
   production transport. `RtLauncher` spawns the program's **own binary**
   in a worker role: two fresh pipes wired to the child's fd 0/1 through

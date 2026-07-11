@@ -26,6 +26,13 @@ fixed, deterministic chain:
    holds the document, so the choice is stable across runs.
 3. `Help/en-US/<name>.md` — the canonical document.
 
+`load_raw` is the same single walk without the parse: it returns the
+size-bounded raw bytes plus the selection, for a caller that must run the
+parse elsewhere — `man` hands them to the sandboxed
+[`rustos-sandbox`](./sandbox.md) `helpdoc` worker so a foreign bundle's
+document is never parsed in its own process. `load` is `load_raw` plus
+`HelpDoc::parse`; the walk has one definition.
+
 The result reports which directory served and how it relates to the request
 (`Selection`/`Fallback`), so `man` can emit its locale-fallback `stdinfo`
 record. A document is rendered whole from one file — falling back never mixes

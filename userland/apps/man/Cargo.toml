@@ -18,7 +18,7 @@ workspace = true
 # runtime's `_start` / `#[global_allocator]` / panic handler.
 [features]
 default = ["program"]
-program = ["dep:rustos-rt"]
+program = ["dep:rustos-rt", "rustos-sandbox/program"]
 
 # The package is both the `rustos-man` resolve/render library (below) and the
 # `Run` entry-point binary of the `man` tool. The binary is a freestanding
@@ -40,8 +40,13 @@ rustos-cmdres = { path = "../../../lib/cmdres", version = "=0.0.0" }
 # The one help engine: locale fallback, the bounded structured-Markdown
 # parser, and the short/full renderers (plans/APPS.md §6).
 rustos-help = { path = "../../../lib/help", version = "=0.0.0" }
-# The one escape-sequence vocabulary the rendered page is encoded with.
-rustos-vt = { path = "../../../lib/vt", version = "=0.0.0" }
+# The parser-sandbox seam: the foreign help document is parsed and
+# rendered in a minimum-capability worker process, never in-process, and
+# only the whitelist-validated render comes back.
+rustos-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0" }
+# The structured-event vocabulary the sandbox containment events are
+# logged through.
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `rustos-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, the `fs_*` file

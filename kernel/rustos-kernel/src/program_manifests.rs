@@ -203,14 +203,18 @@ pub const CAT_MANIFEST: &[CapabilityId] = &[
 /// The `man` help tool's manifest: `CAP_CONSOLE_WRITE` for the rendered
 /// page on fd 1 (and diagnostics on fd 2), `CAP_CONSOLE_READ` for the
 /// pager's keystrokes on fd 0 (also authorising its `stream_input_mode`
-/// raw discipline, as in `top`), and `CAP_FS_ACCESS` because reading a
+/// raw discipline, as in `top`), `CAP_FS_ACCESS` because reading a
 /// bundle's `Help/` documents *is* the tool's job — the secured VFS still
-/// authorises every path per-inode under the caller's attested identity.
+/// authorises every path per-inode under the caller's attested identity —
+/// and `CAP_PROC_SPAWN` to re-spawn its own binary as the parser-sandbox
+/// render worker (`docs/src/security/sandbox.md`): the foreign document is
+/// parsed there, never in `man`'s own process.
 #[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
 pub const MAN_MANIFEST: &[CapabilityId] = &[
     CapabilityId::CONSOLE_WRITE,
     CapabilityId::CONSOLE_READ,
     CapabilityId::FS_ACCESS,
+    CapabilityId::PROC_SPAWN,
 ];
 
 /// The `clear` tool's manifest: `CAP_CONSOLE_WRITE` for the clear sequence
@@ -443,6 +447,7 @@ mod tests {
                 CapabilityId::CONSOLE_WRITE,
                 CapabilityId::CONSOLE_READ,
                 CapabilityId::FS_ACCESS,
+                CapabilityId::PROC_SPAWN,
             ])
         );
     }

@@ -96,12 +96,15 @@ impl RtLauncher {
         }
     }
 
-    /// Build a launcher over this program's own binary (`argv[0]`, the
-    /// path its spawner launched it by). `None` when no startup vector is
-    /// available (fail closed — the caller reports, never guesses a path).
+    /// Build a launcher over this program's own binary, via the kernel's
+    /// reserved self token ([`rustos_abi::SPAWN_SELF`]): the kernel
+    /// substitutes the exact path it admitted the calling process from and
+    /// runs the ordinary load gate over it. `argv[0]` is deliberately not
+    /// used — it is data the spawner chose (a shell passes the typed
+    /// word), never a spawnable spelling the worker launch could trust.
     #[must_use]
-    pub fn own_binary() -> Option<Self> {
-        rustos_rt::arg(0).map(Self::new)
+    pub fn own_binary() -> Self {
+        Self::new(rustos_abi::SPAWN_SELF)
     }
 }
 

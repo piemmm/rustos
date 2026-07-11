@@ -50,6 +50,10 @@ mod program {
     use rustos_abi::{Errno, InputMode, STDOUT};
     use rustos_man::{parse, run, BundleStore, Console, ManError, Request, USAGE};
     use rustos_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
+    use rustos_sandbox::helpdoc::HelpService;
+    use rustos_sandbox::host::ParserSandbox;
+    use rustos_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
+    use rustos_sandbox::worker::ServeEnd;
 
     /// Initial byte size of the directory-listing buffer. A `Help/` tree
     /// lists a handful of locale directories and a store directory a
@@ -223,6 +227,19 @@ mod program {
     /// Exit codes: `0` on success, `1` when the command, its bundle, its
     /// document, or the output path fails, `2` on a usage error.
     fn main() -> i32 {
+        // The worker role: this same binary, re-spawned by its own parent
+        // inside the kernel sandbox spawn mode, serves the help-render
+        // service over its wired standard streams and exits. Decided
+        // before argument parsing — the role marker is the whole argument
+        // vector's meaning.
+        if worker_role() {
+            let mut service = HelpService;
+            return match serve_stdio(&mut service) {
+                ServeEnd::Finished => 0,
+                ServeEnd::Failed(_) => 1,
+            };
+        }
+
         // A malformed (non-UTF-8) argument vector is a usage error, reported
         // rather than guessed at.
         let Some(arguments) = rustos_rt::args() else {
@@ -241,6 +258,13 @@ mod program {
         let home = rustos_rt::env_var(b"HOME").and_then(|raw| core::str::from_utf8(raw).ok());
         let request = Request { locale, path, home };
 
+        // The parser sandbox the untrusted help document is rendered in:
+        // this binary re-spawned in the worker role through the kernel's
+        // reserved self token (the kernel substitutes the path it admitted
+        // this process from — argv is data, not authority), containment
+        // events routed to the system log.
+        let mut sandbox = ParserSandbox::new(RtLauncher::own_binary(), rustos_rt::LogSink);
+
         let console = RtConsole;
         // The raw discipline (no echo, no indicator) only while the pager
         // can actually prompt (an attested interactive console): its
@@ -252,7 +276,7 @@ mod program {
         if interactive {
             let _ = rustos_rt::set_input_mode(InputMode::Raw);
         }
-        let result = run(&command, &request, &RtStore, &console);
+        let result = run(&command, &request, &RtStore, &console, &mut sandbox);
         if interactive {
             let _ = rustos_rt::set_input_mode(InputMode::Cooked);
         }

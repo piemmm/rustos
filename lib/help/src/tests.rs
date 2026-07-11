@@ -16,8 +16,8 @@ fn encode_all(ops: &[Op]) -> Vec<u8> {
 }
 
 use crate::{
-    load, render_full, render_short, Align, Block, DocumentName, Fallback, HelpDoc, HelpError,
-    HelpSource, LoadError, Locale, NameError, SectionKind, SourceError, Span, TagError,
+    load, load_raw, render_full, render_short, Align, Block, DocumentName, Fallback, HelpDoc,
+    HelpError, HelpSource, LoadError, Locale, NameError, SectionKind, SourceError, Span, TagError,
     MAX_DOC_LEN, MAX_LINES, MAX_LIST_ITEMS, MAX_LOCALE_DIRS, MAX_TABLE_ROWS,
 };
 
@@ -129,6 +129,43 @@ fn load_serves_the_exact_locale_first() {
     let loaded = load(&source, &locale("fr-FR"), &name("top")).expect("loads");
     assert_eq!(loaded.selection.locale_dir, "fr-FR");
     assert_eq!(loaded.selection.fallback, Fallback::Exact);
+}
+
+#[test]
+fn load_raw_serves_the_same_selection_with_unparsed_bytes() {
+    // One locale walk serves both entry points: `load_raw` must pick the
+    // same document `load` picks, returning its bytes untouched.
+    let source = MapSource::new(&[("fr-FR", "top.md"), ("en-US", "top.md")]);
+    let raw = load_raw(&source, &locale("fr-CH"), &name("top")).expect("loads");
+    assert_eq!(raw.selection.locale_dir, "fr-FR");
+    assert_eq!(raw.selection.fallback, Fallback::SameLanguage);
+    assert_eq!(raw.bytes, MINIMAL.as_bytes());
+}
+
+#[test]
+fn load_raw_does_not_parse_but_still_bounds_the_size() {
+    // A document `load` would refuse as malformed passes `load_raw` whole
+    // (the parse runs elsewhere, in the sandbox) — but the size bound is
+    // enforced before any bytes are returned.
+    let mut source = MapSource::new(&[]);
+    source.entries.push((
+        "en-US".to_owned(),
+        "top.md".to_owned(),
+        b"not a help document".to_vec(),
+    ));
+    let raw = load_raw(&source, &locale("en-US"), &name("top")).expect("loads");
+    assert_eq!(raw.bytes, b"not a help document");
+
+    let mut oversize = MapSource::new(&[]);
+    oversize.entries.push((
+        "en-US".to_owned(),
+        "top.md".to_owned(),
+        vec![b'a'; MAX_DOC_LEN + 1],
+    ));
+    assert_eq!(
+        load_raw(&oversize, &locale("en-US"), &name("top")).unwrap_err(),
+        LoadError::Document(HelpError::TooLarge)
+    );
 }
 
 #[test]

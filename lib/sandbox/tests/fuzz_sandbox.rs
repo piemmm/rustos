@@ -1,14 +1,16 @@
-//! Deterministic fuzz harness for the sandbox seam's decode surface.
+//! Deterministic fuzz harness for the sandbox seam's decode and helpdoc
+//! surfaces.
 //!
 //! Two hostile directions, both driven through the public client path so
 //! the request encoder, the service's request decoder, the decoders
 //! themselves, and the caller-side reply validation are all exercised
 //! together:
 //!
-//! * **Hostile input files** — mutated container templates and pure noise
-//!   fed to [`rustos_sandbox::decode::container_summary`] /
-//!   [`manifest_summary`] / [`disassemble`] over the in-process loopback
-//!   worker: every outcome must be a typed result, never a panic.
+//! * **Hostile input files** — mutated container/help-document templates
+//!   and pure noise fed to [`rustos_sandbox::decode::container_summary`] /
+//!   [`manifest_summary`] / [`disassemble`] / [`render_help`] over the
+//!   in-process loopback worker: every outcome must be a typed result,
+//!   never a panic.
 //! * **Hostile workers** — a launcher whose "worker" frames pure noise as
 //!   its reply: the caller-side fail-closed reply decoders must refuse or
 //!   accept typed, never panic, and the seam must survive.
@@ -25,6 +27,7 @@ use std::rc::Rc;
 use rustos_sandbox::decode::{
     container_summary, disassemble, manifest_summary, DecodeService, Isa,
 };
+use rustos_sandbox::helpdoc::{render_help, HelpService, RenderMode};
 use rustos_sandbox::host::{Launcher, ParserSandbox};
 use rustos_sandbox::loopback::LoopbackLauncher;
 use rustos_sandbox::proto::Channel;
@@ -90,6 +93,10 @@ fn rxe_template() -> Vec<u8> {
 
 /// The four request ISAs, cycled by the driver.
 const ISAS: [Isa; 4] = [Isa::X86_64, Isa::Aarch64, Isa::Riscv64, Isa::Wasm];
+
+/// A minimal valid help document, as the helpdoc mutation template.
+const HELP_TEMPLATE: &[u8] =
+    b"## NAME\n\ntop \xe2\x80\x94 display tasks\n\n## SYNOPSIS\n\n`top [-d seconds]`\n\n## DESCRIPTION\n\nShows tasks.\n";
 
 /// A "worker" that answers every request with seeded noise framed as a
 /// reply — the compromised-worker model.
@@ -164,6 +171,10 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         LoopbackLauncher::new(DecodeService::default as fn() -> DecodeService),
         SilentSink,
     );
+    let mut honest_help = ParserSandbox::new(
+        LoopbackLauncher::new(HelpService::default as fn() -> HelpService),
+        SilentSink,
+    );
     let hostile_state = Rc::new(RefCell::new(next()));
     let mut hostile = ParserSandbox::new(
         HostileLauncher {
@@ -207,12 +218,31 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
             &noise,
         );
 
-        // 4. The hostile worker: framed noise replies into every client
+        // 4. A help document with a handful of bytes flipped, a random
+        //    truncation, and pure noise, rendered through the honest
+        //    worker under both surfaces.
+        let mut help = HELP_TEMPLATE.to_vec();
+        for _ in 0..bounded(next(), 6) {
+            let pos = bounded(next(), help.len() - 1);
+            help[pos] ^= low_byte(next() >> 17);
+        }
+        let mode = if next() & 1 == 0 {
+            RenderMode::Short
+        } else {
+            RenderMode::Full
+        };
+        let _ = render_help(&mut honest_help, mode, &help);
+        let cut = bounded(next(), help.len());
+        let _ = render_help(&mut honest_help, mode, &help[..cut]);
+        let _ = render_help(&mut honest_help, mode, &noise);
+
+        // 5. The hostile worker: framed noise replies into every client
         //    decoder. Each request crashes and replaces the worker, so
         //    every iteration sees fresh noise.
         let _ = container_summary(&mut hostile, &rxe);
         let _ = manifest_summary(&mut hostile, &noise[..bounded(next(), noise.len())]);
         let _ = disassemble(&mut hostile, isa, 0, 0, 8, b"\x90\x90");
+        let _ = render_help(&mut hostile, mode, HELP_TEMPLATE);
 
         iteration += 1;
         if !rustos_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {

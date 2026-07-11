@@ -3,9 +3,12 @@
 # composer; the capability list is the bundle's request, intersected with
 # the launching user's grants. The console pair drives the pager (echo
 # suppression included); CAP_FS_ACCESS is the tool's job — reading a
-# bundle's Help/ documents through the secured VFS.
+# bundle's Help/ documents through the secured VFS. CAP_PROC_SPAWN
+# re-spawns this same binary as the parser-sandbox render worker
+# (docs/src/security/sandbox.md): the untrusted help document is parsed
+# there, never in this process.
 id = "os.rustos.man"
 name = "man"
 version = "0.1.0"
 kind = "command"
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS"]
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS", "CAP_PROC_SPAWN"]

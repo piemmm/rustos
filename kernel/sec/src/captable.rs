@@ -237,6 +237,16 @@ pub struct TaskCapabilities {
     /// kernel-resolved state, never from caller-supplied bytes, so an audit
     /// consumer may trust it to name the acting process.
     name: ProcName,
+    /// Kernel-attested program path — the exact registry or store-bundle
+    /// path the `spawn` handler resolved and admitted this process from,
+    /// recorded so the reserved self-spawn token (`rustos_abi::SPAWN_SELF`)
+    /// can re-spawn *this same program* as a parser-sandbox worker without
+    /// trusting any caller-supplied spelling (`argv[0]` is data, not
+    /// authority). Empty for a process no spawnable path admitted (kernel
+    /// threads, boot principals), which fails a self-spawn closed. Set only
+    /// through [`Self::with_spawn_path`] from the kernel's own resolved
+    /// path, never from caller-supplied bytes.
+    spawn_path: Vec<u8>,
     /// Kernel-attested monotonic timestamp of the task's admission — the
     /// value the Arch HAL monotonic counter (`ticks_now`) read at the instant
     /// the process was admitted. Defaults to `0`, the sentinel for a task
@@ -314,6 +324,7 @@ impl TaskCapabilities {
             proc_id: ProcId::KERNEL,
             parent_proc_id: ProcId::KERNEL,
             name: ProcName::EMPTY,
+            spawn_path: Vec::new(),
             start_time: 0,
             console: ORIGIN_CONSOLE_NONE,
         }
@@ -460,6 +471,31 @@ impl TaskCapabilities {
     pub fn with_name(mut self, name: ProcName) -> Self {
         self.name = name;
         self
+    }
+
+    /// Attach the kernel-resolved program path this process was admitted
+    /// from, consumed and returned like [`Self::with_name`]. Only the
+    /// kernel's process-admit sites call it, passing the exact registry or
+    /// store-bundle path the spawn handler itself resolved — never a
+    /// caller-supplied value — so the reserved self-spawn token can trust
+    /// it to name this process's own program. A record never given one
+    /// keeps the empty "no spawnable path" sentinel, which fails a
+    /// self-spawn closed.
+    #[must_use]
+    pub fn with_spawn_path(mut self, spawn_path: Vec<u8>) -> Self {
+        self.spawn_path = spawn_path;
+        self
+    }
+
+    /// The kernel-resolved program path this process was admitted from
+    /// (empty if no spawnable path admitted it).
+    ///
+    /// Read from this record's own kernel-held state — never
+    /// caller-supplied — so the spawn handler may trust it to re-spawn
+    /// this process's own program.
+    #[must_use]
+    pub fn spawn_path(&self) -> &[u8] {
+        &self.spawn_path
     }
 
     /// Attach the kernel-attested monotonic admission timestamp to this

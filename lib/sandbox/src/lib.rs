@@ -36,6 +36,7 @@
 extern crate alloc;
 
 pub mod decode;
+pub mod helpdoc;
 pub mod host;
 pub mod loopback;
 pub mod proto;

@@ -6,6 +6,8 @@ use alloc::string::String;
 
 use rustos_abi::Errno;
 use rustos_help::{LoadError, NameError};
+use rustos_sandbox::helpdoc::{HelpRefusal, HelpRenderFailure};
+use rustos_sandbox::host::SandboxError;
 
 /// Why a `man` invocation failed.
 ///
@@ -39,6 +41,13 @@ pub enum ManError {
     /// failed, the tree lists too many locales, or the selected document
     /// does not parse under the engine's fail-closed bounds.
     Tree(LoadError),
+    /// The sandboxed help renderer failed: its worker could not be
+    /// started, crashed mid-render, or produced a reply that cannot be
+    /// believed. The document itself may be fine; the *renderer* is the
+    /// problem, and the page is withheld rather than rendered in-process
+    /// (fail closed). Document-parse refusals are reported as
+    /// [`ManError::Tree`], not here.
+    Render(HelpRenderFailure),
     /// Probing a candidate bundle was refused outright (not "no such
     /// bundle"): the refusal is final, mirroring the shell's launch rule
     /// that only `NotFound` moves to the next candidate.
@@ -72,6 +81,24 @@ impl fmt::Display for ManError {
                 }
             }
             ManError::Tree(err) => write!(f, "help unavailable: {err}"),
+            ManError::Render(failure) => match failure {
+                HelpRenderFailure::Sandbox(SandboxError::WorkerUnavailable(errno)) => {
+                    write!(f, "help renderer unavailable: {errno}")
+                }
+                HelpRenderFailure::Sandbox(SandboxError::WorkerFailed) => {
+                    f.write_str("help renderer failed while rendering the page")
+                }
+                HelpRenderFailure::Sandbox(SandboxError::RequestTooLarge)
+                | HelpRenderFailure::Refused(HelpRefusal::MalformedRequest) => {
+                    f.write_str("help renderer refused the request")
+                }
+                HelpRenderFailure::Refused(HelpRefusal::Document(err)) => {
+                    write!(f, "help unavailable: {err}")
+                }
+                HelpRenderFailure::ReplyMalformed => {
+                    f.write_str("help renderer produced an invalid page")
+                }
+            },
             ManError::Store(err) => write!(f, "cannot read the app store: {err}"),
             ManError::SearchTruncated { root } => write!(
                 f,

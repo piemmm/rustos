@@ -103,12 +103,33 @@ sandboxes a parse imports it:
   pipes wired to the child's fd 0/1 through `SpawnAttach::sandbox`, the
   `--parser-sandbox-worker` argv marker, a blocking reap on disposal.
   The worker serves over its standard streams, exactly the surface the
-  allow-list admits.
+  allow-list admits. "Its own binary" is named by the reserved
+  `SPAWN_SELF` (`@self`) path token, never by `argv[0]` (data the
+  spawner chose, not a spawnable spelling): the kernel substitutes the
+  exact path it admitted the *caller* from — the `spawn_path` attested
+  on its capability record — and runs the ordinary resolution and load
+  gate over it. The token is honoured only for a sandbox spawn and only
+  when the caller carries a spawnable path; every other use fails
+  closed `NotFound`.
 - **First consumers** (`decode`): executable-container summaries
   (`lib/binfmt`) and per-window instruction disassembly (`lib/disasm`)
   run inside the worker; the client-side helpers validate every reply
   field fail-closed, because a worker that has parsed hostile bytes is
   itself treated as hostile.
+- **Help rendering** (`helpdoc`): a foreign bundle's help document is
+  parsed and rendered inside the worker (`rustos_help`'s `HelpDoc::parse`
+  plus the short/full renderers), and the parent-side `render_help`
+  client re-parses the returned bytes through the `lib/vt` streaming
+  parser, admitting only the closed op set a help render can contain
+  (printable text, line feeds, the bold/underline SGR pairs) and
+  re-encoding them canonically — the caller writes bytes its own process
+  produced, never bytes the worker chose. A document-parse error crosses
+  the boundary typed (`HelpError`, code for code), so diagnostics lose
+  nothing to the isolation. `man` is the consumer: it locates and reads
+  the document with its own file authority (`rustos_help::load_raw`),
+  re-spawns itself as the worker (`CAP_PROC_SPAWN` in its manifest), and
+  withholds the page — never falling back to an in-process parse — when
+  the renderer fails.
 
 Host tests inject the in-process `loopback` fake exactly as the
 `Fs`/`Tty` seams take fakes, so a consumer's full parent-side path runs
@@ -143,9 +164,16 @@ under plain `cargo test`.
 - `lib/sandbox`: framing round-trips and truncation/oversize refusals;
   serve-loop semantics; containment (typed error, reap, replacement,
   logged events, frozen event ids); fail-closed decode of hostile
-  replies; and the `fuzz_sandbox` harness (hostile input files through
-  the decode service, hostile worker replies into the client decoders)
-  in `cargo xtask fuzz`.
+  replies; the `helpdoc` render-op whitelist (forbidden escapes, OSC
+  strings, colour SGRs, and truncated trailing escapes all refuse the
+  whole reply) and typed `HelpError` round-trips; and the `fuzz_sandbox`
+  harness (hostile input files through the decode and helpdoc services,
+  hostile worker replies into the client decoders) in
+  `cargo xtask fuzz`.
+- `userland/apps/man`: the loopback-driven suite runs the real
+  `HelpService` end to end, and hostile-renderer tests prove a
+  disbelieved reply withholds the page (typed `ManError::Render`, no
+  byte reaches the console) while `-h` degrades to the usage banner.
 - QEMU (`tests/integration/sandbox_program` + `sandbox_qemu_aarch64`):
   the whole seam over the real syscalls on the `virt` board — decode of
   valid and malformed inputs through a genuinely sandboxed worker, real

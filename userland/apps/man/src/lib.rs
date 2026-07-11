@@ -10,15 +10,22 @@
 //!
 //! # What this crate is
 //!
-//! A thin front end over `lib/cmdres` and `lib/help`. For one parsed
-//! [`Command`] it resolves the owning bundle, loads the document down the
-//! deterministic locale-fallback chain, emits a `stdinfo` advisory when the
-//! served locale is not the requested one, and writes the rendered page —
-//! a screenful at a time on an interactive terminal — to standard output.
-//! The [`BundleStore`] and [`Console`] seams keep every effect injectable,
-//! so the whole engine is exhaustively testable without a kernel; the
-//! binary that ships as `man` wires them to the real `fs_*` and
-//! standard-stream syscalls.
+//! A thin front end over `lib/cmdres`, `lib/help`, and `lib/sandbox`. For
+//! one parsed [`Command`] it resolves the owning bundle, locates and reads
+//! the document down the deterministic locale-fallback chain
+//! (`rustos_help::load_raw`), emits a `stdinfo` advisory when the served
+//! locale is not the requested one, and writes the rendered page — a
+//! screenful at a time on an interactive terminal — to standard output.
+//! The document itself is **never parsed in this process**: it is foreign
+//! bundle content, so its parse and render run in a minimum-capability
+//! parser-sandbox worker (`rustos_sandbox::helpdoc`) and only the
+//! whitelist-validated render comes back — a crashed or hostile worker
+//! costs the page, never the tool. The [`BundleStore`] and [`Console`]
+//! seams keep every effect injectable and the sandbox runs over an
+//! in-process loopback on the host, so the whole engine is exhaustively
+//! testable without a kernel; the binary that ships as `man` wires them to
+//! the real `fs_*` and standard-stream syscalls and re-spawns itself as
+//! the render worker.
 //!
 //! # Module map
 //!
@@ -37,12 +44,12 @@
 //! # Layering & safety
 //!
 //! `no_std` + `alloc`; the dependencies are the audited `lib/abi` ABI
-//! crate and the shared `lib/cmdres` / `lib/help` / `lib/vt` engines, so
-//! this userland tool never links a kernel or driver crate and defines no
-//! second resolution policy, locale walker, or escape vocabulary. No
-//! `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths; help
-//! content is parsed under the engine's fail-closed bounds even though it
-//! is signed.
+//! crate and the shared `lib/cmdres` / `lib/help` / `lib/sandbox` /
+//! `lib/log` engines, so this userland tool never links a kernel or driver
+//! crate and defines no second resolution policy, locale walker, or escape
+//! vocabulary. No `unsafe`, and no `unwrap`/`expect`/`panic!` in
+//! production paths; help content is parsed under the engine's fail-closed
+//! bounds, in the sandbox, even though it is signed.
 
 #![no_std]
 #![forbid(unsafe_code)]

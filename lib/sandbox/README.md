@@ -33,6 +33,14 @@ imports this seam; a second per-app copy is forbidden.
   fail-closed reply vocabulary. The caller-side helpers decode every reply
   fail-closed: a compromised worker can lie about bytes, never break the
   caller.
+- **The help-render service** (`helpdoc`): a foreign bundle's help document
+  is parsed and rendered inside the worker (`rustos-help`), and the
+  caller-side `render_help` re-parses the reply through the `rustos-vt`
+  streaming parser, admitting only the closed render-op set (printable
+  text, line feeds, the bold/underline SGR pairs) and re-encoding it
+  canonically — a forbidden escape, colour, OSC string, or truncated
+  trailing sequence refuses the whole reply. A document-parse error
+  round-trips typed (`HelpError`, code for code). `man` is the consumer.
 - **The production transport** (`rt`, feature `program`, bare-metal only):
   the parent launches **its own binary** in a worker role via
   `SpawnAttach::sandbox` with two pipes wired to the worker's fd 0/1, and
@@ -47,8 +55,9 @@ imports this seam; a second per-app copy is forbidden.
 - The seam adds no authority: the worker holds only the two pipe ends its
   parent wired at spawn; the kernel enforces the rest
   (`docs/src/security/sandbox.md`).
-- Fuzzed: `fuzz_sandbox` (the service request decoder and the caller-side
-  reply decoders) is enrolled in `cargo xtask fuzz`.
+- Fuzzed: `fuzz_sandbox` (the decode and helpdoc service request decoders
+  and the caller-side reply decoders/validators) is enrolled in
+  `cargo xtask fuzz`.
 
 ## Design
 

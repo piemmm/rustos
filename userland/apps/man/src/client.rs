@@ -9,10 +9,10 @@ use alloc::string::String;
 use rustos_abi::stdinfo::{Human, StdInfoKind, StdInfoRecord};
 use rustos_abi::{Errno, BUNDLE_SUFFIX};
 use rustos_cmdres::{bundle_candidates, search_roots};
-use rustos_help::{
-    load, render_full, render_short, DocumentName, Fallback, LoadError, Loaded, Locale,
-};
-use rustos_vt::{encode_all_into, Op};
+use rustos_help::{load_raw, DocumentName, Fallback, LoadError, Locale, RawLoaded};
+use rustos_log::Sink;
+use rustos_sandbox::helpdoc::{render_help, HelpRefusal, HelpRenderFailure, RenderMode};
+use rustos_sandbox::host::{Launcher, ParserSandbox};
 
 use crate::command::Command;
 use crate::error::ManError;
@@ -65,78 +65,80 @@ pub struct Request<'a> {
     pub home: Option<&'a str>,
 }
 
-/// Run one [`Command`] against the injected store and console.
+/// Run one [`Command`] against the injected store, console, and parser
+/// sandbox.
+///
+/// The help document is untrusted foreign-bundle input, so it is never
+/// parsed in this process: the raw bytes go to the sandboxed worker
+/// (`rustos_sandbox::helpdoc`) and only the whitelist-validated render
+/// comes back. The `Run` binary passes the production `RtLauncher`
+/// sandbox; host tests pass an in-process loopback one.
 ///
 /// # Errors
 ///
 /// Every [`ManError`] the command can produce; the `Run` binary reports it
 /// on standard error and maps it to the exit status.
-pub fn run(
+pub fn run<L: Launcher, S: Sink>(
     command: &Command,
     request: &Request<'_>,
     store: &dyn BundleStore,
     console: &dyn Console,
+    sandbox: &mut ParserSandbox<L, S>,
 ) -> Result<(), ManError> {
     match command {
-        Command::ShortHelp => short_help(request, store, console),
-        Command::Page { word, topic } => page(word, topic.as_deref(), request, store, console),
+        Command::ShortHelp => short_help(request, store, console, sandbox),
+        Command::Page { word, topic } => {
+            page(word, topic.as_deref(), request, store, console, sandbox)
+        }
     }
 }
 
 /// Render `man`'s own short help (`NAME` + `SYNOPSIS` + compact `OPTIONS`)
 /// from its own Help tree; when that tree is absent (a build without the
 /// bundle's documents) the usage banner stands in, so `-h` never fails.
-fn short_help(
+fn short_help<L: Launcher, S: Sink>(
     request: &Request<'_>,
     store: &dyn BundleStore,
     console: &dyn Console,
+    sandbox: &mut ParserSandbox<L, S>,
 ) -> Result<(), ManError> {
-    let loaded = resolve(OWN_WORD, request, store).and_then(|bundle_dir| {
+    let rendered = resolve(OWN_WORD, request, store).and_then(|bundle_dir| {
         let name = DocumentName::parse(OWN_WORD)?;
         let source = ScopedHelp::new(store, &bundle_dir);
-        load(&source, &active_locale(request.locale), &name).map_err(from_load(OWN_WORD, OWN_WORD))
+        let raw = load_raw(&source, &active_locale(request.locale), &name)
+            .map_err(from_load(OWN_WORD, OWN_WORD))?;
+        render_help(sandbox, RenderMode::Short, &raw.bytes).map_err(from_render)
     });
-    match loaded {
-        Ok(loaded) => {
-            let bytes = encode_ops(&render_short(&loaded.doc));
-            console.write_all(&bytes).map_err(ManError::Output)
-        }
-        // The tool's own page being missing must not make `-h` fail: the
-        // usage banner is the tool's own text, not fabricated help content.
-        Err(ManError::Output(err)) => Err(ManError::Output(err)),
-        Err(_) => {
-            let line = format!("{USAGE}\n");
-            console.write_all(line.as_bytes()).map_err(ManError::Output)
-        }
+    if let Ok(bytes) = rendered {
+        console.write_all(&bytes).map_err(ManError::Output)
+    } else {
+        // The tool's own page being missing (or its renderer unavailable)
+        // must not make `-h` fail: the usage banner is the tool's own
+        // text, not fabricated help content.
+        let line = format!("{USAGE}\n");
+        console.write_all(line.as_bytes()).map_err(ManError::Output)
     }
 }
 
 /// Render one command's Help document in full, paginated when the console
 /// is an interactive terminal.
-fn page(
+fn page<L: Launcher, S: Sink>(
     word: &str,
     topic: Option<&str>,
     request: &Request<'_>,
     store: &dyn BundleStore,
     console: &dyn Console,
+    sandbox: &mut ParserSandbox<L, S>,
 ) -> Result<(), ManError> {
     let bundle_dir = resolve(word, request, store)?;
     let name_str = topic.unwrap_or_else(|| document_word(word));
     let name = DocumentName::parse(name_str)?;
     let requested = active_locale(request.locale);
     let source = ScopedHelp::new(store, &bundle_dir);
-    let loaded = load(&source, &requested, &name).map_err(from_load(word, name_str))?;
-    emit_fallback_record(console, &requested, &loaded);
-    let bytes = encode_ops(&render_full(&loaded.doc));
+    let raw = load_raw(&source, &requested, &name).map_err(from_load(word, name_str))?;
+    emit_fallback_record(console, &requested, &raw);
+    let bytes = render_help(sandbox, RenderMode::Full, &raw.bytes).map_err(from_render)?;
     write_paged(&bytes, console)
-}
-
-/// Encode a rendered `Op` sequence to bytes over the allocation-free
-/// [`encode_all_into`] sink API.
-fn encode_ops(ops: &[Op]) -> alloc::vec::Vec<u8> {
-    let mut out = alloc::vec::Vec::new();
-    encode_all_into(ops, &mut out);
-    out
 }
 
 /// The document a command word names inside its bundle: the word itself
@@ -257,15 +259,28 @@ fn from_load(word: &str, name: &str) -> impl FnOnce(LoadError) -> ManError {
     }
 }
 
+/// Map a sandboxed-render failure onto the command's error vocabulary: a
+/// typed document-parse refusal is the same "tree unusable" outcome an
+/// in-process parse reported (full fidelity across the process boundary);
+/// every other failure is the renderer itself failing.
+fn from_render(failure: HelpRenderFailure) -> ManError {
+    match failure {
+        HelpRenderFailure::Refused(HelpRefusal::Document(err)) => {
+            ManError::Tree(LoadError::Document(err))
+        }
+        other => ManError::Render(other),
+    }
+}
+
 /// Emit the locale-fallback `stdinfo` advisory (fd 3) when the served
 /// locale is not the one the user asked for (plans/APPS.md §7): a tool or
 /// user then knows the page was not shown in the requested language.
 /// Advisory only — never affects the page, the exit status, or ordering.
-fn emit_fallback_record(console: &dyn Console, requested: &Locale, loaded: &Loaded) {
-    if requested.is_default() || loaded.selection.fallback == Fallback::Exact {
+fn emit_fallback_record(console: &dyn Console, requested: &Locale, raw: &RawLoaded) {
+    if requested.is_default() || raw.selection.fallback == Fallback::Exact {
         return;
     }
-    let served = loaded.selection.locale_dir.as_str();
+    let served = raw.selection.locale_dir.as_str();
     let message = format!(
         "Help shown in {served}; no {} translation.",
         requested.as_str()

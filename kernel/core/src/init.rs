@@ -932,6 +932,10 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             // component — so a process listing and the audit origin always
             // name the driver, never from the spawner's argv.
             ProcName::from_path(path.as_bytes()),
+            // Record the kernel-resolved driver-store path the signed load
+            // gate verified, so even a driver process could name its own
+            // program to a self-spawn without trusting argv.
+            path.as_bytes().to_vec(),
             // A boot-autoloaded driver is a kernel-trusted system principal:
             // admit it under the fixed system credential (uid 0 / gid 0), the
             // spawn-as-user counterpart of the `SecTaskId(0)` supervisor

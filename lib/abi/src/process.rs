@@ -595,6 +595,25 @@ pub const SPAWN_FLAG_SANDBOX: u64 = 1;
 /// closed instead of silently meaning nothing.
 pub const SPAWN_FLAGS_ALL: u64 = SPAWN_FLAG_SANDBOX;
 
+/// Reserved `spawn` path token: re-spawn the **caller's own program**.
+///
+/// A parser-sandbox worker is by definition the same binary as its parent
+/// (`docs/src/security/sandbox.md`), but a program has no trustworthy
+/// spelling of its own path — `argv[0]` is data its spawner chose, not
+/// authority. Passing this token as the `spawn` path makes the kernel
+/// substitute the exact registry or store-bundle path it admitted the
+/// *caller* from (its own attested record), then run the ordinary
+/// resolution and load gate over it — the token never bypasses a check,
+/// it only supplies the path.
+///
+/// The token is honoured **only** for a sandbox spawn (an attach block
+/// with [`SPAWN_FLAG_SANDBOX`]) — its one consumer — and only when the
+/// caller's record carries a spawnable path; any other use fails closed
+/// with `NotFound`. The leading `@` can never collide with a real
+/// program: a registry path or `<Name>.app/Run` bundle path always
+/// starts with `/`.
+pub const SPAWN_SELF: &[u8] = b"@self";
+
 /// How one of a spawned child's standard descriptors (fd 0–3) is backed —
 /// one entry per slot in a [`SpawnAttach`] block (`plans/SPAWN.md` SP10).
 ///

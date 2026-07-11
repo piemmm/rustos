@@ -28,6 +28,11 @@ rustos-log = { path = "../log", version = "=0.0.0" }
 rustos-binfmt = { path = "../binfmt", version = "=0.0.0" }
 # The per-ISA instruction decoders the sandboxed decode service runs.
 rustos-disasm = { path = "../disasm", version = "=0.0.0" }
+# The help-document parser + renderer the sandboxed helpdoc service runs.
+rustos-help = { path = "../help", version = "=0.0.0" }
+# The terminal-op vocabulary the helpdoc reply is encoded in and the
+# streaming parser the client re-validates it through.
+rustos-vt = { path = "../vt", version = "=0.0.0" }
 
 # The `program`-feature transport links the freestanding userland runtime
 # for `pipe_create`/`spawn_attached`/`fs_*`/`wait` on the parent side and

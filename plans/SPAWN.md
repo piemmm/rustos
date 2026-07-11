@@ -1013,7 +1013,14 @@ Staged like SP3/SP5/SP6/SP7 (one fully-gated increment per landing):
   parser-sandbox spawn mode — canonical only with fully explicit
   `Closed`/`Handle` wires, an inherited credential, and no console index;
   kernel enforcement and the dispatcher allow-list are documented in
-  `docs/src/security/sandbox.md`) + `SPAWN_ATTACH_LEN`, the
+  `docs/src/security/sandbox.md`. A sandbox spawn may pass the reserved
+  path token `SPAWN_SELF` (`@self`): the kernel substitutes the path it
+  admitted the *caller* from — the `spawn_path` attested on its
+  capability record at admission, never `argv[0]`, which is data the
+  spawner chose — then runs the ordinary resolution and load gate over
+  it. The token is honoured only with `SPAWN_FLAG_SANDBOX` and only when
+  the caller carries a spawnable path; every other use fails closed
+  `NotFound`) + `SPAWN_ATTACH_LEN`, the
   `SPAWN` row's slots 2/3 → `attach`/`attach_len`, and the
   `stream_read`/`stream_write` rows' dispatcher gate dropped (checked
   in-handler for console backings). `lib/abi-sys`: `ros_sys_spawn` carries

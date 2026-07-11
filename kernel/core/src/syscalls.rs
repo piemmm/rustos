@@ -3068,6 +3068,26 @@ where
         let mut path_buf = alloc::vec![0u8; path_len];
         self.copy_in_user(caller, path, &mut path_buf)?;
 
+        // The reserved self token (`@self`): a parser-sandbox worker is by
+        // definition the caller's own program, and `argv[0]` is data a
+        // spawner chose, so the kernel substitutes the path it admitted
+        // the *caller* from — its own attested record, never a
+        // caller-supplied spelling. Honoured only for a sandbox spawn (the
+        // token's one consumer) and only when the caller carries a
+        // spawnable path; every other use fails closed. The substituted
+        // path then runs the ordinary resolution and load gate below —
+        // the token never bypasses a check.
+        if path_buf == rustos_abi::SPAWN_SELF {
+            if !attach.is_sandbox() {
+                return Err(Errno::NotFound);
+            }
+            let own = caller.caps.spawn_path();
+            if own.is_empty() {
+                return Err(Errno::NotFound);
+            }
+            path_buf = own.to_vec();
+        }
+
         // Resolve the path: first against the compiled-in boot-floor
         // registry, otherwise as an on-disk `<Name>.app` store bundle read
         // through the mounted VFS and judged by the shared load gate. An
@@ -3160,6 +3180,10 @@ where
             // kernel-resolved value, never trusted from the caller as a
             // name.
             ProcName::from_path(&path_buf),
+            // Record the kernel-resolved program path on the child so a
+            // later self-spawn from it can name its own program without
+            // trusting `argv[0]`.
+            path_buf.clone(),
             // The child's kernel-attested credential, resolved above
             // (inherit the caller's own, or a capability-gated switch to a
             // target user) — never a caller-supplied value.
@@ -6283,6 +6307,14 @@ where
     /// a fixed name for a boot principal. Derived kernel-side from resolved
     /// state at the call site, never from caller-supplied bytes.
     name: ProcName,
+    /// The kernel-resolved program path the child is admitted from,
+    /// recorded on its capability record so the reserved self-spawn token
+    /// (`rustos_abi::SPAWN_SELF`) can later re-spawn the same program as a
+    /// parser-sandbox worker. The resolved registry or store-bundle path
+    /// for a `spawn`; empty for an admit path with no spawnable path (a
+    /// kernel principal), which fails a later self-spawn closed. Derived
+    /// kernel-side at the call site, never from caller-supplied bytes.
+    spawn_path: Vec<u8>,
     /// The kernel-attested credential (uid + group set) the child is admitted
     /// under (`PREREQUISITES.md` P-C, spawn-as-user). Resolved kernel-side at
     /// the call site — inherited from the spawning parent's own record, or
@@ -6343,6 +6375,7 @@ where
         node_id: Option<u32>,
         proc_id: ProcId,
         name: ProcName,
+        spawn_path: Vec<u8>,
         credential: SpawnCredential,
         sandbox: bool,
     ) -> Self {
@@ -6362,6 +6395,7 @@ where
             node_id,
             proc_id,
             name,
+            spawn_path,
             credential,
             sandbox,
         }
@@ -6500,6 +6534,7 @@ where
         .with_proc_id(self.proc_id)
         .with_parent_proc_id(parent_proc_id)
         .with_name(self.name.clone())
+        .with_spawn_path(self.spawn_path.clone())
         .with_credential(
             self.credential.primary_gid,
             self.credential.supplementary_gids.clone(),
@@ -11291,6 +11326,9 @@ mod tests {
             rustos_abi::ProcId::from_raw([0x11; 16]),
             // A fixed name so the admit path's name attestation is observable.
             ProcName::from_bytes_truncating(b"driverproc"),
+            // The kernel-resolved path the admit path records for a later
+            // self-spawn.
+            SPAWN_PATH.to_vec(),
             // A driver-spawn admits under the fixed system credential.
             SpawnCredential::system(),
             false,
@@ -11440,6 +11478,7 @@ mod tests {
                 None,
                 proc_id,
                 ProcName::EMPTY,
+                alloc::vec::Vec::new(),
                 SpawnCredential::system(),
                 false,
             )
@@ -12260,6 +12299,182 @@ mod tests {
         ] {
             assert_eq!(child_streams.mode(fd), StreamMode::Closed);
         }
+    }
+
+    /// The reserved `@self` token re-spawns the **caller's own program**
+    /// for a sandbox spawn: the kernel substitutes the path it admitted
+    /// the caller from (its attested record, never `argv[0]`), the load
+    /// gate runs as usual, and the admitted child is the same program,
+    /// sandbox-branded, carrying that same attested path itself.
+    #[test]
+    fn spawn_self_token_respawns_the_callers_own_program_sandboxed() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let attach = SpawnAttach::sandbox([FdWire::Closed; rustos_abi::STD_STREAM_COUNT]);
+        // The payload the caller passes is the token, not a path.
+        let (space, physmap) = send_aspace_with_attach(rustos_abi::SPAWN_SELF, &[attach]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        // The caller's record carries the kernel-attested path it was
+        // admitted from — the value the token resolves to.
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_spawn_path(SPAWN_PATH.to_vec());
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        );
+
+        let pid = h
+            .spawn(
+                &ctx,
+                0x1000,
+                rustos_abi::SPAWN_SELF.len(),
+                attach_addr(0),
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            )
+            .expect("self-token sandbox spawn succeeds");
+
+        let guard = table.read();
+        let record = guard.caps_for(SecTaskId(pid)).expect("child record");
+        assert!(record.is_sandboxed());
+        // The child is the caller's own program: named and recorded from
+        // the substituted kernel-resolved path, never the token spelling.
+        assert_eq!(record.name(), ProcName::from_path(SPAWN_PATH).as_str());
+        assert_eq!(record.spawn_path(), SPAWN_PATH);
+    }
+
+    /// The `@self` token is honoured only for its one consumer, the
+    /// sandbox spawn: a non-sandbox attach block using it is refused
+    /// `NotFound` — the token never becomes a general "my own binary"
+    /// spawn convenience.
+    #[test]
+    fn spawn_self_token_refuses_a_non_sandbox_spawn() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace_with_attach(rustos_abi::SPAWN_SELF, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_spawn_path(SPAWN_PATH.to_vec());
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        );
+
+        assert_eq!(
+            h.spawn(&ctx, 0x1000, rustos_abi::SPAWN_SELF.len(), 0, 0, 0, 0),
+            Err(Errno::NotFound)
+        );
+    }
+
+    /// A caller whose record carries no spawnable path (a boot principal,
+    /// a kernel thread) cannot use the `@self` token even for a sandbox
+    /// spawn: there is nothing attested to substitute, so the request
+    /// fails closed with `NotFound`.
+    #[test]
+    fn spawn_self_token_refuses_a_caller_without_a_spawnable_path() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let attach = SpawnAttach::sandbox([FdWire::Closed; rustos_abi::STD_STREAM_COUNT]);
+        let (space, physmap) = send_aspace_with_attach(rustos_abi::SPAWN_SELF, &[attach]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        // No `with_spawn_path`: the record keeps the empty sentinel.
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        );
+
+        assert_eq!(
+            h.spawn(
+                &ctx,
+                0x1000,
+                rustos_abi::SPAWN_SELF.len(),
+                attach_addr(0),
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            ),
+            Err(Errno::NotFound)
+        );
     }
 
     /// Attach-block wiring is validated fail-closed before any child

@@ -15,12 +15,24 @@ budget is reported, never silently "not found"). It then renders that
 bundle's document in the active locale through
 the one shared help engine (`lib/help`).
 
+The document itself is **never parsed in `man`'s own process**: it is
+foreign bundle content, so `man` locates and reads it with its own file
+authority (`rustos_help::load_raw`, the same one locale walk `load`
+wraps) and hands the raw bytes to a minimum-capability parser-sandbox
+worker (`rustos_sandbox::helpdoc` — `man`'s own binary re-spawned,
+`CAP_PROC_SPAWN` in its manifest). Only the whitelist-validated render
+comes back (printable text, line feeds, the bold/underline SGR pairs);
+a crashed or hostile worker costs the page — the typed
+`ManError::Render`, no in-process fallback — and `-h` degrades to the
+usage banner (`docs/src/security/sandbox.md`).
+
 The crate is `no_std` + `alloc`, forbids `unsafe`, and has no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
 dependencies are the audited `rustos-abi` crate and the shared
-`rustos-cmdres` / `rustos-help` / `rustos-vt` engines, so it never links a
-kernel or driver crate (`AGENTS.md` §17.4) and defines no second resolution
-policy, locale walker, or escape vocabulary (`AGENTS.md` §2.2).
+`rustos-cmdres` / `rustos-help` / `rustos-sandbox` / `rustos-log`
+engines, so it never links a kernel or driver crate (`AGENTS.md` §17.4)
+and defines no second resolution policy, locale walker, or escape
+vocabulary (`AGENTS.md` §2.2).
 
 ## Usage
 

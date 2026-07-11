@@ -1523,8 +1523,9 @@ dependencies = [
  "rustos-abi",
  "rustos-cmdres",
  "rustos-help",
+ "rustos-log",
  "rustos-rt",
- "rustos-vt",
+ "rustos-sandbox",
 ]
 
 [[package]]
@@ -1703,8 +1704,10 @@ dependencies = [
  "rustos-binfmt",
  "rustos-disasm",
  "rustos-fuzzseed",
+ "rustos-help",
  "rustos-log",
  "rustos-rt",
+ "rustos-vt",
 ]
 
 [[package]]

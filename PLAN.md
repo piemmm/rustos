@@ -3230,13 +3230,11 @@ deliverables (where they conflict, §19 wins) and follows the same shrink-only,
 fail-closed discipline as §17; each item lands with its own tests + docs.
 
 **Standing directive (owner):** every *independent* burn-down item
-(1, 3, 4, 5, 6, 7, 8, 11, 13) is **landed and verified green**. Items (2, 10)
-are **stage-blocked** and carry a binding **[DO IMMEDIATELY ON UNBLOCK]**
-order — the session that lands the prerequisite stage must complete the
-matching §19 item before other Stage work proceeds. Item 9 is **unblocked**
-(its prerequisite, Stage 6, is complete) and is staged for full delivery by
-`.junie/fstree-next-plan.md` S8; item 12 stays aspirational per charter
-§19.7/§19.8.
+(1, 3, 4, 5, 6, 7, 8, 9, 11, 13) is **landed and verified green**. Items
+(2, 10) are **stage-blocked** and carry a binding **[DO IMMEDIATELY ON
+UNBLOCK]** order — the session that lands the prerequisite stage must
+complete the matching §19 item before other Stage work proceeds; item 12
+stays aspirational per charter §19.7/§19.8.
 
 Landed (done):
 - §19.1 side channels — per-port `SideChannelMitigation` honest profiles
@@ -3363,9 +3361,42 @@ Unblocked — in progress (`.junie/fstree-next-plan.md` S8):
   (`tests/integration/sandbox_program` + `sandbox_qemu_aarch64`): decode
   of valid/malformed inputs through a real sandboxed worker, real-process
   crash containment, and the syscall wall probed from inside. Docs:
-  `docs/src/security/sandbox.md`. Remaining (staged
-  `.junie/fstree-next-plan.md` S8c): the sweep moving the remaining
-  in-tree untrusted-input parsers behind the facility.
+  `docs/src/security/sandbox.md`. The **parser sweep is complete** (S8c):
+  every in-tree parser of untrusted input is enumerated below with its
+  §19.5 posture, and every live userland parse of foreign data runs
+  behind the facility.
+  - **Behind the facility:** `lib/binfmt` + `lib/disasm` (the S8b decode
+    service, above), and the `lib/help` document parse+render
+    (`rustos_sandbox::helpdoc`): `man` locates a *foreign* bundle's
+    document with its own file authority (`rustos_help::load_raw`, the
+    same one locale walk `load` uses), hands the raw bytes to a sandboxed
+    worker (its own binary re-spawned, `CAP_PROC_SPAWN` in its manifest),
+    and re-validates the reply against the closed render-op whitelist
+    (printable text, line feeds, bold/underline SGR) — a hostile reply is
+    refused whole, a document-parse error round-trips typed
+    (`fuzz_sandbox` covers both directions). A command's `-h` render of
+    its **own** bundle's document (`lib/help` `own_short_help`) parses
+    content from its own signed bundle — the same trust as its own code —
+    under the engine's fail-closed bounds.
+  - **The process is the sandbox:** the `userland/net/icmp` decode engine
+    (ARP/IPv4/ICMP) is bounded, total, and fuzzed (`fuzz_parse`); its
+    service process, when spawned, holds only its NIC-queue authority — a
+    dedicated minimum-capability address space per §19.5.
+  - **No runtime untrusted consumer yet (sandboxed with their consuming
+    stage):** `lib/svg` (with `lib/icon`/`lib/cursor`) decodes only
+    OS-authored theme assets today and has no runtime file-reading
+    consumer; the §10 sandboxed asset decode lands with the desktop asset
+    pipeline (`plans/DISPLAY.md`). The fstree disassembly viewer (S9)
+    runs only over the S8b decode service.
+  - **Outside §19.5's userland-parser scope, hardened in place:**
+    kernel/boot-side parsers of platform data (`lib/fdt`, ACPI,
+    `lib/partition`, `lib/fsprobe`, the filesystem drivers' on-disk
+    formats) are fail-closed, §24.4-bounded, and fuzzed where reachable;
+    their process isolation is the user-space driver model
+    (`plans/fixdrivers.md`, `plans/DRIVES.md`). Parsers of the user's own
+    typed input (`lib/vt`, `lib/glob`, `lib/path`, `lib/resref`,
+    `lib/cmdres`) parse the caller's own keystrokes, not foreign data,
+    and stay fail-closed and bounded.
   Its first consumers exist: `lib/binfmt` (`rustos-binfmt`, done —
   `.junie/fstree-next-plan.md` S6) is the read-only executable-container
   decoder: typed, borrowed, fail-closed views of the `rxe` load image +

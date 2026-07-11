@@ -278,6 +278,21 @@ pub struct Loaded {
     pub doc: HelpDoc,
 }
 
+/// A located help document whose bytes have **not** been parsed.
+///
+/// This is the [`load_raw`] result a caller uses when the parse must run
+/// somewhere else — inside a minimum-capability parser sandbox
+/// (`lib/sandbox`), where the untrusted bytes are handed over whole and
+/// only a validated render comes back. The locale walk and the size bound
+/// have already been applied; the bytes are otherwise untouched.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RawLoaded {
+    /// Which locale served the document.
+    pub selection: Selection,
+    /// The document's raw bytes, at most [`MAX_DOC_LEN`] of them.
+    pub bytes: Vec<u8>,
+}
+
 /// Why [`load`] failed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LoadError {
@@ -333,14 +348,35 @@ pub fn load(
     requested: &Locale,
     name: &DocumentName,
 ) -> Result<Loaded, LoadError> {
+    let raw = load_raw(source, requested, name)?;
+    let doc = HelpDoc::parse(&raw.bytes)?;
+    Ok(Loaded {
+        selection: raw.selection,
+        doc,
+    })
+}
+
+/// Locate and read `name`'s document for `requested` — the same
+/// deterministic fallback chain as [`load`] — **without parsing it**.
+///
+/// The one locale walk serves both entry points: [`load`] is this plus
+/// [`HelpDoc::parse`]. A caller that must run the parse in a sandbox
+/// process uses this to fetch the bytes with its own file authority and
+/// hands them to the sandboxed parser; only the size bound
+/// ([`MAX_DOC_LEN`]) has been enforced on the returned bytes.
+pub fn load_raw(
+    source: &dyn HelpSource,
+    requested: &Locale,
+    name: &DocumentName,
+) -> Result<RawLoaded, LoadError> {
     let file = name.file_name();
 
     if !requested.is_default() {
         if let Some(bytes) = read_bounded(source, requested.as_str(), &file)? {
-            return finish(requested.as_str(), Fallback::Exact, &bytes);
+            return Ok(raw_loaded(requested.as_str(), Fallback::Exact, bytes));
         }
         if let Some((dir, bytes)) = read_same_language(source, requested, &file)? {
-            return finish(&dir, Fallback::SameLanguage, &bytes);
+            return Ok(raw_loaded(&dir, Fallback::SameLanguage, bytes));
         }
     }
 
@@ -351,7 +387,7 @@ pub fn load(
             } else {
                 Fallback::Default
             };
-            finish(DEFAULT_LOCALE, fallback, &bytes)
+            Ok(raw_loaded(DEFAULT_LOCALE, fallback, bytes))
         }
         None => Err(LoadError::NotFound),
     }
@@ -404,14 +440,13 @@ fn read_bounded(
     }
 }
 
-/// Parse the served bytes and assemble the result.
-fn finish(locale_dir: &str, fallback: Fallback, bytes: &[u8]) -> Result<Loaded, LoadError> {
-    let doc = HelpDoc::parse(bytes)?;
-    Ok(Loaded {
+/// Assemble the unparsed result.
+fn raw_loaded(locale_dir: &str, fallback: Fallback, bytes: Vec<u8>) -> RawLoaded {
+    RawLoaded {
         selection: Selection {
             locale_dir: String::from(locale_dir),
             fallback,
         },
-        doc,
-    })
+        bytes,
+    }
 }

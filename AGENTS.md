@@ -745,8 +745,10 @@ rustos/
 │   │                    #   spawn mode — length-framed protocol, worker serve
 │   │                    #   loop, crash containment (typed error, replaced
 │   │                    #   worker, stable log events), the in-process
-│   │                    #   loopback fake for host tests, and the sandboxed
-│   │                    #   lib/binfmt + lib/disasm decode service (§2.2).
+│   │                    #   loopback fake for host tests, the sandboxed
+│   │                    #   lib/binfmt + lib/disasm decode service, and the
+│   │                    #   sandboxed lib/help render service (helpdoc: the
+│   │                    #   whitelist-validated page `man` shows) (§2.2).
 │   ├── seat/            # Arch-neutral seat model (plans/DISPLAY.md): the
 │   │                    #   exclusive, owner-tracked, revocable lease on one
 │   │                    #   display + keyboard + pointer and its input-routing

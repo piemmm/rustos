@@ -70,9 +70,9 @@ pub use doc::{
 #[cfg(feature = "lint")]
 pub use lint::{lint_help_trees, LintDoc};
 pub use locale::{
-    load, DocumentName, Fallback, HelpSource, LoadError, Loaded, Locale, NameError, Selection,
-    SourceError, TagError, DEFAULT_LOCALE, MAX_DOCUMENT_NAME_LEN, MAX_LOCALE_DIRS, MAX_LOCALE_LEN,
-    REQUIRED_LOCALES,
+    load, load_raw, DocumentName, Fallback, HelpSource, LoadError, Loaded, Locale, NameError,
+    RawLoaded, Selection, SourceError, TagError, DEFAULT_LOCALE, MAX_DOCUMENT_NAME_LEN,
+    MAX_LOCALE_DIRS, MAX_LOCALE_LEN, REQUIRED_LOCALES,
 };
 pub use own::own_short_help;
 #[cfg(feature = "rt")]

@@ -9,11 +9,39 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use rustos_abi::Errno;
+use rustos_log::{Event, Sink};
+use rustos_sandbox::helpdoc::{HelpRenderFailure, HelpService};
+use rustos_sandbox::host::ParserSandbox;
+use rustos_sandbox::loopback::LoopbackLauncher;
+use rustos_sandbox::worker::Service;
 
-use crate::client::{run, Request, USAGE};
+use crate::client::{Request, USAGE};
 use crate::command::Command;
 use crate::error::ManError;
 use crate::io::{BundleStore, Console};
+
+/// Discards every logged event (the loopback happy paths log nothing).
+struct NullSink;
+
+impl Sink for NullSink {
+    fn write_event(&self, _event: &Event<'_>) {}
+}
+
+/// Drive [`crate::client::run`] over a fresh in-process loopback sandbox
+/// running the real [`HelpService`] — the host-test stand-in for the `Run`
+/// binary's re-spawned worker process.
+fn run(
+    command: &Command,
+    request: &Request<'_>,
+    store: &dyn BundleStore,
+    console: &dyn Console,
+) -> Result<(), ManError> {
+    let mut sandbox = ParserSandbox::new(
+        LoopbackLauncher::new(HelpService::default as fn() -> HelpService),
+        NullSink,
+    );
+    crate::client::run(command, request, store, console, &mut sandbox)
+}
 
 /// A minimal well-formed Help document for `ps`.
 const PS_DOC: &str = "## NAME\n\nps — list processes\n\n## SYNOPSIS\n\n`ps [-e]`\n\n## DESCRIPTION\n\nLists the caller's processes.\n";
@@ -621,5 +649,61 @@ fn short_help_falls_back_to_the_usage_banner_without_its_bundle() {
     let store = FixtureStore::with_ps();
     let console = FixtureConsole::stream();
     run(&Command::ShortHelp, &Request::default(), &store, &console).expect("usage banner");
+    assert!(console.output().contains(USAGE));
+}
+
+/// A hostile renderer: frames terminal-control noise as its render reply,
+/// exactly as a compromised worker process could.
+struct EvilRenderer;
+
+impl Service for EvilRenderer {
+    fn handle(&mut self, _request: &[u8]) -> Vec<u8> {
+        // REPLY_RENDER (tag 1) framing a screen-clear escape: the client's
+        // whitelist must refuse it whole.
+        let payload = b"safe\x1b[2Jtext";
+        let mut reply = alloc::vec![1u8];
+        reply.extend_from_slice(&u32::try_from(payload.len()).expect("short").to_le_bytes());
+        reply.extend_from_slice(payload);
+        reply
+    }
+}
+
+#[test]
+fn a_hostile_renderer_withholds_the_page_and_reports_it() {
+    let store = FixtureStore::with_ps();
+    let console = FixtureConsole::stream();
+    let mut sandbox = ParserSandbox::new(LoopbackLauncher::new(|| EvilRenderer), NullSink);
+    let err = crate::client::run(
+        &page("ps"),
+        &Request::default(),
+        &store,
+        &console,
+        &mut sandbox,
+    )
+    .unwrap_err();
+    assert_eq!(err, ManError::Render(HelpRenderFailure::ReplyMalformed));
+    assert!(
+        console.output().is_empty(),
+        "no byte of a disbelieved render may reach the console"
+    );
+}
+
+#[test]
+fn short_help_degrades_to_the_usage_banner_when_the_renderer_is_hostile() {
+    let mut store = FixtureStore::with_ps();
+    store.bundles.push(Bundle {
+        dir: "/System/Apps/man.app",
+        docs: alloc::vec![("en-US", "man.md", MAN_DOC)],
+    });
+    let console = FixtureConsole::stream();
+    let mut sandbox = ParserSandbox::new(LoopbackLauncher::new(|| EvilRenderer), NullSink);
+    crate::client::run(
+        &Command::ShortHelp,
+        &Request::default(),
+        &store,
+        &console,
+        &mut sandbox,
+    )
+    .expect("degrades to the usage banner");
     assert!(console.output().contains(USAGE));
 }

@@ -22,6 +22,12 @@ here once and every consumer imports them.
   document, then the canonical `en-US/`. Reports which locale served (`Selection`) so
   `man` can surface a fallback on `stdinfo`; a missing document is a typed
   `NotFound`, never fabricated text.
+- `load_raw(source, requested, name)` — the same single locale walk without
+  the parse: the size-bounded raw bytes plus the `Selection`, for a caller
+  that must run the parse somewhere else — `man` hands them to the
+  `lib/sandbox` `helpdoc` worker so a foreign bundle's document is never
+  parsed in its own process (`docs/src/security/sandbox.md`). `load` is
+  `load_raw` + `HelpDoc::parse`; the walk has one definition.
 - `HelpDoc::parse` — the bounded structured-Markdown parser: the closed,
   ordered `## NAME` … `## SEE ALSO` section set with paragraphs, `###`
   sub-headings, bullet/ordered lists (with two-space continuation lines),
