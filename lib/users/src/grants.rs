@@ -39,21 +39,36 @@ use rustos_caps::CapabilitySet;
 /// * `CAP_CONSOLE_WRITE` / `CAP_CONSOLE_READ` — an interactive session's
 ///   inherited standard streams are console-backed; the fine authority
 ///   stays the inherited descriptor table.
+/// * `CAP_DISPLAY` / `CAP_INPUT_READ` / `CAP_SHM` — the graphical session
+///   class (`plans/CAPABILITY_USE.md` §4.6): acquiring a seat's exclusive,
+///   revocable display lease, draining the *owned* seat's input channels,
+///   and creating/granting the zero-copy frame region the display service
+///   maps. The class capability only admits the syscall; the kernel still
+///   owner-gates every acquire, drain, and present against the live lease
+///   and every region against its owner, so a baseline holder gains no
+///   reach into another session's seat or memory. Granted in the baseline
+///   because a graphical login is an ordinary session, not an
+///   administrative act; on a headless build there is no seat to acquire
+///   and the grants are inert.
 ///
 /// Nothing else is baseline: self-scoped `sysinfo` queries, `stream_*` on
 /// inherited descriptors, lowering one's own resource limits, and
 /// `fs_getcwd` already require no capability. A sandboxed process still
 /// gets none of this, because its manifest requests none of it.
 ///
-/// This list is also the `Shell` session program's whole manifest request
-/// (`kernel/rustos-kernel/src/program_manifests.rs`): the shell requests
-/// exactly the baseline, so its effective set under any account is
-/// `baseline ∩ ceiling`.
+/// This is an **account ceiling**, never any program's manifest: each
+/// program requests exactly its own exercised set (the shell's is the
+/// kernel's `SHELL_MANIFEST`, which stays strictly within this ceiling;
+/// the desktop session's is the graphical class), and the intersection
+/// with this ceiling does the security work.
 pub const SESSION_BASELINE: &[CapabilityId] = &[
     CapabilityId::FS_ACCESS,
     CapabilityId::PROC_SPAWN,
     CapabilityId::CONSOLE_WRITE,
     CapabilityId::CONSOLE_READ,
+    CapabilityId::DISPLAY,
+    CapabilityId::INPUT_READ,
+    CapabilityId::SHM,
 ];
 
 /// The administrative set: the grants an administrator account carries on
@@ -122,12 +137,15 @@ mod tests {
     #[test]
     fn session_baseline_is_pinned() {
         let set = session_baseline();
-        assert_eq!(set.len(), 4);
+        assert_eq!(set.len(), 7);
         for cap in [
             CapabilityId::FS_ACCESS,
             CapabilityId::PROC_SPAWN,
             CapabilityId::CONSOLE_WRITE,
             CapabilityId::CONSOLE_READ,
+            CapabilityId::DISPLAY,
+            CapabilityId::INPUT_READ,
+            CapabilityId::SHM,
         ] {
             assert!(set.contains(cap), "{cap:?} missing from the baseline");
         }
@@ -136,7 +154,7 @@ mod tests {
     #[test]
     fn administrator_ceiling_is_pinned() {
         let set = administrator_ceiling();
-        assert_eq!(set.len(), 13);
+        assert_eq!(set.len(), 16);
         for cap in SESSION_BASELINE {
             assert!(set.contains(*cap), "{cap:?} missing from the ceiling");
         }

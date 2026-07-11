@@ -388,9 +388,7 @@ default.
 
 ### Stage D7 — the display-client present path (the graphical session goes live)
 
-**Status: in progress — D7a, D7b, and D7c done; D7d's first stage
-(the display-world autoload vertical) is done, its second (login flip +
-session spawn + pixel readback) is next.** D1–D6 made the seat an
+**Status: done — D7a–D7d complete.** D1–D6 made the seat an
 enforced, revocable kernel object and derived the present right from the
 live lease — but the only presenters so far are kernel-side fixtures. D7 is the
 missing transport: a user-space window-manager session presenting
@@ -522,28 +520,55 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
   90–97, owner-checked `display_release` on every exit path — never a
   spin or a blind repaint. The bundle's image planting and spawn ride
   D7d.
-- **D7d — end to end. `[~]` — first stage done.** The autoload QEMU
-  vertical world is a *display* world: the aarch64 boot publishes the
-  ramfb scan-out surface as a boot display node (a
-  `HwResourceKind::Framebuffer` grant + `simple-framebuffer` match key),
-  the signed framebuffer-service bundle is discovered in the on-volume
-  store and spawned onto that node's grants, and the vertical proves —
-  with the whole dialogue typed at the seat keyboard, since the video
-  console is the only console — the typed passphrase unlocking the root,
-  both per-kind `INPUT_DELIVERED` witnesses from the autoloaded
-  user-space input drivers, and the service's `DISPLAY_ENDPOINT` bind
-  under `CAP_IPC_BIND_PRIVILEGED`. Landed with it: the drvrt host maps
-  `Framebuffer` grants; the per-task MMIO/shared window ceilings are the
-  reserved 1 GiB spans with lazily grown, fail-closed bookkeeping (a
-  scan-out surface no longer OOMs a 1 MiB hand ceiling); and fixture
-  build scripts register the inner build's dep-info so an embedded
-  driver bundle can never go stale (`tests/integration/harness`
-  `dep_info`). **Remaining (D7d-2):** `userland/session/login` flips
-  `graphical_available` when (and only when) the display service and
-  session bundles are present, spawns the D7c session, and the vertical
-  grows the scan-out pixel readback (host-side screendump) proving the
-  composited frame reached the surface (`plans/PI.md` P10's final step
-  rides this).
+- **D7d — end to end. `[x]` — done.** The autoload QEMU vertical world
+  is a *display* world: the aarch64 boot publishes the ramfb scan-out
+  surface as a boot display node (a `HwResourceKind::Framebuffer` grant
+  + `simple-framebuffer` match key), the signed framebuffer-service
+  bundle is discovered in the on-volume store and spawned onto that
+  node's grants, and the vertical proves — with the whole dialogue typed
+  at the seat keyboard, since the video console is the only console —
+  the typed passphrase unlocking the root, both per-kind
+  `INPUT_DELIVERED` witnesses from the autoloaded user-space input
+  drivers, and the service's `DISPLAY_ENDPOINT` bind under
+  `CAP_IPC_BIND_PRIVILEGED`. Landed with the first stage: the drvrt host
+  maps `Framebuffer` grants; the per-task MMIO/shared window ceilings
+  are the reserved 1 GiB spans with lazily grown, fail-closed
+  bookkeeping; and fixture build scripts register the inner build's
+  dep-info (`tests/integration/harness` `dep_info`).
+  **D7d-2 (the graphical login) guarantees:**
+  - `userland/session/login` probes per round — a read-only `fs_open` of
+    `DESKTOP_SESSION_PATH` (`rustos_login::session`, the one spelling of
+    `/System/Services/desktop.app/Run`) plus one `Query` `ipc_call` to
+    the reserved `DISPLAY_ENDPOINT` (any well-formed reply proves a
+    privileged-bound service; `NotFound` proves none) — and offers the
+    graphical choice only when both hold; a graphical choice spawns the
+    D7c session as the authenticated user (`session_program`). Login's
+    manifest gained `CAP_FS_ACCESS` for exactly that probe (AppInfo +
+    kernel pin in lockstep).
+  - The CU6 ceiling slice: `SESSION_BASELINE` carries the
+    graphical-session class (`CAP_DISPLAY`/`CAP_INPUT_READ`/`CAP_SHM`),
+    so `desktop.app`'s manifest survives the `manifest ∩ ceiling`
+    intersection for every interactive account; the shell's manifest was
+    decoupled to its own exercised set (`SHELL_MANIFEST`) so the wider
+    baseline never widens elsh.
+  - The display service's engine latches `has_presented()` and the `Run`
+    binary emits the one-shot `FIRST_PRESENT` record (`EventId` 15001,
+    range `15000..16000` in the driver crate's lib target, message
+    shared with every consumer; manifest += `CAP_LOG_EMIT` at both plant
+    sites) after the first successful client present — off the hot path.
+  - The vertical types `root`/`root` + `g` (a second marker-gated
+    typed-keys step keyed on the `UsersDbLoaded` serial witness; the
+    dialogue is compile-time-pinned to the fixture credentials), and the
+    runner keys **both** a QEMU-monitor screendump and the mouse
+    injection on the `FIRST_PRESENT` marker, ordered present → fully
+    parsed dump → pointer → `kind=pointer` witness → PASS, then asserts
+    the dump's dominant colour is the shared theme's desktop colour
+    (`rustos_theme`, never a literal) at ≥ 50% share — the host-side
+    proof the composited frame reached scan-out (`tools/qemu` grew the
+    typed-keys script, the verified `Screendump` step, and the
+    fail-closed PPM decoder `screendump::parse_ppm`; an unverified
+    requested dump fails the run even on a guest PASS).
+  `plans/PI.md` P10's final step rides this landing.
 
 **Explicitly not in D7:** a GPU/3D or video-decode pipeline (the
 protocol's damage + direct-scanout shape is designed so those extend it

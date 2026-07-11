@@ -1,11 +1,16 @@
-//! Canonical bind table of the framebuffer display service.
+//! Canonical bind table and log-event vocabulary of the framebuffer
+//! display service.
 //!
 //! The `Run` binary (`src/main.rs`) is the service itself; this
-//! host-buildable lib target carries only the crate's canonical
+//! host-buildable lib target carries the crate's canonical
 //! [`BIND_KEYS`] — the single source of truth the signed-manifest bind
 //! table is authored from (`tools/xtask` `image_drivers`, the autoload
 //! fixtures) and `devmgr` (or the in-kernel bootstrap-floor autoload)
-//! resolves a discovered display node against.
+//! resolves a discovered display node against — and the service's stable
+//! [`rustos_log::EventId`] constants ([`FIRST_PRESENT`]), so the emitting
+//! binary and every log consumer (the D7d QEMU vertical keys its
+//! host-side scan-out readback on the rendered [`FIRST_PRESENT_MESSAGE`])
+//! share one definition.
 //!
 //! The match key is the canonical `simple-framebuffer` model name
 //! ([`SIMPLE_FRAMEBUFFER_COMPATIBLE`]) a platform's boot path publishes
@@ -20,6 +25,28 @@
 #![deny(missing_docs)]
 
 use rustos_abi::{DriverBindKey, HwMatchKey, SIMPLE_FRAMEBUFFER_COMPATIBLE};
+use rustos_log::EventId;
+
+/// Range start (inclusive) reserved for the display service's event
+/// identifiers. Per `lib/log` convention every subsystem owns a
+/// 1 000-wide reserved range; the display service occupies
+/// `15000..16000` (adjacent to `seatmgr`'s `14000..15000`). Once shipped
+/// the numeric values must never be re-used or re-numbered.
+pub const DISPLAY_SERVICE_RANGE_START: u32 = 15_000;
+/// Range end (exclusive) reserved for display-service event identifiers.
+pub const DISPLAY_SERVICE_RANGE_END: u32 = 16_000;
+
+/// One-shot: the first client frame was successfully presented to the
+/// scan-out surface since this service started — the operational witness
+/// that the session → display-service → surface path is live end to end
+/// (`plans/DISPLAY.md` D7d). Emitted at most once per service lifetime,
+/// off the present hot path (a latched fact checked after the reply).
+pub const FIRST_PRESENT: EventId = EventId(15_001);
+
+/// The exact message [`FIRST_PRESENT`] is emitted with. A log consumer
+/// (the D7d vertical's host runner) keys on this rendered text, so it is
+/// defined once beside the id and imported by both sides.
+pub const FIRST_PRESENT_MESSAGE: &str = "first client frame presented to scan-out";
 
 /// The bind priority [`BIND_KEYS`] carries. An exact `compatible`-string
 /// match ranks at the concrete-identity tier alongside the other
@@ -59,5 +86,10 @@ mod tests {
     fn an_unrelated_compatible_does_not_match() {
         let other = HwMatchKey::compatible(b"virtio,mmio").expect("fits");
         assert!(!BIND_KEYS[0].key.matches(&other));
+    }
+
+    #[test]
+    fn the_event_ids_are_inside_the_reserved_range() {
+        assert!((DISPLAY_SERVICE_RANGE_START..DISPLAY_SERVICE_RANGE_END).contains(&FIRST_PRESENT.0));
     }
 }

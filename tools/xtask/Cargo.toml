@@ -141,3 +141,7 @@ rustos-drv-input-virtio-input = { path = "../../drivers/input/virtio_input", ver
 rustos-drv-display-framebuffer = { path = "../../drivers/display/framebuffer", version = "=0.0.0" }
 rustos-drv-storage-usb-msd = { path = "../../drivers/storage/usb_msd", version = "=0.0.0" }
 rustos-drv-storage-volmgr = { path = "../../drivers/storage/volmgr", version = "=0.0.0" }
+# The shared desktop theme definition: the display vertical's screendump
+# assert compares the dumped scan-out against the theme's own desktop
+# colour, so the expected pixels have one definition (never a literal).
+rustos-theme = { path = "../../lib/theme", version = "=0.0.0" }

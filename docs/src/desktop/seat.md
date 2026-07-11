@@ -351,9 +351,15 @@ Both `Run` binaries hosting those halves are live (stages D7b–D7c):
   reserved exit code, an owner-checked release); it never spins or
   repaints without a live lease.
 
-The end-to-end QEMU vertical (the autoload world growing the display
-node, the framebuffer service bundle, and the spawned session, plus
-login's `graphical_available` flip) is stage D7d (`plans/DISPLAY.md`).
+Stage D7d (`plans/DISPLAY.md`) proves the whole chain end to end in the
+autoload QEMU vertical: the boot display node, the autoloaded framebuffer
+service, login's per-round `graphical_available` probes (the desktop
+bundle on disk plus a live display service at the reserved endpoint), the
+`root`/`root` + `g` dialogue typed at the seat keyboard, the spawned
+session's first present — witnessed by the service's one-shot
+`FIRST_PRESENT` record — and a host-side QEMU screendump asserted to be
+dominated by the theme's desktop colour, so the composited frame
+demonstrably reached the scan-out surface.
 
 ## Observing seats
 

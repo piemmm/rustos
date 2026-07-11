@@ -403,8 +403,9 @@ pub fn build_virtio_kbd_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
 /// (`plans/DISPLAY.md` D7b/D7d): it maps its granted scan-out surface
 /// (`CAP_MMIO_MAP` — the geometry rides the node's `Framebuffer`
 /// resource), maps each session's granted frame region at `Configure`
-/// (`CAP_SHM`), and binds the reserved `DISPLAY_ENDPOINT` rendezvous
-/// (`CAP_IPC_BIND_PRIVILEGED`) — and nothing more. Every present is gated
+/// (`CAP_SHM`), binds the reserved `DISPLAY_ENDPOINT` rendezvous
+/// (`CAP_IPC_BIND_PRIVILEGED`), and emits its one-shot first-present
+/// record (`CAP_LOG_EMIT`) — and nothing more. Every present is gated
 /// kernel-side on the caller's live seat lease (`call_peer_seat`, no
 /// capability — the authority is serving the in-flight call). Carries
 /// `rustos_drv_display_framebuffer::BIND_KEYS`, so it autoloads against
@@ -422,6 +423,7 @@ pub fn build_framebuffer_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
             CapabilityId::MMIO_MAP,
             CapabilityId::SHM,
             CapabilityId::IPC_BIND_PRIVILEGED,
+            CapabilityId::LOG_EMIT,
         ],
         rustos_drv_display_framebuffer::BIND_KEYS,
     )

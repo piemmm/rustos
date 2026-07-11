@@ -29,6 +29,9 @@ workspace = true
 # `sole_framebuffer` grant resolver.
 [dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The stable EventId vocabulary the lib target defines (FIRST_PRESENT) and
+# the freestanding binary emits its one-shot record through.
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 # Everything else the freestanding program links is pulled in only for the
 # bare-metal targets the binary is actually built for; on the host the binary

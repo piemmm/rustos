@@ -35,7 +35,7 @@ use crate::program_manifests::INIT_MANIFEST;
 #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
 use crate::program_manifests::{
     CAT_MANIFEST, CLEAR_MANIFEST, DEVMGR_MANIFEST, LOGIN_MANIFEST, LS_MANIFEST, MAN_MANIFEST,
-    PS_MANIFEST, RESET_MANIFEST, SEATMGR_MANIFEST, SESSION_BASELINE, SYSINFOD_MANIFEST,
+    PS_MANIFEST, RESET_MANIFEST, SEATMGR_MANIFEST, SHELL_MANIFEST, SYSINFOD_MANIFEST,
     SYSINFO_MANIFEST, TOP_MANIFEST, USERS_TOOL_MANIFEST,
 };
 
@@ -143,7 +143,7 @@ pub static SPAWN_PROGRAMS: [EmbeddedProgram; 14] = [
     EmbeddedProgram {
         path: SHELL_PATH,
         rxe: SHELL_RXE,
-        caps: SESSION_BASELINE,
+        caps: SHELL_MANIFEST,
         args: &[b"shell"],
     },
     EmbeddedProgram {

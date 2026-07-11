@@ -1,10 +1,11 @@
 # Signed-AppInfo manifest source for the `elsh` shell command app
 # (plans/APPS.md deliverable 8). Discovered by the build's app-bundle
 # composer; the capability list is the bundle's request, intersected with
-# the launching user's grants. The request is exactly the session baseline
-# (lib/users SESSION_BASELINE): the console pair for the REPL, spawn for
-# launching commands, and filesystem access for the working-directory and
-# redirection seams.
+# the launching user's grants. The request is exactly the shell's own
+# exercised set (the kernel SHELL_MANIFEST pin): the console pair for the
+# REPL, spawn for launching commands, and filesystem access for the
+# working-directory and redirection seams — not the wider account
+# baseline, whose graphical-session class the shell never exercises.
 id = "os.rustos.elsh"
 name = "elsh"
 version = "0.1.0"

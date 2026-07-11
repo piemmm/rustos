@@ -51,6 +51,11 @@ mode-setting on programmable controllers is a separate driver class
 - `CAP_SHM` — mapping the client's granted frame region at `Configure`.
 - `CAP_IPC_BIND_PRIVILEGED` — binding the reserved `DISPLAY_ENDPOINT`
   rendezvous, so a squatter cannot intercept presents.
+- `CAP_LOG_EMIT` — the one-shot `FIRST_PRESENT` diagnostic record
+  (`EventId` 15001), emitted after the first client frame reaches the
+  scan-out surface: the operational witness that the session → service →
+  surface path is live, checked after the reply so the present hot path
+  pays nothing.
 
 The service runs in user space; it does **not** request
 `CAP_DRV_KERNEL`. Every present — `Query` included — is gated on the

@@ -60,6 +60,7 @@ use std::time::{Duration, Instant};
 pub mod aarch64;
 pub mod disk;
 pub mod riscv64;
+pub mod screendump;
 pub mod x86_64;
 
 /// Byte the kernel writes to its architecture-specific debug-exit device to
@@ -248,6 +249,33 @@ pub struct PointerInjection {
     pub dy: i32,
 }
 
+/// A deterministic, marker-gated screendump request — the host-side
+/// scan-out readback of a display vertical.
+///
+/// A guest cannot observe its own scan-out after a present (the frame
+/// left its address space), so the *host* takes the evidence: once
+/// [`ready_marker`](Self::ready_marker) has appeared the runner sends one
+/// `screendump <path>` through the QEMU monitor, which writes the current
+/// display surface as a binary PPM ([`screendump::parse_ppm`]). The dump
+/// is then read back and fully parsed before any requested pointer
+/// injection is allowed to fire, so a PASS chain that ends on the pointer
+/// witness cannot outrun the dump and the file can never be truncated by
+/// the guest exiting first. The caller asserts the decoded pixels after
+/// the run.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Screendump {
+    /// Serial-console substring the runner waits for before dumping —
+    /// typically the guest's own witness that the frame of interest
+    /// reached the scan-out surface.
+    pub ready_marker: String,
+    /// How many times [`ready_marker`](Self::ready_marker) must appear
+    /// before the dump is taken (minimum 1).
+    pub ready_occurrences: u32,
+    /// Host path the PPM image is written to (by QEMU) and read back
+    /// from (by the runner and the asserting caller).
+    pub path: PathBuf,
+}
+
 /// One step of a deterministic serial-input script for an interactive
 /// vertical.
 ///
@@ -368,12 +396,14 @@ pub struct Spec {
     /// serial console. `None` attaches no input device. Used by the
     /// aarch64 virtio-input vertical; other arches ignore it today.
     pub input_keyboard: Option<KeyInjection>,
-    /// When `Some`, attach a `virtio-keyboard-device` and type the
-    /// described text through paced monitor `sendkey`s once its readiness
-    /// marker appears — the scripted-dialogue path for a guest whose
-    /// primary console is the display, where [`Spec::serial_input`]
-    /// cannot reach. Only the aarch64 argv honours it today.
-    pub input_typing: Option<KeyTyping>,
+    /// When non-empty, attach a `virtio-keyboard-device` and type each
+    /// step's text through paced monitor `sendkey`s once that step's
+    /// readiness marker has appeared — the scripted-dialogue path for a
+    /// guest whose primary console is the display, where
+    /// [`Spec::serial_input`] cannot reach. Steps run strictly in order:
+    /// a step types only after the previous step finished *and* its own
+    /// marker was seen. Only the aarch64 argv honours it today.
+    pub input_typing: Vec<KeyTyping>,
     /// When `true`, attach a `virtio-mouse-device` after the keyboard —
     /// the same two-identical-virtio-input-nodes topology an interactive
     /// session presents — so a vertical can prove the keyboard is still
@@ -390,6 +420,13 @@ pub struct Spec {
     /// the previous step's match) before writing its line. Empty leaves
     /// stdin closed (`null`). Used by the interactive-session verticals.
     pub serial_input: Vec<SerialInjection>,
+    /// When `Some`, take one QEMU monitor `screendump` of the guest's
+    /// display once the readiness marker appears, and hold any requested
+    /// pointer injection back until the dumped image has been read back
+    /// and fully parsed — so a witness chain "present → dump → injection
+    /// → guest PASS" is strictly ordered and the dump can never be
+    /// truncated by the guest exiting. `None` takes no dump.
+    pub screendump: Option<Screendump>,
     /// How the session presents itself to a human. Only the aarch64
     /// argv honours it today.
     pub session: SessionKind,
@@ -425,10 +462,11 @@ impl Spec {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
-            input_typing: None,
+            input_typing: Vec::new(),
             input_mouse: false,
             input_pointer_move: None,
             serial_input: Vec::new(),
+            screendump: None,
             session: SessionKind::HeadlessTest,
         }
     }
@@ -463,10 +501,11 @@ impl Spec {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
-            input_typing: None,
+            input_typing: Vec::new(),
             input_mouse: false,
             input_pointer_move: None,
             serial_input: Vec::new(),
+            screendump: None,
             session: SessionKind::HeadlessTest,
         }
     }
@@ -486,10 +525,11 @@ impl Spec {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
-            input_typing: None,
+            input_typing: Vec::new(),
             input_mouse: false,
             input_pointer_move: None,
             serial_input: Vec::new(),
+            screendump: None,
             session: SessionKind::HeadlessTest,
         }
     }
@@ -571,11 +611,15 @@ impl Spec {
         self
     }
 
-    /// Attach a `virtio-keyboard-device` and type `text` through paced
-    /// monitor `sendkey`s once `ready_marker` has appeared `occurrences`
-    /// times (clamped at `>= 1`) on the serial console. Used by a vertical
-    /// whose guest console is the display: the dialogue is typed at the
-    /// seat keyboard, buffering as type-ahead until the guest reads it.
+    /// Append one typed-text step: attach a `virtio-keyboard-device` and
+    /// type `text` through paced monitor `sendkey`s once `ready_marker`
+    /// has appeared `occurrences` times (clamped at `>= 1`) on the serial
+    /// console. Call repeatedly to script a whole seat-keyboard dialogue
+    /// (passphrase → login → choice → …); the steps run strictly in
+    /// order, each gated on its own marker after the previous step
+    /// finished. Used by a vertical whose guest console is the display:
+    /// each step's characters buffer as type-ahead until the guest reads
+    /// them.
     #[must_use]
     pub fn with_typed_keys(
         mut self,
@@ -583,10 +627,30 @@ impl Spec {
         occurrences: u32,
         text: impl Into<String>,
     ) -> Self {
-        self.input_typing = Some(KeyTyping {
+        self.input_typing.push(KeyTyping {
             ready_marker: ready_marker.into(),
             ready_occurrences: occurrences.max(1),
             text: text.into(),
+        });
+        self
+    }
+
+    /// Take one monitor `screendump` of the guest display into `path`
+    /// once `ready_marker` has appeared `occurrences` times (clamped at
+    /// `>= 1`) on the serial console. Any requested pointer injection is
+    /// held back until the dumped image parses completely, so a PASS
+    /// chain ending on the pointer witness cannot outrun the dump.
+    #[must_use]
+    pub fn with_screendump(
+        mut self,
+        ready_marker: impl Into<String>,
+        occurrences: u32,
+        path: impl Into<PathBuf>,
+    ) -> Self {
+        self.screendump = Some(Screendump {
+            ready_marker: ready_marker.into(),
+            ready_occurrences: occurrences.max(1),
+            path: path.into(),
         });
         self
     }
@@ -690,8 +754,9 @@ impl Runner {
         // server-side in QEMU (created at startup, well before the guest's
         // readiness marker) and the runner connects as a client.
         let monitor = (spec.input_keyboard.is_some()
-            || spec.input_typing.is_some()
-            || spec.input_pointer_move.is_some())
+            || !spec.input_typing.is_empty()
+            || spec.input_pointer_move.is_some()
+            || spec.screendump.is_some())
         .then(MonitorSocket::reserve);
         if let Some(mon) = &monitor {
             cmd.arg("-chardev");
@@ -802,8 +867,9 @@ fn supervise(
     let SerialDrain {
         captured,
         marker_seen,
-        typing_marker_seen,
+        typing_markers_seen,
         pointer_marker_seen,
+        screendump_marker_seen,
         reader,
     } = spawn_serial_drain(&mut child, spec);
 
@@ -846,6 +912,7 @@ fn supervise(
                 serial_step,
                 injections.pointer_sent,
                 injections.typing_done(spec),
+                injections.screendump_verified(),
                 status,
             );
         }
@@ -853,8 +920,9 @@ fn supervise(
             spec,
             monitor,
             &marker_seen,
-            &typing_marker_seen,
+            &typing_markers_seen,
             &pointer_marker_seen,
+            &screendump_marker_seen,
         ) {
             let _ = child.kill();
             let _ = child.wait();
@@ -1041,11 +1109,15 @@ struct SerialDrain {
     /// Set once the key injection's readiness marker has appeared the
     /// required number of times.
     marker_seen: Arc<AtomicBool>,
-    /// Set once the typed-text injection's readiness marker has appeared
-    /// the required number of times.
-    typing_marker_seen: Arc<AtomicBool>,
+    /// One flag per typed-text step, set once that step's readiness
+    /// marker has appeared the required number of times. Index-aligned
+    /// with [`Spec::input_typing`].
+    typing_markers_seen: Vec<Arc<AtomicBool>>,
     /// Set once the pointer injection's readiness marker has appeared.
     pointer_marker_seen: Arc<AtomicBool>,
+    /// Set once the screendump's readiness marker has appeared the
+    /// required number of times.
+    screendump_marker_seen: Arc<AtomicBool>,
     /// The drain thread, joined once the child has exited.
     reader: std::thread::JoinHandle<()>,
 }
@@ -1064,8 +1136,13 @@ struct SerialDrain {
 fn spawn_serial_drain(child: &mut Child, spec: &Spec) -> SerialDrain {
     let captured = Arc::new(Mutex::new(String::new()));
     let marker_seen = Arc::new(AtomicBool::new(false));
-    let typing_marker_seen = Arc::new(AtomicBool::new(false));
+    let typing_markers_seen: Vec<Arc<AtomicBool>> = spec
+        .input_typing
+        .iter()
+        .map(|_| Arc::new(AtomicBool::new(false)))
+        .collect();
     let pointer_marker_seen = Arc::new(AtomicBool::new(false));
+    let screendump_marker_seen = Arc::new(AtomicBool::new(false));
     let reader = {
         let captured = Arc::clone(&captured);
         let stdout = child.stdout.take();
@@ -1077,15 +1154,22 @@ fn spawn_serial_drain(child: &mut Child, spec: &Spec) -> SerialDrain {
                 Arc::clone(&marker_seen),
             ));
         }
-        if let Some(t) = &spec.input_typing {
+        for (t, seen) in spec.input_typing.iter().zip(&typing_markers_seen) {
             markers.push((
                 t.ready_marker.clone(),
                 t.ready_occurrences.max(1),
-                Arc::clone(&typing_marker_seen),
+                Arc::clone(seen),
             ));
         }
         if let Some(p) = &spec.input_pointer_move {
             markers.push((p.ready_marker.clone(), 1, Arc::clone(&pointer_marker_seen)));
+        }
+        if let Some(d) = &spec.screendump {
+            markers.push((
+                d.ready_marker.clone(),
+                d.ready_occurrences.max(1),
+                Arc::clone(&screendump_marker_seen),
+            ));
         }
         std::thread::spawn(move || {
             drain_stream(stdout, &captured, &markers);
@@ -1094,8 +1178,9 @@ fn spawn_serial_drain(child: &mut Child, spec: &Spec) -> SerialDrain {
     SerialDrain {
         captured,
         marker_seen,
-        typing_marker_seen,
+        typing_markers_seen,
         pointer_marker_seen,
+        screendump_marker_seen,
         reader,
     }
 }
@@ -1205,13 +1290,28 @@ fn qkeycode_for(c: char) -> Result<String, String> {
 struct InjectionState {
     key_sent: bool,
     pointer_sent: bool,
-    /// Characters of the typed-text script already sent (`text.len()`
-    /// when done, or when no typing was requested).
-    typed: usize,
+    /// The typed-text step currently being typed (`input_typing.len()`
+    /// once every step finished, or when no typing was requested).
+    typed_step: usize,
+    /// Characters of the current step already sent.
+    typed_in_step: usize,
     /// The earliest instant the next typed key may be sent — the pacing
     /// that keeps every press/release pair distinct on the device.
     next_typed_key_at: Instant,
+    /// Progress of the requested screendump.
+    screendump: DumpState,
     conn: Option<UnixStream>,
+}
+
+/// Progress of a requested screendump, in order: the command has not been
+/// sent, it has been sent but the file has not yet parsed completely, and
+/// the dumped image has been read back and fully parsed — the state a
+/// requested pointer injection waits for.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum DumpState {
+    NotSent,
+    Sent,
+    Verified,
 }
 
 /// Milliseconds a typed key is held down (`sendkey <key> <hold>`).
@@ -1230,18 +1330,24 @@ impl InjectionState {
         Self {
             key_sent: spec.input_keyboard.is_none(),
             pointer_sent: spec.input_pointer_move.is_none(),
-            typed: 0,
+            typed_step: 0,
+            typed_in_step: 0,
             next_typed_key_at: Instant::now(),
+            screendump: DumpState::NotSent,
             conn: None,
         }
     }
 
-    /// `true` once every requested typed character has been sent.
+    /// `true` once the requested screendump has been read back and fully
+    /// parsed — the fact [`exit_reason`] requires for a spec that asked
+    /// for one.
+    fn screendump_verified(&self) -> bool {
+        self.screendump == DumpState::Verified
+    }
+
+    /// `true` once every requested typed-text step has been fully sent.
     fn typing_done(&self, spec: &Spec) -> bool {
-        // `Option::is_none_or` needs Rust 1.82; the workspace MSRV is older.
-        spec.input_typing
-            .as_ref()
-            .map_or(true, |t| self.typed >= t.text.chars().count())
+        self.typed_step >= spec.input_typing.len()
     }
 
     /// Send whichever requested injections have just become ready.
@@ -1255,8 +1361,9 @@ impl InjectionState {
         spec: &Spec,
         monitor: Option<&MonitorSocket>,
         key_seen: &AtomicBool,
-        typing_seen: &AtomicBool,
+        typing_seen: &[Arc<AtomicBool>],
         pointer_seen: &AtomicBool,
+        screendump_seen: &AtomicBool,
     ) -> Result<(), String> {
         // Safe to unwrap inside the closures: each `*_sent` flag is only
         // `false` when its injection request and `monitor` are both `Some`.
@@ -1265,31 +1372,64 @@ impl InjectionState {
             self.send(monitor, "key", &format!("sendkey {key}"))?;
             self.key_sent = true;
         }
-        if let Some(typing) = &spec.input_typing {
-            // Paced: at most one key per call, and only once the previous
-            // key's hold has fully elapsed, so repeated characters arrive
-            // as distinct press/release edges.
-            if self.typed < typing.text.chars().count()
-                && typing_seen.load(Ordering::Acquire)
-                && Instant::now() >= self.next_typed_key_at
-            {
-                let c = typing
-                    .text
-                    .chars()
-                    .nth(self.typed)
-                    .expect("index bounded by the count above");
-                let key =
-                    qkeycode_for(c).map_err(|e| format!("typed-text injection failed: {e}"))?;
-                self.send(
-                    monitor,
-                    "typed-text",
-                    &format!("sendkey {key} {TYPED_KEY_HOLD_MS}"),
-                )?;
-                self.typed += 1;
-                self.next_typed_key_at = Instant::now() + TYPED_KEY_INTERVAL;
+        if let Some(typing) = spec.input_typing.get(self.typed_step) {
+            // Steps run strictly in order, each gated on its own marker;
+            // within a step the keys are paced — at most one per call,
+            // and only once the previous key's hold has fully elapsed —
+            // so repeated characters arrive as distinct press/release
+            // edges.
+            let step_seen = typing_seen
+                .get(self.typed_step)
+                .is_some_and(|seen| seen.load(Ordering::Acquire));
+            if step_seen && Instant::now() >= self.next_typed_key_at {
+                if let Some(c) = typing.text.chars().nth(self.typed_in_step) {
+                    let key =
+                        qkeycode_for(c).map_err(|e| format!("typed-text injection failed: {e}"))?;
+                    self.send(
+                        monitor,
+                        "typed-text",
+                        &format!("sendkey {key} {TYPED_KEY_HOLD_MS}"),
+                    )?;
+                    self.typed_in_step += 1;
+                    self.next_typed_key_at = Instant::now() + TYPED_KEY_INTERVAL;
+                    // A fully-typed step advances immediately so an
+                    // already-seen next marker starts the next step on
+                    // the following tick.
+                    if self.typed_in_step >= typing.text.chars().count() {
+                        self.typed_step += 1;
+                        self.typed_in_step = 0;
+                    }
+                } else {
+                    // An empty step is complete the moment its marker is
+                    // seen (nothing to type).
+                    self.typed_step += 1;
+                    self.typed_in_step = 0;
+                }
             }
         }
-        if !self.pointer_sent && pointer_seen.load(Ordering::Acquire) {
+        if let Some(dump) = &spec.screendump {
+            if self.screendump == DumpState::NotSent && screendump_seen.load(Ordering::Acquire) {
+                self.send(
+                    monitor,
+                    "screendump",
+                    &format!("screendump {}", dump.path.display()),
+                )?;
+                self.screendump = DumpState::Sent;
+            }
+            // QEMU writes the PPM inside the monitor command, but the
+            // write races this poll loop: the dump is trusted only once
+            // the file on disk parses as a complete image. Until then any
+            // requested pointer injection stays held back.
+            if self.screendump == DumpState::Sent {
+                if let Ok(bytes) = std::fs::read(&dump.path) {
+                    if screendump::parse_ppm(&bytes).is_ok() {
+                        self.screendump = DumpState::Verified;
+                    }
+                }
+            }
+        }
+        let dump_ready = spec.screendump.is_none() || self.screendump == DumpState::Verified;
+        if !self.pointer_sent && dump_ready && pointer_seen.load(Ordering::Acquire) {
             let mv = spec.input_pointer_move.as_ref().expect("motion present");
             self.send(
                 monitor,
@@ -1332,15 +1472,17 @@ impl InjectionState {
 
 /// Classify a child exit observed by [`supervise`]: an exit before the
 /// serial-input script completed, before a requested pointer motion was
-/// ever sent, or before a requested typed-text script finished, means the
-/// exchange the vertical was meant to prove never happened — the run
-/// fails even when the guest itself reported success. Otherwise the
-/// guest's own exit status decides the outcome.
+/// ever sent, before a requested typed-text script finished, or before a
+/// requested screendump was taken and verified, means the exchange the
+/// vertical was meant to prove never happened — the run fails even when
+/// the guest itself reported success. Otherwise the guest's own exit
+/// status decides the outcome.
 fn exit_reason(
     spec: &Spec,
     serial_step: usize,
     pointer_injected: bool,
     typing_done: bool,
+    screendump_verified: bool,
     status: std::process::ExitStatus,
 ) -> DoneReason {
     if serial_step < spec.serial_input.len() {
@@ -1360,6 +1502,13 @@ fn exit_reason(
         return DoneReason::InjectionFailed(
             "typed-text script incomplete: its readiness marker was not seen (or the guest \
              exited mid-script)"
+                .into(),
+        );
+    }
+    if spec.screendump.is_some() && !screendump_verified {
+        return DoneReason::InjectionFailed(
+            "screendump never taken and verified: its readiness marker was not seen, or the \
+             guest exited before the dumped image parsed completely"
                 .into(),
         );
     }
@@ -1547,11 +1696,27 @@ mod tests {
 
     #[test]
     fn with_typed_keys_records_the_script_and_clamps_occurrences() {
-        let s = Spec::for_aarch64_kernel("/tmp/k").with_typed_keys("armed", 0, "root\n");
-        let t = s.input_typing.expect("typing recorded");
+        let s = Spec::for_aarch64_kernel("/tmp/k")
+            .with_typed_keys("armed", 0, "root\n")
+            .with_typed_keys("db loaded", 1, "g\n");
+        assert_eq!(s.input_typing.len(), 2, "steps append in order");
+        let t = &s.input_typing[0];
         assert_eq!(t.ready_marker, "armed");
         assert_eq!(t.ready_occurrences, 1, "occurrences clamp at >= 1");
         assert_eq!(t.text, "root\n");
+        let t = &s.input_typing[1];
+        assert_eq!(t.ready_marker, "db loaded");
+        assert_eq!(t.ready_occurrences, 1);
+        assert_eq!(t.text, "g\n");
+    }
+
+    #[test]
+    fn with_screendump_records_the_request_and_clamps_occurrences() {
+        let s = Spec::for_aarch64_kernel("/tmp/k").with_screendump("presented", 0, "/tmp/d.ppm");
+        let d = s.screendump.expect("screendump recorded");
+        assert_eq!(d.ready_marker, "presented");
+        assert_eq!(d.ready_occurrences, 1, "occurrences clamp at >= 1");
+        assert_eq!(d.path, PathBuf::from("/tmp/d.ppm"));
     }
 
     #[test]
@@ -1638,10 +1803,11 @@ mod tests {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
-            input_typing: None,
+            input_typing: Vec::new(),
             input_mouse: false,
             input_pointer_move: None,
             serial_input: Vec::new(),
+            screendump: None,
             session: SessionKind::HeadlessTest,
         };
         let err = Runner::run(&s).expect_err("missing backing image should fail");

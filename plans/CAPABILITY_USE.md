@@ -28,8 +28,11 @@ useless: every `ls`, `cd`, file open, and program launch fails with
 2. *(fixed — CU2)* The shell's registered manifest requested only
    `CAP_CONSOLE_WRITE` + `CAP_CONSOLE_READ` — no `CAP_FS_ACCESS`, no
    `CAP_PROC_SPAWN` — so the spawned shell could not touch the filesystem
-   or launch anything. The shell now requests the session baseline
-   (`kernel/rustos-kernel/src/program_manifests.rs`, CU2).
+   or launch anything. The shell now requests its own exercised set,
+   `SHELL_MANIFEST`: the console pair plus `CAP_FS_ACCESS` and
+   `CAP_PROC_SPAWN` (`kernel/rustos-kernel/src/program_manifests.rs`,
+   CU2; decoupled from the baseline when CU6 widened the ceiling with
+   the graphical-session class the shell never exercises).
 3. *(fixed — CU3)* The debug root account's seeded grant (`tools/mkimage`)
    omitted `CAP_FS_ACCESS`, so even with the intersection wired the shell
    was still denied the filesystem. The seeded grant is now the shared
@@ -154,16 +157,17 @@ The life of a capability, from disk to exercise to revocation:
   the account's `capability_grants` snapshot and
   `KernelSpawnCtx::admit_process` derives `ceiling ∩ manifest` — B1 is
   fixed.
-- The session-baseline shell manifest and audited, pinned per-program
-  manifests (`kernel/rustos-kernel/src/program_manifests.rs`, CU2) — B2 is
-  fixed.
+- The audited, pinned per-program manifests — the shell's own exercised
+  set (`SHELL_MANIFEST`), sized per §4.5, among them
+  (`kernel/rustos-kernel/src/program_manifests.rs`, CU2) — B2 is fixed.
 - The §4.2/§4.3 sets defined once in `lib/users` (`grants`:
   `SESSION_BASELINE`, `ADMINISTRATIVE_SET`, `administrator_ceiling()`)
   and seeded as the debug root grant (`tools/mkimage::debug_users_db`)
   and the QEMU users-root fixture account — B3 is fixed (CU3).
 
 All three defects are fixed; user management (CU4) and per-invocation
-elevation (CU5) are live. The remaining stage is the desktop (CU6).
+elevation (CU5) are live; the desktop's session/ceiling slice (CU6) is
+live with `plans/DISPLAY.md` D7d, with picker descriptors remaining.
 
 ---
 
@@ -195,6 +199,7 @@ Every account that may start an interactive session is granted at least:
 | `CAP_FS_ACCESS` | "May use the filesystem at all." Real reach stays per-inode (§5.3): home is writable, `/System` is not. |
 | `CAP_PROC_SPAWN` | "May run programs at all." What runs is bounded by the program registry / bundle store; the child is bounded by its own manifest ∩ this same ceiling. |
 | `CAP_CONSOLE_READ`, `CAP_CONSOLE_WRITE` | An interactive session's streams are console-backed; the fine authority stays the inherited descriptor table. |
+| `CAP_DISPLAY`, `CAP_INPUT_READ`, `CAP_SHM` | The graphical-session class (§4.6, `plans/DISPLAY.md` D7): acquiring a seat's exclusive revocable lease, draining the *owned* seat's input, and creating/granting the zero-copy frame region. A graphical login is an ordinary session; the kernel still owner-gates every acquire, drain, and present against the live lease, and every region against its owner. |
 
 Nothing else is baseline. Self-scoped `sysinfo` queries, `resource_open` of
 `sys:*`, `stream_*` on inherited pipes/files, lowering one's own rlimits,
@@ -275,16 +280,18 @@ above-baseline request must correspond to a feature that degrades gracefully
 and every session tool's above-baseline subset is pinned as its own audited
 set so widening is a reviewed diff.
 
-### 4.6 The desktop (not yet implemented — direction only)
+### 4.6 The desktop
 
-The graphical session changes no rule. The WM/session service's manifest
-requests `CAP_DISPLAY`/`CAP_INPUT_READ` (seat ownership per
-`plans/DISPLAY.md`); a desktop app is spawned like any other process and
-gets `AppInfo request ∩ user ceiling`; user-mediated file access beyond the
-app's own state flows through picker-issued one-shot descriptors, not class
-capabilities (`AGENTS.md` §16.5). Nothing in CU1–CU5 needs revisiting for
-the desktop; CU6 is the placeholder that binds it when `userland/gui/*`
-work starts.
+The graphical session changes no rule. The desktop-session service's
+manifest requests the graphical class (`CAP_DISPLAY`/`CAP_INPUT_READ`/
+`CAP_SHM` — seat ownership and the zero-copy frame region per
+`plans/DISPLAY.md`), the session baseline carries the same class so the
+intersection keeps it for every interactive account, and a desktop app is
+spawned like any other process and gets `AppInfo request ∩ user ceiling`;
+user-mediated file access beyond the app's own state flows through
+picker-issued one-shot descriptors, not class capabilities (`AGENTS.md`
+§16.5). Nothing in CU1–CU5 needed revisiting; CU6 tracks the remaining
+picker work.
 
 ### 4.7 Resource limits interplay
 
@@ -543,11 +550,24 @@ exist from CU3).
 
 ### CU6 — desktop session capabilities
 
-**Status: planned (blocked on `userland/gui/*` / `plans/DISPLAY.md`).**
+**Status: in progress — the session/ceiling slice is live
+(`plans/DISPLAY.md` D7d); picker-issued one-shot descriptors remain.**
 
-- Binds §4.6 when the desktop lands: WM/session manifests, `AppInfo`
-  intersection, picker-issued one-shot descriptors. No design work is done
-  here ahead of a live consumer.
+- Live: the graphical-session class (`CAP_DISPLAY`/`CAP_INPUT_READ`/
+  `CAP_SHM`) is part of `SESSION_BASELINE` — a graphical login is an
+  ordinary session, and the kernel still owner-gates every seat acquire,
+  drain, and present against the live lease and every shm region against
+  its owner, so the class capability only admits the syscall. The
+  desktop session's `AppInfo` requests exactly that class; login spawns
+  it as the authenticated user and its set is `manifest ∩ ceiling`,
+  exactly as §4.6 prescribes. The shell's manifest was decoupled from
+  the baseline (`SHELL_MANIFEST`: console pair + `CAP_FS_ACCESS` +
+  `CAP_PROC_SPAWN`) per the §4.5 sizing rule, so widening the account
+  ceiling never widened elsh; login's manifest gained `CAP_FS_ACCESS`
+  for its one read-only desktop-bundle probe.
+- Remaining: picker-issued one-shot file descriptors for desktop apps
+  (`AGENTS.md` §16.5) — staged with the app windows / WM channel work,
+  not designed ahead of that consumer.
 
 ### CU7 — manifest entitlement audit (the §4.5 sizing rule)
 

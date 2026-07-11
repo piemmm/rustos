@@ -24,21 +24,36 @@
 
 use rustos_abi::CapabilityId;
 
-/// The session baseline (`plans/CAPABILITY_USE.md` §4.2) — what every
-/// interactive account's shell requests, and the `Shell` program's whole
-/// manifest. The set is account policy shared with the users-database
-/// authors (the image builder's seeded grants, the installer), so its one
-/// definition lives beside the account record in `lib/users` and is
-/// re-exported here for the registry rows; the per-capability rationale
-/// lives on that definition.
-///
-/// Nothing else: `wait`, `signal`, `rlimit_get`/`rlimit_set`, and
-/// `fs_getcwd` — the rest of what the shell calls — are ungated.
-// Consumed by the registry rows on the row-bearing targets and by the
-// exact-set pinning tests on the CI host; the aarch64 production build
-// carries no rows and its shell manifest travels in the on-disk bundle.
+/// The session baseline (`plans/CAPABILITY_USE.md` §4.2) — the ceiling
+/// every interactive account is seeded with. Account policy shared with
+/// the users-database authors (the image builder's seeded grants, the
+/// installer), so its one definition lives beside the account record in
+/// `lib/users` and is re-exported here for the manifest-sizing tests
+/// below; the per-capability rationale lives on that definition. A
+/// program's manifest is sized to its own code paths — the shell's is
+/// [`SHELL_MANIFEST`], not this ceiling.
+// Consumed by the exact-set pinning tests on the CI host, which verify
+// every session tool's request against this ceiling.
 #[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
 pub use rustos_users::SESSION_BASELINE;
+
+/// The shell's manifest: the console pair for its REPL, `CAP_FS_ACCESS`
+/// for `cd`/redirection/completion through the secured VFS, and
+/// `CAP_PROC_SPAWN` to run programs. Exactly the capabilities the shell
+/// has code paths for — deliberately **not** the account baseline
+/// (`rustos_users::SESSION_BASELINE`), which additionally carries the
+/// graphical-session class (`CAP_DISPLAY`/`CAP_INPUT_READ`/`CAP_SHM`)
+/// the shell never exercises: a manifest is sized to the program's code
+/// paths, never to what an account may hold. Nothing else: `wait`,
+/// `signal`, `rlimit_get`/`rlimit_set`, and `fs_getcwd` — the rest of
+/// what the shell calls — are ungated.
+#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
+pub const SHELL_MANIFEST: &[CapabilityId] = &[
+    CapabilityId::CONSOLE_WRITE,
+    CapabilityId::CONSOLE_READ,
+    CapabilityId::FS_ACCESS,
+    CapabilityId::PROC_SPAWN,
+];
 
 /// The login service's manifest: the console pair for its prompt
 /// (`stream_read`/`stream_write`/`stream_input_mode` over its inherited
@@ -50,12 +65,14 @@ pub use rustos_users::SESSION_BASELINE;
 /// `CAP_IPC_BIND_PRIVILEGED` to bind its console's reserved elevation
 /// rendezvous (the `elevate_endpoint` id the shell's `elevate` builtin
 /// calls — reserved ids fail closed against squatters),
-/// `CAP_LOG_EMIT` for its structured audit records, and
+/// `CAP_LOG_EMIT` for its structured audit records,
 /// `CAP_SYSINFO_KERNEL` so the full-screen view's bottom bar can show the
 /// memory figures (a refusal degrades that one figure to a placeholder,
-/// never the login). No `CAP_FS_ACCESS`:
-/// login reads the users database through its own gated syscall and never
-/// touches the filesystem.
+/// never the login), and `CAP_FS_ACCESS` for exactly one read-only probe
+/// — whether the desktop-session bundle exists, which decides if the
+/// graphical option is offered (`plans/DISPLAY.md` D7d). Credentials
+/// still flow only through the gated `users_db_read` syscall, never the
+/// filesystem.
 #[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
 pub const LOGIN_MANIFEST: &[CapabilityId] = &[
     CapabilityId::CONSOLE_WRITE,
@@ -66,6 +83,7 @@ pub const LOGIN_MANIFEST: &[CapabilityId] = &[
     CapabilityId::IPC_BIND_PRIVILEGED,
     CapabilityId::LOG_EMIT,
     CapabilityId::SYSINFO_KERNEL,
+    CapabilityId::FS_ACCESS,
 ];
 
 /// The device-manager service's manifest: `CAP_SYSINFO_HW` for the
@@ -293,9 +311,12 @@ mod tests {
     }
 
     #[test]
-    fn shell_manifest_is_exactly_the_session_baseline() {
+    fn shell_manifest_is_pinned() {
+        // The shell requests exactly its exercised capabilities; the wider
+        // account baseline (which now carries the graphical-session class)
+        // is a ceiling, never this program's request.
         assert_eq!(
-            set(SESSION_BASELINE),
+            set(SHELL_MANIFEST),
             set(&[
                 CapabilityId::FS_ACCESS,
                 CapabilityId::PROC_SPAWN,
@@ -303,6 +324,11 @@ mod tests {
                 CapabilityId::CONSOLE_READ,
             ])
         );
+        // And stays strictly within the baseline, so under any account the
+        // intersection keeps the shell's whole request.
+        for cap in SHELL_MANIFEST {
+            assert!(set(SESSION_BASELINE).contains(*cap));
+        }
     }
 
     #[test]
@@ -318,6 +344,7 @@ mod tests {
                 CapabilityId::IPC_BIND_PRIVILEGED,
                 CapabilityId::LOG_EMIT,
                 CapabilityId::SYSINFO_KERNEL,
+                CapabilityId::FS_ACCESS,
             ])
         );
     }
@@ -646,7 +673,7 @@ mod tests {
             ("dirname", AppKind::Command, PURE_TOOL_REQUEST),
             ("du", AppKind::Command, PURE_TOOL_REQUEST),
             ("edit", AppKind::Command, FILE_TOOL_REQUEST),
-            ("elsh", AppKind::Command, SESSION_BASELINE),
+            ("elsh", AppKind::Command, SHELL_MANIFEST),
             ("false", AppKind::Command, PURE_TOOL_REQUEST),
             ("fstree", AppKind::Command, FILE_TOOL_REQUEST),
             ("groupadd", AppKind::Command, ADMIN_TOOL_REQUEST),

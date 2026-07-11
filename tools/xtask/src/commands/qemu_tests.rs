@@ -62,15 +62,25 @@ struct QemuTest {
     /// the serial console. Used by the aarch64 virtio-input vertical to
     /// make a real device→driver input event deterministic.
     keyboard: Option<(&'static str, &'static str)>,
-    /// When `Some((marker, occurrences, text))`, attach a
-    /// `virtio-keyboard-device` and type `text` through paced monitor
-    /// `sendkey`s once `marker` has appeared `occurrences` times on the
-    /// serial console. The typed-dialogue path for a guest whose primary
-    /// console is the display (a `ramfb` world), which the `serial` script
-    /// cannot reach: typed keys buffer as console type-ahead until the
-    /// guest's reader drains them. Used by the autoload vertical to type
-    /// the unlock passphrase at the seat keyboard.
-    typed_keys: Option<(&'static str, u32, &'static str)>,
+    /// Ordered typed-keys script: for each `(marker, occurrences, text)`
+    /// step, attach a `virtio-keyboard-device` and type `text` through
+    /// paced monitor `sendkey`s once `marker` has appeared `occurrences`
+    /// times on the serial console; the steps run strictly in order. The
+    /// typed-dialogue path for a guest whose primary console is the
+    /// display (a `ramfb` world), which the `serial` script cannot reach:
+    /// typed keys buffer as console type-ahead until the guest's reader
+    /// drains them. Used by the autoload vertical to type the unlock
+    /// passphrase and then the login + graphical-choice dialogue at the
+    /// seat keyboard.
+    typed_keys: &'static [(&'static str, u32, &'static str)],
+    /// When `Some((marker, occurrences))`, take one QEMU monitor
+    /// `screendump` of the guest display once `marker` has appeared
+    /// `occurrences` times on serial, hold the pointer injection back
+    /// until the dumped image parses completely, and after a PASS assert
+    /// the dump is dominated by the shared theme's desktop colour — the
+    /// host-side scan-out readback proving the composited frame reached
+    /// the surface (`plans/DISPLAY.md` D7d).
+    screendump: Option<(&'static str, u32)>,
     /// When `Some((marker, dx, dy))`, additionally attach a
     /// `virtio-mouse-device` after the keyboard — the
     /// two-identical-virtio-input-nodes topology an interactive session
@@ -211,21 +221,54 @@ const AUTOLOAD_INPUT_KEY_MARKER: &str = "sc=irq_bind";
 /// keyboard's own arming — possibly the second — is never raced.
 const AUTOLOAD_INPUT_ARMED_OCCURRENCES: u32 = 2;
 
-/// Serial marker after which the autoload-input vertical injects the mouse
-/// motion: the serial rendering of the **key** kind's one-shot
-/// `InputDelivered` audit witness (`EventId` 4050 with `kind=key`), emitted
-/// the moment the first typed passphrase character reached the input-focus
-/// arbiter. Gating the motion on it orders the injections — keys first,
-/// pointer second — so the vertical's PASS condition (both per-kind
-/// witnesses observed by the guest sink) attributes each input class
-/// separately: a keystroke cannot satisfy the pointer witness and vice
-/// versa.
-const AUTOLOAD_INPUT_POINTER_MARKER: &str = "first input delivered to focus arbiter kind=key";
-
 /// The relative mouse motion the autoload-input vertical injects
 /// (`mouse_move dx dy`): an arbitrary non-zero displacement on both axes,
 /// so the driver decodes at least one `EV_REL` event per axis.
 const AUTOLOAD_INPUT_POINTER_MOVE: (i32, i32) = (15, 7);
+
+/// Serial marker after which the autoload vertical types the login +
+/// graphical-choice dialogue: the serial rendering of the kernel's
+/// `UsersDbLoaded` audit witness (`EventId` 4040), emitted the moment the
+/// typed passphrase unlocked the encrypted root and the users database
+/// installed. `login` prompts on the video console only after that, so
+/// the dialogue buffers as console type-ahead until its reads drain it —
+/// exactly the passphrase step's discipline. (The literal matches the
+/// kernel `AuditEvent::UsersDbLoaded` message; drift makes the vertical
+/// time out loudly, never pass on the wrong exchange.)
+const AUTOLOAD_LOGIN_MARKER: &str = "users database loaded";
+
+/// The login + graphical-choice dialogue the autoload vertical types at
+/// the seat keyboard: the fixture account's username and password
+/// (`root`/`root`), then `g` at the session-choice prompt — selecting
+/// the graphical desktop session. Pinned against the fixture credentials
+/// below so the dialogue and the planted account cannot drift.
+const AUTOLOAD_LOGIN_DIALOGUE: &str = "root\nroot\ng\n";
+
+/// Serial marker after which the autoload vertical takes its screendump
+/// **and** injects the mouse motion: the display service's one-shot
+/// `FIRST_PRESENT` log record — the witness that the desktop session's
+/// composited frame reached the scan-out surface. Imported from the
+/// driver crate's own definition, so the emitter and this consumer can
+/// never drift. Keying both the dump and the pointer on it makes the
+/// chain strictly ordered: present → verified dump → mouse motion → the
+/// guest's `kind=pointer` witness → PASS — a run can neither pass
+/// without presenting nor exit before the host holds the pixels.
+const AUTOLOAD_FIRST_PRESENT_MARKER: &str = rustos_drv_display_framebuffer::FIRST_PRESENT_MESSAGE;
+
+/// `true` if `text` begins with `prefix`.
+const fn starts_with_bytes(text: &[u8], prefix: &[u8]) -> bool {
+    if text.len() < prefix.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < prefix.len() {
+        if text[i] != prefix[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
 
 /// The username line the session-ceiling vertical types at the login
 /// view's `Username:` field.
@@ -274,6 +317,35 @@ const _: () = {
             ),
         "WRONG_UNLOCK_PASSPHRASE_PREFIX must be non-empty and not the fixture passphrase"
     );
+    // The autoload login dialogue is `<username>\n<password>\n` from the
+    // shared fixture account, then the explicit graphical choice `g\n`.
+    assert!(
+        starts_with_bytes(
+            AUTOLOAD_LOGIN_DIALOGUE.as_bytes(),
+            SESSION_USERNAME_LINE.as_bytes()
+        ),
+        "AUTOLOAD_LOGIN_DIALOGUE must start with the fixture username line"
+    );
+    assert!(
+        starts_with_bytes(
+            AUTOLOAD_LOGIN_DIALOGUE
+                .as_bytes()
+                .split_at(SESSION_USERNAME_LINE.len())
+                .1,
+            SESSION_PASSWORD_LINE.as_bytes()
+        ),
+        "AUTOLOAD_LOGIN_DIALOGUE must continue with the fixture password line"
+    );
+    assert!(
+        bytes_eq(
+            AUTOLOAD_LOGIN_DIALOGUE
+                .as_bytes()
+                .split_at(SESSION_USERNAME_LINE.len() + SESSION_PASSWORD_LINE.len())
+                .1,
+            b"g\n"
+        ),
+        "AUTOLOAD_LOGIN_DIALOGUE must end with the explicit graphical choice"
+    );
     assert!(
         is_line_of(
             SESSION_USERNAME_LINE.as_bytes(),
@@ -302,7 +374,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -322,7 +395,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -350,7 +424,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -379,7 +454,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -410,7 +486,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -442,7 +519,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -475,7 +553,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -509,7 +588,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -538,7 +618,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -572,7 +653,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -607,7 +689,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -645,7 +728,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -678,7 +762,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -712,7 +797,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -749,7 +835,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -770,7 +857,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -806,7 +894,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -835,7 +924,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -866,7 +956,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -890,7 +981,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::Fat32,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -915,7 +1007,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::Rustfs,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -943,7 +1036,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -966,7 +1060,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -998,7 +1093,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1025,7 +1121,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1053,7 +1150,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1080,7 +1178,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1114,7 +1213,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1151,7 +1251,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1182,7 +1283,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1212,7 +1314,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1242,7 +1345,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1265,7 +1369,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1287,7 +1392,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1311,7 +1417,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1339,7 +1446,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1371,7 +1479,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1398,7 +1507,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1413,7 +1523,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1431,7 +1542,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1468,7 +1580,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1495,7 +1608,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1520,7 +1634,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1548,7 +1663,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: true,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1577,7 +1693,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: true,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1610,7 +1727,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: true,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1641,7 +1759,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1694,7 +1813,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[
             ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
@@ -1753,7 +1873,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1784,7 +1905,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1820,7 +1942,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1859,7 +1982,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1903,7 +2027,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1941,7 +2066,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -1979,7 +2105,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2010,7 +2137,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2043,7 +2171,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2078,7 +2207,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2098,7 +2228,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2132,7 +2263,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2170,7 +2302,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2206,7 +2339,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2243,7 +2377,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2281,7 +2416,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2318,7 +2454,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2356,7 +2493,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2389,7 +2527,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2423,7 +2562,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2460,7 +2600,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2503,7 +2644,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2538,7 +2680,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2581,7 +2724,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2615,7 +2759,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2648,7 +2793,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2685,7 +2831,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2722,7 +2869,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2758,7 +2906,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2789,7 +2938,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2818,7 +2968,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2846,7 +2997,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::UsersRoot,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2880,7 +3032,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -2939,7 +3092,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[
             (
@@ -3000,7 +3154,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[
             ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
@@ -3083,7 +3238,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::MemsoakRootDisk,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[
             ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
@@ -3133,7 +3289,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[
             ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
@@ -3197,27 +3354,47 @@ const TESTS: &[QemuTest] = &[
     // encrypted root end to end), and `CallEndpointCreated` for the reserved
     // `DISPLAY_ENDPOINT` (the autoloaded display service came up on its
     // granted surface and bound its rendezvous under
-    // `CAP_IPC_BIND_PRIVILEGED`). A 150-second budget covers the boot +
-    // bounded PBKDF2 + autoload + driver bring-up + the ~4 s paced typing +
-    // video-console rendering on QEMU TCG.
+    // `CAP_IPC_BIND_PRIVILEGED`).
+    //
+    // D7d-2 grows the run into the full graphical login: after the unlock,
+    // the second typed step (keyed on the `UsersDbLoaded` serial witness)
+    // types the fixture account's `root`/`root` at login's video-console
+    // prompt and answers the session choice with `g` — login offers the
+    // choice only because its per-round probes found both the desktop
+    // bundle and the live display service. The spawned desktop session
+    // acquires the boot seat, configures the zero-copy frame region, and
+    // presents; the display service's one-shot `FIRST_PRESENT` record is
+    // the serial witness the runner keys the host-side scan-out readback
+    // on (a QEMU `screendump`, asserted after the run to be dominated by
+    // the theme's desktop colour) **and** the mouse injection, so the
+    // ordering is present → verified dump → pointer → `kind=pointer`
+    // witness → PASS: the guest cannot exit before the host holds the
+    // pixels, and the pointer witness now additionally proves the desktop
+    // was live. A 180-second budget covers the boot + bounded PBKDF2 +
+    // autoload + driver bring-up + the ~4 s passphrase + ~1 s login typing
+    // + session bring-up + video-console rendering on QEMU TCG.
     QemuTest {
         package: "rustos-test-autoload-input-qemu-aarch64",
         binary: "rustos-test-autoload-input-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
-        timeout: Duration::from_secs(150),
+        timeout: Duration::from_secs(180),
         disk_sectors: None,
         virtio_net: false,
         ramfb: true,
         fs_disk: FsDisk::AutoloadRootDisk,
         keyboard: None,
-        typed_keys: Some((
-            AUTOLOAD_INPUT_KEY_MARKER,
-            AUTOLOAD_INPUT_ARMED_OCCURRENCES,
-            UNLOCK_PASSPHRASE_LINE,
-        )),
+        typed_keys: &[
+            (
+                AUTOLOAD_INPUT_KEY_MARKER,
+                AUTOLOAD_INPUT_ARMED_OCCURRENCES,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
+            (AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+        ],
+        screendump: Some((AUTOLOAD_FIRST_PRESENT_MARKER, 1)),
         pointer_move: Some((
-            AUTOLOAD_INPUT_POINTER_MARKER,
+            AUTOLOAD_FIRST_PRESENT_MARKER,
             AUTOLOAD_INPUT_POINTER_MOVE.0,
             AUTOLOAD_INPUT_POINTER_MOVE.1,
         )),
@@ -3245,7 +3422,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -3275,7 +3453,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: true,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -3298,7 +3477,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -3325,7 +3505,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -3356,7 +3537,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -3389,7 +3571,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -3425,7 +3608,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -3456,7 +3640,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -3493,7 +3678,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -3525,7 +3711,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: Some(("virtio-qemu: virtio-input eventq armed", "a")),
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -3558,7 +3745,8 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: Some(("virtio-qemu: virtio-input eventq armed", "a")),
-        typed_keys: None,
+        typed_keys: &[],
+        screendump: None,
         pointer_move: None,
         serial: &[],
     },
@@ -3907,6 +4095,35 @@ fn run_one(
     finish_run(t, &kernel, spec)
 }
 
+/// Assert the dumped scan-out shows the composited desktop: the image is
+/// dominated by the shared theme's own desktop colour (the compositor's
+/// background), whatever the taskbar, cursor, or window chrome overlays.
+/// The expected colour is read from `rustos_theme` — the one definition
+/// the desktop session itself renders with — never a literal, so a theme
+/// change cannot silently diverge the test from the product.
+fn assert_desktop_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+    // The desktop background covers everything but the taskbar and
+    // cursor, so a genuinely presented frame is far above this floor; a
+    // boot console left on screen (text on its own background) is far
+    // below it.
+    const MIN_SHARE: f64 = 0.5;
+    let bytes = std::fs::read(path)
+        .map_err(|e| format!("test --qemu ({}): read screendump: {e}", t.package))?;
+    let image = rustos_qemu::screendump::parse_ppm(&bytes)
+        .map_err(|e| format!("test --qemu ({}): decode screendump: {e}", t.package))?;
+    let desktop = rustos_theme::Theme::dark().palette().desktop;
+    let expected = (desktop.r, desktop.g, desktop.b);
+    let (dominant, share) = image.dominant_color();
+    if dominant != expected || share < MIN_SHARE {
+        return Err(format!(
+            "test --qemu ({}): screendump is not the composited desktop: dominant colour \
+             {dominant:?} at share {share:.3} (expected {expected:?} at >= {MIN_SHARE})",
+            t.package
+        ));
+    }
+    Ok(())
+}
+
 /// A filesystem volume to plant on an enrolment's virtio-blk backing image.
 struct FsImage {
     /// File extension of the backing image planted beside the kernel binary.
@@ -4002,12 +4219,30 @@ fn finish_run(t: &QemuTest, kernel: &Path, mut spec: Spec) -> Result<(), String>
     }
 
     // Attach a `virtio-keyboard-device` and type the scripted dialogue at
-    // it once its readiness marker has appeared the required number of
-    // times — the console-input path for a display-console guest, where
-    // the serial script cannot reach.
-    if let Some((marker, occurrences, text)) = t.typed_keys {
-        spec = spec.with_typed_keys(marker, occurrences, text);
+    // it, step by step — each step once its own readiness marker has
+    // appeared the required number of times — the console-input path for
+    // a display-console guest, where the serial script cannot reach.
+    for (marker, occurrences, text) in t.typed_keys {
+        spec = spec.with_typed_keys(*marker, *occurrences, *text);
     }
+
+    // Arm the marker-gated screendump: the host-side scan-out readback.
+    // Any stale dump from an earlier run is removed first, so the runner's
+    // completeness check (and the pixel assert below) can never read old
+    // bytes. The pointer injection is held until the dump verifies.
+    let screendump_path = if let Some((marker, occurrences)) = t.screendump {
+        let path = kernel.with_extension("screendump.ppm");
+        std::fs::remove_file(&path)
+            .or_else(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => Ok(()),
+                _ => Err(e),
+            })
+            .map_err(|e| format!("test --qemu ({}): remove stale screendump: {e}", t.package))?;
+        spec = spec.with_screendump(marker, occurrences, &path);
+        Some(path)
+    } else {
+        None
+    };
 
     // Attach the pointer sibling after the keyboard — the interactive
     // session's two-identical-virtio-input-nodes topology — and let the
@@ -4030,7 +4265,12 @@ fn finish_run(t: &QemuTest, kernel: &Path, mut spec: Spec) -> Result<(), String>
     }
 
     match Runner::run(&spec).map_err(|e| format!("test --qemu ({}): {e}", t.package))? {
-        Outcome::Pass => Ok(()),
+        Outcome::Pass => {
+            if let Some(path) = screendump_path {
+                assert_desktop_screendump(t, &path)?;
+            }
+            Ok(())
+        }
         Outcome::Fail { status, serial } => Err(format!(
             "test --qemu ({}) FAILED (qemu status {status})\n--- serial ---\n{serial}\n--- end ---",
             t.package

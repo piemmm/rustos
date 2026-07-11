@@ -70,7 +70,9 @@ mod program {
         DisplayServer, FrameRegion, Framebuffer, FramebufferConfig, SeatCheck, ShmMapper,
         DISPLAY_REPLY_MAX,
     };
+    use rustos_drv_display_framebuffer::{FIRST_PRESENT, FIRST_PRESENT_MESSAGE};
     use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
+    use rustos_rt::LogSink;
 
     /// Exit code when the rt-backed driver host could not be built from the
     /// kernel-delivered grants (the `resource_grants` query was refused or
@@ -302,6 +304,11 @@ mod program {
         let mut request = [0u8; DISPLAY_MAX_REQUEST];
         let mut reply = [0u8; DISPLAY_REPLY_MAX];
         let mut token = 0u64;
+        // One-shot: emitted the first time the engine reports a client
+        // frame reached the surface, then never again — the operational
+        // witness that the session → service → scan-out path is live,
+        // checked after the reply so the present hot path pays nothing.
+        let mut first_present_logged = false;
         loop {
             if rustos_rt::waitset_wait(wait_set, u64::MAX, &mut token) != 0 {
                 // A dead wait-set would degrade the loop into a busy poll;
@@ -318,6 +325,18 @@ mod program {
             // well-formed reply; the engine never leaves a caller parked.
             let n = server.serve(&mut surface, &mut seat, ticket, &request[..len], &mut reply);
             let _ = rustos_rt::call_reply(DISPLAY_ENDPOINT, ticket, &reply[..n]);
+            if !first_present_logged && server.has_presented() {
+                first_present_logged = true;
+                rustos_log::log(
+                    &LogSink,
+                    &rustos_log::Event {
+                        level: rustos_log::Level::Info,
+                        id: FIRST_PRESENT,
+                        message: FIRST_PRESENT_MESSAGE,
+                        fields: &[],
+                    },
+                );
+            }
         }
     }
 

@@ -64,19 +64,22 @@ mod program {
     use alloc::string::String;
     use alloc::vec::Vec;
 
+    use rustos_abi::display_ipc::{DisplayRequest, DISPLAY_ENDPOINT, DISPLAY_MODE_REPLY_LEN};
     use rustos_abi::elevate::{elevate_endpoint, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN};
+    use rustos_abi::seat::SEAT_PRIMARY;
     use rustos_abi::sysinfo::{KernelMemoryStats, LoadAverage, SysinfoQueryId, SystemIdentity};
     use rustos_abi::{
-        Errno, InputMode, Origin, Time64, WaitSetOp, WaitSourceKind, CONSOLE_INHERIT,
+        Errno, InputMode, OpenFlags, Origin, Time64, WaitSetOp, WaitSourceKind, CONSOLE_INHERIT,
         ORIGIN_CONSOLE_NONE, ORIGIN_WIRE_LEN,
     };
     use rustos_caps::CapabilitySet;
     use rustos_curses::{Screen, Size, StreamTty};
     use rustos_login::elevate::ElevateLauncher;
     use rustos_login::{
-        events, handle_elevate_request, session_environment, supervise, AuthenticatedUser,
-        Authenticator, ConsoleMode, CursesView, DbLoad, Login, LoginConfig, LoginError,
-        LoginStatus, LoginView, SessionKind, SessionLauncher, SessionOutcome, StatusSource,
+        events, handle_elevate_request, session_environment, session_program, supervise,
+        AuthenticatedUser, Authenticator, ConsoleMode, CursesView, DbLoad, Login, LoginConfig,
+        LoginError, LoginStatus, LoginView, SessionKind, SessionLauncher, SessionOutcome,
+        StatusSource, DESKTOP_SESSION_PATH,
     };
     use rustos_procinfo::{call, IpcTransport};
     use rustos_rt::LogSink;
@@ -437,13 +440,15 @@ mod program {
                 .iter()
                 .map(alloc::string::String::as_bytes)
                 .collect();
-            let ret = rustos_rt::spawn_with(
-                user.shell.as_bytes(),
-                CONSOLE_INHERIT,
-                user.uid.0,
-                &[],
-                &env,
-            );
+            // Text runs the account's recorded shell; graphical runs the OS
+            // desktop-session bundle (one mapping, defined in the library
+            // beside `SessionKind`). Both are spawned **as the
+            // authenticated user**: the desktop session's seat lease, input
+            // drains, and frame region are that user's authority (its
+            // manifest ∩ the account ceiling), never login's.
+            let program = session_program(user, kind);
+            let ret =
+                rustos_rt::spawn_with(program.as_bytes(), CONSOLE_INHERIT, user.uid.0, &[], &env);
             if ret < 0 {
                 return Err(errno_from(ret));
             }
@@ -505,6 +510,42 @@ mod program {
         state
     }
 
+    /// Whether a graphical session can be offered on this round: the
+    /// desktop-session bundle is installed **and** a display service is
+    /// live. Both facts are re-checked per round — a service that came up
+    /// (or a bundle installed) after boot is offered on the next prompt,
+    /// and one that vanished is hidden again — and both fail closed: any
+    /// refusal hides the option, never errors the login (the graphical
+    /// option is hidden, never crashed).
+    ///
+    /// * **Bundle presence** — a read-only `fs_open` of the desktop
+    ///   bundle's `Run` path through the secured VFS (per-inode
+    ///   authorisation under login's own attested identity; `/System` is
+    ///   world-readable). The descriptor is closed immediately: the probe
+    ///   wants existence, not bytes.
+    /// * **Display service** — one `Query` call to the reserved
+    ///   `DISPLAY_ENDPOINT`. Login holds no seat lease, so a live service
+    ///   answers with a typed refusal — but *any* well-formed reply proves
+    ///   a display service is serving the rendezvous (only a
+    ///   `CAP_IPC_BIND_PRIVILEGED` holder can bind a reserved id), while an
+    ///   unbound endpoint fails the call itself with `NotFound`. The probe
+    ///   learns nothing about the seat and gains no authority.
+    fn graphical_session_available() -> bool {
+        let fd = rustos_rt::fs_open(DESKTOP_SESSION_PATH.as_bytes(), OpenFlags::READ);
+        if fd < 0 {
+            return false;
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        // `fd >= 0` checked above; descriptors are small kernel indices.
+        let _ = rustos_rt::fs_close(fd as u32);
+        let request = DisplayRequest::Query {
+            seat_id: SEAT_PRIMARY,
+        }
+        .to_le_bytes();
+        let mut reply = [0u8; DISPLAY_MODE_REPLY_LEN];
+        rustos_rt::ipc_call(DISPLAY_ENDPOINT, &request, &mut reply).is_ok()
+    }
+
     /// Run one login round: prompt → authenticate → run the session to
     /// completion against `authenticator`. Returns `true` to open another
     /// round, `false` when the console is dead and the process should exit
@@ -525,9 +566,10 @@ mod program {
         };
         let login = Login::new(LoginConfig {
             max_attempts: MAX_ATTEMPTS,
-            // The graphical session rides the P10 WM work; until a display
-            // session exists the option is hidden, never errored.
-            graphical_available: false,
+            // Re-probed each round: offered only while the desktop bundle
+            // is installed and a display service is live; hidden — never
+            // errored — otherwise.
+            graphical_available: graphical_session_available(),
             view,
             authenticator,
             launcher: &launcher,

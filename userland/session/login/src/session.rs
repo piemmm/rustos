@@ -121,6 +121,30 @@ pub fn session_environment(user: &AuthenticatedUser) -> Vec<String> {
     ]
 }
 
+/// Absolute path of the desktop-session service's `Run` binary — the
+/// program a [`SessionKind::Graphical`] session launches
+/// (`plans/DISPLAY.md` D7c/D7d). A service is an app (`.app` bundle under
+/// `/System/Services/`), and this is the one OS-wide spelling of its
+/// entry point: the launcher spawns it and login's availability probe
+/// checks the same path, so the two can never name different bundles.
+pub const DESKTOP_SESSION_PATH: &str = "/System/Services/desktop.app/Run";
+
+/// The program a session of `kind` runs for `user`: the authenticated
+/// account's own shell of choice for a text session, the OS desktop
+/// session service ([`DESKTOP_SESSION_PATH`]) for a graphical one.
+///
+/// One definition, so the launcher and every test agree on the mapping.
+/// The desktop session is deliberately *not* per-account data: which
+/// desktop runs is OS policy (the bundle installed on the volume), while
+/// the shell is the account's recorded choice.
+#[must_use]
+pub fn session_program(user: &AuthenticatedUser, kind: SessionKind) -> &str {
+    match kind {
+        SessionKind::Text => &user.shell,
+        SessionKind::Graphical => DESKTOP_SESSION_PATH,
+    }
+}
+
 /// Which kind of session to launch after a successful authentication.
 ///
 /// Login always offers **text** first; the graphical option
@@ -318,6 +342,32 @@ mod tests {
         for entry in &env {
             assert!(entry.contains('='), "malformed entry: {entry:?}");
         }
+    }
+
+    #[test]
+    fn session_program_maps_text_to_the_shell_and_graphical_to_the_desktop() {
+        let user = AuthenticatedUser {
+            username: "ada".to_string(),
+            uid: Uid(1000),
+            primary_gid: Gid(1000),
+            supplementary_gids: Vec::new(),
+            capabilities: CapabilitySet::empty(),
+            home: "/Users/ada".to_string(),
+            shell: "/System/Apps/elsh.app/Run".to_string(),
+        };
+        assert_eq!(
+            super::session_program(&user, SessionKind::Text),
+            "/System/Apps/elsh.app/Run"
+        );
+        assert_eq!(
+            super::session_program(&user, SessionKind::Graphical),
+            super::DESKTOP_SESSION_PATH
+        );
+        // The desktop path is the sealed service-store bundle spelling.
+        assert_eq!(
+            super::DESKTOP_SESSION_PATH,
+            "/System/Services/desktop.app/Run"
+        );
     }
 
     #[test]

@@ -6,12 +6,15 @@
 # identity transition (starting the authenticated account's shell under
 # that account's kernel-resolved credential), CAP_USERS_READ to verify
 # offered credentials, CAP_IPC_BIND_PRIVILEGED for the reserved elevation
-# rendezvous, CAP_LOG_EMIT for its audit records, and CAP_SYSINFO_KERNEL
+# rendezvous, CAP_LOG_EMIT for its audit records, CAP_SYSINFO_KERNEL
 # so the full-screen view's status bar can show the memory figures (a
-# refusal degrades that one figure to a placeholder, never the login).
-# No CAP_FS_ACCESS.
+# refusal degrades that one figure to a placeholder, never the login),
+# and CAP_FS_ACCESS for exactly one read-only probe: whether the
+# desktop-session bundle exists, which decides if the graphical option
+# is offered (plans/DISPLAY.md D7d). Credentials still flow only through
+# the gated users_db_read syscall, never the filesystem.
 id = "os.rustos.login"
 name = "login"
 version = "0.1.0"
 kind = "service"
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_PROC_SPAWN", "CAP_USERS_READ", "CAP_SPAWN_AS_USER", "CAP_IPC_BIND_PRIVILEGED", "CAP_LOG_EMIT", "CAP_SYSINFO_KERNEL"]
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_PROC_SPAWN", "CAP_USERS_READ", "CAP_SPAWN_AS_USER", "CAP_IPC_BIND_PRIVILEGED", "CAP_LOG_EMIT", "CAP_SYSINFO_KERNEL", "CAP_FS_ACCESS"]

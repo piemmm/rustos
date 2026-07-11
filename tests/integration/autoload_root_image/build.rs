@@ -97,6 +97,7 @@ const PLANTED: &[PlantedDriver] = &[
             CapabilityId::MMIO_MAP,
             CapabilityId::SHM,
             CapabilityId::IPC_BIND_PRIVILEGED,
+            CapabilityId::LOG_EMIT,
         ],
         bind_keys: rustos_drv_display_framebuffer::BIND_KEYS,
         const_name: "FRAMEBUFFER_BUNDLE",

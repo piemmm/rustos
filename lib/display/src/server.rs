@@ -100,6 +100,10 @@ struct Configured<R> {
 pub struct DisplayServer<M: ShmMapper> {
     mapper: M,
     configured: Option<Configured<M::Region>>,
+    /// Latched by the first successful [`Self::present`]: a client frame
+    /// has reached the scan-out surface at least once in this engine's
+    /// lifetime. Observability only — no serving decision reads it.
+    presented: bool,
 }
 
 impl<M: ShmMapper> DisplayServer<M> {
@@ -108,6 +112,7 @@ impl<M: ShmMapper> DisplayServer<M> {
         Self {
             mapper,
             configured: None,
+            presented: false,
         }
     }
 
@@ -201,6 +206,19 @@ impl<M: ShmMapper> DisplayServer<M> {
         self.configured.is_some()
     }
 
+    /// Whether at least one client frame has been successfully presented
+    /// to the scan-out surface in this engine's lifetime.
+    ///
+    /// The hosting service reads this after each served request to emit
+    /// its one-shot first-present log record — the operational witness
+    /// that the session → service → surface path is live end to end. It
+    /// is a fact about served work, never an authority: no request
+    /// outcome depends on it.
+    #[must_use]
+    pub const fn has_presented(&self) -> bool {
+        self.presented
+    }
+
     /// Adopt the caller's granted frame region for `seat_id` under the
     /// live `generation`, replacing any earlier configuration.
     #[allow(clippy::too_many_arguments)]
@@ -284,7 +302,11 @@ impl<M: ShmMapper> DisplayServer<M> {
         } else {
             display.present_region(frame, damage)
         };
-        result.map_err(rustos_abi::DriverError::as_errno)
+        let result = result.map_err(rustos_abi::DriverError::as_errno);
+        if result.is_ok() {
+            self.presented = true;
+        }
+        result
     }
 }
 

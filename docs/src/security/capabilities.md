@@ -90,8 +90,13 @@ so delegation can only narrow. Every derivation emits the
 ## The session baseline and the administrator
 
 Every account that may start an interactive session is granted at least
-`CAP_FS_ACCESS`, `CAP_PROC_SPAWN`, `CAP_CONSOLE_READ`, and
-`CAP_CONSOLE_WRITE`; real reach stays per-inode and per-descriptor. An
+`CAP_FS_ACCESS`, `CAP_PROC_SPAWN`, `CAP_CONSOLE_READ`,
+`CAP_CONSOLE_WRITE`, and the graphical-session class — `CAP_DISPLAY`,
+`CAP_INPUT_READ`, and `CAP_SHM`, so a graphical login is an ordinary
+session, not an administrative act; real reach stays per-inode,
+per-descriptor, and per-lease (the kernel owner-gates every seat
+acquire, input drain, and present against the live lease, and every
+shared-memory region against its owner). An
 administrator is an account whose grant additionally includes the
 administrative capabilities (`CAP_USER_ADMIN`, `CAP_FS_MOUNT`,
 `CAP_RLIMIT_RAISE`, `CAP_AUDIT_READ`, the global `CAP_SYSINFO_*` queries,
@@ -124,9 +129,12 @@ module) defines `SESSION_BASELINE`, `ADMINISTRATIVE_SET`, and the
 `administrator_ceiling()` union beside the account record that stores a
 grant, and every author imports them — the image builder's debug `root`
 account (`tools/mkimage::debug_users_db`) and the QEMU disk fixtures seed
-exactly `administrator_ceiling()`, and the kernel's shell manifest
-re-exports `SESSION_BASELINE` (`plans/CAPABILITY_USE.md` CU3). Every
-other program's manifest is sized to every gated syscall the program has
+exactly `administrator_ceiling()` (`plans/CAPABILITY_USE.md` CU3). The
+baseline is a **ceiling**, never a program's manifest: the shell
+requests its own exercised set (`SHELL_MANIFEST` — the console pair,
+`CAP_FS_ACCESS`, `CAP_PROC_SPAWN`), the desktop session requests the
+graphical class, and every
+program's manifest is sized to every gated syscall the program has
 a code path to issue — **including capability-gated optional features
 that degrade gracefully when the intersection strips them** — and to
 nothing it has no code path for (`plans/CAPABILITY_USE.md` §4.5, CU7).

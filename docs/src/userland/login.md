@@ -2,10 +2,11 @@
 
 `rustos-login` authenticates a user against `kernel/sec` and launches a
 session on their behalf. It **always starts in text mode** and offers a
-graphical session only when a display driver and the window manager are
-present; when they are not, the graphical option is simply hidden — never
-crashed, never errored (`AGENTS.md` §10). The installed binary lives at
-`/System/Services/login.app/Run`.
+graphical session only when the desktop-session bundle is installed
+**and** a display service is live (both re-probed each round, see the
+`Run` binary below); when they are not, the graphical option is simply
+hidden — never crashed, never errored (`AGENTS.md` §10). The installed
+binary lives at `/System/Services/login.app/Run`.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and depends only on
 the audited `lib/*` crates `rustos-abi`, `rustos-caps`, `rustos-log`,
@@ -182,17 +183,37 @@ supervises (`plans/PI.md` P11). It wires the real seams:
     or an unlock that gave up). A **deny-all** authenticator is wired: the
     prompt stays up and every attempt is refused (`AGENTS.md` §5.4.5, never
     an invented account).
-- **`SessionLauncher`** over the `spawn`/`wait` syscalls: the record's
-  shell of choice is spawned **as the authenticated user** and supervised;
+- **`SessionLauncher`** over the `spawn`/`wait` syscalls: the chosen
+  session's program — the record's shell of choice for a text session,
+  the OS desktop-session bundle
+  (`rustos_login::DESKTOP_SESSION_PATH`,
+  `/System/Services/desktop.app/Run`) for a graphical one
+  (`session_program`, one mapping defined beside `SessionKind`) — is
+  spawned **as the authenticated user** and supervised;
   its exit code closes the session. Login holds `CAP_SPAWN_AS_USER` and
-  starts the shell through `rustos_rt::spawn_as(shell, CONSOLE_INHERIT,
-  uid)`, so the kernel resolves the user's full credential (uid, primary
-  gid, supplementary groups) from the authoritative identity table and
-  snapshots it onto the child — privilege only ever switches user at
-  process creation, never by a running process mutating its own identity
-  (there is no setuid-self, `PREREQUISITES.md` P-C). The shell still
-  receives only its registered program grant (`AGENTS.md` §5.2); the
+  starts the program through the uid-switching spawn with the session
+  environment, so the kernel resolves the user's full credential (uid,
+  primary gid, supplementary groups) from the authoritative identity
+  table and snapshots it onto the child — privilege only ever switches
+  user at process creation, never by a running process mutating its own
+  identity (there is no setuid-self, `PREREQUISITES.md` P-C). The child
+  still receives only its own manifest request intersected with the
+  account ceiling (`AGENTS.md` §5.2) — the desktop session's
+  `CAP_DISPLAY`/`CAP_INPUT_READ`/`CAP_SHM` are its manifest's, admitted
+  because the session baseline carries the graphical class; the
   spawn-as-user switch sets the child's *identity*, not its capabilities.
+- **The graphical-availability probe** (`plans/DISPLAY.md` D7d), run
+  before every round and failing closed to "hidden": a read-only
+  `fs_open` of the desktop bundle's `Run` path through the secured VFS
+  (login's one filesystem code path, the reason its manifest carries
+  `CAP_FS_ACCESS`; credentials still flow only through the gated
+  `users_db_read` syscall), and one `Query` call to the reserved
+  `DISPLAY_ENDPOINT`. Login holds no seat lease, so a live display
+  service answers with a typed refusal — but any well-formed reply
+  proves a service is serving the reserved rendezvous (only a
+  `CAP_IPC_BIND_PRIVILEGED` holder can bind it), while an unbound
+  endpoint fails the call itself. The probe learns nothing about the
+  seat and gains no authority.
 - **The elevation broker** (`plans/CAPABILITY_USE.md` CU5): at startup
   login binds its console's reserved elevation call endpoint
   (`rustos_abi::elevate::elevate_endpoint` over its own kernel-attested

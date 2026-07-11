@@ -2961,9 +2961,23 @@ transfer, landed in increments:
   autoloads onto its grants, the whole unlock dialogue is typed at the
   seat keyboard (the video console is the only console), and the run
   proves both per-kind `INPUT_DELIVERED` witnesses, the unlock, and the
-  `DISPLAY_ENDPOINT` bind (`plans/DISPLAY.md` D7d). Remaining (D7d-2):
-  login's `graphical_available` flip + desktop-session spawn + the
-  host-side scan-out pixel readback.
+  `DISPLAY_ENDPOINT` bind (`plans/DISPLAY.md` D7d). **D7d-2 (the
+  graphical login) is done — D7 is complete:** login probes per round
+  (a read-only `fs_open` of the desktop bundle's `Run` path — its
+  manifest gained `CAP_FS_ACCESS` for exactly this — plus one `Query`
+  `ipc_call` to the reserved `DISPLAY_ENDPOINT`), offers the graphical
+  choice only when both hold, and spawns the D7c session as the
+  authenticated user; `SESSION_BASELINE` carries the graphical class
+  (`CAP_DISPLAY`/`CAP_INPUT_READ`/`CAP_SHM`, the CU6 ceiling slice) while
+  the shell's manifest was decoupled to its own exercised set
+  (`SHELL_MANIFEST`); the display service emits a one-shot
+  `FIRST_PRESENT` record (id 15001, `CAP_LOG_EMIT`) after the first
+  client frame reaches scan-out; and the autoload vertical types
+  `root`/`root` + `g` at the seat keyboard, keys a QEMU screendump plus
+  the mouse injection on that witness (present → verified dump →
+  pointer → PASS), and the runner asserts the dump is dominated by the
+  theme's desktop colour — the host-side proof the composited frame
+  reached the surface.
   The virtio pointer feed into the seat channel is done — see above; the
   USB HID mouse joins through the same shared `from_device_event` mapping
   when its metal report pump lands. Then: relay the theme switch over live
@@ -4884,7 +4898,8 @@ VM mechanism, `kernel/mem::ramzip`;
 
 ## CAPABILITY_USE — the capability lifecycle: login → session → administration (`plans/CAPABILITY_USE.md`)
 
-**Status: CU1–CU5 and CU7 done; CU6 planned.** The full capability lifecycle is
+**Status: CU1–CU5 and CU7 done; CU6's session/ceiling slice live, its
+picker work remaining.** The full capability lifecycle is
 wired: the kernel computes *effective = user grant ∩ manifest request*
 (`TaskCapabilities::derive`), the runtime spawn path threads the account's
 `capability_grants` ceiling through `SpawnCredential` into that intersection
@@ -4895,7 +4910,9 @@ capability-gated optional features that degrade gracefully when the
 intersection strips them (`top`/`ps`/`sysinfo` request the privileged
 `CAP_SYSINFO_*` queries their optional features issue; the above-baseline
 subset per session tool is pinned as its own audited set — CU7) — with the
-shell on the session baseline (CU2),
+shell on its own exercised set (`SHELL_MANIFEST`; the account baseline
+additionally carries the graphical-session class
+`CAP_DISPLAY`/`CAP_INPUT_READ`/`CAP_SHM` — CU2/CU6),
 the debug root account is seeded with the shared `administrator_ceiling()`
 and the whole flow is proven by the `session_ceiling` QEMU vertical (CU3),
 and a running system administers its accounts through the
@@ -4917,8 +4934,9 @@ interactive **session baseline**, the **administrator** as a grant set (no
 uid-0 power, no wheel group), spawn as the only delegation point (narrowing
 only), next-spawn revocation, and elevation as re-authenticated
 spawn-as-user through the session service — never setuid or a runtime raise.
-Remaining: CU6 (desktop; `plans/DISPLAY.md` is complete, so the seat
-foundation it needed is in place) and the installer
+Remaining: CU6's picker-issued one-shot descriptors (with the desktop
+app-window work; the session/ceiling slice landed with `plans/DISPLAY.md`
+D7d) and the installer
 first-user flow (with the installer work). See `plans/CAPABILITY_USE.md`
 for the binding design and staging.
 
