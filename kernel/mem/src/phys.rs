@@ -172,6 +172,17 @@ mod tests {
         assert_eq!(p.as_ptr() as u64, 0x1000);
     }
 
+    /// Physical address zero translates to the null pointer under an
+    /// identity map, which [`NonNull`] cannot represent: the translate
+    /// fails closed. This is the hazard the frame allocator's permanent
+    /// zero-page reservation defends against — a zero frame handed to the
+    /// page-table source would be returned and re-drawn forever.
+    #[test]
+    fn direct_identity_rejects_the_null_translation() {
+        let map = DirectPhysMap::identity(0x1_0000_0000);
+        assert!(map.translate(PhysAddr::new(0), PAGE_SIZE).is_none());
+    }
+
     #[test]
     fn direct_rejects_range_past_limit() {
         let map = DirectPhysMap::identity(0x2000);

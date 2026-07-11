@@ -327,6 +327,20 @@ impl FrameAllocator {
     /// *inward* to whole-frame boundaries before being inserted into the
     /// buddy free lists.
     ///
+    /// The frame at physical address zero is never enrolled, even when the
+    /// firmware map reports it usable: under an identity direct map its
+    /// translation is the null pointer, which no [`NonNull`]-based consumer
+    /// (the page-table frame source, the DMA pool, an MMIO window) can
+    /// represent — and because the buddy lists hand out the lowest free
+    /// index first, a frame 0 that a consumer draws, cannot use, and hands
+    /// back would be re-drawn by every later request, wedging allocation
+    /// permanently while `free_frames` still reports plenty. On PCs it is
+    /// also the real-mode IVT/BDA page. It stays marked reserved, exactly
+    /// like firmware-reserved RAM, and is excluded from
+    /// [`Self::usable_frames`].
+    ///
+    /// [`NonNull`]: core::ptr::NonNull
+    ///
     /// # Errors
     ///
     /// Returns [`AllocError::InvariantViolation`] if the map is
@@ -390,6 +404,12 @@ impl FrameAllocator {
             // last frame fully inside region (exclusive upper bound).
             let first = usize::try_from(r.start.as_u64().div_ceil(PAGE_SIZE as u64))
                 .map_err(|_| AllocError::InvariantViolation)?;
+            // Never enroll the zero page: its identity translation is the
+            // null pointer, so a consumer that draws it must hand it back,
+            // and the lowest-first buddy pop would then re-issue it forever
+            // (the CI-only spawn wedge this guards against). Reserved, like
+            // firmware-reserved RAM.
+            let first = first.max(1);
             let last_excl = usize::try_from(end.as_u64() / PAGE_SIZE as u64)
                 .map_err(|_| AllocError::InvariantViolation)?;
             if first >= last_excl {
@@ -474,8 +494,9 @@ impl FrameAllocator {
 
     /// Number of whole frames of usable RAM the allocator manages —
     /// frames inside `Usable` boot-map regions, whether currently free or
-    /// handed out. Excludes reserved regions and physical-address holes,
-    /// so `usable_frames() - free_frames()` is the memory genuinely in use.
+    /// handed out. Excludes reserved regions, physical-address holes, and
+    /// the permanently reserved zero page (see [`Self::new`]), so
+    /// `usable_frames() - free_frames()` is the memory genuinely in use.
     #[must_use]
     pub fn usable_frames(&self) -> FrameCount {
         self.inner.lock().usable_frames
@@ -500,10 +521,13 @@ mod tests {
     use std::format;
     use std::vec::Vec;
 
+    /// A map whose single usable region starts at frame 16 — clear of the
+    /// permanently reserved zero page, and aligned for the largest order
+    /// the merge test draws — so `usable_pages` frames enter the pool.
     fn small_map(usable_pages: usize) -> BootMemoryMap {
         let mut m = BootMemoryMap::new();
         m.push(MemoryRegion {
-            start: PhysAddr::new(0),
+            start: PhysAddr::new((16 * PAGE_SIZE) as u64),
             length: (usable_pages * PAGE_SIZE) as u64,
             kind: RegionKind::Usable,
         });
@@ -618,9 +642,9 @@ mod tests {
     fn free_misaligned_order_block() {
         let m = small_map(16);
         let a = FrameAllocator::new(&m).unwrap();
-        // Frame 1 cannot be the start of an order-1 block (needs alignment 2).
+        // Frame 17 cannot be the start of an order-1 block (needs alignment 2).
         assert_eq!(
-            a.free_order(Frame(1), 1).err(),
+            a.free_order(Frame(17), 1).err(),
             Some(AllocError::InvariantViolation)
         );
     }
@@ -647,11 +671,51 @@ mod tests {
         let a = FrameAllocator::new(&m).unwrap();
         let mut handed = Vec::new();
         while let Ok(f) = a.alloc() {
-            // No frame in [4,8) may ever be handed out.
+            // No frame in [4,8) — nor the reserved zero page — may ever be
+            // handed out.
             assert!(!(4..8).contains(&f.0), "reserved frame {} handed out", f.0);
+            assert_ne!(f.0, 0, "the zero page must never be handed out");
             handed.push(f);
         }
-        assert_eq!(handed.len(), 12);
+        assert_eq!(handed.len(), 11);
+    }
+
+    /// Regression: the zero page never enters circulation even when the
+    /// firmware map reports it usable. Before the fix, frame 0's identity
+    /// translation (the null pointer) made the page-table frame source hand
+    /// it back, and the lowest-first buddy pop re-issued it to every later
+    /// request — wedging `spawn` permanently with tens of thousands of
+    /// frames still free (the CI-only spawn-session failure).
+    #[test]
+    fn zero_page_is_reserved_even_when_firmware_reports_it_usable() {
+        let mut m = BootMemoryMap::new();
+        m.push(MemoryRegion {
+            start: PhysAddr::new(0),
+            length: (8 * PAGE_SIZE) as u64,
+            kind: RegionKind::Usable,
+        });
+        let a = FrameAllocator::new(&m).unwrap();
+        assert_eq!(a.usable_frames(), 7, "the zero page is not usable RAM");
+        assert_eq!(a.free_frames(), 7);
+        let mut handed = Vec::new();
+        while let Ok(f) = a.alloc() {
+            assert_ne!(f.0, 0, "the zero page must never be handed out");
+            handed.push(f);
+        }
+        assert_eq!(handed.len(), 7);
+    }
+
+    /// A map whose only usable frame is the zero page holds no RAM the
+    /// allocator may hand out, so construction fails closed.
+    #[test]
+    fn map_of_only_the_zero_page_has_no_usable_frame() {
+        let mut m = BootMemoryMap::new();
+        m.push(MemoryRegion {
+            start: PhysAddr::new(0),
+            length: PAGE_SIZE as u64,
+            kind: RegionKind::Usable,
+        });
+        assert_eq!(FrameAllocator::new(&m).err(), Some(AllocError::OutOfMemory));
     }
 
     #[test]

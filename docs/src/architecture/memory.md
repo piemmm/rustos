@@ -54,6 +54,17 @@ regions are merged into the bitmap as "used" so they can never be
 handed out; usable regions are rounded *inward* to whole-frame
 boundaries.
 
+**The zero page is never enrolled**, even when firmware reports it
+usable (the PC low-BIOS region starts at physical 0): under an identity
+direct map its translation is the null pointer, which no
+`NonNull`-based consumer ([`FrameTableSource`], the DMA pool, an MMIO
+window) can represent. Because the buddy lists hand out the lowest free
+index first, a frame 0 that a consumer draws, cannot use, and returns
+would be re-issued to every later request — wedging allocation
+permanently while `free_frames` still reports plenty. It stays marked
+reserved, exactly like firmware-reserved RAM, and is excluded from
+`usable_frames`.
+
 ## 2. Slab allocator with guard pages
 
 `AGENTS.md` §4 mandates guard pages around kernel slabs. The slab's

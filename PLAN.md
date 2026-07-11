@@ -3179,36 +3179,33 @@ be split into two partial (refused) attempts. Work remaining:
 
 ## Defect — spawn-session x86_64 failure (user OOM + wrong write count)
 
-**Status: root cause found and fixed** (the x86_64 syscall return path); the
-remaining pieces are the ring-3 fault-handler decision below and the
-re-opened CI-host-only refusal under investigation.
+**Status: root cause found and fixed** (the x86_64 syscall return path and
+the zero-page frame wedge below); the remaining piece is the ring-3
+fault-handler decision at the end of this section.
 
-**Re-opened (CI host only): login spawn refused `NoSpace` (err 15).** On the
-self-hosted runner, `rustos-test-spawn-session-qemu-x86-64` fails
-persistently (first seen near the `VfsDirectorySource` commit): PID 1's
-fifth spawn — `/System/Services/login.app/Run` — is rejected by the handler
-with errno 15 *before* any `ProcessSpawned`/`ProcessSpawnFailed` record, and
-the run times out. Not reproducible on a developer machine even with
-byte-identical binaries (`CARGO_INCREMENTAL=0` matches the runner's code
-layout exactly), the same QEMU 8.2.2, parallel guests, a heavily contended
-single core, or `-icount`/`one-insn-per-tb` timing distortion. Ruled out by
-measurement: genuine frame exhaustion (~47 400 frames free at the fifth
-spawn), the fixed user-layout/stack-span derivations (deterministic on the
-same image bytes, which pass locally), the spawn handler's attach/credential
-paths (none returns `NoSpace`), and resource limits (default unlimited).
-The producers' pre-build refusal sites were **silent**, which is what made
-the transcript undiagnosable; they now audit a stable `cause` plus the
-allocator's free-frame margin through the shared
-`kernel_core::{refuse_spawn, refuse_admit}` helpers (all three ports). Work
-remaining:
-
-- Re-run the vertical on the CI host; the `ProcessSpawnFailed` record now
-  names the failing site (`page_table_frames_exhausted` /
-  `user_layout_unfit` / `stack_span_malformed` / admit causes) and its
-  `free_frames` margin distinguishes exhaustion from state corruption.
-- Fix the named cause with a regression test (a corrupted-allocator finding
-  would redirect to the preemption/interrupt save-restore paths, the class
-  the syscall-return-path fix above already exemplified).
+**Fixed (was CI-host-only): login spawn refused `NoSpace` (err 15) — the
+zero-page frame wedge.** The producers' formerly silent pre-build refusal
+sites now audit a stable `cause` plus the allocator's free-frame margin
+(shared `kernel_core::{refuse_spawn, refuse_admit}` helpers, all three
+ports), and the instrumented CI run named the site:
+`cause=page_table_frames_exhausted free_frames=47232` — a page-table frame
+refusal with ~185 MiB free. Root cause: the x86_64 firmware map reports the
+low BIOS region (including physical page 0) usable, and the spawn producer's
+page-table frame source translates each drawn frame through the low
+**identity** direct map — for frame 0 that translation is the null pointer,
+which `NonNull` cannot represent, so the source hands the frame back and
+fails closed. The buddy allocator hands out the **lowest** free index first,
+so once frame 0 enters the free lists (timing-dependent — which is why only
+the CI host's interleaving hit it) every subsequent page-table allocation
+re-draws frame 0 and fails forever while `free_frames` stays huge. Fix:
+`FrameAllocator::new` (`kernel/mem/src/frame.rs`) never enrolls the zero
+page, even when firmware reports it usable — it stays reserved like
+firmware-reserved RAM on every port (it is also the PC real-mode IVT/BDA
+page), excluded from `usable_frames`. Regression tests:
+`zero_page_is_reserved_even_when_firmware_reports_it_usable` and
+`map_of_only_the_zero_page_has_no_usable_frame` (frame.rs), and
+`direct_identity_rejects_the_null_translation` pins the hazard the
+reservation defends against (phys.rs).
 
 **Root cause.** The x86_64 `IA32_LSTAR` entry stub
 (`kernel/arch/x86_64/src/syscall_entry.rs`) tore its on-stack argument array

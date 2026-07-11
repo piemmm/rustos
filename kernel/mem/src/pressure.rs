@@ -843,9 +843,11 @@ mod tests {
         use crate::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
         use crate::frame::PhysAddr;
 
+        // Based at frame 1: the zero page is permanently reserved, so a
+        // base-0 region would enroll one frame fewer than it spans.
         let mut map = BootMemoryMap::new();
         map.push(MemoryRegion {
-            start: PhysAddr::new(0),
+            start: PhysAddr::new(PAGE_SIZE as u64),
             length: (64 * PAGE_SIZE) as u64,
             kind: RegionKind::Usable,
         });
