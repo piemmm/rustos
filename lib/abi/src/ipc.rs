@@ -55,6 +55,69 @@ pub const fn is_reserved_endpoint(id: u64) -> bool {
     id >= elevate_base && id <= elevate_base + crate::process::CONSOLE_INDEX_MAX as u64
 }
 
+/// Flags accepted by the server-side `call_recv` syscall.
+///
+/// A `#[repr(transparent)]` newtype over the `u32` flags register so the
+/// wire representation is exactly the integer the syscall trampoline
+/// passes (the [`crate::RandomFlags`] pattern). Only the bits named here
+/// are defined; every other bit is reserved and must be zero.
+/// [`CallRecvFlags::from_bits`] rejects a value with any reserved bit set,
+/// so a future flag cannot be silently ignored by an older kernel
+/// (validate every input, fail closed).
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
+pub struct CallRecvFlags(u32);
+
+impl CallRecvFlags {
+    /// Do not block when no request is queued.
+    ///
+    /// When set and the endpoint's queue is empty, the receive returns
+    /// [`Errno::WouldBlock`] immediately instead of parking. This is the
+    /// mode a wait-set-driven event loop uses: its wait-set already told
+    /// it the endpoint *was* ready, but the queued call may legitimately
+    /// have vanished in between (the kernel cancels a caller's in-flight
+    /// calls when that caller exits), and an event loop serving several
+    /// sources must not park on one of them.
+    pub const NON_BLOCKING: Self = Self(1 << 0);
+
+    /// The set of all defined flag bits.
+    ///
+    /// Any bit outside this mask is reserved and rejected by
+    /// [`CallRecvFlags::from_bits`].
+    const DEFINED_BITS: u32 = Self::NON_BLOCKING.0;
+
+    /// An empty flag set (blocking receive, no options).
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// Raw flag bits, as carried on the ABI.
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// Build a flag set from raw bits, rejecting any reserved bit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Errno::OutOfRange`] if `bits` sets any reserved
+    /// (currently-undefined) bit.
+    pub const fn from_bits(bits: u32) -> Result<Self, Errno> {
+        if bits & !Self::DEFINED_BITS != 0 {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self(bits))
+    }
+
+    /// Whether the caller asked for non-blocking behaviour.
+    #[must_use]
+    pub const fn is_non_blocking(self) -> bool {
+        self.0 & Self::NON_BLOCKING.0 != 0
+    }
+}
+
 /// Header carried in front of every IPC message.
 ///
 /// Total wire size is exactly [`IpcMessageHeader::WIRE_LEN`] bytes. The

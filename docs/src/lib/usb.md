@@ -53,17 +53,21 @@ build on the *same* engine without depending on each other — exactly the split
   device's endpoints. Endpoint DCIs, packet sizes, and intervals are read
   from each device's descriptors (never hard-coded).
   `bring_up` is the arch-neutral bring-up orchestration the host-controller
-  driver runs once: it enumerates the first connected root-hub port and, when
-  that device is itself a hub (the Pi 4B's onboard hub), powers the hub's
-  ports and enumerates **every** connected downstream port (settle windows
-  supplied by the `rustos_abi::Delay` seam) — a keyboard and a storage stick
-  plugged in together are both served, neither displacing the other, and a
-  port whose device fails enumeration is skipped with its slot released,
-  never allowed to cost the other devices their service. A device absent at
-  bring-up is a first-class state, not a failure: the controller comes up
-  with the first-connect watch armed (the onboard hub's status-change
-  endpoint, or the root port), so a cold boot with nothing plugged in works
-  and each device autoloads when plugged in.
+  driver runs once: it powers all root ports, parks through the connect
+  debounce, and attaches **every** connected root port (`attach_root_port`).
+  A root device that is itself a hub (the Pi 4B's onboard USB2 hub) is
+  installed, descended — every connected downstream port, nested tiers
+  included — and watched; a directly-attached device (the Pi 4B's USB3 side
+  of each jack is wired straight to a root port) is served beside it (settle
+  windows supplied by the `rustos_abi::Delay` seam) — a keyboard and a
+  storage stick plugged in together are both served, neither displacing the
+  other, and a port whose device fails enumeration is skipped with its slot
+  released, never allowed to cost the other devices their service. A device
+  absent at bring-up is a first-class state, not a failure: the controller
+  comes up watched (each hub's status-change endpoint, and the root ports'
+  latched connect changes serviced by `next_root_change` on every interrupt
+  wake, with no controller reset), so a cold boot with nothing plugged in
+  works and each device autoloads when plugged in.
 - `regs` / `trb` / `ring` — the register, TRB, and ring-state vocabularies; the
   ring state machines (`ProducerRing`, `EventRingCursor`) hold no memory of
   their own, so the owner publishes every write through the `device::DmaBank`
@@ -145,8 +149,16 @@ build on the *same* engine without depending on each other — exactly the split
   machines are proven host-side against a register-level mock plus an in-memory
   ring/DMA model (§2.2); the doorbell below them is the on-metal acceptance
   item (no QEMU `raspi*` USB vertical exists, §0.4).
+- Synchronous completion waits **park** on the caller-supplied
+  `device::EventWait` seam (on metal: the HCD's `irq_wait` on the
+  controller's bound interrupt line, which the caller binds before
+  `UsbDevice::start` — start enables the completion interrupter itself) and
+  are bounded by wall-clock budgets (the USB 2.0 §9.2.6 request ceiling for
+  a completion, the power-on-good + attach-debounce window for the boot
+  connect scan). Only the brief register handshakes (`Xhci` open/start/
+  reset readiness) keep the bounded iteration poll budget.
 - Fail-closed (§2.9): an implausible capability block, an out-of-range port or
-  doorbell target, a malformed descriptor, or an exhausted poll budget is a
+  doorbell target, a malformed descriptor, or an exhausted wait budget is a
   typed `DriverError`, never a panic or an unbounded spin (§2.1).
 - The crate holds **no** capability of its own — authority is the consuming
   driver's (`CAP_MMIO_MAP` for the register window, `CAP_MEM_DMA` for the DMA

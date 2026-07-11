@@ -884,15 +884,17 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::CALL_RECV,
         name: "call_recv",
-        arg_count: 4,
+        arg_count: 5,
         args: [
             // endpoint id, request buffer ptr, request buffer cap,
-            // ticket-out ptr.
+            // ticket-out ptr, `CallRecvFlags` bits (`NON_BLOCKING` makes
+            // an empty queue return `-WouldBlock` instead of parking —
+            // the wait-set event-loop mode; reserved bits fail closed).
             AbiType::IpcEndpoint,
             AbiType::UserPtr,
             AbiType::Len,
             AbiType::UserPtr,
-            AbiType::Unit,
+            AbiType::U32,
             AbiType::Unit,
         ],
         // `U64` carries the request-bytes-written-or-`-errno` register

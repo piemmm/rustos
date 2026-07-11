@@ -469,14 +469,44 @@ the live controller behaviour is host- and CI-proven first.
     this such an event matched no live endpoint and faulted the hub watch,
     silencing it so a later re-plug went unseen. The tolerance is cleared once a
     fresh device enumerates.
-  - **Directly-attached (no hub) hot-plug** uses the root-port `CCS` watch for
-    disconnect and `UsbDevice::reset_and_reenumerate` (full HCRST + re-program
-    + re-enumerate) on a root-port connect, treating it as a brand-new device.
-    The connect trigger is `UsbDevice::any_root_port_connected` (any root port,
-    since with no device addressed there is no specific port to watch).
-  - **Every reachable device is served concurrently.** `UsbDevice::bring_up`
-    enumerates the root device and, when it is the onboard hub, **every**
-    connected downstream port into a growable table bounded only by the
+  - **Root-port hot-plug is a per-port CSC scan, uniform for every port.**
+    A connect or disconnect on any root port latches `PORTSC.CSC` (and
+    posts the Port Status Change Event that raises the interrupt);
+    `UsbDevice::next_root_change` — called by the HCD on every interrupt
+    wake, before the hub-watch service — reads each port's latch, consumes
+    it (`Xhci::clear_port_connect_change`, RW1C-masked), re-reads the live
+    connect state, and reconciles: a new connect on an unserved port is
+    attached in place (`UsbDevice::attach_root_port` — a hub tier
+    installed, descended, and watched, or a leaf served), and a disconnect
+    detaches exactly what that port carried (a hub tier cascades with
+    everything behind it). The controller is **never** reset for routine
+    hot-plug, so sibling ports' devices are untouched; the latch scan is
+    register-confirmed, so a Port Status Change Event consumed by an
+    engine wait can never lose a plug. `reset_and_reenumerate` (full
+    HCRST + re-program + full re-walk) remains only as the latched
+    controller-fault recovery. Fail-soft per port, mirroring the hub scan:
+    a failed attach consumes the latch (no re-fire storm), snapshots
+    `last_attach_fault` (with the root port number; `port_status` is `0` —
+    a root port has no hub-format `wPortStatus`), and the first failure is
+    surfaced for the HCD's breadcrumb log.
+  - **Every reachable device is served concurrently — on every root
+    port.** `UsbDevice::bring_up` powers all root ports, parks through the
+    connect-debounce window, then attaches **every** connected root port
+    (`attach_root_port`, fail-soft per port): a hub tier (the Pi 4's
+    onboard USB2 hub) is installed, descended — every connected downstream
+    port, nested tiers included — and watched, and a directly-attached
+    device (the Pi 4's USB3 side of each jack is wired straight to a root
+    port) is served beside it. Every attachment is enumerated on its own
+    claimed device-table entry and demand-allocated DMA region — the
+    single-root special case (the shared-chunk `enumerate_hid` path and
+    the engine-level `root_port`/`root_speed`) is deleted; a hub records
+    its root port in its `HubState` (children inherit it into their slot
+    contexts) and a leaf in its `DeviceState`, which also lets
+    `detach_if_device_gone` confirm a *direct* device's removal on its
+    root port's live `CCS`. The resting control cursor generalises with it
+    (`rest_active_context`: lowest live hub, else a live device, else the
+    idle layout binding — never a released region). Devices fill a
+    growable table bounded only by the
     controller's reported slot count and genuine memory exhaustion — a
     keyboard and a storage stick plugged in together are both served, neither
     displacing the other (the Pi 4 boot defect where a plugged-in stick won
@@ -492,15 +522,22 @@ the live controller behaviour is host- and CI-proven first.
     failure.** The controller is always brought up and left serving. When the
     root device is the onboard hub but no downstream device is connected yet,
     the hub's status-change watch is armed; when no root device is present at
-    all, the controller waits for the first root-port connect. The HCD
+    all, the controller waits for the first root-port connect, which the
+    `next_root_change` scan attaches with no reset. The HCD
     publishes an interface node per device actually enumerated
     (`device_live(index)`), so a cold boot with nothing plugged in works:
     plug a device in afterwards and it autoloads. `reset_and_reenumerate`
     re-runs the same bring-up walk, so devices that vanished before
     re-enumeration leave the controller awaiting them rather than faulting.
+    A hub claims its own device-table entry's region for its contexts
+    (exactly as a nested hub always did), so the leaf devices behind the
+    Pi 4's onboard hub occupy indices above it — index 0 is the hub's.
   - Host/CI-proven over the register-level mock (the mock gained a hub
-    status-change endpoint, per-slot EP0-ring tracking, Disable Slot, and HCRST
-    state reset; `SET_FEATURE(PORT_RESET)` latches the Reset-change bit and
+    status-change endpoint, per-slot EP0-ring tracking, Disable Slot, HCRST
+    state reset, `PORTSC.CSC` write-1-to-clear, and a root-port-keyed
+    fixture model — the hub on root port 1, a leaf on any other — with the
+    root hub's live slot tracked for the TT check; `SET_FEATURE(PORT_RESET)`
+    latches the Reset-change bit and
     `CLEAR_FEATURE` clears only the selected change, mirroring real hardware):
     `hub_watch_arms…`, `hub_watch_retracts_a_disconnected…`,
     `hub_watch_reenumerates_a_reattached_device_on_a_fresh_slot`,
@@ -508,6 +545,9 @@ the live controller behaviour is host- and CI-proven first.
     `enumeration_drains_every_port_change_latch_so_the_hub_watch_stays_quiet`,
     `trailing_freed_slot_transfer_event_is_drained_not_faulted`,
     `hub_assembly_unplug_at_root_port_tears_down_and_replug_reenumerates`,
+    the multi-root cases (the Pi 4 silent-insertion defect)
+    `a_device_plugged_into_a_second_root_port_is_served_while_the_hub_stays_watched`
+    and `bring_up_serves_a_hub_tier_and_a_direct_root_device_together`,
     the cold-boot-no-device cases
     `bring_up_keyboard_arms_the_hub_watch_when_no_downstream_device_is_present`,
     `bring_up_keyboard_then_a_downstream_connect_enumerates_a_fresh_keyboard`,
@@ -520,14 +560,13 @@ the live controller behaviour is host- and CI-proven first.
   - **Whole-hub-assembly unplug (hub directly on a root port) is detected at
     the root port.** When a hub sits directly on a root port and is itself
     pulled, the unplug surfaces as that root port clearing its connect bit, not
-    as a downstream hub-port status-change. `UsbDevice::detach_if_hub_root_gone`
-    reads the watched hub's root port directly (a register read, no USB
-    transaction): still-connected → the normal `next_hub_change` path runs; gone
-    → the engine drops the hub watch and all device/hub tracking and the HCD
-    retracts the interface, leaving the controller awaiting a fresh root-port
-    connect that `reset_and_reenumerate` re-enumerates from scratch. A root-port
-    read fault is treated as still-connected (fail safe). The HCD's IRQ handler
-    checks this first whenever a hub is watched.
+    as a downstream hub-port status-change (the hub is gone, so it answers
+    neither its status-change endpoint nor a `GET_PORT_STATUS`). The
+    `next_root_change` scan sees the latched change, cascades the tier down
+    (`detach_hub`: every device and deeper tier behind it), and the HCD
+    reconciles its nodes; the later re-plug is attached afresh by the same
+    scan — hub reinstalled, descended, watched — with no controller reset,
+    so sibling ports' devices are untouched.
   - **Downstream keyboard unplug behind a *persistent* hub is detected on the
     device's own fault code.** The Pi 4 keyboard hangs off a hub that stays
     plugged in, so on unplug the root port keeps reading connected
@@ -581,31 +620,90 @@ the live controller behaviour is host- and CI-proven first.
     symptom). Re-arming first keeps the watch live so the next genuine report
     (the reconnect) still wakes the loop. Host regression:
     `a_failed_status_change_service_re_arms_the_watch_so_a_replug_is_still_seen`.
-  - **Downstream hot-plug does not depend on the hub's interrupt: a tickless
-    port poll is the fallback wake source.** Metal proved the Pi 4's
-    integrated hub can raise *no* interrupt at all for a downstream connect
-    (a mass-storage stick plugged in after boot produced no controller event
-    ever), so a watch that only re-arms can still never wake. The HCD's
-    event loop therefore arms its `waitset_wait` with a one-shot 256 ms
-    deadline (`RECONNECT_POLL_NS`) **only while a hub is watched** (with no
-    hub the wait stays unbounded — no periodic wakes) and, gated on the
-    elapsed monotonic clock so an IRQ storm can neither starve it nor flood
-    the hub's control ring, runs `UsbDevice::poll_hub_ports`: one sweep that
-    reads every watched hub's downstream ports directly with
-    `GET_PORT_STATUS` (no dependence on the status-change endpoint) and puts
-    each port through the same `reconcile_hub_port` decision the
-    status-change service uses — one hot-plug path, not two. The decision is
-    keyed on the port's *live* state against the tracking tables (attach the
+  - **Every engine wait parks, and downstream hot-plug is interrupt-driven
+    only — no periodic port sweep.** The engine's synchronous completion
+    waits (`await_event_for`) and the boot-time root-connect debounce park
+    on the `EventWait` seam — on metal the HCD's `irq_wait` on the
+    controller's bound interrupt line, which is bound **before** the
+    controller is started (`UsbDevice::start` itself enables the completion
+    interrupter, so cold boot and every post-reset re-program share one
+    definition) — and are bounded by **wall-clock** budgets
+    (`AWAIT_EVENT_BUDGET_US`, the USB 2.0 §9.2.6 request ceiling;
+    `CONNECT_WINDOW_US`, power-on-good + attach debounce), never by an
+    iteration-count spin. The hub's status-change interrupt-IN watch is the
+    sole downstream hot-plug wake source; the HCD event loop's wait is
+    unbounded with no periodic wakes. Every changed port still goes through
+    the one `reconcile_hub_port` decision, keyed on the port's *live*
+    `GET_PORT_STATUS` state against the tracking tables (attach the
     untracked connected, free the tracked disconnected — hubs cascade — and
-    drain stale latches), never on the latch bits alone, since the latch may
-    be stale or missing while the state is real. The HCD tick
-    (`poll_hub_topology`) checks the whole-assembly root-port unplug first,
-    exactly as the interrupt path does, then reconciles the published
-    interface nodes so `devmgr` autoloads the class driver. Host
-    regressions: `a_silent_downstream_connect_is_found_by_the_port_poll`,
-    `a_silent_downstream_disconnect_is_freed_by_the_port_poll`,
-    `the_port_poll_drains_a_stale_latch_without_fabricating_a_device`,
-    `the_port_poll_is_a_no_op_with_no_watched_hub`.
+    drain stale latches). The earlier "the hub raises no interrupt for a
+    downstream connect" metal observation is treated as **undiagnosed**
+    until re-captured against the parked-wait engine: a bring-up failure now
+    logs the whole breadcrumb (phase, error, open stage, `USBCMD`/`USBSTS`,
+    enumeration stage, completion/event-type/reject codes, `PORTSC`), a
+    successful bring-up logs a topology summary (devices served, hub watch,
+    root port), and a connected device that fails enumeration and is
+    skipped logs a warning with the skip count
+    (`UsbDevice::skipped_port_count`) instead of looking like an empty
+    port. Host regressions:
+    `a_missing_completion_times_out_by_wall_clock_and_parks_instead_of_spinning`,
+    `an_empty_root_hub_parks_through_the_connect_window_and_reports_not_found`,
+    `start_enables_the_interrupter`.
+  - **A downstream-port reset is polled to completion, and a failed attach
+    keeps its evidence.** Hot-plugging an (empty) external hub into the
+    integrated hub faulted the attach (`hub status-change service failed
+    err_hex=a`) with nothing in the log to say why. Two fixes:
+    - The attach used to wait one fixed 50 ms and then require the port
+      enabled in a single `GET_PORT_STATUS`, but a slow external hub
+      legitimately takes hundreds of milliseconds to complete a downstream
+      reset. `await_port_reset_complete` now re-polls the port status at
+      20 ms parked intervals (bounded at 800 ms, the budget production
+      stacks allow), requires reset-signalling done **and** the port
+      enabled, and settles `TRSTRCY` (10 ms) before the device is
+      addressed — a fast hub costs one poll, a slow one is no longer
+      refused as a `DeviceFault`.
+    - A failed attach snapshots its diagnostics before the best-effort
+      latch drain overwrites the live state
+      (`UsbDevice::last_attach_fault`: port, error, enumeration stage,
+      completion/event-type/reject codes, the port's final observed
+      `wPortStatus`; first failure of a service kept, cleared on each
+      service/walk entry). The HCD's `hub status-change service failed`
+      warning logs that snapshot plus `USBSTS` (or the live diagnostics
+      for a non-attach failure), and every error URB reply is logged with
+      its errno and the endpoint's latched raw completion code, so a
+      collateral class-driver fault (the keyboard's warning beside the
+      hub plug) is attributable to the controller's actual verdict.
+    Host regressions:
+    `a_slow_hub_port_reset_is_polled_until_it_completes`,
+    `a_port_that_never_enables_records_its_stage_port_and_final_status`.
+  - **A controller-fault recovery can no longer be wedged by a dead class
+    driver's leftover URB submit.** Mid-typing (no plug/unplug) the VL805
+    latched a controller fault; the HCD's reset/re-enumerate recovery
+    worked, but the *reloaded* keyboard driver's every submit was refused
+    `AlreadyExists` and it exited fail-closed. Cause: the old driver's
+    final `ipc_call` was still queued in the kernel when `devmgr` killed
+    it; the kernel kept a dead caller's calls, so after recovery the HCD
+    received the corpse's URB, held it in the single outstanding slot,
+    and the transport was wedged. Fixes, at the correct layers:
+    - Kernel: task reclamation now cancels every call the dead task
+      posted (`CallEndpoint::cancel_posted_by`, walked over the registry
+      from `reclaim_task_resources`; audit event 3051) — a server never
+      receives a dead caller's request (`docs/src/architecture/ipc.md`).
+    - ABI/runtime: `call_recv` gained fail-closed `CallRecvFlags`
+      (`NON_BLOCKING` answers an empty queue with `WouldBlock`); every
+      wait-set-driven event loop — the HCD, `usb_msd` (one endpoint per
+      LUN), the display service, login's elevation broker — receives
+      non-blocking, so a readiness peek whose call was cancelled can
+      never park the loop and starve its other sources.
+    - Diagnostics: the `controller fault latched` warning (id 4127) now
+      carries live `USBSTS`/`USBCMD`, so the next metal capture names
+      which fault bit (HSE/HCE/HCHalted) actually latched — the
+      spontaneous mid-typing fault itself remains to be diagnosed from
+      that evidence.
+    Regressions: kernel/ipc `cancel_posted_by_*` (three-state scrub,
+    other-poster isolation, silent no-op), kernel/core
+    `reclaim_scrubs_a_dead_posters_queued_call`,
+    `nonblocking_call_recv_answers_an_empty_queue_with_would_block`.
   - **A stray controller event never silences the hub watch (the
     "controller goes quiet after the first report" fix).** The Pi 4's black
     USB2 sockets sit behind an *integrated* hub (the engine reports
@@ -718,8 +816,8 @@ the live controller behaviour is host- and CI-proven first.
     each controller-IRQ wake and recovers via `reset_and_reenumerate` — the
     same full HC reset + fresh enumeration a cold boot performs — returning to
     the proven await-connect state so the re-plug enumerates through the normal
-    attach path. The recovery body is shared with the root-port re-attach path
-    (`reset_reenumerate_and_publish`, no duplication) and runs after both
+    attach path (`reset_reenumerate_and_publish`, the fault-recovery-only
+    reset; routine hot-plug never resets the controller) after both
     disconnect exits (`recover_if_controller_faulted`). Host regression:
     `controller_faulted_reports_hse_and_halt_and_recovery_clears_it` (healthy →
     not faulted; latched HSE → faulted; HC reset clears it; Run/Stop clear →
@@ -908,8 +1006,7 @@ the live controller behaviour is host- and CI-proven first.
 U1–U9 are landed; the modular USB stack — bus driver → user-space HCD owning
 one controller and serving the URB transport → per-interface class drivers
 (keyboard, mouse, mass storage), with event-driven hub hot-plug on every
-tier (plus the tickless downstream-port poll for hubs that raise no
-interrupt), recursive multi-tier hub descent with cascade teardown, fresh
+tier, recursive multi-tier hub descent with cascade teardown, fresh
 re-enumeration, per-port failure isolation, composite (multi-interface)
 devices served one node per interface, and EP0 max-packet discovery for
 full-speed devices — is complete and host-/CI-proven. The

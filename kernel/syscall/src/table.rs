@@ -9,9 +9,9 @@
 //! (no bloat).
 
 use rustos_abi::{
-    spec_for, AbiType, CapabilityId, Errno, IrqHandle, MapFlags, OpenFlags, RandomFlags, Signal,
-    SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags, ENCODED_TABLE, FS_ATTR_KEY_MAX,
-    FS_ATTR_VALUE_MAX, FS_MODE_MASK, PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
+    spec_for, AbiType, CallRecvFlags, CapabilityId, Errno, IrqHandle, MapFlags, OpenFlags,
+    RandomFlags, Signal, SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags, ENCODED_TABLE,
+    FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
 };
 use rustos_crypto::{sha256, Sha256Digest};
 use rustos_kernel_sec::{TaskCapabilities, TaskId};
@@ -1130,11 +1130,17 @@ pub trait SyscallHandlers {
     /// server-side receive half).
     ///
     /// The dispatcher has already checked `buf` and `ticket_out` are non-null
-    /// `UserPtr`s. The implementation resolves `endpoint`, enforces the
-    /// endpoint's required **receive** capability against the caller before
-    /// touching state, and either copies one request out
+    /// `UserPtr`s and validated `flags` against the defined
+    /// [`CallRecvFlags`] bits. The implementation resolves `endpoint`,
+    /// enforces the endpoint's required **receive** capability against the
+    /// caller before touching state, and either copies one request out
     /// (returning its byte length and writing its ticket to `ticket_out`) or
-    /// blocks cooperatively until one is posted (never busy-spinning). A request larger than `buf_cap` fails closed with
+    /// blocks cooperatively until one is posted (never busy-spinning) —
+    /// unless `flags` carries [`CallRecvFlags::NON_BLOCKING`], in which case
+    /// an empty queue fails closed with [`Errno::WouldBlock`] instead of
+    /// parking (the wait-set event-loop mode: a queued call the wait-set
+    /// reported may legitimately have been cancelled by its poster's exit).
+    /// A request larger than `buf_cap` fails closed with
     /// [`Errno::BufferTooSmall`] and is left queued.
     ///
     /// The default implementation fails closed with
@@ -1147,6 +1153,7 @@ pub trait SyscallHandlers {
         _buf: u64,
         _buf_cap: usize,
         _ticket_out: u64,
+        _flags: CallRecvFlags,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
@@ -2396,10 +2403,13 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             SyscallNumber::CALL_RECV => {
                 // args[0] is the endpoint id; args[1]/args[3] are non-null
                 // `UserPtr`s (request buffer, ticket-out, dispatcher-checked);
-                // args[2] is the request-buffer capacity.
+                // args[2] is the request-buffer capacity; args[4] carries the
+                // `CallRecvFlags` bits, rejected fail-closed on any reserved
+                // bit before the handler runs.
                 let buf_cap = decode_len(args.0[2])?;
+                let flags = CallRecvFlags::from_bits(decode_u32(args.0[4]))?;
                 self.handlers
-                    .call_recv(caller, args.0[0], args.0[1], buf_cap, args.0[3])
+                    .call_recv(caller, args.0[0], args.0[1], buf_cap, args.0[3], flags)
             }
             SyscallNumber::CALL_REPLY => {
                 // args[0] is the endpoint id; args[1] the ticket; args[2] is a
@@ -3410,10 +3420,11 @@ mod tests {
             _buf: u64,
             buf_cap: usize,
             _ticket_out: u64,
+            _flags: CallRecvFlags,
         ) -> SyscallResult {
             self.record("call_recv");
             // Echo the buffer capacity so the reachability test can assert the
-            // dispatcher decoded the four arguments without wiring a real
+            // dispatcher decoded the arguments without wiring a real
             // endpoint / scheduler here.
             Ok(buf_cap as u64)
         }

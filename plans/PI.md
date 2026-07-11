@@ -2290,9 +2290,9 @@ compiles and host-tests on the CI host:
   re-checked kernel-side, §5.4);
 - `bring_up_keyboard(host, &PcieBringup, &dyn Delay)` runs the full chain
   — `pcie_brcm::wiring::open_discovered` (link train) → `mechanism_brcm`
-  → `usb::wiring::open_discovered` → `UsbDevice::enumerate_first_connected`
-  (new: scans root-hub ports 1..=max for the first connected device,
-  fail-closed `NotFound` on an empty hub) → `BootKeyboard`;
+  → `usb::wiring::open_discovered` → `UsbDevice::bring_up`
+  (scans root-hub ports 1..=max and attaches every connected device;
+  an empty controller comes up serving nothing) → `BootKeyboard`;
 - `QueueConsoleSink` feeds the produced bytes into the video console's
   `ConsoleInput` queue (`console_input`/`VIDEO_KEYBOARD`), short-pushing
   without spin (§2.1).
@@ -2302,7 +2302,7 @@ drops-overflow-without-spin, `ChainHost` reports caps/mapper/dma, the
 chain fails closed without `CAP_MMIO_MAP`, and the chain reaches the
 BCM2711 root-complex bring-up over a mapped window and fails closed
 `DeviceFault` on the inert mock — the metal boundary), plus the usb
-`enumerate_first_connected_*` tests; the discovered-node parse tests
+bring-up root-port-scan tests; the discovered-node parse tests
 (window assembly + each fail-closed missing resource + a non-zero inbound
 PCIe base) moved with `pcie_bringup_from_node` into the `pcie_brcm` crate
 under Increment C-2 (§2.2/§2.21).
@@ -2681,7 +2681,7 @@ keyboard service kthread**:
   - **Root-hub port power (`PORTSC.PP`): done, metal-confirmed.**
     With the controller online, the residual moved to root-hub enumeration:
     `4101 no usb device enumerated on the root hub err=device_fault`. The scan
-    (`UsbDevice::enumerate_first_connected`) read each port's Current Connect
+    (now `UsbDevice::bring_up`'s root-port walk) read each port's Current Connect
     Status **once**, immediately after Run, with no Port Power asserted and no
     connect debounce — but the Host Controller Reset in `Xhci::open` clears
     every `PORTSC`, and the VL805 is port-power-controlled (`HCCPARAMS1`
@@ -2697,11 +2697,11 @@ keyboard service kthread**:
     the other four ports powered but empty — so power asserts correctly and the
     device is present. Host-proven by `drivers/bus/usb`
     `set_port_power_asserts_pp_and_rejects_a_bad_port`,
-    `enumerate_first_connected_powers_every_root_port` and
-    `enumerate_first_connected_connects_a_port_only_after_power`.
+    `bring_up_powers_every_root_port` and
+    `bring_up_connects_a_port_only_after_power`.
   - **Enumeration fault localisation (`EnumStage` / `4126`): done, the
     localiser that pinned the next root cause.** With a device on port 1 the
-    `device_fault` was *inside* `UsbDevice::enumerate_hid`; the single coarse
+    `device_fault` was *inside* the root attach; the single coarse
     `DriverError::DeviceFault` could not say where. The driver records a
     breadcrumb — `enum_stage()` (an `EnumStage` discriminant set as each step
     runs) and `last_completion_code()` (the raw xHCI completion code of the last
@@ -2709,8 +2709,8 @@ keyboard service kthread**:
     command/control transfer, set undecoded via `Trb::completion_code_raw`) —
     logged one-shot on the failure path as `EventId(4126)`
     (`stage_hex` + `completion_hex`) before the `4125` port dump. Host-proven by
-    `drivers/bus/usb` `enumerate_hid_records_the_configured_stage_on_success`
-    and `enumerate_hid_stage_breadcrumb_localises_a_class_stall`.
+    `drivers/bus/usb` `root_attach_records_the_configured_stage_on_success`
+    and `root_attach_fails_closed_on_a_non_stall_class_fault`.
   - **Non-coherent DMA cache maintenance — done; necessary but not
     sufficient (`AGENTS.md` §4 / §15.7).** The `4126` metal capture read
     `stage_hex=2` (Enable Slot)
@@ -2784,13 +2784,13 @@ keyboard service kthread**:
     usable in its default protocol (a non-implementing device ignores a
     stalled `SET_PROTOCOL`). The driver treated any non-Success control
     completion as `device_fault`, aborting an otherwise enumerable keyboard.
-    `enumerate_hid` now issues `SET_PROTOCOL(boot)` through `control_optional`,
+    The enumeration now issues `SET_PROTOCOL(boot)` through `control_optional`,
     which absorbs a STALL (raw code preserved in `last_completion`), primes
     the interrupt-IN ring, and reaches `EnumStage::Configured`; every other
     completion still fails closed. It is the last EP0 transfer and EP0 is not
     reused, so a halted control endpoint after the STALL is immaterial.
-    Host-proven by `drivers/bus/usb` `enumerate_hid_tolerates_a_stalled_set_protocol`
-    and `enumerate_hid_fails_closed_on_a_non_stall_class_fault`.
+    Host-proven by `drivers/bus/usb` `root_attach_tolerates_a_stalled_set_protocol`
+    and `root_attach_fails_closed_on_a_non_stall_class_fault`.
     **Metal-confirmed:** the capture logs `4102 vendor=2109 product=3431` —
     enumeration runs end to end, so the tolerated STALL was the last
     *enumeration* blocker. What enumerates, however, is the onboard hub, not
@@ -2813,7 +2813,7 @@ keyboard service kthread**:
     The metal capture read `4101 reading the hub descriptor failed
     err=device_fault`: the class `GET_DESCRIPTOR(hub)` faulted though the
     device/config-descriptor reads on the same EP0 had succeeded. Root cause:
-    `enumerate_hid` issued the HID `SET_PROTOCOL(boot)` to *every* device,
+    the enumeration issued the HID `SET_PROTOCOL(boot)` to *every* device,
     including the hub; a hub is not a HID device so it STALLs that request, and
     an xHCI STALL **halts** the control endpoint (xHCI §4.10.2.4) until reset.
     `control_optional` tolerated the STALL on the (now-broken) assumption that
@@ -2825,12 +2825,12 @@ keyboard service kthread**:
     is unaffected (its HID interface still gets it, still last). The `4127`
     hub-descriptor-read failure log now also carries `completion_hex` (raw xHCI
     completion code). Host-proven by `drivers/bus/usb`
-    `enumerate_hid_flags_a_hub_via_the_device_class`,
+    `root_attach_recognises_a_hub_via_the_device_class`,
     `enumerating_a_hub_leaves_ep0_usable_for_the_hub_descriptor` (the mock
     STALLs the hub's `SET_PROTOCOL` and models the EP0 halt — fails before the
     gate, passes after), `hub_discovery_finds_the_downstream_device`,
     `hub_port_reads_disconnected_until_powered`, and
-    `hub_num_ports_fails_closed_on_a_forged_descriptor`.
+    `a_forged_hub_descriptor_fails_the_attach_closed`.
   - **Per-port `GET_STATUS` faults — current lever; `AGENTS.md` §15.7.** With
     the EP0 fix the hub-descriptor read succeeds (metal `4127 num_ports=4`) and
     Port Power is asserted on every downstream port, but the capture then read
@@ -2887,7 +2887,7 @@ keyboard service kthread**:
     (TRB-address mismatch) with `evtype_hex=0x20` (a real Transfer Event) on
     ports 1–2, and ports 3–4 with no event (`completion=0`/`reject=0` = the
     EP0 ring had wedged from the earlier faults). Root cause:
-    `enumerate_hid` configured, primed, and doorbelled the **interrupt-IN
+    the enumeration configured, primed, and doorbelled the **interrupt-IN
     endpoint for every enumerated device, including the hub**. A hub's
     interrupt endpoint is its status-change pipe; once armed and doorbelled the
     hub delivers asynchronous status-change reports, and those interrupt
@@ -3164,7 +3164,7 @@ table, so a new board is match **data**, not new code. Sub-increments
   method only (no `#[repr(C)]`/C-header drift), host-proven that the VL805
   node matches `bus_usb::BIND_KEYS`. **5b-ii — done:** `bus_usb` emits the
   HID device under the VL805 keyed by its **interface** class
-  (`0x030101`/`0x030102`). `UsbDevice::enumerate_hid` now reads the
+  (`0x030101`/`0x030102`). The enumeration now reads the
   configuration descriptor and parses every default-alternate interface
   descriptor (`InterfaceInfo::decode_all`, fail-closed): the discovered `bConfigurationValue`
   / `bInterfaceNumber` drive `SET_CONFIGURATION` / `SET_PROTOCOL(boot)` (no

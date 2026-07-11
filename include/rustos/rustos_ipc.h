@@ -24,6 +24,9 @@
 /* Packed little-endian wire size of an IPC message header, in bytes. */
 #define ROS_IPC_MESSAGE_HEADER_WIRE_LEN 32u
 
+/* call_recv flags (uint32_t). Every undefined bit is reserved and must be zero. */
+#define ROS_CALL_RECV_FLAG_NON_BLOCKING 0x1u
+
 /* Maximum length, in bytes, of a port name (excludes the length byte). */
 #define ROS_PORT_NAME_MAX_LEN 31u
 /* Packed little-endian wire size of a port name, in bytes. */

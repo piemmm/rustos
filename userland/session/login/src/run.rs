@@ -273,6 +273,12 @@ mod program {
 
         /// Receive, decide, and answer one posted elevation request.
         ///
+        /// The receive is non-blocking: this wait-set also supervises the
+        /// session's shell child, and the queued request the wake reported
+        /// may have been cancelled (its poster exited), so parking here
+        /// would wedge session supervision on an endpoint with nothing to
+        /// serve. An empty queue simply returns.
+        ///
         /// The request buffer carries an offered password, so it is zeroed
         /// before this returns on every path. A recv failure is dropped
         /// (the poster's `ipc_call` observes its error); a reply failure is
@@ -281,7 +287,8 @@ mod program {
         fn serve_one(&self, authenticator: &dyn Authenticator, sink: &LogSink) {
             let mut request = [0u8; ELEVATE_MAX_REQUEST];
             let mut ticket = 0u64;
-            let Ok(len) = rustos_rt::call_recv(self.endpoint, &mut request, &mut ticket) else {
+            let Ok(len) = rustos_rt::call_recv_nonblock(self.endpoint, &mut request, &mut ticket)
+            else {
                 request.fill(0);
                 return;
             };

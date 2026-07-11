@@ -234,7 +234,7 @@ uint64_t ros_sys_hw_tree_read(void * a0, uintptr_t a1);
 int32_t ros_sys_hw_tree_wait(uint64_t a0, uint64_t a1);
 uint64_t ros_sys_ipc_call(uint64_t a0, void * a1, uintptr_t a2, void * a3, uintptr_t a4);
 int32_t ros_sys_call_create(uint64_t a0, void * a1, void * a2, uintptr_t a3, uintptr_t a4, uintptr_t a5);
-uint64_t ros_sys_call_recv(uint64_t a0, void * a1, uintptr_t a2, void * a3);
+uint64_t ros_sys_call_recv(uint64_t a0, void * a1, uintptr_t a2, void * a3, uint32_t a4);
 int32_t ros_sys_call_reply(uint64_t a0, uint64_t a1, void * a2, uintptr_t a3);
 int32_t ros_sys_users_db_wait(uint64_t a0);
 int32_t ros_sys_log_emit(void * a0, uintptr_t a1);

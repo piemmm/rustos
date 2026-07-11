@@ -219,6 +219,29 @@ revealing another task's ticket — `AGENTS.md` §19.1); and `destroy`
 cancels every in-flight ticket so a parked caller observes `Cancelled`
 and abandons rather than waiting forever (fail closed, `AGENTS.md` §2.9).
 
+A caller's calls die with it. When a task exits (cleanly, by fault, or
+killed — e.g. a class driver unloaded by `devmgr`), the kernel's task
+reclamation cancels every call that task still has in flight on every
+registered endpoint (`cancel_posted_by`): queued requests are dropped
+before any server receives them, in-service tickets are retired so the
+server's later `reply` is refused fail-closed, and unclaimed replies are
+discarded. Without this a dead caller's queued request would be handed to
+the server as if live — serviced on a ticket whose reply goes nowhere and,
+on a single-slot protocol such as the USB URB transport, wedging the
+endpoint against the caller's replacement (the observed Pi 4
+keyboard-recovery defect). Each affected endpoint records one
+`CALL_POSTER_VANISHED` (3051) event.
+
+Because a queued call can vanish this way, a wait-set's endpoint
+readiness peek is a hint, not a guarantee. The `call_recv` syscall
+therefore takes a `CallRecvFlags` word: `0` blocks until a request
+arrives (the dedicated-server mode `sysinfod`/`journald`/`seatmgr` use),
+while `NON_BLOCKING` answers an empty queue with `WouldBlock` instead of
+parking — the mode every wait-set-driven event loop (the USB HCD, the
+display service, `usb_msd`, login's elevation broker) uses so a loop
+serving several sources can never park on one of them. Reserved flag
+bits are rejected fail-closed.
+
 ## Audit catalogue
 
 Audit events live in the `kernel/ipc` reserved range `3_000..4_000`
@@ -259,6 +282,7 @@ Audit events live in the `kernel/ipc` reserved range `3_000..4_000`
 | 3048 | Debug | `CALL_REPLIED`                | A server delivered a reply to an in-flight call. `Debug` for the same reason as `CALL_POSTED` (3043): routine high-throughput RPC completion. Its denial (3049) stays at `Error`. |
 | 3049 | Error | `CALL_REPLY_DENIED`           | Unknown ticket, or reply exceeded `max_reply`. |
 | 3050 | Error | `CALL_ENDPOINT_REGISTER_DENIED` | A registry bind was refused because the `EndpointId` was already bound; the freshly created endpoint is dropped (mirrors `PORT_REGISTER_DENIED`, 3004). |
+| 3051 | Info  | `CALL_POSTER_VANISHED`        | A caller task exited with calls still in flight on this endpoint; the kernel cancelled them (queued requests dropped before service, in-service tickets retired so the server's reply fails closed, unclaimed replies discarded). |
 
 Adding a new event requires assigning the next free identifier in
 `kernel/ipc/src/audit.rs` and appending a row to this table.

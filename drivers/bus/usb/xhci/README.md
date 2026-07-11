@@ -27,10 +27,12 @@ lib/*` only; the USB analogue of `lib/virtio` ↔ `drivers/bus/virtio`).
 - `bringup` — `derive_controller_resources` + `bring_up_controller[_diagnostic]`:
   derive the BAR/DMA bounds from the granted resources, carve+aperture-check
   the DMA region (fail-closed `OutOfRange`, §5.4), map the BAR, and bring the
-  controller up via `rustos_usb::Xhci::open` + `UsbDevice::start` +
-  `UsbDevice::bring_up_keyboard`, returning the `UsbDevice` engine — pointed at
-  the device's slot when one is present, or serving with its first-connect watch
-  armed (`BringUp::AwaitingDevice`) when none is yet attached.
+  controller up via `rustos_usb::Xhci::open` + `UsbDevice::start` (which also
+  enables the completion interrupter — the engine's synchronous waits park on
+  the caller-supplied `EventWait` seam, wall-clock-bounded, never an
+  iteration-count spin) + `UsbDevice::bring_up`, returning the `UsbDevice`
+  engine serving every enumerated device — or serving with its first-connect
+  watch armed when none is yet attached.
 - `serve` — `UrbService`, the per-interface state holding at most one
   outstanding interrupt-IN URB (a second concurrent submit fails closed
   `AlreadyExists`), driven on submit/IRQ through `rustos_usb::drive_urb` /
@@ -39,27 +41,26 @@ lib/*` only; the USB analogue of `lib/virtio` ↔ `drivers/bus/virtio`).
   is live is rejected with `NotFound`, so a replugged class driver starts from a
   clean transport state. `attach_transport_grants` adds the URB endpoint +
   shared-buffer grants onto the `describe_device` interface node.
-- `main.rs` — the freestanding `Run` program: `from_grants_query` → bring-up →
-  `shm_create` (the URB data buffer) + grant-restricted `call_create` (the URB
-  transport endpoint) → emit the interface node carrying both grants
-  (`hw_emit_node` returns the assigned node id) → enable the completion
-  interrupter + `irq_bind` → an **asynchronous wait-set event loop** that parks
-  on the URB endpoint **and** the controller IRQ: a URB submit is driven and
-  either replied at once or held outstanding; a controller interrupt drains the
-  event ring, services hot-plug before stale transfer completions, and replies
-  the now-complete URB (bounce-copying the report into the shared buffer). The
-  hot-plug path is the onboard hub's status-change watch (`next_hub_change`:
-  enumerate a freshly-connected device and publish a node, or abort the parked
-  URB, retract on disconnect, and reject stale old-driver submits while absent)
-  — backed by a tickless downstream-port poll: while a hub is watched the wait
-  carries a one-shot 256 ms deadline (`RECONNECT_POLL_NS`) and, gated on the
-  elapsed monotonic clock, `poll_hub_topology` sweeps every watched hub's
-  ports with `GET_PORT_STATUS` through the engine's `poll_hub_ports`. That
-  sweep is the only wake source for a hub (the Pi 4's integrated hub among
-  them) that raises no interrupt for a downstream connect, so a device
-  plugged in after boot is still enumerated and published; with no hub
-  watched the wait stays unbounded (no periodic wakes) —
-  plus a fault-confirmation path for controllers that report unplug first as the
+- `main.rs` — the freestanding `Run` program: `from_grants_query` → `irq_bind`
+  (the controller's interrupt line, **before** the controller is touched — the
+  engine's synchronous waits park on it through the `EventWait` seam, and the
+  interrupter is enabled as part of `UsbDevice::start`) → bring-up (a failure
+  logs the **whole** diagnostic breadcrumb: phase, error, open stage,
+  `USBCMD`/`USBSTS`, enumeration stage, completion/event-type/reject codes,
+  and `PORTSC`; success logs a topology summary and warns about connected
+  devices that failed enumeration and were skipped) → `shm_create` (the URB
+  data buffer) + grant-restricted `call_create` (the URB transport endpoint)
+  → emit the interface node carrying both grants (`hw_emit_node` returns the
+  assigned node id) → an **asynchronous wait-set event loop** that parks —
+  unbounded, with no periodic wakes — on the URB endpoint **and** the
+  controller IRQ: a URB submit is driven and either replied at once or held
+  outstanding; a controller interrupt drains the event ring, services
+  hot-plug before stale transfer completions, and replies the now-complete
+  URB (bounce-copying the report into the shared buffer). The hot-plug path
+  is the onboard hub's status-change watch (`next_hub_change`: enumerate a
+  freshly-connected device and publish a node, or abort the parked URB,
+  retract on disconnect, and reject stale old-driver submits while absent)
+  — plus a fault-confirmation path for controllers that report unplug first as the
   watched device's failed interrupt transfer; that path retracts when the
   device's own endpoint reported a device-unreachable completion code (a USB or
   split transaction error — conclusive on its own, since the gone device's hub
@@ -71,9 +72,13 @@ lib/*` only; the USB analogue of `lib/virtio` ↔ `drivers/bus/virtio`).
   re-enumerates. It leaves the hub's
   connection-change latch for the status endpoint to report, so a delayed
   disconnect notification still wakes the loop, drains the latch, and re-arms
-  the watch before the later reconnect. A directly-attached device uses the
-  root-port connect/disconnect (`any_root_port_connected` →
-  `reset_and_reenumerate`). Every (re)attach publishes a fresh node carrying the
+  the watch before the later reconnect. Root-port connects/disconnects — a
+  directly-attached device (the Pi 4's USB3 side of each jack), or a whole
+  hub assembly pulled from its port — are serviced from the `PORTSC.CSC`
+  latches on every interrupt wake (`UsbDevice::next_root_change`): a new
+  connect is attached in place and a disconnect detaches exactly what the
+  port carried, with no controller reset, so sibling ports' devices are
+  untouched. Every (re)attach publishes a fresh node carrying the
   same transport grants so the class driver re-autoloads onto the same sink. It
   never busy-polls (`AGENTS.md` §2.23).
 

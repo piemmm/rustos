@@ -372,6 +372,7 @@ impl SyscallHandlers for AcceptingHandlers {
         _buf: u64,
         _buf_cap: usize,
         _ticket_out: u64,
+        _flags: rustos_abi::CallRecvFlags,
     ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
@@ -728,6 +729,16 @@ fn would_accept(spec_idx: usize, raw_number: u16, args: &[u64; SYSCALL_MAX_ARGS]
     if spec.number == SyscallNumber::RANDOM_GET {
         let allowed = u64::from(RandomFlags::NON_BLOCKING.bits());
         if args[2] & !allowed != 0 {
+            return false;
+        }
+    }
+    // `call_recv`'s flags argument (arg 4) carries the same extra semantic
+    // check: the dispatcher runs the raw `U32` through
+    // `CallRecvFlags::from_bits`, which rejects any reserved bit (the only
+    // defined bit today is `NON_BLOCKING`). Mirror that here.
+    if spec.number == SyscallNumber::CALL_RECV {
+        let allowed = u64::from(rustos_abi::CallRecvFlags::NON_BLOCKING.bits());
+        if args[4] & !allowed != 0 {
             return false;
         }
     }

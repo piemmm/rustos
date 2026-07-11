@@ -435,6 +435,53 @@ impl CallEndpoint {
         );
     }
 
+    /// Cancel every in-flight call posted by the task `sender`, which has
+    /// exited: queued requests are dropped before service, in-service
+    /// tickets are retired (a later [`reply`](Self::reply) for one is
+    /// refused fail-closed, its bytes going nowhere), and unclaimed
+    /// replies are discarded. Returns the number of calls cancelled.
+    ///
+    /// Without this, a dead caller's queued request would later be served
+    /// on its ticket — the observed Pi 4 defect: an unloaded USB class
+    /// driver's final request survived its death, was held by the
+    /// host-controller driver after a fault recovery, and wedged the
+    /// single-URB transport against the replacement driver. Records one
+    /// [`AuditEvent::CallPosterVanished`] when anything was cancelled.
+    pub fn cancel_posted_by<S: Sink + ?Sized>(&self, sender: u64, audit: &S) -> usize {
+        let cancelled = {
+            let mut g = self.inner.lock();
+            let before = g.outstanding();
+            g.pending.retain(|call| call.sender != sender);
+            g.in_service.retain(|_, (owner, _, _)| *owner != sender);
+            g.completed.retain(|_, (owner, _)| *owner != sender);
+            before - g.outstanding()
+        };
+        if cancelled > 0 {
+            let mut id_buf = [0u8; 16];
+            let mut sender_buf = [0u8; 16];
+            let mut n_buf = [0u8; 12];
+            record(
+                audit,
+                AuditEvent::CallPosterVanished,
+                &[
+                    Field {
+                        key: "endpoint",
+                        value: rustos_log::FieldValue::Str(format_hex_u64(self.id.0, &mut id_buf)),
+                    },
+                    Field {
+                        key: "sender",
+                        value: rustos_log::FieldValue::Str(format_hex_u64(sender, &mut sender_buf)),
+                    },
+                    Field {
+                        key: "cancelled",
+                        value: rustos_log::FieldValue::Str(format_usize(cancelled, &mut n_buf)),
+                    },
+                ],
+            );
+        }
+        cancelled
+    }
+
     /// Post `request` and obtain the [`CallTicket`] correlating its reply.
     ///
     /// The kernel enforces every check, mirroring [`Port::send`](crate::port::Port::send):
@@ -1369,5 +1416,73 @@ mod tests {
         ep.destroy(&sink);
         ep.destroy(&sink);
         assert!(ep.is_closed());
+    }
+
+    #[test]
+    fn cancel_posted_by_scrubs_every_state_of_the_dead_poster() {
+        // The Pi 4 keyboard-wedge regression: a killed class driver's final
+        // queued URB submit survived its death, was later received and held
+        // by the HCD, and the replacement driver's every submit was refused
+        // as AlreadyExists. Cancellation on the poster's exit must scrub the
+        // dead task's calls in all three states.
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        let caller = task_with(7, &[]);
+        let t_done = ep.post(&caller, POSTER_SCHED, b"d", &sink).expect("done");
+        let t_in_service = ep
+            .post(&caller, POSTER_SCHED, b"s", &sink)
+            .expect("in service");
+        let t_pending = ep
+            .post(&caller, POSTER_SCHED, b"p", &sink)
+            .expect("pending");
+        assert_eq!(recv_one(&ep).expect("first").ticket, t_done);
+        assert_eq!(recv_one(&ep).expect("second").ticket, t_in_service);
+        ep.reply(t_done, b"r", &sink).expect("reply the first");
+        assert_eq!(ep.outstanding(), 3);
+
+        assert_eq!(ep.cancel_posted_by(7, &sink), 3);
+
+        // The pending call is never handed to the server...
+        assert!(!ep.has_pending());
+        assert!(recv_one(&ep).is_none());
+        // ...a reply to the retired in-service ticket is refused fail-closed...
+        assert_eq!(
+            ep.reply(t_in_service, b"r", &sink).expect_err("cancelled"),
+            Errno::NotFound
+        );
+        // ...and the unclaimed completed reply is discarded.
+        assert_eq!(ep.take_reply(7, t_pending), ReplyOutcome::Unknown);
+        assert_eq!(ep.take_reply(7, t_done), ReplyOutcome::Unknown);
+        assert_eq!(ep.outstanding(), 0);
+        assert!(sink.ids().contains(&AuditEvent::CallPosterVanished.id().0));
+    }
+
+    #[test]
+    fn cancel_posted_by_leaves_other_posters_calls_untouched() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        let dead = task_with(7, &[]);
+        let live = task_with(8, &[]);
+        ep.post(&dead, POSTER_SCHED, b"dead", &sink).expect("dead");
+        let t_live = ep.post(&live, POSTER_SCHED, b"live", &sink).expect("live");
+
+        assert_eq!(ep.cancel_posted_by(7, &sink), 1);
+
+        // The live poster's call is still delivered and answerable.
+        let got = recv_one(&ep).expect("live call survives");
+        assert_eq!(got.ticket, t_live);
+        assert_eq!(got.sender, 8);
+        ep.reply(t_live, b"r", &sink).expect("replied");
+        assert_eq!(ep.take_reply(8, t_live), ReplyOutcome::Ready(b"r".to_vec()));
+    }
+
+    #[test]
+    fn cancel_posted_by_with_nothing_in_flight_is_silent() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        let before = sink.len();
+        assert_eq!(ep.cancel_posted_by(7, &sink), 0);
+        // No calls cancelled: no audit record is emitted.
+        assert_eq!(sink.len(), before);
     }
 }

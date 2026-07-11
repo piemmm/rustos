@@ -46,8 +46,8 @@ use rustos_abi::field::{
     TAG_NULL, TAG_SIGNED, TAG_STR, TAG_TIME, TAG_UNSIGNED, TAG_UUID,
 };
 use rustos_abi::{
-    AbiType, AppInfoHeader, BufferClass, BundleEntry, CapabilityId, DriverBindKey, DriverError,
-    DriverHandle, DriverKind, DriverManifest, DriverRegisterReply, Duration64, Errno,
+    AbiType, AppInfoHeader, BufferClass, BundleEntry, CallRecvFlags, CapabilityId, DriverBindKey,
+    DriverError, DriverHandle, DriverKind, DriverManifest, DriverRegisterReply, Duration64, Errno,
     HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwResource, HwResourceKind, IpcMessageHeader,
     KernelMemoryStats, KeyInput, LibraryScope, LimitKind, LoadAverage, LoadHeader, ManifestHeader,
     MapFlags, MountAvailability, MountListRequest, MountRecord, NamedKeyCode, NeededLibrary,
@@ -688,6 +688,16 @@ fn generate_ipc() -> String {
         out,
         "#define ROS_IPC_MESSAGE_HEADER_WIRE_LEN {}u",
         IpcMessageHeader::WIRE_LEN
+    );
+    out.push('\n');
+
+    out.push_str(
+        "/* call_recv flags (uint32_t). Every undefined bit is reserved and must be zero. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_CALL_RECV_FLAG_NON_BLOCKING {:#x}u",
+        CallRecvFlags::NON_BLOCKING.bits()
     );
     out.push('\n');
 
@@ -2985,6 +2995,13 @@ mod tests {
                 PortName::WIRE_LEN
             )),
             "port-name wire len: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_CALL_RECV_FLAG_NON_BLOCKING {:#x}u",
+                CallRecvFlags::NON_BLOCKING.bits()
+            )),
+            "call_recv non-blocking flag bit: {h}"
         );
         // The C structs mirror the #[repr(C)] Rust layout.
         assert_eq!(

@@ -373,6 +373,7 @@ impl SyscallHandlers for CountingHandlers {
         _buf: u64,
         _buf_cap: usize,
         _ticket_out: u64,
+        _flags: rustos_abi::CallRecvFlags,
     ) -> SyscallResult {
         self.bump();
         Ok(0)

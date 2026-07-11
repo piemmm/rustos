@@ -80,14 +80,14 @@ use rustos_abi::sysinfo::{
     CpuTimeRecord, MountRecord, ProcessRecord, SeatRecord, UserDirectoryRecord,
 };
 use rustos_abi::{
-    decode_log_record, BootId, CapabilityId, DescriptorTable, DirEntry, Errno, FdWire, FileStat,
-    InputMode, IntrospectDomain, IrqHandle, LimitKind, MapFlags, OpenFlags, PortName, ProcId,
-    ProcessStart, RandomFlags, ResourceLimit, Signal, SpawnAttach, StreamMode, SyscallNumber,
-    Time64, UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState,
-    BOOT_ID_LEN, CONSOLE_INHERIT, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_NAME_MAX,
-    FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN,
-    PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES, RESOURCE_REF_MAX, SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT,
-    TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
+    decode_log_record, BootId, CallRecvFlags, CapabilityId, DescriptorTable, DirEntry, Errno,
+    FdWire, FileStat, InputMode, IntrospectDomain, IrqHandle, LimitKind, MapFlags, OpenFlags,
+    PortName, ProcId, ProcessStart, RandomFlags, ResourceLimit, Signal, SpawnAttach, StreamMode,
+    SyscallNumber, Time64, UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WallClockReading,
+    WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_IO_MAX,
+    FS_NAME_MAX, FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PORT_NAME_MAX_LEN,
+    PROCESS_START_MAX_TOTAL_LEN, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES, RESOURCE_REF_MAX,
+    SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::{
@@ -1570,6 +1570,13 @@ where
         // vanish observer lets the volume layer react to an unplugged
         // disk's dead block service.
         crate::callreg::teardown_owned_by(task.0, self.audit);
+        // The converse: cancel every call this task *posted* that is still
+        // in flight on someone else's endpoint. A dead caller's queued
+        // request must never be handed to a server as if live — it would
+        // be serviced on a ticket whose reply goes nowhere and, on a
+        // single-slot protocol like the USB URB transport, wedge the
+        // endpoint against the caller's replacement.
+        crate::callreg::cancel_posted_by(task.0, self.audit);
         // Release every shared-memory mapping this task held, dropping
         // each reference and zeroing + freeing any region whose last
         // reference this releases (zero-on-free). The registry scrubs a
@@ -4921,6 +4928,7 @@ where
         buf: u64,
         buf_cap: usize,
         ticket_out: u64,
+        flags: CallRecvFlags,
     ) -> SyscallResult {
         // resolve the endpoint, then gate the *server* against the
         // endpoint's required receive capability and confirm it is the owning
@@ -4965,6 +4973,14 @@ where
                 // closed. The server resizes and retries.
                 RecvCall::TooLarge { .. } => break Err(Errno::BufferTooSmall),
                 RecvCall::Empty => {
+                    // A non-blocking receive answers an empty queue rather
+                    // than parking: a wait-set event loop's readiness peek
+                    // is not a guarantee — the queued call may have been
+                    // cancelled by its poster's exit — and a loop serving
+                    // several sources must never park on one of them.
+                    if flags.is_non_blocking() {
+                        break Err(Errno::WouldBlock);
+                    }
                     if !crate::kthread::reschedule_current(cpu, RescheduleAction::Park) {
                         match self.sched.yield_current(sched_task) {
                             Ok(()) | Err(SchedError::InvalidState) => {}
@@ -21327,7 +21343,14 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
         assert_eq!(
-            h.call_recv(&ctx, 0xDEAD_3001, 0x1000, 64, 0x2000),
+            h.call_recv(
+                &ctx,
+                0xDEAD_3001,
+                0x1000,
+                64,
+                0x2000,
+                CallRecvFlags::empty()
+            ),
             Err(Errno::NotFound)
         );
         assert_eq!(
@@ -21383,7 +21406,7 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
         assert_eq!(
-            h.call_recv(&ctx, id, 0x1000, 64, 0x2000),
+            h.call_recv(&ctx, id, 0x1000, 64, 0x2000, CallRecvFlags::empty()),
             Err(Errno::PermissionDenied)
         );
         crate::callreg::unregister(EndpointId(id));
@@ -21447,7 +21470,9 @@ mod tests {
         );
 
         // `call_recv` delivers the request to page 1 and the ticket to page 2.
-        let got = h.call_recv(&ctx, id, 0x1000, 64, 0x2000).expect("received");
+        let got = h
+            .call_recv(&ctx, id, 0x1000, 64, 0x2000, CallRecvFlags::empty())
+            .expect("received");
         assert_eq!(got, 4);
         let guard = aspaces.read();
         let (_space, physmap) = guard.resolve(SecTaskId(0x5705)).expect("aspace present");
@@ -21464,6 +21489,125 @@ mod tests {
             ep.take_reply(7, CallTicket(recv_ticket)),
             ReplyOutcome::Ready(b"pong".to_vec())
         );
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// A non-blocking `call_recv` answers an empty queue with `WouldBlock`
+    /// instead of parking — the wait-set event-loop mode — and still drains
+    /// a queued request normally.
+    #[test]
+    fn nonblocking_call_recv_answers_an_empty_queue_with_would_block() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = server_aspace(b"idle");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        // Unique server task + endpoint id (the registry is process-global).
+        aspaces
+            .write()
+            .register(SecTaskId(0x5707), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+
+        let id = 0xCA11_5005;
+        let server_caps = make_caps_record(0x5707, &[], sink);
+        let ep = Arc::new(
+            CallEndpoint::create(
+                EndpointId(id),
+                &server_caps,
+                CapabilitySet::empty(),
+                CapabilitySet::empty(),
+                CallEndpointLimits {
+                    max_request: 64,
+                    max_reply: 64,
+                    capacity: 4,
+                },
+                sink,
+            )
+            .expect("unrestricted endpoint"),
+        );
+        crate::callreg::register(ep.clone(), sink).expect("registered");
+
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x5707),
+            caps: &server_caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        // Nothing queued: the non-blocking receive answers instead of parking.
+        assert_eq!(
+            h.call_recv(&ctx, id, 0x1000, 64, 0x2000, CallRecvFlags::NON_BLOCKING),
+            Err(Errno::WouldBlock)
+        );
+
+        // A queued request is still drained normally in the same mode.
+        let client_caps = make_caps_record(7, &[], sink);
+        let _ = ep.post(&client_caps, 7, b"ping", sink).expect("posted");
+        let got = h
+            .call_recv(&ctx, id, 0x1000, 64, 0x2000, CallRecvFlags::NON_BLOCKING)
+            .expect("received");
+        assert_eq!(got, 4);
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// Task-exit reclamation cancels the calls the dead task *posted*: a
+    /// queued request from a killed caller is never later handed to the
+    /// server (the Pi 4 keyboard-wedge regression — a dead class driver's
+    /// final URB submit was held by the HCD after a fault recovery and
+    /// refused its replacement's every submit as `AlreadyExists`).
+    #[test]
+    fn reclaim_scrubs_a_dead_posters_queued_call() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+
+        // Unique server task + endpoint id (the registry is process-global).
+        let id = 0xCA11_6006;
+        let server_caps = make_caps_record(0x5708, &[], sink);
+        let ep = Arc::new(
+            CallEndpoint::create(
+                EndpointId(id),
+                &server_caps,
+                CapabilitySet::empty(),
+                CapabilitySet::empty(),
+                CallEndpointLimits {
+                    max_request: 64,
+                    max_reply: 64,
+                    capacity: 4,
+                },
+                sink,
+            )
+            .expect("unrestricted endpoint"),
+        );
+        crate::callreg::register(ep.clone(), sink).expect("registered");
+
+        // A client (task 9) posts and is then killed before the server
+        // receives.
+        let client_caps = make_caps_record(9, &[], sink);
+        let _ = ep.post(&client_caps, 9, b"stale", sink).expect("posted");
+        assert!(ep.has_pending());
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        h.reclaim_task_resources(SecTaskId(9));
+
+        // The dead poster's call is gone before any server sees it.
+        assert!(!ep.has_pending());
         crate::callreg::unregister(EndpointId(id));
     }
 
@@ -21538,7 +21682,9 @@ mod tests {
         );
 
         // Receive the call, moving it into service.
-        let got = h.call_recv(&ctx, id, 0x2000, 64, 0x3000).expect("received");
+        let got = h
+            .call_recv(&ctx, id, 0x2000, 64, 0x3000, CallRecvFlags::empty())
+            .expect("received");
         assert_eq!(got, 8);
 
         // A foreign reader (task 8, not the owner) is denied before any

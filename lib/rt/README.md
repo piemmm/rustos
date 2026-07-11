@@ -136,4 +136,7 @@ the anonymous-memory pair (`mem_map`, `mem_unmap`) and the `mem_map`-backed
 `key_inject`, `keyboard_read`, `display_acquire` / `display_release`,
 `ipc_send`), the user-space-driver wrappers (`mmio_map`, `dma_alloc`,
 `resource_grants`), and the monotonic clock (`clock_get`) plus the
-`ClockDelay` `Delay` facility (`AGENTS.md` §2.2) built on it.
+`ClockDelay` `Delay` facility (`AGENTS.md` §2.2) built on it — a timed wait
+that genuinely sleeps by parking on the process's lazily created, memberless
+sleep wait-set (`waitset_wait` with the remaining window as its deadline),
+degrading to a cooperative yield wait only if the kernel refuses a wait-set.

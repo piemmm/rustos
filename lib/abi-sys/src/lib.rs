@@ -1132,7 +1132,10 @@ pub extern "C" fn sys_call_create(
 /// blocking until one arrives (`SyscallNumber::CALL_RECV`). The request is
 /// copied into the `buf_cap`-byte buffer at `buf`, the per-call ticket is
 /// written to `*ticket_out`, and the request byte count is returned (or a
-/// `ROS_E_*` code reinterpreted into the result).
+/// `ROS_E_*` code reinterpreted into the result). `flags` carries the
+/// `CallRecvFlags` bits: `0` blocks until a request arrives; the
+/// non-blocking bit makes an empty queue return `ROS_E_WOULD_BLOCK`
+/// instead of parking (reserved bits are rejected fail-closed).
 #[must_use]
 #[export_name = "ros_sys_call_recv"]
 pub extern "C" fn sys_call_recv(
@@ -1140,6 +1143,7 @@ pub extern "C" fn sys_call_recv(
     buf: *mut c_void,
     buf_cap: usize,
     ticket_out: *mut c_void,
+    flags: u32,
 ) -> u64 {
     // SAFETY: see `sys_ipc_call`; the kernel validates both pointers against
     // the caller's address space before touching them.
@@ -1151,7 +1155,7 @@ pub extern "C" fn sys_call_recv(
                 ptr_arg(buf),
                 buf_cap as u64,
                 ptr_arg(ticket_out),
-                0,
+                u64::from(flags),
                 0,
             ],
         )
@@ -2160,7 +2164,7 @@ mod tests {
         (NUM_HW_TREE_WAIT, "hw_tree_wait", 2),
         (NUM_IPC_CALL, "ipc_call", 5),
         (NUM_CALL_CREATE, "call_create", 6),
-        (NUM_CALL_RECV, "call_recv", 4),
+        (NUM_CALL_RECV, "call_recv", 5),
         (NUM_CALL_REPLY, "call_reply", 4),
         (NUM_LOG_EMIT, "log_emit", 2),
         (NUM_HW_EMIT_NODE, "hw_emit_node", 2),

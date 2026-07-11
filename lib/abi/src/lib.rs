@@ -96,7 +96,9 @@ pub use input::{
     KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT,
     POINTER_INPUT_MAGIC,
 };
-pub use ipc::{IpcMessageHeader, PortName, IPC_MESSAGE_HEADER_MAGIC, PORT_NAME_MAX_LEN};
+pub use ipc::{
+    CallRecvFlags, IpcMessageHeader, PortName, IPC_MESSAGE_HEADER_MAGIC, PORT_NAME_MAX_LEN,
+};
 pub use log::{
     decode_record as decode_log_record, encode_record as encode_log_record, LogFieldIter,
     LogRecordRef, LOG_FIELDS_MAX, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX,

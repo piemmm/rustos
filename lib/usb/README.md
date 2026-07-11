@@ -43,8 +43,16 @@ other (§17.4 — `drivers/* → lib/*` only).
   the bring-up, enumeration, and ring state machines are proven host-side
   against a register-level mock plus an in-memory ring/DMA model (§2.2); the
   doorbell below them is the on-metal acceptance item.
+- Synchronous completion waits **park** on the caller-supplied
+  `device::EventWait` seam (on metal: the HCD's `irq_wait` on the
+  controller's bound interrupt line, which the caller binds before
+  `UsbDevice::start` — start enables the completion interrupter itself) and
+  are bounded by wall-clock budgets (the USB 2.0 §9.2.6 request ceiling for
+  a completion, the power-on-good + attach-debounce window for the boot
+  connect scan). Only the brief register handshakes (`Xhci` open/start/
+  reset readiness) keep the bounded iteration poll budget.
 - Fail-closed (§2.9): an implausible capability block, an out-of-range port or
-  doorbell target, a malformed descriptor, or an exhausted poll budget is a
+  doorbell target, a malformed descriptor, or an exhausted wait budget is a
   typed `DriverError`, never a panic or an unbounded spin (§2.1).
 - The crate holds **no** capability of its own — authority is the consuming
   driver's (`CAP_MMIO_MAP` for the register window, `CAP_MEM_DMA` for the DMA

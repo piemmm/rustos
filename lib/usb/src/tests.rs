@@ -11,7 +11,7 @@ use core::cell::RefCell;
 
 use super::device::{
     hub_port_connected, hub_port_enabled, hub_port_speed, route_for_child, AttachOutcome,
-    BulkDirection, BulkPipe, DeviceDescriptor, DmaBank, EnumStage, HubEvent, HubPollOutcome,
+    BulkDirection, BulkPipe, DeviceDescriptor, DmaBank, EnumStage, EventWait, HubEvent,
     InterfaceInfo, UsbDevice, BULK_BUF_LEN, BULK_SLOTS, EVENT_RING_SEGMENT_MIN_TRBS, MAX_HUB_DEPTH,
     REPORT_LEN, RING_TRBS,
 };
@@ -669,6 +669,15 @@ struct MockXhci {
     /// to the hub fixtures (class `0x09`), mirroring the Pi 4B's onboard
     /// `2109:3431` VIA Labs hub.
     hub_ports: u8,
+    /// The slot the root-attached hub currently occupies, recorded at its
+    /// Address Device (route string `0`). A re-attached hub takes a fresh
+    /// slot, and its downstream devices' transaction-translator
+    /// coordinates must name *that* slot, never a hard-wired first one.
+    root_hub_slot: u8,
+    /// The root-hub port of the most recent root-attached Address Device
+    /// (slot-context dword 1), so the fixture model can carry the hub on
+    /// root port 1 and a plain leaf device on another root port at once.
+    addressed_root_port: u8,
     /// The 1-based downstream hub port a device is attached to (`0` =
     /// none), with that device's `wPortStatus` value.
     hub_downstream_port: u8,
@@ -806,6 +815,13 @@ struct MockXhci {
     /// other ports their service and without leaving the port's change
     /// latches set.
     fail_enable_downstream_port: u8,
+    /// `GET_STATUS` reads on the watched downstream port that report the
+    /// reset still in progress (connected, `PORT_STATUS_RESET` set, not
+    /// yet enabled) before the port finally reports enabled — a slow hub
+    /// that legitimately takes several polls to complete a downstream
+    /// reset (`0` = the reset completes by the first read). Decremented
+    /// per such read.
+    slow_enable_status_reads: u32,
     /// The second configured HID interrupt endpoint (the mouse beside the
     /// keyboard), captured when the addressed device on
     /// [`Self::mouse_downstream_port`] has its interrupt endpoint
@@ -1004,6 +1020,8 @@ impl MockXhci {
             ep0_cycle: true,
             ep0_slot: 0,
             ep0_saved: [(0, 0, true); 33],
+            root_hub_slot: 1,
+            addressed_root_port: 1,
             ep0_max: [0; 33],
             evaluate_context_count: 0,
             int_base: 0,
@@ -1056,6 +1074,7 @@ impl MockXhci {
             composite_downstream_port: 0,
             forge_composite_ep0_max: false,
             fail_enable_downstream_port: 0,
+            slow_enable_status_reads: 0,
             int2: MockInt::new(),
             pending_reports2: VecDeque::new(),
             int_slot: 0,
@@ -1615,7 +1634,7 @@ impl MockXhci {
                         self.nested_hubs[i].downstream_port,
                     )
                 } else {
-                    (1u8, route_port)
+                    (self.root_hub_slot, route_port)
                 }
             } else {
                 (0, 0)
@@ -1631,6 +1650,21 @@ impl MockXhci {
             // The single-tier assertions read the low nibble; a nested
             // route is identified by the full route string instead.
             self.downstream_route_port = if single_tier { route_port } else { 0 };
+        }
+        if route_string == 0 {
+            // The addressed device sits directly on a root port: the fixture
+            // answering standard EP0 requests is the root-attached device
+            // again (e.g. the hub assembly re-attached after a teardown),
+            // not a previously addressed downstream device.
+            self.downstream_active = false;
+            self.downstream_route = 0;
+            self.downstream_route_port = 0;
+            self.addressed_root_port = ((slot_ctx[1] >> 16) & 0xFF) as u8;
+            if self.hub_ports > 0 && self.addressed_root_port == 1 {
+                // The root-attached hub now lives on this slot; its
+                // downstream devices' TT coordinates must name it.
+                self.root_hub_slot = self.active_slot;
+            }
         }
         // Save the previously-live slot's EP0 ring progress before this slot
         // becomes the live control context, so switching back to it (e.g. the
@@ -1913,8 +1947,12 @@ impl MockXhci {
             && self
                 .nested_by_root_port((self.downstream_route & 0xF) as u8)
                 .is_some();
+        // The hub fixture sits on root port 1 (the Pi 4's onboard-hub
+        // shape); a root device addressed on any other port is a plain
+        // leaf, so a hub tier and a directly-attached device coexist.
         let is_hub_device =
-            (self.hub_ports > 0 && !self.downstream_active) || is_nested_hub_addressed;
+            (self.hub_ports > 0 && !self.downstream_active && self.addressed_root_port == 1)
+                || is_nested_hub_addressed;
         // The device kind is the *addressed* device's: the global flag for a
         // single-device fixture, or the per-port kind when a storage stick
         // is scripted beside the keyboard on its own downstream port.
@@ -2461,17 +2499,28 @@ impl MockXhci {
                 || (self.mouse_downstream_port != 0 && port == self.mouse_downstream_port)
                 || (self.composite_downstream_port != 0 && port == self.composite_downstream_port);
             let w_status = if powered && is_device_port {
-                // Once the port has been reset it reports enabled
-                // (PORT_STATUS_ENABLE, bit 1) in addition to its connect/speed
-                // bits — unless the port's device is scripted to never enable
-                // (a broken or half-seated device).
-                let enabled =
-                    if self.hub_reset & bit != 0 && port != self.fail_enable_downstream_port {
-                        1 << 1
-                    } else {
-                        0
-                    };
-                self.hub_downstream_status | enabled
+                // A slow hub keeps reporting the reset in progress for the
+                // scripted number of reads before the port enables, so the
+                // engine's reset-completion poll is exercised.
+                if self.slow_enable_status_reads > 0
+                    && self.hub_reset & bit != 0
+                    && port == self.hub_downstream_port
+                {
+                    self.slow_enable_status_reads -= 1;
+                    self.hub_downstream_status | (1 << 4)
+                } else {
+                    // Once the port has been reset it reports enabled
+                    // (PORT_STATUS_ENABLE, bit 1) in addition to its connect/speed
+                    // bits — unless the port's device is scripted to never enable
+                    // (a broken or half-seated device).
+                    let enabled =
+                        if self.hub_reset & bit != 0 && port != self.fail_enable_downstream_port {
+                            1 << 1
+                        } else {
+                            0
+                        };
+                    self.hub_downstream_status | enabled
+                }
             } else {
                 0
             };
@@ -2715,6 +2764,11 @@ impl XhciHost for MockXhci {
                     self.portsc[port] |= regs::PORTSC_PED | regs::PORTSC_PR;
                     self.port_reset_reads = 2;
                     self.port_reset_port = port;
+                }
+                if value & regs::PORTSC_CSC != 0 {
+                    // Connect Status Change is write-1-to-clear (xHCI 1.2
+                    // §5.4.8): the root-port scan consumes the latch.
+                    self.portsc[port] &= !regs::PORTSC_CSC;
                 }
                 return Ok(());
             }
@@ -3246,41 +3300,101 @@ fn dma_program_rejects_unaligned_addresses() {
     );
 }
 
-/// Open the mock controller and start the engine over the shared
-/// buffer.
-fn started_device(mock: MockXhci, mem: &SharedMem) -> UsbDevice<MockXhci, MockDma> {
-    let xhci = Xhci::open(mock).expect("bring-up succeeds");
-    let dma = MockDma::new(Rc::clone(mem), MOCK_DMA_BASE);
-    UsbDevice::start(xhci, dma, 4096).expect("engine starts")
+/// Deterministic engine event-wait for the tests: a fake microsecond clock
+/// that advances by the parked budget on every wait, so a completion that
+/// never arrives reaches the wall-clock deadline in one park — the tests
+/// never spin and never sleep. The wait count lets a regression assert the
+/// engine *parked* rather than polled.
+struct TestWait {
+    now_us: core::cell::Cell<u64>,
+    waits: core::cell::Cell<u32>,
 }
 
-fn arm_report_request(device: &mut UsbDevice<MockXhci, MockDma>) {
+impl TestWait {
+    /// Leak one for the test process, satisfying the engine's borrow without
+    /// bookkeeping (the mock-host `'static` storage strategy).
+    fn leaked() -> &'static TestWait {
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(TestWait {
+            now_us: core::cell::Cell::new(0),
+            waits: core::cell::Cell::new(0),
+        }))
+    }
+}
+
+impl EventWait for TestWait {
+    fn now_us(&self) -> u64 {
+        self.now_us.get()
+    }
+
+    fn wait_us(&self, budget_us: u64) {
+        self.waits.set(self.waits.get() + 1);
+        self.now_us
+            .set(self.now_us.get().saturating_add(budget_us.max(1)));
+    }
+}
+
+/// Open the mock controller and start the engine over the shared
+/// buffer.
+fn started_device(mock: MockXhci, mem: &SharedMem) -> UsbDevice<'static, MockXhci, MockDma> {
+    started_device_with_wait(mock, mem, TestWait::leaked())
+}
+
+/// [`started_device`] with a caller-held [`TestWait`], so a regression can
+/// observe the engine's parking behaviour.
+fn started_device_with_wait(
+    mock: MockXhci,
+    mem: &SharedMem,
+    wait: &'static TestWait,
+) -> UsbDevice<'static, MockXhci, MockDma> {
+    let xhci = Xhci::open(mock).expect("bring-up succeeds");
+    let dma = MockDma::new(Rc::clone(mem), MOCK_DMA_BASE);
+    UsbDevice::start(xhci, dma, wait, 4096).expect("engine starts")
+}
+
+fn arm_report_request(device: &mut UsbDevice<'_, MockXhci, MockDma>) {
+    arm_report_request_for(device, 0);
+}
+
+/// [`arm_report_request`] for the served device at `index` (a leaf behind
+/// a hub sits above the hub's own entry).
+fn arm_report_request_for(device: &mut UsbDevice<'_, MockXhci, MockDma>, index: usize) {
     let mut buf = [0u8; REPORT_LEN];
     assert_eq!(
-        device.next_report(0, &mut buf),
+        device.next_report(index, &mut buf),
         Ok(None),
         "a class report request arms one interrupt-IN transfer and then parks"
     );
 }
 
-/// The step-by-step downstream attach the hub-descent tests drive: install
-/// the enumerated root hub, attach the device on `port`, and arm the hub's
-/// status-change watch, returning the fresh device index. Mirrors the
-/// sequence `UsbDevice::bring_up` runs per connected port.
-fn enumerate_downstream(
-    device: &mut UsbDevice<MockXhci, MockDma>,
-    port: u8,
-    speed: u8,
-) -> Result<usize, DriverError> {
-    let root_hub = device.install_root_hub()?;
-    attach_and_watch(device, root_hub, port, speed)
+/// Enumerate and install the root-attached hub on root port 1 **without**
+/// descending it, returning its hub-table index — the harness flow for
+/// tests that drive the downstream ports' power/reset/class requests
+/// themselves rather than letting the walk attach everything.
+fn install_root_hub_on_port_1(device: &mut UsbDevice<'_, MockXhci, MockDma>) -> usize {
+    match device.attach_root_on_port(1) {
+        Ok(AttachOutcome::Hub(hub)) => hub,
+        other => panic!("the root hub enumerates and installs: {other:?}"),
+    }
 }
 
-/// The attach half of [`enumerate_downstream`], for tests that install the
-/// root hub themselves (to drive per-port class requests first): attach the
+/// Enumerate and serve the directly-attached leaf device on root-hub
+/// `port`, returning its device-table index.
+fn attach_root_device(
+    device: &mut UsbDevice<'_, MockXhci, MockDma>,
+    port: u8,
+) -> Result<usize, DriverError> {
+    match device.attach_root_on_port(port)? {
+        AttachOutcome::Device(index) => Ok(index),
+        // These callers attach leaf devices only; a hub here is a harness bug.
+        AttachOutcome::Hub(_) => Err(DriverError::BadMagic),
+    }
+}
+
+/// The downstream-attach step the hub-descent tests drive after
+/// [`install_root_hub_on_port_1`]: attach the
 /// leaf device on `hub`'s `port` and arm that hub's status-change watch.
 fn attach_and_watch(
-    device: &mut UsbDevice<MockXhci, MockDma>,
+    device: &mut UsbDevice<'_, MockXhci, MockDma>,
     hub: usize,
     port: u8,
     speed: u8,
@@ -3298,9 +3412,11 @@ fn attach_and_watch(
 /// downstream `port`: power, reset, and read the post-reset status the
 /// attach decision needs. Returns the root hub's table index and the
 /// port's `wPortStatus`.
-fn install_hub_and_ready_port(device: &mut UsbDevice<MockXhci, MockDma>, port: u8) -> (usize, u16) {
-    device.enumerate_hid(1).expect("the hub enumerates");
-    let hub = device.install_root_hub().expect("the root hub installs");
+fn install_hub_and_ready_port(
+    device: &mut UsbDevice<'_, MockXhci, MockDma>,
+    port: u8,
+) -> (usize, u16) {
+    let hub = install_root_hub_on_port_1(device);
     device
         .power_hub_port(hub, port)
         .expect("power the downstream port");
@@ -3341,7 +3457,7 @@ fn usb_device_start_rejects_bad_regions() {
     let xhci = Xhci::open(MockXhci::with_device(&mem)).expect("bring-up succeeds");
     let misaligned = MockDma::new(Rc::clone(&mem), MOCK_DMA_BASE + 4);
     assert!(matches!(
-        UsbDevice::start(xhci, misaligned, 4096).err(),
+        UsbDevice::start(xhci, misaligned, TestWait::leaked(), 4096).err(),
         Some(DriverError::OutOfRange)
     ));
 
@@ -3349,7 +3465,7 @@ fn usb_device_start_rejects_bad_regions() {
     let xhci = Xhci::open(MockXhci::with_device(&tiny)).expect("bring-up succeeds");
     let small = MockDma::new(Rc::clone(&tiny), MOCK_DMA_BASE);
     assert!(matches!(
-        UsbDevice::start(xhci, small, 4096).err(),
+        UsbDevice::start(xhci, small, TestWait::leaked(), 4096).err(),
         Some(DriverError::LengthOutOfRange)
     ));
 }
@@ -3387,7 +3503,8 @@ fn start_reserves_scratchpad_and_programs_dcbaa0() {
     assert_eq!(xhci.max_scratchpad_buffers(), 31);
     assert_eq!(xhci.page_size(), 4096);
     let dma = MockDma::new(Rc::clone(&mem), MOCK_DMA_BASE);
-    let mut device = UsbDevice::start(xhci, dma, 4096).expect("engine starts with scratchpad");
+    let mut device = UsbDevice::start(xhci, dma, TestWait::leaked(), 4096)
+        .expect("engine starts with scratchpad");
 
     // `DCBAA[0]` now points at a non-zero scratchpad pointer array...
     let dcbaa_base = MockXhci::qword(device.host_mut().dcbaap);
@@ -3401,10 +3518,10 @@ fn start_reserves_scratchpad_and_programs_dcbaa0() {
     assert_eq!(page0 % 4096, 0, "scratchpad buffers are page-aligned");
 
     // And a command actually completes now: enumeration runs end to end.
-    let descriptor = device
-        .enumerate_hid(1)
+    let index = attach_root_device(&mut device, 1)
         .expect("enumeration completes once the scratchpad is reserved");
-    assert_eq!(descriptor.vendor_id, 0x046D);
+    let identity = device.device_identity(index).expect("identity captured");
+    assert_eq!(identity.vendor_id, 0x046D);
 }
 
 #[test]
@@ -3417,25 +3534,19 @@ fn start_stalls_without_scratchpad_on_a_controller_that_needs_it() {
     let xhci = Xhci::open(MockXhci::with_device_scratchpad(&small, 31)).expect("bring-up succeeds");
     let dma = MockDma::new(Rc::clone(&small), MOCK_DMA_BASE);
     assert_eq!(
-        UsbDevice::start(xhci, dma, 4096).err(),
+        UsbDevice::start(xhci, dma, TestWait::leaked(), 4096).err(),
         Some(DriverError::LengthOutOfRange)
     );
 }
 
 #[test]
-fn enumerate_hid_full_chain() {
+fn root_attach_full_chain() {
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
-    let descriptor = device.enumerate_hid(1).expect("enumeration succeeds");
-    assert_eq!(
-        descriptor,
-        DeviceDescriptor {
-            vendor_id: 0x046D,
-            product_id: 0xC077,
-            device_class: 0,
-            num_configurations: 1,
-        }
-    );
+    let index = attach_root_device(&mut device, 1).expect("enumeration succeeds");
+    let identity = device.device_identity(index).expect("identity captured");
+    assert_eq!(identity.vendor_id, 0x046D);
+    assert_eq!(identity.product_id, 0xC077);
     assert_eq!(device.raw_device_slot(0), 1);
     let mock = device.host_mut();
     assert!(mock.addressed, "Address Device reached the model");
@@ -3445,61 +3556,72 @@ fn enumerate_hid_full_chain() {
 }
 
 #[test]
-fn enumerate_hid_resets_a_disabled_port() {
+fn root_attach_resets_a_disabled_port() {
     let mem = shared_mem();
     let mut mock = MockXhci::with_device(&mem);
     // Connected but not yet enabled: the USB2 shape before a reset.
     mock.portsc[0] &= !regs::PORTSC_PED;
     let mut device = started_device(mock, &mem);
-    device.enumerate_hid(1).expect("reset then enumeration");
+    attach_root_device(&mut device, 1).expect("reset then enumeration");
     let mock = device.host_mut();
     assert_ne!(mock.portsc[0] & regs::PORTSC_PED, 0, "port re-enabled");
     assert!(mock.configured);
 }
 
 #[test]
-fn enumerate_hid_fails_closed_on_an_empty_port() {
+fn root_attach_fails_closed_on_an_empty_port() {
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
-    assert_eq!(device.enumerate_hid(2), Err(DriverError::DeviceFault));
-    assert_eq!(device.enumerate_hid(0), Err(DriverError::OutOfRange));
+    assert_eq!(
+        device.attach_root_on_port(2).err(),
+        Some(DriverError::DeviceFault)
+    );
+    assert_eq!(
+        device.attach_root_on_port(0).err(),
+        Some(DriverError::OutOfRange)
+    );
 }
 
 #[test]
-fn enumerate_hid_twice_is_refused() {
+fn root_attach_twice_on_one_port_is_refused() {
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
-    device.enumerate_hid(1).expect("first enumeration");
-    assert_eq!(device.enumerate_hid(1), Err(DriverError::Busy));
+    attach_root_device(&mut device, 1).expect("first enumeration");
+    assert_eq!(
+        device.attach_root_on_port(1).err(),
+        Some(DriverError::Busy),
+        "the port already carries a served attachment"
+    );
 }
 
 #[test]
-fn enumerate_first_connected_finds_the_populated_port() {
+fn bring_up_serves_the_populated_port() {
     // `with_device` connects a device on root-hub port 1 and leaves the
-    // others empty; the scan enumerates port 1 and lands on slot 1.
+    // others empty; the walk enumerates port 1 and lands on slot 1.
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
-    let descriptor = device
-        .enumerate_first_connected()
+    device
+        .bring_up(&TestDelay::default())
         .expect("port 1 is connected");
-    assert_eq!(descriptor.vendor_id, 0x046D);
+    let identity = device.device_identity(0).expect("identity captured");
+    assert_eq!(identity.vendor_id, 0x046D);
     assert_eq!(device.raw_device_slot(0), 1);
     assert!(device.host_mut().configured);
 }
 
 #[test]
-fn enumerate_first_connected_fails_closed_on_an_empty_root_hub() {
-    // No port reports a connected device: the scan refuses with
-    // `NotFound` rather than guessing a port.
+fn bring_up_serves_nothing_on_an_empty_root_hub() {
+    // No port reports a connected device: the walk comes up serving
+    // nothing (a first-class state — the first connect arrives through
+    // the root-port scan) rather than guessing a port or failing.
     let mem = shared_mem();
     let mut mock = MockXhci::with_device(&mem);
     mock.portsc[0] &= !regs::PORTSC_CCS;
     let mut device = started_device(mock, &mem);
-    assert_eq!(
-        device.enumerate_first_connected(),
-        Err(DriverError::NotFound)
-    );
-    assert_eq!(device.raw_device_slot(0), 0, "no device was enumerated");
+    device
+        .bring_up(&TestDelay::default())
+        .expect("an empty controller comes up serving nothing");
+    assert!(!device.any_device_live(), "no device was enumerated");
 }
 
 #[test]
@@ -3521,8 +3643,8 @@ fn set_port_power_asserts_pp_and_rejects_a_bad_port() {
 }
 
 #[test]
-fn enumerate_first_connected_powers_every_root_port() {
-    // The scan must power on every reported port before reading connect
+fn bring_up_powers_every_root_port() {
+    // The walk must power on every reported port before reading connect
     // status, or a port-power-controlled controller hides attached
     // devices. Start with all ports unpowered (the post-reset shape) and
     // confirm each carries `PP` afterwards.
@@ -3533,7 +3655,7 @@ fn enumerate_first_connected_powers_every_root_port() {
     }
     let mut device = started_device(mock, &mem);
     device
-        .enumerate_first_connected()
+        .bring_up(&TestDelay::default())
         .expect("port 1 is connected once powered");
     let mock = device.host_mut();
     for port in 0..mock.portsc.len() {
@@ -3546,9 +3668,9 @@ fn enumerate_first_connected_powers_every_root_port() {
 }
 
 #[test]
-fn enumerate_first_connected_connects_a_port_only_after_power() {
+fn bring_up_connects_a_port_only_after_power() {
     // Model the VL805: the device reports no Current Connect Status until
-    // software powers the port. A scan that read connect status without
+    // software powers the port. A walk that read connect status without
     // first asserting `PP` (the old behaviour) would find nothing; the
     // power-then-debounce scan brings the device up.
     let mem = shared_mem();
@@ -3556,10 +3678,11 @@ fn enumerate_first_connected_connects_a_port_only_after_power() {
     mock.portsc[0] = 0;
     mock.latent_device_port = Some(0);
     let mut device = started_device(mock, &mem);
-    let descriptor = device
-        .enumerate_first_connected()
+    device
+        .bring_up(&TestDelay::default())
         .expect("the device appears once its port is powered");
-    assert_eq!(descriptor.vendor_id, 0x046D);
+    let identity = device.device_identity(0).expect("identity captured");
+    assert_eq!(identity.vendor_id, 0x046D);
     assert_eq!(device.raw_device_slot(0), 1);
     assert!(device.host_mut().configured);
 }
@@ -3581,7 +3704,7 @@ fn root_port_status_raw_reports_each_port_and_rejects_a_bad_port() {
 }
 
 #[test]
-fn enumerate_hid_tolerates_a_stalled_set_protocol() {
+fn root_attach_tolerates_a_stalled_set_protocol() {
     // `SET_PROTOCOL(boot)` is optional (HID 1.11 §7.2.6): a device that
     // does not implement it STALLs, which is a protocol stall the
     // default control endpoint recovers from. The Pi 4 VL805 keyboard
@@ -3593,10 +3716,9 @@ fn enumerate_hid_tolerates_a_stalled_set_protocol() {
     let mut mock = MockXhci::with_device(&mem);
     mock.stall_class_requests = true;
     let mut device = started_device(mock, &mem);
-    let descriptor = device
-        .enumerate_hid(1)
-        .expect("a stalled SET_PROTOCOL is tolerated");
-    assert_eq!(descriptor.vendor_id, 0x046D);
+    let index = attach_root_device(&mut device, 1).expect("a stalled SET_PROTOCOL is tolerated");
+    let identity = device.device_identity(index).expect("identity captured");
+    assert_eq!(identity.vendor_id, 0x046D);
     assert_eq!(device.enum_stage(), EnumStage::Configured);
     // The STALL was observed (the diagnostic preserves it) but absorbed.
     assert_eq!(
@@ -3611,14 +3733,14 @@ fn enumerate_hid_tolerates_a_stalled_set_protocol() {
 }
 
 #[test]
-fn enumerate_hid_records_the_configured_stage_on_success() {
+fn root_attach_records_the_configured_stage_on_success() {
     // A clean enumeration walks the breadcrumb to `Configured`, and the
     // last completion observed is the SET_PROTOCOL status stage's
     // Success — the fault-localising diagnostic reads a healthy run.
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     assert_eq!(device.enum_stage(), EnumStage::Scan);
-    device.enumerate_hid(1).expect("enumeration succeeds");
+    attach_root_device(&mut device, 1).expect("enumeration succeeds");
     assert_eq!(device.enum_stage(), EnumStage::Configured);
     assert_eq!(
         device.last_completion_code(),
@@ -3627,7 +3749,7 @@ fn enumerate_hid_records_the_configured_stage_on_success() {
 }
 
 #[test]
-fn enumerate_hid_fails_closed_on_a_non_stall_class_fault() {
+fn root_attach_fails_closed_on_a_non_stall_class_fault() {
     // A STALL on the optional SET_PROTOCOL is tolerated, but a *genuine*
     // class-request fault (here a USB transaction error) is not optional
     // — it still fails closed, leaving the breadcrumb
@@ -3637,7 +3759,10 @@ fn enumerate_hid_fails_closed_on_a_non_stall_class_fault() {
     let mut mock = MockXhci::with_device(&mem);
     mock.fault_class_requests = true;
     let mut device = started_device(mock, &mem);
-    assert_eq!(device.enumerate_hid(1), Err(DriverError::DeviceFault));
+    assert_eq!(
+        device.attach_root_on_port(1).err(),
+        Some(DriverError::DeviceFault)
+    );
     assert_eq!(device.enum_stage(), EnumStage::SetProtocol);
     assert_eq!(
         device.last_completion_code(),
@@ -3646,17 +3771,20 @@ fn enumerate_hid_fails_closed_on_a_non_stall_class_fault() {
 }
 
 #[test]
-fn enumerate_hid_flags_a_hub_via_the_device_class() {
+fn root_attach_recognises_a_hub_via_the_device_class() {
     // The Pi 4B's onboard 2109:3431 VIA Labs hub enumerates on root-hub
-    // port 1; the keyboard hangs off it, so the bring-up must recognise
-    // the enumerated device is a hub (bDeviceClass 0x09) rather than
-    // treating it as the keyboard (metal `4102 vendor=2109 product=3431`).
+    // port 1; the keyboard hangs off it, so the attach must recognise
+    // the enumerated device is a hub (bDeviceClass 0x09) and install it
+    // rather than serving it as a leaf (metal `4102 vendor=2109
+    // product=3431`).
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_hub(&mem, 4, 2), &mem);
-    let descriptor = device.enumerate_hid(1).expect("the hub enumerates");
-    assert_eq!(descriptor.vendor_id, 0x2109);
-    assert_eq!(descriptor.product_id, 0x3431);
-    assert!(descriptor.is_hub(), "device class 0x09 is recognised");
+    assert_eq!(
+        device.attach_root_on_port(1),
+        Ok(AttachOutcome::Hub(0)),
+        "device class 0x09 is recognised and installed as a hub"
+    );
+    assert!(!device.any_device_live(), "a hub is never a served leaf");
 }
 
 #[test]
@@ -3670,7 +3798,7 @@ fn enumerating_a_hub_leaves_ep0_usable_for_the_hub_descriptor() {
     // the hub-descriptor read succeeds. It fails before that gate.
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_hub(&mem, 4, 2), &mem);
-    device.enumerate_hid(1).expect("the hub enumerates");
+    let _hub = install_root_hub_on_port_1(&mut device);
 
     assert_eq!(
         device.host_mut().protocol,
@@ -3698,10 +3826,9 @@ fn hub_discovery_finds_the_downstream_device() {
     // speed, while an unpopulated port reads disconnected.
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_hub(&mem, 4, 2), &mem);
-    device.enumerate_hid(1).expect("the hub enumerates");
+    let hub = install_root_hub_on_port_1(&mut device);
 
     assert_eq!(device.hub_num_ports().expect("hub descriptor read"), 4);
-    let hub = device.install_root_hub().expect("the root hub installs");
     for port in 1..=4 {
         device
             .power_hub_port(hub, port)
@@ -3736,8 +3863,7 @@ fn hub_port_reads_disconnected_until_powered() {
     // an unpowered scan finds nothing — mirroring the root-hub path.
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_hub(&mem, 4, 2), &mem);
-    device.enumerate_hid(1).expect("the hub enumerates");
-    let hub = device.install_root_hub().expect("the root hub installs");
+    let hub = install_root_hub_on_port_1(&mut device);
 
     let before = device
         .hub_port_status(hub, 2)
@@ -3784,7 +3910,7 @@ fn enumerating_a_hub_does_not_arm_its_interrupt_endpoint() {
     let mut mock = MockXhci::with_hub(&mem, 4, 2);
     mock.pending_reports.push_back(alloc::vec![0x02]);
     let mut device = started_device(mock, &mem);
-    device.enumerate_hid(1).expect("the hub enumerates");
+    let hub = install_root_hub_on_port_1(&mut device);
 
     assert!(
         !device
@@ -3801,7 +3927,6 @@ fn enumerating_a_hub_does_not_arm_its_interrupt_endpoint() {
             .expect("hub descriptor read succeeds"),
         4,
     );
-    let hub = device.install_root_hub().expect("the root hub installs");
     for port in 1..=4 {
         device
             .power_hub_port(hub, port)
@@ -3835,10 +3960,10 @@ fn enumerate_downstream_hid_addresses_a_full_speed_keyboard_through_the_hub() {
     mock.hub_downstream_status = 1 << 0;
     let mut device = started_device(mock, &mem);
 
-    let hub = device.enumerate_hid(1).expect("the hub enumerates");
-    assert!(hub.is_hub(), "the device on the root hub is the VIA hub");
+    let root_hub = install_root_hub_on_port_1(&mut device);
+    // The resting control context is the freshly installed hub, so the
+    // active slot is the hub's own.
     let hub_slot = device.active_slot();
-    let root_hub = device.install_root_hub().expect("the root hub installs");
 
     // Bring the keyboard's downstream port up: power, reset, confirm
     // enabled (the caller owns these wall-clock delays on metal).
@@ -3872,7 +3997,7 @@ fn enumerate_downstream_hid_addresses_a_full_speed_keyboard_through_the_hub() {
 
     // The keyboard occupies a *second* slot, distinct from the hub's,
     // and the engine is now pointed at it.
-    let kbd_slot = device.raw_device_slot(0);
+    let kbd_slot = device.raw_device_slot(keyboard);
     assert_ne!(kbd_slot, hub_slot, "the keyboard gets its own slot");
     assert_eq!(kbd_slot, 2);
 
@@ -3884,10 +4009,10 @@ fn enumerate_downstream_hid_addresses_a_full_speed_keyboard_through_the_hub() {
     // child node, and a class report request drains after the controller
     // completes it.
     let node = device
-        .describe_device(0, 0, 1)
+        .describe_device(keyboard, 0, 1)
         .expect("the keyboard describes a child node");
     assert_eq!(node.class(), Some(rustos_abi::HwDeviceClass::Input));
-    arm_report_request(&mut device);
+    arm_report_request_for(&mut device, keyboard);
     device
         .host_mut()
         .pending_reports
@@ -3895,7 +4020,7 @@ fn enumerate_downstream_hid_addresses_a_full_speed_keyboard_through_the_hub() {
     device.host_mut().process_int_ring();
     let mut buf = [0u8; REPORT_LEN];
     let len = device
-        .next_report(0, &mut buf)
+        .next_report(keyboard, &mut buf)
         .expect("a report drains")
         .expect("a report is available");
     assert_eq!(len, REPORT_LEN);
@@ -3980,25 +4105,29 @@ fn bring_up_keyboard_descends_through_a_hub_to_the_keyboard() {
     device
         .bring_up(&delay)
         .expect("the keyboard behind the onboard hub is reached");
+    // Entry 0's region carries the root hub's contexts (a hub claims its
+    // entry exactly as a nested hub does), so the first leaf device takes
+    // index 1.
     let keyboard = device
-        .device_identity(0)
+        .device_identity(1)
         .expect("a connected downstream keyboard must enumerate now");
     assert_eq!(keyboard.vendor_id, 0x046D);
     assert_eq!(keyboard.product_id, 0xC077);
     // Descended one tier: the keyboard sits on a second xHCI slot,
     // addressed through the hub's downstream port 4.
     assert_eq!(
-        device.raw_device_slot(0),
+        device.raw_device_slot(1),
         2,
         "the keyboard gets its own slot"
     );
     assert_eq!(device.host_mut().downstream_route_port, 4);
-    // Both hardware settle windows were honoured (power-on-good then
-    // reset-recovery), each exactly once.
-    assert_eq!(delay.calls.get(), 2);
+    // Every hardware settle window was honoured exactly once: power-on-good,
+    // one reset-completion poll interval (the hub reports the port enabled
+    // on the first read), then the TRSTRCY reset-recovery settle.
+    assert_eq!(delay.calls.get(), 3);
 
     // With the hub marked and the endpoint configured, a requested report drains.
-    arm_report_request(&mut device);
+    arm_report_request_for(&mut device, 1);
     device
         .host_mut()
         .pending_reports
@@ -4006,7 +4135,7 @@ fn bring_up_keyboard_descends_through_a_hub_to_the_keyboard() {
     device.host_mut().process_int_ring();
     let mut buf = [0u8; REPORT_LEN];
     let len = device
-        .next_report(0, &mut buf)
+        .next_report(1, &mut buf)
         .expect("a report drains")
         .expect("a report is available");
     assert_eq!(len, REPORT_LEN);
@@ -4089,12 +4218,12 @@ fn bring_up_keyboard_then_a_downstream_connect_enumerates_a_fresh_keyboard() {
         .expect("the downstream device is the served keyboard");
     assert_eq!(identity.vendor_id, 0x046D);
     assert!(
-        device.device_live(0),
+        device.device_live(index),
         "the freshly-attached keyboard is now live"
     );
 
     // Keystrokes flow over the freshly-enumerated slot.
-    arm_report_request(&mut device);
+    arm_report_request_for(&mut device, index);
     device
         .host_mut()
         .pending_reports
@@ -4102,7 +4231,7 @@ fn bring_up_keyboard_then_a_downstream_connect_enumerates_a_fresh_keyboard() {
     device.host_mut().process_int_ring();
     let mut buf = [0u8; REPORT_LEN];
     let len = device
-        .next_report(0, &mut buf)
+        .next_report(index, &mut buf)
         .expect("a report drains")
         .expect("a report is available after the cold-boot attach");
     assert_eq!(len, REPORT_LEN);
@@ -4128,7 +4257,7 @@ fn addressing_a_downstream_keyboard_marks_the_parent_hub_as_a_hub() {
     let mut device = started_device(mock, &mem);
 
     let (hub, status) = install_hub_and_ready_port(&mut device, 4);
-    attach_and_watch(&mut device, hub, 4, hub_port_speed(status))
+    let keyboard = attach_and_watch(&mut device, hub, 4, hub_port_speed(status))
         .expect("the keyboard behind the hub is addressed");
 
     // The parent hub was marked a hub with its real port count, the
@@ -4144,7 +4273,7 @@ fn addressing_a_downstream_keyboard_marks_the_parent_hub_as_a_hub() {
     );
 
     // With the hub marked, a requested report now drains — keystrokes flow.
-    arm_report_request(&mut device);
+    arm_report_request_for(&mut device, keyboard);
     device
         .host_mut()
         .pending_reports
@@ -4152,7 +4281,7 @@ fn addressing_a_downstream_keyboard_marks_the_parent_hub_as_a_hub() {
     device.host_mut().process_int_ring();
     let mut buf = [0u8; REPORT_LEN];
     let len = device
-        .next_report(0, &mut buf)
+        .next_report(keyboard, &mut buf)
         .expect("a report drains")
         .expect("a report is available once the hub is marked");
     assert_eq!(len, REPORT_LEN);
@@ -4178,7 +4307,7 @@ fn the_downstream_interrupt_endpoint_carries_a_nonzero_max_esit_payload() {
     let mut device = started_device(mock, &mem);
 
     let (hub, status) = install_hub_and_ready_port(&mut device, 4);
-    attach_and_watch(&mut device, hub, 4, hub_port_speed(status))
+    let keyboard = attach_and_watch(&mut device, hub, 4, hub_port_speed(status))
         .expect("the keyboard behind the hub is addressed");
 
     assert_ne!(
@@ -4189,7 +4318,7 @@ fn the_downstream_interrupt_endpoint_carries_a_nonzero_max_esit_payload() {
     );
 
     // And, with bandwidth reserved, a requested report actually drains.
-    arm_report_request(&mut device);
+    arm_report_request_for(&mut device, keyboard);
     device
         .host_mut()
         .pending_reports
@@ -4197,7 +4326,7 @@ fn the_downstream_interrupt_endpoint_carries_a_nonzero_max_esit_payload() {
     device.host_mut().process_int_ring();
     let mut buf = [0u8; REPORT_LEN];
     let len = device
-        .next_report(0, &mut buf)
+        .next_report(keyboard, &mut buf)
         .expect("a report drains")
         .expect("a report is available once the endpoint has bandwidth");
     assert_eq!(len, REPORT_LEN);
@@ -4243,7 +4372,7 @@ fn downstream_keyboard_is_serviced_on_its_descriptor_reported_endpoint() {
 
     // A requested report drains: the controller services DCI 5 and the
     // driver accepts the Transfer Event for that endpoint id.
-    arm_report_request(&mut device);
+    arm_report_request_for(&mut device, keyboard);
     device
         .host_mut()
         .pending_reports
@@ -4251,7 +4380,7 @@ fn downstream_keyboard_is_serviced_on_its_descriptor_reported_endpoint() {
     device.host_mut().process_int_ring();
     let mut buf = [0u8; REPORT_LEN];
     let len = device
-        .next_report(0, &mut buf)
+        .next_report(keyboard, &mut buf)
         .expect("a report drains")
         .expect("a report is available on the endpoint the keyboard actually uses");
     assert_eq!(len, REPORT_LEN);
@@ -4279,30 +4408,33 @@ fn enumerate_downstream_hid_omits_the_tt_for_a_high_speed_device() {
 }
 
 #[test]
-fn enumerate_downstream_hid_before_a_hub_is_addressed_fails_closed() {
-    // Addressing a downstream device requires a hub already addressed on
-    // the active slot (its slot is the route's root and its TT hub).
-    // Without one the call fails closed rather than addressing a device
-    // at a guessed topology.
+fn attach_downstream_before_a_hub_is_installed_fails_closed() {
+    // Addressing a downstream device requires a live installed hub (its
+    // slot is the route's root and its TT hub). Without one the call
+    // fails closed rather than addressing a device at a guessed topology.
     let mem = shared_mem();
     let mock = MockXhci::with_hub(&mem, 4, 4);
     let mut device = started_device(mock, &mem);
     assert_eq!(
-        enumerate_downstream(&mut device, 4, 1),
+        attach_and_watch(&mut device, 0, 4, 1),
         Err(DriverError::DeviceFault),
     );
 }
 
 #[test]
-fn hub_num_ports_fails_closed_on_a_forged_descriptor() {
+fn a_forged_hub_descriptor_fails_the_attach_closed() {
     // A hub descriptor with the wrong bDescriptorType is forged/corrupt
-    // and rejected fail-closed.
+    // and rejected fail-closed: the attach's hub install reads the
+    // topology from it, so the whole attach refuses rather than serving
+    // a hub whose port count is a guess.
     let mem = shared_mem();
     let mut mock = MockXhci::with_hub(&mem, 4, 2);
     mock.forge_hub_descriptor = true;
     let mut device = started_device(mock, &mem);
-    device.enumerate_hid(1).expect("the hub enumerates");
-    assert_eq!(device.hub_num_ports(), Err(DriverError::BadMagic));
+    assert_eq!(
+        device.attach_root_on_port(1).err(),
+        Some(DriverError::BadMagic)
+    );
 }
 
 #[test]
@@ -4318,8 +4450,7 @@ fn faulting_hub_port_status_records_the_completion_code() {
     let mut mock = MockXhci::with_hub(&mem, 4, 2);
     mock.fault_hub_port_status = true;
     let mut device = started_device(mock, &mem);
-    device.enumerate_hid(1).expect("the hub enumerates");
-    let hub = device.install_root_hub().expect("the root hub installs");
+    let hub = install_root_hub_on_port_1(&mut device);
 
     assert_eq!(
         device.hub_port_status(hub, 2),
@@ -4353,8 +4484,7 @@ fn faulting_hub_port_status_records_an_undecodable_completion_code() {
     let mut mock = MockXhci::with_hub(&mem, 4, 2);
     mock.fault_hub_port_status_raw = RESOURCE_ERROR;
     let mut device = started_device(mock, &mem);
-    device.enumerate_hid(1).expect("the hub enumerates");
-    let hub = device.install_root_hub().expect("the root hub installs");
+    let hub = install_root_hub_on_port_1(&mut device);
 
     assert_eq!(
         device.hub_port_status(hub, 2),
@@ -4387,8 +4517,7 @@ fn faulting_hub_port_status_records_an_unexpected_event_type() {
     let mut mock = MockXhci::with_hub(&mem, 4, 2);
     mock.fault_hub_port_status_evtype = unexpected;
     let mut device = started_device(mock, &mem);
-    device.enumerate_hid(1).expect("the hub enumerates");
-    let hub = device.install_root_hub().expect("the root hub installs");
+    let hub = install_root_hub_on_port_1(&mut device);
 
     assert_eq!(
         device.hub_port_status(hub, 2),
@@ -4416,7 +4545,7 @@ fn faulting_hub_port_status_records_an_unexpected_event_type() {
 fn reports_flow_through_the_report_source() {
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
-    device.enumerate_hid(1).expect("enumeration succeeds");
+    attach_root_device(&mut device, 1).expect("enumeration succeeds");
 
     let mut buf = [0u8; REPORT_LEN];
     assert_eq!(device.next_report(0, &mut buf), Ok(None));
@@ -4444,7 +4573,7 @@ fn reports_flow_through_the_report_source() {
 fn report_source_rearms_across_the_ring_wrap() {
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
-    device.enumerate_hid(1).expect("enumeration succeeds");
+    attach_root_device(&mut device, 1).expect("enumeration succeeds");
 
     // More reports than the ring's data slots: arming and draining them all
     // proves retire + on-demand arm keep the ring live across the Link-TRB wrap.
@@ -4478,7 +4607,7 @@ fn report_source_rearms_after_a_rejected_completion() {
     // after.
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
-    device.enumerate_hid(1).expect("enumeration succeeds");
+    attach_root_device(&mut device, 1).expect("enumeration succeeds");
 
     // The next report posts a non-Success/ShortPacket completion code the
     // decode rejects; the one after is normal.
@@ -4525,7 +4654,7 @@ fn rejected_report_records_its_completion_code_surviving_a_later_control_transfe
     use crate::transport::UrbEngine;
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
-    device.enumerate_hid(1).expect("enumeration succeeds");
+    attach_root_device(&mut device, 1).expect("enumeration succeeds");
     assert_eq!(
         device.last_report_fault_code(0),
         0,
@@ -4585,30 +4714,20 @@ fn next_report_before_enumeration_fails_closed() {
 }
 
 #[test]
-fn enable_interrupter_arms_iman_imod_and_usbcmd_inte() {
-    // A driver that services the keyboard interrupt-driven enables the
-    // controller interrupter once: this sets the per-interrupter Interrupt
-    // Enable, disables moderation (lowest completion latency), clears any
-    // stale Interrupt Pending the firmware left, and sets the global
-    // `USBCMD.INTE` so a posted event asserts the device's interrupt.
+fn start_enables_the_interrupter() {
+    // The engine's synchronous waits park on the controller interrupt, so
+    // starting the controller enables its interrupter as part of
+    // `UsbDevice::start` (and every post-reset re-program): the
+    // per-interrupter Interrupt Enable is set, moderation is disabled
+    // (lowest completion latency), and the global `USBCMD.INTE` is set so a
+    // posted event asserts the device's interrupt.
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
-    device.enumerate_hid(1).expect("enumeration succeeds");
-    // Seed a stale Interrupt Pending the firmware hand-off could leave.
-    device.host_mut().iman = regs::IMAN_IP;
-
-    device.enable_interrupter().expect("enable interrupter");
-
     let host = device.host_mut();
     assert_eq!(
         host.iman & regs::IMAN_IE,
         regs::IMAN_IE,
-        "interrupter Interrupt Enable is set"
-    );
-    assert_eq!(
-        host.iman & regs::IMAN_IP,
-        0,
-        "the stale Interrupt Pending was cleared"
+        "interrupter Interrupt Enable is set by start"
     );
     assert_eq!(
         host.imod, 0,
@@ -4617,41 +4736,107 @@ fn enable_interrupter_arms_iman_imod_and_usbcmd_inte() {
     assert_eq!(
         host.usbcmd & regs::USBCMD_INTE,
         regs::USBCMD_INTE,
-        "global Interrupter Enable is set"
+        "global Interrupter Enable is set by start"
     );
 }
 
 #[test]
-fn enable_interrupter_clears_stale_global_status_before_arming() {
-    // Port-change and event latches can be left visible by the discovery /
-    // enumeration path. Clear them before enabling xHCI interrupts so the
-    // first real report completion produces a fresh controller interrupt.
+fn a_missing_completion_times_out_by_wall_clock_and_parks_instead_of_spinning() {
+    // A controller that never posts the awaited completion fails closed
+    // once the wall-clock wait budget is spent — reached by *parking* on
+    // the event-wait seam (each park advances the deterministic test
+    // clock by the granted budget), never by spinning an iteration count.
+    // The engine grants each park the whole remaining budget, so the
+    // timeout costs a handful of parks, not a poll loop.
     let mem = shared_mem();
-    let mut device = started_device(MockXhci::with_device(&mem), &mem);
-    device.enumerate_hid(1).expect("enumeration succeeds");
-    device.host_mut().hse_latched = true;
-    device.host_mut().eint_latched = true;
-    device.host_mut().pcd_latched = true;
-    device.host_mut().status_write_needs_read_flush = true;
-
-    device.enable_interrupter().expect("enable interrupter");
-
-    let host = device.host_mut();
+    let wait = TestWait::leaked();
+    // `MockXhci::new()` carries no device model: a command doorbell rings
+    // into silence and no event is ever posted.
+    let mut device = started_device_with_wait(MockXhci::new(), &mem, wait);
+    let waits_before = wait.waits.get();
+    let clock_before = wait.now_us.get();
     assert_eq!(
-        host.read32(MockXhci::op(regs::USBSTS)).unwrap()
+        device
+            .command_for_test(Trb::new(TrbType::EnableSlot, 0, 0, 0))
+            .err(),
+        Some(DriverError::DeviceFault),
+        "a silent controller fails closed"
+    );
+    assert_eq!(
+        device.last_reject_reason(),
+        4,
+        "the failure is the genuine wait-budget timeout"
+    );
+    assert!(
+        wait.now_us.get() - clock_before >= 5_000_000,
+        "the wait spans the whole wall-clock budget before failing"
+    );
+    let parks = wait.waits.get() - waits_before;
+    assert!(parks >= 1, "the engine parked for the missing event");
+    assert!(
+        parks <= 4,
+        "the wait parks with the remaining budget, never spinning: {parks} parks"
+    );
+}
+
+#[test]
+fn an_empty_root_hub_parks_through_the_connect_window_and_serves_nothing() {
+    // With nothing connected, the boot-time walk powers the ports, parks
+    // through the power-on/attach-debounce window (never spinning), and
+    // comes up serving nothing — the "controller up, awaiting the first
+    // connect" state, not an error.
+    let mem = shared_mem();
+    let wait = TestWait::leaked();
+    let mut device = started_device_with_wait(MockXhci::new(), &mem, wait);
+    let waits_before = wait.waits.get();
+    device
+        .bring_up(&TestDelay::default())
+        .expect("an empty controller comes up serving nothing");
+    assert!(!device.any_device_live(), "nothing was enumerated");
+    let parks = wait.waits.get() - waits_before;
+    assert!(parks >= 1, "the connect debounce parked");
+    assert!(
+        parks <= 4,
+        "the debounce parks with the remaining window, never spinning: {parks} parks"
+    );
+}
+
+#[test]
+fn enable_interrupter_clears_stale_pending_and_global_status_before_arming() {
+    // Stale Interrupt Pending and port-change/event latches can be left
+    // visible by the firmware hand-off or the discovery path. The enable
+    // sequence clears them before arming, so the first real completion
+    // produces a fresh controller interrupt.
+    let mem = shared_mem();
+    let mut xhci = Xhci::open(MockXhci::with_device(&mem)).expect("bring-up succeeds");
+    xhci.host.iman = regs::IMAN_IP;
+    xhci.host.hse_latched = true;
+    xhci.host.eint_latched = true;
+    xhci.host.pcd_latched = true;
+    xhci.host.status_write_needs_read_flush = true;
+
+    xhci.enable_interrupter().expect("enable interrupter");
+
+    assert_eq!(
+        xhci.host.iman & regs::IMAN_IP,
+        0,
+        "the stale Interrupt Pending was cleared"
+    );
+    assert_eq!(
+        xhci.host.read32(MockXhci::op(regs::USBSTS)).unwrap()
             & (regs::USBSTS_HSE | regs::USBSTS_EINT | regs::USBSTS_PCD),
         0,
         "stale global status was cleared and flushed before arming"
     );
     assert_eq!(
-        host.iman & regs::IMAN_IE,
+        xhci.host.iman & regs::IMAN_IE,
         regs::IMAN_IE,
-        "interrupter is still armed after stale status cleanup"
+        "interrupter is armed after stale status cleanup"
     );
     assert_eq!(
-        host.usbcmd & regs::USBCMD_INTE,
+        xhci.host.usbcmd & regs::USBCMD_INTE,
         regs::USBCMD_INTE,
-        "global interrupt enable is still set after stale status cleanup"
+        "global interrupt enable is set after stale status cleanup"
     );
 }
 
@@ -4662,8 +4847,7 @@ fn acknowledge_interrupt_clears_global_and_interrupter_pending_and_keeps_enable(
     // interrupter stays armed for the next completion.
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
-    device.enumerate_hid(1).expect("enumeration succeeds");
-    device.enable_interrupter().expect("enable interrupter");
+    attach_root_device(&mut device, 1).expect("enumeration succeeds");
     // The controller posts an event and sets both interrupt-status latches.
     device.host_mut().eint_latched = true;
     device.host_mut().iman |= regs::IMAN_IP;
@@ -4710,8 +4894,7 @@ fn acknowledge_clears_ip_only_and_a_zero_event_wake_never_writes_erdp() {
     // the controller's event is genuinely consumed — never speculatively.
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
-    device.enumerate_hid(1).expect("enumeration succeeds");
-    device.enable_interrupter().expect("enable interrupter");
+    attach_root_device(&mut device, 1).expect("enumeration succeeds");
 
     // The controller asserts an interrupt (sets EHB + IP) but the event TRB is
     // not yet visible to this PE: the drain that follows finds nothing.
@@ -4788,8 +4971,7 @@ fn a_cycle_owned_but_not_yet_landed_event_is_not_consumed_until_its_body_arrives
     // body lands.
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
-    device.enumerate_hid(1).expect("enumeration succeeds");
-    device.enable_interrupter().expect("enable interrupter");
+    attach_root_device(&mut device, 1).expect("enumeration succeeds");
     let mut buf = [0u8; REPORT_LEN];
     assert_eq!(device.next_report(0, &mut buf), Ok(None), "arms a transfer");
 
@@ -4878,7 +5060,7 @@ fn controller_faulted_reports_hse_and_halt_and_recovery_clears_it() {
 fn forged_report_residual_fails_closed() {
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
-    device.enumerate_hid(1).expect("enumeration succeeds");
+    attach_root_device(&mut device, 1).expect("enumeration succeeds");
     let mut buf = [0u8; REPORT_LEN];
     assert_eq!(device.next_report(0, &mut buf), Ok(None));
     device.host_mut().forge_report_residual = true;
@@ -4897,7 +5079,7 @@ fn forged_report_residual_fails_closed() {
 fn boot_keyboard_decodes_over_the_xhci_transfer_ring() {
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
-    device.enumerate_hid(1).expect("enumeration succeeds");
+    attach_root_device(&mut device, 1).expect("enumeration succeeds");
     let mut arm = [0u8; REPORT_LEN];
     assert_eq!(device.next_report(0, &mut arm), Ok(None));
     // Left Shift held plus key usage 0x04 (`A`).
@@ -5069,7 +5251,7 @@ fn describe_device_emits_the_hid_child_node() {
     use rustos_abi::{HwDeviceClass, HwMatchKey};
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
-    device.enumerate_hid(1).expect("enumeration succeeds");
+    attach_root_device(&mut device, 1).expect("enumeration succeeds");
 
     // The emitted child node carries the device's vid:pid and the
     // *interface* class read from the configuration descriptor
@@ -5111,11 +5293,12 @@ fn describe_device_before_enumeration_fails_closed() {
 /// Bring up a directly-attached mass-storage device on root port 1,
 /// asserting its identity so every bulk test starts from a proven
 /// enumeration.
-fn started_msd(mem: &SharedMem) -> UsbDevice<MockXhci, MockDma> {
+fn started_msd(mem: &SharedMem) -> UsbDevice<'static, MockXhci, MockDma> {
     let mut device = started_device(MockXhci::with_msd_device(mem), mem);
-    let descriptor = device.enumerate_hid(1).expect("the MSD enumerates");
-    assert_eq!(descriptor.vendor_id, 0x0781);
-    assert_eq!(descriptor.product_id, 0x5567);
+    let index = attach_root_device(&mut device, 1).expect("the MSD enumerates");
+    let identity = device.device_identity(index).expect("identity captured");
+    assert_eq!(identity.vendor_id, 0x0781);
+    assert_eq!(identity.product_id, 0x5567);
     device
 }
 
@@ -5385,17 +5568,18 @@ fn a_downstream_msd_stall_recovery_targets_the_device_never_the_hub() {
     let mut device = started_device(mock, &mem);
     let delay = TestDelay::default();
     device.bring_up(&delay).expect("bring-up runs");
+    // The root hub holds entry 0's region, so the stick is index 1.
     let descriptor = device
-        .device_identity(0)
+        .device_identity(1)
         .expect("a downstream device is enumerated");
     assert_eq!(descriptor.vendor_id, 0x0781);
 
     device.host_mut().bulk_out.stall_next = true;
     device
-        .queue_bulk_out(0, OUT_PIPE, &[0xE1u8; 4])
+        .queue_bulk_out(1, OUT_PIPE, &[0xE1u8; 4])
         .expect("TD queues");
     let complete = device
-        .poll_bulk(0, &mut [])
+        .poll_bulk(1, &mut [])
         .expect("poll succeeds")
         .expect("the stalled TD completes");
     assert_eq!(complete.result, Err(DriverError::EndpointStalled));
@@ -5407,10 +5591,10 @@ fn a_downstream_msd_stall_recovery_targets_the_device_never_the_hub() {
 
     // And the recovered endpoint accepts a fresh transfer end to end.
     device
-        .queue_bulk_out(0, OUT_PIPE, &[0xE2u8; 4])
+        .queue_bulk_out(1, OUT_PIPE, &[0xE2u8; 4])
         .expect("fresh TD queues");
     let fresh = device
-        .poll_bulk(0, &mut [])
+        .poll_bulk(1, &mut [])
         .expect("poll succeeds")
         .expect("the fresh TD completes");
     assert_eq!(fresh.result, Ok(4));
@@ -5528,137 +5712,9 @@ fn enumeration_drains_every_port_change_latch_so_the_hub_watch_stays_quiet() {
     assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::None));
     assert_eq!(device.host_mut().hub_downstream_change, 0);
     assert!(
-        device.device_live(0),
+        device.device_live(1),
         "the keyboard stays enumerated through a spurious status-change report"
     );
-}
-
-#[test]
-fn a_silent_downstream_connect_is_found_by_the_port_poll() {
-    // The metal Pi 4 defect: a device is plugged into a hub's downstream
-    // port after boot, the hub latches the connect change, but its
-    // status-change interrupt endpoint never posts a completion — the
-    // event-driven watch has no wake source, so the device was never
-    // enumerated (and never appeared in `lsusb`). The active port sweep
-    // reads each port's status directly and enumerates it brand-new.
-    let mem = shared_mem();
-    let mut mock = MockXhci::with_hub(&mem, 4, 4);
-    mock.hub_downstream_status = 0; // nothing attached downstream at boot
-    let mut device = started_device(mock, &mem);
-    let delay = TestDelay::default();
-    device
-        .bring_up(&delay)
-        .expect("bring-up leaves the controller serving");
-    assert!(device.hub_watch_active());
-    assert!(!device.any_device_live());
-
-    // The keyboard is plugged in; the hub latches the change but posts no
-    // status-change completion, so the event-driven watch sees nothing.
-    device.host_mut().hub_downstream_status = 1 << 0;
-    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
-    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::None));
-    assert!(
-        !device.any_device_live(),
-        "the silent connect is invisible to the event-driven watch"
-    );
-
-    // The tickless sweep reads the port directly and enumerates the device.
-    let outcome = device.poll_hub_ports(&delay).expect("the sweep succeeds");
-    assert_eq!(
-        outcome,
-        HubPollOutcome {
-            attached: 1,
-            detached: 0
-        }
-    );
-    assert!(device.device_live(0), "the plugged-in device is now served");
-    // The attach drained the connect latch; an idle follow-up sweep is a
-    // no-op, so the 256 ms tick never re-enumerates a served device.
-    assert_eq!(device.host_mut().hub_downstream_change, 0);
-    assert_eq!(device.poll_hub_ports(&delay), Ok(HubPollOutcome::default()));
-    assert!(device.device_live(0));
-}
-
-#[test]
-fn a_silent_downstream_disconnect_is_freed_by_the_port_poll() {
-    // The unplug mirror of the silent connect: the device vanishes from its
-    // hub port with no status-change completion. The sweep sees the port
-    // report no connection while a device is tracked there and frees it.
-    let mem = shared_mem();
-    let mut mock = MockXhci::with_hub(&mem, 4, 4);
-    mock.hub_downstream_status = 1 << 0;
-    let mut device = started_device(mock, &mem);
-    let delay = TestDelay::default();
-    device
-        .bring_up(&delay)
-        .expect("the keyboard behind the hub is reached");
-    assert!(device.device_live(0));
-
-    device.host_mut().hub_downstream_status = 0;
-    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
-    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::None));
-    assert!(
-        device.device_live(0),
-        "the silent disconnect is invisible to the event-driven watch"
-    );
-
-    let outcome = device.poll_hub_ports(&delay).expect("the sweep succeeds");
-    assert_eq!(
-        outcome,
-        HubPollOutcome {
-            attached: 0,
-            detached: 1
-        }
-    );
-    assert!(!device.any_device_live(), "the unplugged device is freed");
-    assert_eq!(
-        device.host_mut().hub_downstream_change,
-        0,
-        "the detach drained the stale latch"
-    );
-}
-
-#[test]
-fn the_port_poll_drains_a_stale_latch_without_fabricating_a_device() {
-    // A change latch left on an empty port (a connect that bounced before
-    // the sweep ran): the sweep drains it and fabricates nothing, so the
-    // status-change endpoint can never wedge on the stale latch.
-    let mem = shared_mem();
-    let mut mock = MockXhci::with_hub(&mem, 4, 4);
-    mock.hub_downstream_status = 0;
-    let mut device = started_device(mock, &mem);
-    let delay = TestDelay::default();
-    device
-        .bring_up(&delay)
-        .expect("bring-up leaves the controller serving");
-
-    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
-    assert_eq!(device.poll_hub_ports(&delay), Ok(HubPollOutcome::default()));
-    assert_eq!(
-        device.host_mut().hub_downstream_change,
-        0,
-        "the stale latch is drained"
-    );
-    assert!(!device.any_device_live());
-}
-
-#[test]
-fn the_port_poll_is_a_no_op_with_no_watched_hub() {
-    // A directly-attached device has no hub to sweep: the poll issues no
-    // control transfer and reports nothing, leaving the served device
-    // untouched.
-    let mem = shared_mem();
-    let mock = MockXhci::with_device(&mem);
-    let mut device = started_device(mock, &mem);
-    let delay = TestDelay::default();
-    device
-        .bring_up(&delay)
-        .expect("the directly-attached device is reached");
-    assert!(!device.hub_watch_active());
-    assert!(device.any_device_live());
-
-    assert_eq!(device.poll_hub_ports(&delay), Ok(HubPollOutcome::default()));
-    assert!(device.any_device_live());
 }
 
 #[test]
@@ -5673,7 +5729,7 @@ fn hub_watch_retracts_a_disconnected_downstream_device() {
         .bring_up(&delay)
         .expect("the keyboard behind the hub is reached");
     assert_eq!(
-        device.raw_device_slot(0),
+        device.raw_device_slot(1),
         2,
         "the keyboard occupies the second slot"
     );
@@ -5687,10 +5743,10 @@ fn hub_watch_retracts_a_disconnected_downstream_device() {
 
     assert_eq!(
         device.next_hub_change(&delay),
-        Ok(HubEvent::Detached(0)),
+        Ok(HubEvent::Detached(1)),
         "the disconnected downstream device is detected"
     );
-    assert!(!device.device_live(0), "its device slot was freed");
+    assert!(!device.device_live(1), "its device slot was freed");
     assert!(
         device.hub_watch_active(),
         "the controller and its hub watch stay up after a detach"
@@ -5718,7 +5774,7 @@ fn a_stray_controller_event_during_a_hub_poll_never_silences_the_watch() {
         .bring_up(&delay)
         .expect("the keyboard behind the hub is reached");
     assert!(device.hub_watch_active());
-    assert!(device.device_live(0));
+    assert!(device.device_live(1));
 
     // A stray controller event (a Host Controller Event, raw TRB-type 37 —
     // not a transfer/command this poll tracks, not a port-status-change) lands
@@ -5736,7 +5792,7 @@ fn a_stray_controller_event_during_a_hub_poll_never_silences_the_watch() {
         "the watch survived the stray event"
     );
     assert!(
-        device.device_live(0),
+        device.device_live(1),
         "the keyboard stays enumerated through a stray controller event"
     );
 
@@ -5747,10 +5803,10 @@ fn a_stray_controller_event_during_a_hub_poll_never_silences_the_watch() {
     device.host_mut().post_hub_status_change(&[1 << 4]);
     assert_eq!(
         device.next_hub_change(&delay),
-        Ok(HubEvent::Detached(0)),
+        Ok(HubEvent::Detached(1)),
         "the disconnect is still seen after the stray event was tolerated"
     );
-    assert!(!device.device_live(0), "its device slot was freed");
+    assert!(!device.device_live(1), "its device slot was freed");
     assert!(device.hub_watch_active());
 }
 
@@ -5767,7 +5823,7 @@ fn faulted_downstream_report_can_confirm_and_detach_a_gone_device() {
         .expect("the keyboard behind the hub is reached");
     let mut buf = [0u8; REPORT_LEN];
     device.host_mut().fault_one_report_completion = Some(CompletionCode::StallError);
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(device.next_report(1, &mut buf), Ok(None));
     device
         .host_mut()
         .pending_reports
@@ -5776,11 +5832,11 @@ fn faulted_downstream_report_can_confirm_and_detach_a_gone_device() {
 
     device.host_mut().hub_downstream_status = 0;
     assert_eq!(
-        device.next_report(0, &mut buf),
+        device.next_report(1, &mut buf),
         Err(DriverError::DeviceFault)
     );
-    assert_eq!(device.detach_if_device_gone(0), Ok(true));
-    assert!(!device.device_live(0), "the vanished device slot was freed");
+    assert_eq!(device.detach_if_device_gone(1), Ok(true));
+    assert!(!device.device_live(1), "the vanished device slot was freed");
     assert!(
         device.hub_watch_active(),
         "the hub watch remains armed for a later reattach"
@@ -5800,7 +5856,7 @@ fn fault_driven_detach_rearms_a_stashed_hub_change_for_reattach() {
         .expect("the keyboard behind the hub is reached");
     let mut buf = [0u8; REPORT_LEN];
     device.host_mut().fault_one_report_completion = Some(CompletionCode::StallError);
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(device.next_report(1, &mut buf), Ok(None));
     device.host_mut().hub_downstream_status = 0;
     device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
     device.host_mut().post_hub_status_change(&[1 << 4]);
@@ -5811,10 +5867,10 @@ fn fault_driven_detach_rearms_a_stashed_hub_change_for_reattach() {
     device.host_mut().process_int_ring();
 
     assert_eq!(
-        device.next_report(0, &mut buf),
+        device.next_report(1, &mut buf),
         Err(DriverError::DeviceFault)
     );
-    assert_eq!(device.detach_if_device_gone(0), Ok(true));
+    assert_eq!(device.detach_if_device_gone(1), Ok(true));
 
     assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::None));
     device.host_mut().hub_downstream_status = 1 << 0;
@@ -5843,14 +5899,14 @@ fn trailing_freed_slot_transfer_event_is_drained_not_faulted() {
     device
         .bring_up(&delay)
         .expect("the keyboard behind the hub is reached");
-    let freed_slot = device.raw_device_slot(0);
+    let freed_slot = device.raw_device_slot(1);
     assert!(freed_slot != 0, "the keyboard enumerated on a real slot");
 
     // The unplug faults the device's interrupt-IN transfer; the fault path
     // confirms the downstream port is gone and frees the device slot.
     let mut buf = [0u8; REPORT_LEN];
     device.host_mut().fault_one_report_completion = Some(CompletionCode::StallError);
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(device.next_report(1, &mut buf), Ok(None));
     device.host_mut().hub_downstream_status = 0;
     device
         .host_mut()
@@ -5858,10 +5914,10 @@ fn trailing_freed_slot_transfer_event_is_drained_not_faulted() {
         .push_back(alloc::vec![0xAA, 0, 0, 0, 0, 0, 0, 0]);
     device.host_mut().process_int_ring();
     assert_eq!(
-        device.next_report(0, &mut buf),
+        device.next_report(1, &mut buf),
         Err(DriverError::DeviceFault)
     );
-    assert_eq!(device.detach_if_device_gone(0), Ok(true));
+    assert_eq!(device.detach_if_device_gone(1), Ok(true));
 
     // The controller now posts a *trailing* transfer completion still addressed
     // to the just-freed device slot — ahead of the hub's disconnect
@@ -5900,7 +5956,7 @@ fn trailing_freed_slot_transfer_event_is_drained_not_faulted() {
         other => panic!("expected a fresh attach after draining the stale event, got {other:?}"),
     }
     // Once the fresh device owns its slot the freed-slot tolerance is cleared.
-    assert!(device.device_live(0));
+    assert!(device.device_live(1));
 }
 
 #[test]
@@ -5916,7 +5972,7 @@ fn fault_driven_detach_leaves_unposted_hub_latch_for_rearm() {
         .expect("the keyboard behind the hub is reached");
     let mut buf = [0u8; REPORT_LEN];
     device.host_mut().fault_one_report_completion = Some(CompletionCode::StallError);
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(device.next_report(1, &mut buf), Ok(None));
     device.host_mut().hub_downstream_status = 0;
     device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
     device
@@ -5926,10 +5982,10 @@ fn fault_driven_detach_leaves_unposted_hub_latch_for_rearm() {
     device.host_mut().process_int_ring();
 
     assert_eq!(
-        device.next_report(0, &mut buf),
+        device.next_report(1, &mut buf),
         Err(DriverError::DeviceFault)
     );
-    assert_eq!(device.detach_if_device_gone(0), Ok(true));
+    assert_eq!(device.detach_if_device_gone(1), Ok(true));
     assert_eq!(
         device.host_mut().hub_downstream_change,
         PORT_CHANGE_CONNECTION,
@@ -5968,7 +6024,7 @@ fn live_downstream_report_fault_is_not_misclassified_as_detach() {
         .expect("the keyboard behind the hub is reached");
     let mut buf = [0u8; REPORT_LEN];
     device.host_mut().fault_one_report_completion = Some(CompletionCode::StallError);
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(device.next_report(1, &mut buf), Ok(None));
     device
         .host_mut()
         .pending_reports
@@ -5976,12 +6032,12 @@ fn live_downstream_report_fault_is_not_misclassified_as_detach() {
     device.host_mut().process_int_ring();
 
     assert_eq!(
-        device.next_report(0, &mut buf),
+        device.next_report(1, &mut buf),
         Err(DriverError::DeviceFault)
     );
-    assert_eq!(device.detach_if_device_gone(0), Ok(false));
+    assert_eq!(device.detach_if_device_gone(1), Ok(false));
     assert!(
-        device.device_live(0),
+        device.device_live(1),
         "a live device's transfer fault remains a report fault"
     );
 }
@@ -6009,18 +6065,18 @@ fn split_transaction_fault_detaches_without_a_hub_status_confirmation() {
 
     let mut buf = [0u8; REPORT_LEN];
     device.host_mut().fault_one_report_completion = Some(CompletionCode::SplitTransactionError);
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(device.next_report(1, &mut buf), Ok(None));
     device
         .host_mut()
         .pending_reports
         .push_back(alloc::vec![0xAA, 0, 0, 0, 0, 0, 0, 0]);
     device.host_mut().process_int_ring();
     assert_eq!(
-        device.next_report(0, &mut buf),
+        device.next_report(1, &mut buf),
         Err(DriverError::DeviceFault)
     );
     assert_eq!(
-        device.last_report_fault_code(0),
+        device.last_report_fault_code(1),
         CompletionCode::SplitTransactionError.as_u8(),
         "the keyboard endpoint's device-gone code is captured"
     );
@@ -6028,14 +6084,14 @@ fn split_transaction_fault_detaches_without_a_hub_status_confirmation() {
     // The hub's downstream port is deliberately left reading connected: the fix
     // must NOT depend on the hub confirmation. Before the fix this returned
     // Ok(false) (hub says connected) and the device was never freed.
-    assert_eq!(device.detach_if_device_gone(0), Ok(true));
-    assert!(!device.device_live(0), "the gone device's slot was freed");
+    assert_eq!(device.detach_if_device_gone(1), Ok(true));
+    assert!(!device.device_live(1), "the gone device's slot was freed");
     assert!(
         device.hub_watch_active(),
         "the hub watch stays armed for the re-plug"
     );
     assert_eq!(
-        device.last_report_fault_code(0),
+        device.last_report_fault_code(1),
         0,
         "the acted-on fault code is cleared so a re-plug is not re-detached"
     );
@@ -6057,7 +6113,7 @@ fn split_transaction_fault_detaches_without_a_hub_status_confirmation() {
         }
     }
     assert!(
-        device.device_live(0),
+        device.device_live(1),
         "the re-plugged keyboard is live again"
     );
 }
@@ -6084,14 +6140,14 @@ fn split_transaction_detach_frees_the_slot_even_when_disable_is_never_confirmed(
 
     let mut buf = [0u8; REPORT_LEN];
     device.host_mut().fault_one_report_completion = Some(CompletionCode::SplitTransactionError);
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(device.next_report(1, &mut buf), Ok(None));
     device
         .host_mut()
         .pending_reports
         .push_back(alloc::vec![0xAA, 0, 0, 0, 0, 0, 0, 0]);
     device.host_mut().process_int_ring();
     assert_eq!(
-        device.next_report(0, &mut buf),
+        device.next_report(1, &mut buf),
         Err(DriverError::DeviceFault)
     );
 
@@ -6100,9 +6156,9 @@ fn split_transaction_detach_frees_the_slot_even_when_disable_is_never_confirmed(
     device.host_mut().suppress_disable_completion = true;
 
     // The slot is still freed locally despite the unconfirmable Disable Slot.
-    assert_eq!(device.detach_if_device_gone(0), Ok(true));
+    assert_eq!(device.detach_if_device_gone(1), Ok(true));
     assert!(
-        !device.device_live(0),
+        !device.device_live(1),
         "the slot is freed best-effort even without a Disable Slot confirmation"
     );
     assert!(
@@ -6126,7 +6182,7 @@ fn split_transaction_detach_frees_the_slot_even_when_disable_is_never_confirmed(
         other => panic!("expected a fresh attach after an unconfirmed detach, got {other:?}"),
     }
     assert!(
-        device.device_live(0),
+        device.device_live(1),
         "the re-plugged keyboard is live again"
     );
 }
@@ -6157,18 +6213,18 @@ fn a_failed_status_change_service_re_arms_the_watch_so_a_replug_is_still_seen() 
     // unreliable, so the device-unreachable code is conclusive on its own).
     let mut buf = [0u8; REPORT_LEN];
     device.host_mut().fault_one_report_completion = Some(CompletionCode::SplitTransactionError);
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(device.next_report(1, &mut buf), Ok(None));
     device
         .host_mut()
         .pending_reports
         .push_back(alloc::vec![0xAA, 0, 0, 0, 0, 0, 0, 0]);
     device.host_mut().process_int_ring();
     assert_eq!(
-        device.next_report(0, &mut buf),
+        device.next_report(1, &mut buf),
         Err(DriverError::DeviceFault)
     );
-    assert_eq!(device.detach_if_device_gone(0), Ok(true));
-    assert!(!device.device_live(0), "the gone device's slot was freed");
+    assert_eq!(device.detach_if_device_gone(1), Ok(true));
+    assert!(!device.device_live(1), "the gone device's slot was freed");
     assert!(device.hub_watch_active());
 
     // The hub posts a status-change report, but servicing it fails: right
@@ -6192,7 +6248,7 @@ fn a_failed_status_change_service_re_arms_the_watch_so_a_replug_is_still_seen() 
         "the watch stays active after a failed status-change service"
     );
     assert!(
-        !device.device_live(0),
+        !device.any_device_live(),
         "the failed service enumerated nothing yet"
     );
 
@@ -6216,7 +6272,7 @@ fn a_failed_status_change_service_re_arms_the_watch_so_a_replug_is_still_seen() 
         }
     }
     assert!(
-        device.device_live(0),
+        device.device_live(1),
         "the re-plugged keyboard is live again"
     );
 }
@@ -6237,7 +6293,7 @@ fn hub_watch_reenumerates_a_reattached_device_on_a_fresh_slot() {
     device.host_mut().hub_downstream_status = 0;
     device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
     device.host_mut().post_hub_status_change(&[1 << 4]);
-    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::Detached(0)));
+    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::Detached(1)));
 
     // Re-plug: the port reads connected again with the change latched. The
     // reconnect is treated as a brand-new device — a fresh slot, no reuse of
@@ -6256,7 +6312,7 @@ fn hub_watch_reenumerates_a_reattached_device_on_a_fresh_slot() {
         other => panic!("expected a fresh attach, got {other:?}"),
     }
     assert!(
-        device.raw_device_slot(0) > 2,
+        device.raw_device_slot(1) > 2,
         "a re-attach allocates a brand-new slot, never the freed one"
     );
 }
@@ -6265,13 +6321,14 @@ fn hub_watch_reenumerates_a_reattached_device_on_a_fresh_slot() {
 fn hub_assembly_unplug_at_root_port_tears_down_and_replug_reenumerates() {
     // On the Pi 4 the keyboard hangs off a hub, and pulling the keyboard out
     // takes that hub with it: the unplug surfaces as the hub's own *root* port
-    // losing connection, not as a downstream hub-port change. The hub being
-    // gone, it answers neither its status-change interrupt endpoint nor a
-    // GET_PORT_STATUS control transfer, so watching only the downstream port
-    // never sees the disconnect (the metal symptom: the hub control transfer
-    // times out and the re-plug is never enumerated). The engine must notice
-    // the root port gone, drop the hub watch and all tracking, and let a
-    // re-plug re-enumerate from scratch.
+    // losing connection (its `PORTSC.CSC` latching), not as a downstream
+    // hub-port change. The hub being gone, it answers neither its
+    // status-change interrupt endpoint nor a GET_PORT_STATUS control
+    // transfer, so watching only the downstream port never sees the
+    // disconnect. The root-port scan must notice the latched change, tear
+    // the assembly down, and attach a re-plug afresh — the controller
+    // itself stays up throughout (no reset, so a sibling port's devices
+    // would be untouched).
     let mem = shared_mem();
     let mut mock = MockXhci::with_hub(&mem, 4, 4);
     mock.hub_downstream_status = 1 << 0;
@@ -6282,53 +6339,149 @@ fn hub_assembly_unplug_at_root_port_tears_down_and_replug_reenumerates() {
         .bring_up(&delay)
         .expect("the keyboard behind the hub is reached");
     assert!(device.hub_watch_active());
-    assert!(device.device_live(0));
-    assert_eq!(device.root_port(), 1, "the hub enumerated on root port 1");
+    assert!(device.device_live(1));
 
-    // While the hub is present its root port reads connected, so the check is
-    // a no-op and the watch is left intact for the normal status-change path.
-    assert_eq!(device.detach_if_hub_root_gone(), Ok(false));
+    // While the hub is present no connect change is latched: the scan is
+    // quiet and the watch is left intact for the status-change path.
+    assert_eq!(device.next_root_change(&delay), Ok(HubEvent::None));
     assert!(device.hub_watch_active());
 
     // The whole hub assembly is now unplugged: its root port clears the
-    // connect bit.
-    device.host_mut().portsc[0] = 0;
-    assert_eq!(
-        device.detach_if_hub_root_gone(),
-        Ok(true),
-        "the hub assembly vanishing at its root port is detected"
-    );
+    // connect bit and latches the connect change.
+    device.host_mut().portsc[0] = regs::PORTSC_PP | regs::PORTSC_CSC;
+    match device.next_root_change(&delay) {
+        Ok(HubEvent::HubDetached(_)) => {}
+        other => panic!("the hub assembly detach is detected, got {other:?}"),
+    }
     assert!(
         !device.hub_watch_active(),
         "the hub watch is dropped once the hub itself is gone"
     );
     assert!(
-        !device.device_live(0),
+        !device.any_device_live(),
         "no device is tracked after the hub assembly is removed"
     );
+    // The latch was consumed: a second scan is quiet, never re-firing on
+    // stale state.
+    assert_eq!(device.next_root_change(&delay), Ok(HubEvent::None));
 
-    // A re-plug: the hub assembly reappears on a root port. Treated as a
-    // brand-new device, a full reset + re-enumeration brings the keyboard back
-    // through the hub.
-    device.host_mut().portsc[0] =
-        regs::PORTSC_CCS | regs::PORTSC_PED | regs::PORTSC_PP | (3 << regs::PORTSC_SPEED_SHIFT);
-    assert!(device.any_root_port_connected());
-    device
-        .reset_and_reenumerate(&delay)
-        .expect("the controller resets and re-enumerates the reattached hub assembly");
+    // A re-plug: the hub assembly reappears on its root port (connect +
+    // latched change). The scan attaches it afresh — the hub installed,
+    // descended, and watched, the keyboard behind it enumerated — without
+    // any controller reset.
+    device.host_mut().portsc[0] = regs::PORTSC_CCS
+        | regs::PORTSC_PED
+        | regs::PORTSC_PP
+        | (3 << regs::PORTSC_SPEED_SHIFT)
+        | regs::PORTSC_CSC;
+    match device.next_root_change(&delay) {
+        Ok(HubEvent::HubAttached(_)) => {}
+        other => panic!("the hub assembly re-attach is served, got {other:?}"),
+    }
     let identity = device
-        .device_identity(0)
+        .device_identity(1)
         .expect("the reattached hub+keyboard must enumerate");
     assert_eq!(identity.vendor_id, 0x046D);
     assert_eq!(identity.product_id, 0xC077);
     assert!(
-        device.device_live(0),
+        device.device_live(1),
         "the keyboard is live again after the re-plug"
     );
     assert!(
         device.hub_watch_active(),
         "the hub watch is re-armed for the freshly enumerated assembly"
     );
+}
+
+#[test]
+fn a_device_plugged_into_a_second_root_port_is_served_while_the_hub_stays_watched() {
+    // The Pi 4 metal defect this rework fixes: only the USB2 side of the
+    // jacks runs through the watched onboard hub — a SuperSpeed device
+    // trains directly on *another* root port. The old engine served only
+    // the first connected root port and never scanned the others while a
+    // hub watch was active, so plugging such a device produced nothing at
+    // all (no log, no node). The root-port scan must attach it beside the
+    // hub tier, and its unplug must detach only it.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up(&delay)
+        .expect("the hub tier comes up on root port 1");
+    assert!(device.hub_watch_active());
+    assert!(
+        device.device_live(1),
+        "the keyboard behind the hub is served"
+    );
+
+    // A device is plugged into root port 2: connected, already enabled
+    // (the SuperSpeed shape — no reset needed), connect change latched.
+    device.host_mut().portsc[1] = regs::PORTSC_CCS
+        | regs::PORTSC_PED
+        | regs::PORTSC_PP
+        | (3 << regs::PORTSC_SPEED_SHIFT)
+        | regs::PORTSC_CSC;
+    let index = match device.next_root_change(&delay) {
+        Ok(HubEvent::Attached(index)) => index,
+        other => panic!("the second root port's device is attached, got {other:?}"),
+    };
+    let identity = device
+        .device_identity(index)
+        .expect("the directly-attached device is served");
+    assert_eq!(identity.vendor_id, 0x046D);
+    assert!(
+        device.device_live(1),
+        "the hub's keyboard is untouched by the new attach"
+    );
+    assert!(device.hub_watch_active(), "the hub watch stays armed");
+    // The latch was consumed: the scan is quiet until the next change.
+    assert_eq!(device.next_root_change(&delay), Ok(HubEvent::None));
+
+    // Unplug it again: the disconnect detaches only that device.
+    device.host_mut().portsc[1] = regs::PORTSC_PP | regs::PORTSC_CSC;
+    assert_eq!(
+        device.next_root_change(&delay),
+        Ok(HubEvent::Detached(index))
+    );
+    assert!(!device.device_live(index), "the direct device is freed");
+    assert!(
+        device.device_live(1),
+        "the hub's keyboard survives the sibling port's unplug"
+    );
+    assert!(device.hub_watch_active());
+}
+
+#[test]
+fn bring_up_serves_a_hub_tier_and_a_direct_root_device_together() {
+    // The multi-root cold boot: the onboard hub (with its keyboard) sits
+    // on root port 1 and a directly-attached device on root port 2. The
+    // walk must serve *every* connected root port, not just the first.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    mock.portsc[1] =
+        regs::PORTSC_CCS | regs::PORTSC_PED | regs::PORTSC_PP | (3 << regs::PORTSC_SPEED_SHIFT);
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device.bring_up(&delay).expect("both root ports are served");
+    assert!(
+        device.device_live(1),
+        "the keyboard behind the hub is served"
+    );
+    assert!(
+        device.device_live(2),
+        "the directly-attached device on root port 2 is served beside it"
+    );
+    assert_ne!(
+        device.raw_device_slot(1),
+        device.raw_device_slot(2),
+        "separate devices on separate slots"
+    );
+    assert!(device.hub_watch_active(), "the hub tier is watched");
 }
 
 #[test]
@@ -6380,25 +6533,23 @@ fn bring_up_keyboard_comes_up_awaiting_a_connect_when_no_device_is_attached() {
     assert!(!device.any_device_live());
     assert!(
         !device.hub_watch_active(),
-        "no hub is present, so the root-port connect watch is used"
+        "no hub is present, so the root-port scan is the connect watch"
     );
     assert!(!device.device_live(0), "no device is live yet");
-    assert!(
-        !device.any_root_port_connected(),
-        "no root port reports a connected device while nothing is attached"
-    );
+    // Nothing attached and no change latched: the scan is quiet.
+    assert_eq!(device.next_root_change(&delay), Ok(HubEvent::None));
 
-    // A keyboard is now plugged into a root port: the controller resets and
-    // enumerates it as a brand-new device.
-    device.host_mut().portsc[0] =
-        regs::PORTSC_CCS | regs::PORTSC_PED | regs::PORTSC_PP | (3 << regs::PORTSC_SPEED_SHIFT);
-    assert!(
-        device.any_root_port_connected(),
-        "the freshly-attached device is seen on its root port"
-    );
-    device
-        .reset_and_reenumerate(&delay)
-        .expect("the controller resets and enumerates the freshly-attached device");
+    // A keyboard is now plugged into a root port: the connect latches
+    // `PORTSC.CSC` and the scan attaches it — no controller reset.
+    device.host_mut().portsc[0] = regs::PORTSC_CCS
+        | regs::PORTSC_PED
+        | regs::PORTSC_PP
+        | (3 << regs::PORTSC_SPEED_SHIFT)
+        | regs::PORTSC_CSC;
+    match device.next_root_change(&delay) {
+        Ok(HubEvent::Attached(0)) => {}
+        other => panic!("the first connect is attached, got {other:?}"),
+    }
     let descriptor = device
         .device_identity(0)
         .expect("the now-connected device must enumerate");
@@ -6428,36 +6579,36 @@ fn bring_up_serves_a_keyboard_and_a_storage_stick_behind_the_hub_together() {
     device
         .bring_up(&delay)
         .expect("bring-up serves both devices");
-    assert!(device.device_live(0), "the stick (walked first) is served");
-    assert!(device.device_live(1), "the keyboard is served beside it");
-    let stick = device.device_identity(0).expect("the stick is index 0");
+    assert!(device.device_live(1), "the stick (walked first) is served");
+    assert!(device.device_live(2), "the keyboard is served beside it");
+    let stick = device.device_identity(1).expect("the stick is index 1");
     assert_eq!(stick.vendor_id, 0x0781);
     assert_eq!(
         stick.interface_class >> 16,
         0x08,
         "a mass-storage interface"
     );
-    let keyboard = device.device_identity(1).expect("the keyboard is index 1");
+    let keyboard = device.device_identity(2).expect("the keyboard is index 2");
     assert_eq!(keyboard.vendor_id, 0x046D);
     assert_eq!(keyboard.interface_class >> 16, 0x03, "a HID interface");
     assert!(device.hub_watch_active());
 
     // Each device's node derives its own class, so `devmgr` autoloads the
     // storage class driver *and* the keyboard class driver.
-    let stick_node = device.describe_device(0, 0, 1).expect("stick node");
+    let stick_node = device.describe_device(1, 0, 1).expect("stick node");
     assert_eq!(stick_node.class(), Some(rustos_abi::HwDeviceClass::Storage));
-    let kbd_node = device.describe_device(1, 0, 2).expect("keyboard node");
+    let kbd_node = device.describe_device(2, 0, 2).expect("keyboard node");
     assert_eq!(kbd_node.class(), Some(rustos_abi::HwDeviceClass::Input));
 
     // The keyboard's reports flow on its own index...
     let mut buf = [0u8; REPORT_LEN];
-    assert_eq!(device.next_report(1, &mut buf), Ok(None));
+    assert_eq!(device.next_report(2, &mut buf), Ok(None));
     device
         .host_mut()
         .pending_reports
         .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
     device.host_mut().process_int_ring();
-    assert_eq!(device.next_report(1, &mut buf), Ok(Some(REPORT_LEN)));
+    assert_eq!(device.next_report(2, &mut buf), Ok(Some(REPORT_LEN)));
     assert_eq!(buf[2], 0x04, "the keystroke reaches the keyboard's index");
 
     // ...and the stick's bulk transfers on its own index, concurrently.
@@ -6466,10 +6617,10 @@ fn bring_up_serves_a_keyboard_and_a_storage_stick_behind_the_hub_together() {
         .host_mut()
         .bulk_in_responses
         .push_back(response.clone());
-    device.queue_bulk_in(0, IN_PIPE, 8).expect("bulk TD queues");
+    device.queue_bulk_in(1, IN_PIPE, 8).expect("bulk TD queues");
     let mut bulk_buf = [0u8; 8];
     let complete = device
-        .poll_bulk(0, &mut bulk_buf)
+        .poll_bulk(1, &mut bulk_buf)
         .expect("poll succeeds")
         .expect("the bulk TD completes");
     assert_eq!(complete.result, Ok(8));
@@ -6489,7 +6640,7 @@ fn unplugging_the_keyboard_leaves_the_storage_stick_served() {
     device
         .bring_up(&delay)
         .expect("bring-up serves both devices");
-    assert!(device.device_live(0) && device.device_live(1));
+    assert!(device.device_live(1) && device.device_live(2));
 
     // Unplug the keyboard (port 4): the hub latches the connect change and
     // posts a status-change report naming that port.
@@ -6498,12 +6649,12 @@ fn unplugging_the_keyboard_leaves_the_storage_stick_served() {
     device.host_mut().post_hub_status_change(&[1 << 4]);
     assert_eq!(
         device.next_hub_change(&delay),
-        Ok(HubEvent::Detached(1)),
+        Ok(HubEvent::Detached(2)),
         "only the keyboard's index is detached"
     );
-    assert!(!device.device_live(1), "the keyboard's index is freed");
+    assert!(!device.device_live(2), "the keyboard's index is freed");
     assert!(
-        device.device_live(0),
+        device.device_live(1),
         "the stick is untouched by the keyboard's unplug"
     );
 
@@ -6513,10 +6664,10 @@ fn unplugging_the_keyboard_leaves_the_storage_stick_served() {
         .host_mut()
         .bulk_in_responses
         .push_back(response.clone());
-    device.queue_bulk_in(0, IN_PIPE, 6).expect("bulk TD queues");
+    device.queue_bulk_in(1, IN_PIPE, 6).expect("bulk TD queues");
     let mut bulk_buf = [0u8; 6];
     let complete = device
-        .poll_bulk(0, &mut bulk_buf)
+        .poll_bulk(1, &mut bulk_buf)
         .expect("poll succeeds")
         .expect("the bulk TD completes");
     assert_eq!(complete.result, Ok(6));
@@ -6529,7 +6680,7 @@ fn unplugging_the_keyboard_leaves_the_storage_stick_served() {
     device.host_mut().post_hub_status_change(&[1 << 4]);
     match device.next_hub_change(&delay) {
         Ok(HubEvent::Attached(index)) => {
-            assert_eq!(index, 1, "the re-plugged keyboard reuses the freed index");
+            assert_eq!(index, 2, "the re-plugged keyboard reuses the freed index");
             let identity = device
                 .device_identity(index)
                 .expect("the re-attached keyboard is served");
@@ -6537,7 +6688,7 @@ fn unplugging_the_keyboard_leaves_the_storage_stick_served() {
         }
         other => panic!("expected the keyboard to re-attach, got {other:?}"),
     }
-    assert!(device.device_live(0), "the stick is still served");
+    assert!(device.device_live(1), "the stick is still served");
 }
 
 #[test]
@@ -6558,15 +6709,15 @@ fn bring_up_serves_a_keyboard_and_a_mouse_behind_the_hub_together() {
     device
         .bring_up(&delay)
         .expect("bring-up serves both devices");
-    assert!(device.device_live(0), "the mouse (walked first) is served");
-    assert!(device.device_live(1), "the keyboard is served beside it");
-    let mouse = device.device_identity(0).expect("the mouse is index 0");
+    assert!(device.device_live(1), "the mouse (walked first) is served");
+    assert!(device.device_live(2), "the keyboard is served beside it");
+    let mouse = device.device_identity(1).expect("the mouse is index 1");
     assert_eq!(mouse.product_id, 0xC539);
     assert_eq!(
         mouse.interface_class, 0x03_01_02,
         "a HID boot-mouse interface"
     );
-    let keyboard = device.device_identity(1).expect("the keyboard is index 1");
+    let keyboard = device.device_identity(2).expect("the keyboard is index 2");
     assert_eq!(keyboard.product_id, 0xC077);
     assert_eq!(
         keyboard.interface_class, 0x03_01_01,
@@ -6576,31 +6727,31 @@ fn bring_up_serves_a_keyboard_and_a_mouse_behind_the_hub_together() {
 
     // Each node derives its own class and match key, so the keyboard and
     // the mouse class drivers autoload independently.
-    let mouse_node = device.describe_device(0, 0, 1).expect("mouse node");
+    let mouse_node = device.describe_device(1, 0, 1).expect("mouse node");
     assert_eq!(mouse_node.class(), Some(rustos_abi::HwDeviceClass::Input));
-    let kbd_node = device.describe_device(1, 0, 2).expect("keyboard node");
+    let kbd_node = device.describe_device(2, 0, 2).expect("keyboard node");
     assert_eq!(kbd_node.class(), Some(rustos_abi::HwDeviceClass::Input));
 
     // The keyboard's reports flow on its own index...
     let mut buf = [0u8; REPORT_LEN];
-    assert_eq!(device.next_report(1, &mut buf), Ok(None));
+    assert_eq!(device.next_report(2, &mut buf), Ok(None));
     device
         .host_mut()
         .pending_reports
         .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
     device.host_mut().process_int_ring();
-    assert_eq!(device.next_report(1, &mut buf), Ok(Some(REPORT_LEN)));
+    assert_eq!(device.next_report(2, &mut buf), Ok(Some(REPORT_LEN)));
     assert_eq!(buf[2], 0x04, "the keystroke reaches the keyboard's index");
 
     // ...and the mouse's boot reports on its own index, concurrently.
     let mut mouse_buf = [0u8; REPORT_LEN];
-    assert_eq!(device.next_report(0, &mut mouse_buf), Ok(None));
+    assert_eq!(device.next_report(1, &mut mouse_buf), Ok(None));
     device
         .host_mut()
         .pending_reports2
         .push_back(alloc::vec![0x01, 0x05, 0xFB, 0x00]);
     device.host_mut().process_int2_ring();
-    assert_eq!(device.next_report(0, &mut mouse_buf), Ok(Some(4)));
+    assert_eq!(device.next_report(1, &mut mouse_buf), Ok(Some(4)));
     assert_eq!(
         &mouse_buf[..4],
         &[0x01, 0x05, 0xFB, 0x00],
@@ -6624,12 +6775,75 @@ fn a_failing_port_at_bring_up_never_costs_the_keyboard_its_service() {
         .bring_up(&delay)
         .expect("bring-up survives the broken port");
     assert!(
-        device.device_live(0),
+        device.device_live(1),
         "the keyboard is served on the first free index"
     );
-    let keyboard = device.device_identity(0).expect("the keyboard is served");
+    let keyboard = device.device_identity(1).expect("the keyboard is served");
     assert_eq!(keyboard.interface_class, 0x03_01_01);
-    assert!(!device.device_live(1), "the broken device claimed no index");
+    assert!(!device.device_live(2), "the broken device claimed no index");
+    assert!(device.hub_watch_active(), "the hub watch is still armed");
+}
+
+#[test]
+fn a_slow_hub_port_reset_is_polled_until_it_completes() {
+    // A slow external hub legitimately takes several polls (hundreds of
+    // milliseconds) to complete a downstream port reset. A single fixed
+    // wait followed by one enable check refused such a device as a
+    // DeviceFault; the reset-completion wait must re-poll `GET_STATUS`
+    // until the hub reports the reset done and the port enabled.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.slow_enable_status_reads = 5;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up(&delay)
+        .expect("bring-up polls the slow reset to completion");
+    assert!(
+        device.device_live(1),
+        "the keyboard behind the slow port is served"
+    );
+    assert_eq!(device.skipped_port_count(), 0);
+    assert_eq!(
+        device.host_mut().slow_enable_status_reads,
+        0,
+        "the poll consumed every reset-in-progress read"
+    );
+}
+
+#[test]
+fn a_port_that_never_enables_records_its_stage_port_and_final_status() {
+    // The hot-plug fault breadcrumb: an attach whose port never enables
+    // must leave the enumeration stage at PortReset and record the
+    // targeted port and its final observed `wPortStatus`, so the coarse
+    // DeviceFault a metal log carries is localisable to "connected but
+    // never enabled" rather than guessed at.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.fail_enable_downstream_port = 4;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up(&delay)
+        .expect("bring-up survives the broken port");
+    assert!(!device.device_live(0), "the broken device claimed no index");
+    assert_eq!(device.skipped_port_count(), 1);
+    let fault = device
+        .last_attach_fault()
+        .expect("the failed attach left its fault snapshot");
+    assert_eq!(fault.port, 4);
+    assert_eq!(fault.error, DriverError::DeviceFault);
+    assert_eq!(fault.stage, EnumStage::PortReset);
+    assert!(
+        crate::device::hub_port_connected(fault.port_status),
+        "the final observed status shows the device present"
+    );
+    assert!(
+        !crate::device::hub_port_enabled(fault.port_status),
+        "...but the port never enabled"
+    );
     assert!(device.hub_watch_active(), "the hub watch is still armed");
 }
 
@@ -6656,18 +6870,18 @@ fn bring_up_serves_both_interfaces_of_a_composite_receiver() {
     device
         .bring_up(&delay)
         .expect("the composite receiver enumerates");
-    assert!(device.device_live(0), "the keyboard interface is served");
-    assert!(device.device_live(1), "the mouse interface is served");
-    assert!(!device.device_live(2));
-    let keyboard = device.device_identity(0).expect("keyboard identity");
+    assert!(device.device_live(1), "the keyboard interface is served");
+    assert!(device.device_live(2), "the mouse interface is served");
+    assert!(!device.device_live(3));
+    let keyboard = device.device_identity(1).expect("keyboard identity");
     assert_eq!(keyboard.product_id, 0xC534);
     assert_eq!(keyboard.interface_class, 0x03_01_01);
-    let mouse = device.device_identity(1).expect("mouse identity");
+    let mouse = device.device_identity(2).expect("mouse identity");
     assert_eq!(mouse.product_id, 0xC534, "one physical device");
     assert_eq!(mouse.interface_class, 0x03_01_02);
     assert_eq!(
-        device.raw_device_slot(0),
         device.raw_device_slot(1),
+        device.raw_device_slot(2),
         "both interfaces ride one device slot"
     );
     assert_eq!(
@@ -6679,9 +6893,9 @@ fn bring_up_serves_both_interfaces_of_a_composite_receiver() {
 
     // Each interface publishes its own node with its own class key, so
     // `devmgr` autoloads the keyboard AND the mouse class driver.
-    let kbd_node = device.describe_device(0, 0, 1).expect("keyboard node");
+    let kbd_node = device.describe_device(1, 0, 1).expect("keyboard node");
     assert!(HwMatchKey::usb(0, 0, 0x03_01_01).matches(&kbd_node.match_keys()[0]));
-    let mouse_node = device.describe_device(1, 0, 2).expect("mouse node");
+    let mouse_node = device.describe_device(2, 0, 2).expect("mouse node");
     assert!(HwMatchKey::usb(0, 0, 0x03_01_02).matches(&mouse_node.match_keys()[0]));
     // Both interface nodes carry the one physical device's slot as their
     // device address, so an inventory consumer (`lsusb`) attributes them
@@ -6691,24 +6905,24 @@ fn bring_up_serves_both_interfaces_of_a_composite_receiver() {
 
     // Keystrokes flow on the keyboard interface's index...
     let mut buf = [0u8; REPORT_LEN];
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(device.next_report(1, &mut buf), Ok(None));
     device
         .host_mut()
         .pending_reports
         .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
     device.host_mut().process_int_ring();
-    assert_eq!(device.next_report(0, &mut buf), Ok(Some(REPORT_LEN)));
+    assert_eq!(device.next_report(1, &mut buf), Ok(Some(REPORT_LEN)));
     assert_eq!(buf[2], 0x04);
 
     // ...and mouse reports on the mouse interface's index, concurrently.
     let mut mouse_buf = [0u8; REPORT_LEN];
-    assert_eq!(device.next_report(1, &mut mouse_buf), Ok(None));
+    assert_eq!(device.next_report(2, &mut mouse_buf), Ok(None));
     device
         .host_mut()
         .pending_reports2
         .push_back(alloc::vec![0x01, 0x05, 0xFB, 0x00]);
     device.host_mut().process_int2_ring();
-    assert_eq!(device.next_report(1, &mut mouse_buf), Ok(Some(4)));
+    assert_eq!(device.next_report(2, &mut mouse_buf), Ok(Some(4)));
     assert_eq!(&mouse_buf[..4], &[0x01, 0x05, 0xFB, 0x00]);
 
     // A control transfer through the SIBLING index routes through the
@@ -6717,7 +6931,7 @@ fn bring_up_serves_both_interfaces_of_a_composite_receiver() {
     let mut data = [0u8; 18];
     let setup = [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 18, 0x00];
     let transferred = device
-        .engine_for(1)
+        .engine_for(2)
         .control_in(setup, &mut data)
         .expect("the sibling's control transfer routes through the EP0 owner");
     assert_eq!(transferred, 18);
@@ -6737,17 +6951,17 @@ fn unplugging_a_composite_receiver_frees_both_interfaces_and_a_replug_reserves_t
     device
         .bring_up(&delay)
         .expect("the composite receiver enumerates");
-    assert!(device.device_live(0) && device.device_live(1));
+    assert!(device.device_live(1) && device.device_live(2));
 
     // Unplug the receiver: ONE physical disconnect must free BOTH interface
     // entries — a stale sibling entry would hold the freed slot's rings.
     device.host_mut().hub_downstream_status = 0;
     device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
     device.host_mut().post_hub_status_change(&[1 << 4]);
-    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::Detached(0)));
-    assert!(!device.device_live(0), "the keyboard interface is freed");
+    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::Detached(1)));
+    assert!(!device.device_live(1), "the keyboard interface is freed");
     assert!(
-        !device.device_live(1),
+        !device.device_live(2),
         "the sibling mouse interface is freed with it"
     );
     assert!(device.hub_watch_active());
@@ -6756,12 +6970,12 @@ fn unplugging_a_composite_receiver_frees_both_interfaces_and_a_replug_reserves_t
     device.host_mut().hub_downstream_status = 1 << 0;
     device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
     device.host_mut().post_hub_status_change(&[1 << 4]);
-    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::Attached(0)));
-    assert!(device.device_live(0), "the keyboard interface is re-served");
-    assert!(device.device_live(1), "the mouse interface is re-served");
+    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::Attached(1)));
+    assert!(device.device_live(1), "the keyboard interface is re-served");
+    assert!(device.device_live(2), "the mouse interface is re-served");
     assert_eq!(
         device
-            .device_identity(1)
+            .device_identity(2)
             .expect("mouse identity")
             .interface_class,
         0x03_01_02
@@ -6786,21 +7000,21 @@ fn a_composite_receiver_beside_the_keyboard_costs_it_nothing() {
     device
         .bring_up(&delay)
         .expect("bring-up serves both devices");
-    let composite_kbd = device.device_identity(0).expect("receiver keyboard");
+    let composite_kbd = device.device_identity(1).expect("receiver keyboard");
     assert_eq!(composite_kbd.product_id, 0xC534);
     assert_eq!(composite_kbd.interface_class, 0x03_01_01);
-    let composite_mouse = device.device_identity(1).expect("receiver mouse");
+    let composite_mouse = device.device_identity(2).expect("receiver mouse");
     assert_eq!(composite_mouse.product_id, 0xC534);
     assert_eq!(composite_mouse.interface_class, 0x03_01_02);
-    let keyboard = device.device_identity(2).expect("the ordinary keyboard");
+    let keyboard = device.device_identity(3).expect("the ordinary keyboard");
     assert_eq!(keyboard.product_id, 0xC077);
     assert_eq!(
         keyboard.interface_class, 0x03_01_01,
         "the ordinary keyboard is served beside the receiver's two interfaces"
     );
     assert_ne!(
-        device.raw_device_slot(0),
-        device.raw_device_slot(2),
+        device.raw_device_slot(1),
+        device.raw_device_slot(3),
         "the receiver and the keyboard are separate devices on separate slots"
     );
     assert_eq!(
@@ -6828,10 +7042,10 @@ fn a_forged_ep0_max_packet_fails_closed_without_costing_the_keyboard() {
     device
         .bring_up(&delay)
         .expect("bring-up survives the forged device");
-    let keyboard = device.device_identity(0).expect("the keyboard is served");
+    let keyboard = device.device_identity(1).expect("the keyboard is served");
     assert_eq!(keyboard.product_id, 0xC077);
     assert!(
-        !device.device_live(1) && !device.device_live(2),
+        !device.device_live(2) && !device.device_live(3),
         "the forged device claimed no index"
     );
     assert_eq!(
@@ -6941,15 +7155,16 @@ fn bring_up_serves_a_keyboard_behind_a_nested_hub() {
     let delay = TestDelay::default();
     device.bring_up(&delay).expect("both hub tiers come up");
 
-    // The nested hub's contexts claimed device region 0, so the keyboard
-    // is served on the next free index — and index 0 is not misreported
-    // as a live device.
+    // The root hub's contexts claimed device region 0 and the nested
+    // hub's region 1, so the keyboard is served on the next free index —
+    // and neither hub entry is misreported as a live device.
     assert!(!device.device_live(0));
+    assert!(!device.device_live(1));
     assert!(
-        device.device_live(1),
+        device.device_live(2),
         "the keyboard behind the nested hub is served"
     );
-    let identity = device.device_identity(1).expect("the keyboard is served");
+    let identity = device.device_identity(2).expect("the keyboard is served");
     assert_eq!(identity.vendor_id, 0x046D);
     assert_eq!(
         device.host_mut().downstream_route,
@@ -6969,14 +7184,14 @@ fn bring_up_serves_a_keyboard_behind_a_nested_hub() {
 
     // Keystrokes flow end to end through both tiers.
     let mut buf = [0u8; REPORT_LEN];
-    assert_eq!(device.next_report(1, &mut buf), Ok(None));
+    assert_eq!(device.next_report(2, &mut buf), Ok(None));
     device
         .host_mut()
         .pending_reports
         .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
     device.host_mut().process_int_ring();
     let len = device
-        .next_report(1, &mut buf)
+        .next_report(2, &mut buf)
         .expect("a report drains")
         .expect("a report is available");
     assert_eq!(len, REPORT_LEN);
@@ -7037,7 +7252,7 @@ fn unplugging_a_nested_hub_cascades_and_a_replug_rebuilds_the_tier() {
     let mut device = started_device(MockXhci::with_nested_hub(&mem), &mem);
     let delay = TestDelay::default();
     device.bring_up(&delay).expect("both hub tiers come up");
-    assert!(device.device_live(1));
+    assert!(device.device_live(2));
 
     device.host_mut().nested_hubs[0].connected = false;
     device.host_mut().nested_hubs[0].root_change = PORT_CHANGE_CONNECTION;
@@ -7123,7 +7338,7 @@ fn detaching_a_downstream_device_releases_its_dma_chunk() {
     device
         .bring_up(&delay)
         .expect("the keyboard behind the hub is reached");
-    assert!(device.device_live(0));
+    assert!(device.device_live(1));
     let with_device = device.dma_ref().live_chunks();
 
     // Unplug the keyboard: the detach frees its table entry *and* its
@@ -7131,8 +7346,8 @@ fn detaching_a_downstream_device_releases_its_dma_chunk() {
     device.host_mut().hub_downstream_status = 0;
     device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
     device.host_mut().post_hub_status_change(&[1 << 4]);
-    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::Detached(0)));
-    assert!(!device.device_live(0));
+    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::Detached(1)));
+    assert!(!device.device_live(1));
     assert_eq!(
         device.dma_ref().live_chunks(),
         with_device - 1,

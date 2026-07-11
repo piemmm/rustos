@@ -359,7 +359,8 @@ names a sibling crate.
   outstanding and completes it on the controller event exactly like an
   interrupt URB; the class driver still holds **zero** DMA authority
   (the HCD bounce-copies through its staging buffers).
-- Reality-driven fixes landed with it: `restore_hub_active` now **parks**
+- Reality-driven fixes landed with it: the resting-context switch
+  (`rest_active_context`) **parks**
   a downstream device's EP0 ring (`device_ep0_ring`) instead of dropping
   it, so a post-enumeration device-targeted control transfer (a URB
   control-IN, the recovery's `CLEAR_FEATURE`) switches to the device via

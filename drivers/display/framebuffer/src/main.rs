@@ -316,9 +316,14 @@ mod program {
                 return EXIT_WAIT_FAILED;
             }
             let mut ticket: u64 = 0;
-            // A transient recv error (e.g. an oversize request left queued)
-            // must not kill the server; drop it and re-park.
-            let Ok(len) = rustos_rt::call_recv(DISPLAY_ENDPOINT, &mut request, &mut ticket) else {
+            // Non-blocking: the loop's park point is the wait-set, and the
+            // queued call the wake reported may have been cancelled by its
+            // poster's exit. A transient recv error (an empty queue, an
+            // oversize request left queued) must not kill the server; drop
+            // it and re-park.
+            let Ok(len) =
+                rustos_rt::call_recv_nonblock(DISPLAY_ENDPOINT, &mut request, &mut ticket)
+            else {
                 continue;
             };
             // Every outcome — including a malformed request — is a

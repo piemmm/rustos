@@ -648,7 +648,8 @@ order (one fully-gated increment each):
      - **5b-ii — USB/HID child emission — done.** `bus_usb` emits the
        enumerated HID device under the VL805 as a child `HwNode` keyed by its
        **interface** class (`0x03_01_01` keyboard / `0x03_01_02` mouse).
-       `UsbDevice::enumerate_hid` now reads the whole configuration
+       The enumeration (`UsbDevice::bring_up` /
+       `UsbDevice::attach_root_port`) reads the whole configuration
        descriptor and parses every default-alternate interface descriptor
        (`InterfaceInfo::decode_all`, fail-closed bounded walk by each
        `bLength`; a composite keyboard+mouse receiver gets one entry and one

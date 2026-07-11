@@ -168,6 +168,26 @@ pub fn teardown_owned_by(owner: u64, audit: &dyn Sink) {
     }
 }
 
+/// Cancel every in-flight call the exiting task `sender` posted, on every
+/// live endpoint — the converse of [`teardown_owned_by`]: that releases the
+/// endpoints a dead task *served*; this scrubs the calls a dead task *sent*.
+///
+/// Without it a dead caller's queued request outlives it and is later
+/// handed to the server as if live — the Pi 4 USB defect where an unloaded
+/// class driver's final URB submit survived its death and wedged the
+/// single-slot URB transport against the replacement driver. Each endpoint
+/// with cancellations records one `CallPosterVanished` audit event. No wake
+/// is needed: the poster is dead and the server parks only on *arrival* of
+/// requests, never their removal.
+pub fn cancel_posted_by(sender: u64, audit: &dyn Sink) {
+    // Snapshot under the registry lock, cancel outside it (each
+    // cancellation takes the endpoint's own interior lock, never this one).
+    let endpoints: Vec<Arc<CallEndpoint>> = CALL_ENDPOINTS.lock().values().cloned().collect();
+    for ep in endpoints {
+        let _ = ep.cancel_posted_by(sender, audit);
+    }
+}
+
 /// `true` if `id` is currently bound. Diagnostic / test observer.
 #[must_use]
 pub fn contains(id: EndpointId) -> bool {
@@ -262,6 +282,28 @@ mod tests {
             [AuditEvent::CallEndpointRegisterDenied.id().0],
             "the refused bind is the audited decision"
         );
+        unregister(id);
+    }
+
+    #[test]
+    fn cancel_posted_by_scrubs_the_dead_posters_calls_on_registered_endpoints() {
+        let id = EndpointId(0xCA11_0004);
+        let ep = endpoint(id.0);
+        register(Arc::clone(&ep), &NullSink).expect("bound");
+        let caller = TaskCapabilities::derive(
+            TaskId(9),
+            UserId(1),
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            &NullSink,
+        );
+        ep.post(&caller, 0, b"q", &NullSink).expect("posted");
+        assert!(ep.has_pending());
+
+        cancel_posted_by(9, &NullSink);
+
+        // The dead poster's queued call is gone before any server sees it.
+        assert!(!ep.has_pending());
         unregister(id);
     }
 

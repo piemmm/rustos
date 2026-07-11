@@ -443,7 +443,7 @@ compile-time budget.
 
 `UsbDevice::start` zeroes the shared chunk, publishes the ERST entry and
 the rings' Link TRBs, and starts the controller through `Xhci::start`.
-`UsbDevice::enumerate_hid(port)` then brings the device on a root-hub
+`UsbDevice::attach_root_port(port)` then brings the device on a root-hub
 port to the configured state (§4.3): port reset when the port is not
 yet enabled, Enable Slot (validating the returned slot ID), Address
 Device (input control context `A0 | A1`, slot context, EP0 context
@@ -496,10 +496,17 @@ arming) is the shared `finish_enumeration`, identical to a root-port device —
 only the topology in the slot context differs. A failed attach restores
 the hub as the active control context and releases the claimed slot, so
 one port's broken device never costs the other ports their service. The
-caller owns the wall-clock power-on-good and reset-recovery delays: it
-powers the port, resets it (`SET_FEATURE(PORT_RESET)`), waits, and
-confirms the port enabled with the speed read from `GET_STATUS` before
-addressing.
+caller owns the wall-clock settle windows (the `Delay` seam): the walk
+powers the port, resets it (`SET_FEATURE(PORT_RESET)`), then **polls the
+reset to completion** (`await_port_reset_complete`: `GET_STATUS` at 20 ms
+parked intervals, bounded at 800 ms — a slow external hub legitimately
+takes hundreds of milliseconds — requiring reset-signalling done and the
+port enabled, then the `TRSTRCY` settle) before addressing at the speed
+the final status reports. A failed attach snapshots its diagnostics
+(`UsbDevice::last_attach_fault`: port, error, stage, completion/
+event-type/reject, final `wPortStatus`) before the latch drain overwrites
+the live state, so the HCD's hot-plug failure warning names the failing
+step.
 
 Before addressing anything behind it, the bring-up walk first
 **marks the hub as a hub** in its own slot context
@@ -950,7 +957,8 @@ The USB host driver does the same one level down, for the HID device it
 enumerates behind the controller (`plans/PI.md` Stage 4.HW item 5b-ii).
 A USB device's class lives on its *interface*, not its device
 descriptor (whose `bDeviceClass` is `0` for an HID device), so
-`UsbDevice::enumerate_hid` reads the configuration descriptor at its
+the enumeration (`UsbDevice::bring_up` /
+`UsbDevice::attach_root_port`) reads the configuration descriptor at its
 exact advertised `wTotalLength` during bring-up (a 9-byte header read
 first, then precisely that many bytes) and parses **every**
 default-alternate interface descriptor (`InterfaceInfo::decode_all`,

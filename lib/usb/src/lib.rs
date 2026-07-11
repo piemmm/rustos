@@ -800,6 +800,30 @@ impl<H: XhciHost> Xhci<H> {
         Ok(PortStatus::from_raw(raw))
     }
 
+    /// Clear one root-hub port's latched Connect Status Change
+    /// ([`regs::PORTSC_CSC`], write-1-to-clear), consuming the latch the
+    /// root-port hot-plug scan keys on so the next connect/disconnect
+    /// latches — and interrupts — anew.
+    ///
+    /// The write masks every *other* write-1-to-clear bit
+    /// ([`regs::PORTSC_RW1C_MASK`]) so no unrelated pending change is
+    /// consumed by accident.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::OutOfRange`] if `port` is zero or above
+    ///   [`Self::max_ports`].
+    /// * [`DriverError::DeviceFault`] if the register window rejects the
+    ///   access.
+    pub fn clear_port_connect_change(&mut self, port: u8) -> Result<(), DriverError> {
+        if port == 0 || port > self.max_ports {
+            return Err(DriverError::OutOfRange);
+        }
+        let offset = regs::PORTSC_BASE + (port as usize - 1) * regs::PORTSC_STRIDE;
+        let raw = self.read_op(offset)?;
+        self.write_op(offset, (raw & !regs::PORTSC_RW1C_MASK) | regs::PORTSC_CSC)
+    }
+
     /// Assert Port Power ([`regs::PORTSC_PP`]) on root-hub `port`.
     ///
     /// The Host Controller Reset issued in [`Self::open`] clears every

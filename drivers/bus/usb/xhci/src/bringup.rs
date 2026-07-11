@@ -35,7 +35,7 @@
 
 use rustos_abi::hwtree::{HwResource, HwResourceKind};
 use rustos_abi::{CapabilityId, Delay, DriverError, DriverHost, MmioMapper, RegisterWindow};
-use rustos_usb::device::{EnumStage, UsbDevice};
+use rustos_usb::device::{EnumStage, EventWait, UsbDevice};
 use rustos_usb::{SlabBank, Xhci, XhciOpenStage, DEFAULT_POLL_BUDGET};
 
 /// The brought-up controller engine the HCD serves: a [`UsbDevice`] over the
@@ -45,8 +45,9 @@ use rustos_usb::{SlabBank, Xhci, XhciOpenStage, DEFAULT_POLL_BUDGET};
 /// exhaustion — never a fixed carve). It is enumerated and pointed at the
 /// attached device's slot when a device is present, or left serving with its
 /// first-connect watch armed when none is yet attached. The `'h` lifetime is
-/// the borrow of the [`DriverHost`] whose DMA seam backs the bank.
-pub type ControllerDevice<'h> = UsbDevice<RegisterWindow, SlabBank<'h>>;
+/// the borrow of the [`DriverHost`] whose DMA seam backs the bank and of the
+/// [`EventWait`] seam the engine's synchronous waits park on.
+pub type ControllerDevice<'h> = UsbDevice<'h, RegisterWindow, SlabBank<'h>>;
 
 /// The concrete bring-up inputs the HCD derives from its kernel-issued
 /// device-resource grants to drive [`bring_up_controller`].
@@ -159,8 +160,10 @@ where
 /// upper bound, in the device-visible address space, of the inbound window the
 /// bridge lets the controller reach. The carved region's device-visible end
 /// must lie wholly below it or the controller could not reach its own rings.
-/// `delay` supplies the hardware-dictated hub settle windows; the caller owns
-/// the clock.
+/// `delay` supplies the hardware-dictated hub settle windows and `wait` the
+/// parked event-wait seam the engine's synchronous completion waits block
+/// through (on metal: a park on the controller's bound interrupt line, so the
+/// caller must have bound that line first); the caller owns the clock.
 ///
 /// The DMA region is carved and aperture-checked before any register is
 /// touched, so a region the controller could not reach is refused fail-closed
@@ -179,11 +182,12 @@ where
 pub fn bring_up_controller<'h>(
     host: &'h dyn DriverHost,
     delay: &dyn Delay,
+    wait: &'h dyn EventWait,
     bar_base: u64,
     bar_len: usize,
     dma_aperture_top: u64,
 ) -> Result<ControllerDevice<'h>, DriverError> {
-    bring_up_controller_diagnostic(host, delay, bar_base, bar_len, dma_aperture_top)
+    bring_up_controller_diagnostic(host, delay, wait, bar_base, bar_len, dma_aperture_top)
         .map_err(|err| err.error)
 }
 
@@ -311,6 +315,7 @@ impl ControllerBringupError {
 pub fn bring_up_controller_diagnostic<'h>(
     host: &'h dyn DriverHost,
     delay: &dyn Delay,
+    wait: &'h dyn EventWait,
     bar_base: u64,
     bar_len: usize,
     dma_aperture_top: u64,
@@ -362,8 +367,9 @@ pub fn bring_up_controller_diagnostic<'h>(
     })?;
 
     // Grow the shared chunk out of the bank, lay out and program the
-    // device-shared structures, and start the controller.
-    let mut device = UsbDevice::start(xhci, dma, DEFAULT_POLL_BUDGET)
+    // device-shared structures, start the controller, and enable its
+    // completion interrupter (the engine's waits park on it).
+    let mut device = UsbDevice::start(xhci, dma, wait, DEFAULT_POLL_BUDGET)
         .map_err(|e| ControllerBringupError::bare(BringupPhase::ControllerStart, e))?;
 
     // Bring the controller up to serve every reachable device, transparently

@@ -1355,10 +1355,11 @@ they distinguish an empty hub (`err=not_found`, `4126 stage=0`) from a
 device that is present but faults part-way through enumeration.
 
 **Enumeration orchestration.** The arch-neutral root→hub→downstream
-bring-up sequence (enumerate the first connected root-hub port; if it is a
-hub, power its ports and address the device behind **every** connected one
-on its own xHCI slot, each with a demand-allocated DMA region, bounded
-only by the controller's reported slot count) lives in one place —
+bring-up sequence (attach **every** connected root-hub port; a hub tier is
+powered, descended, and watched, with the device behind every connected
+downstream port on its own xHCI slot, each with a demand-allocated DMA
+region, bounded only by the controller's reported slot count) lives in one
+place —
 `rustos_usb::device::UsbDevice::bring_up` — so every device reached through
 the Pi 4B's onboard hub is *discovered*, never a guessed port (`AGENTS.md`
 §2.2 / §18): a keyboard and a storage stick plugged in together are both
@@ -1453,23 +1454,24 @@ after Run, with no Port Power asserted and no connect debounce — but the
 Host Controller Reset in `Xhci::open` clears every `PORTSC`, and the VL805
 is port-power-controlled (`HCCPARAMS1` PPC = 1), so a powered-off port
 reports disconnected no matter what is plugged in (xHCI 1.2 §4.19.1.1).
-`UsbDevice::enumerate_first_connected` now asserts `PORTSC.PP`
+The bring-up walk (`UsbDevice::bring_up`) now asserts `PORTSC.PP`
 (`Xhci::set_port_power`, masking the write-1-to-clear bits) on every
 reported port, then debounce-polls `1..=max_ports` (bounded by the
-engine's budget, fail-closed `NotFound` on a genuinely empty hub) for the
-first port to report a device. The `4125` per-port diagnostic captures
+engine's budget; a genuinely empty controller comes up serving nothing,
+awaiting the first connect) and attaches every connected port. The
+`4125` per-port diagnostic captures
 the post-power `PORTSC` for the next metal run. Host-proven by the
 `lib/usb` tests `set_port_power_asserts_pp_and_rejects_a_bad_port`,
-`enumerate_first_connected_powers_every_root_port`, and
-`enumerate_first_connected_connects_a_port_only_after_power` (a mock
+`bring_up_powers_every_root_port`, and
+`bring_up_connects_a_port_only_after_power` (a mock
 modelling a device that reports connected only once its port is powered).
 Metal-only beyond that (QEMU models no Pi PCIe/USB, §0.4).
 
 **Enumeration fault localisation (`EnumStage` / `4126`).** The port-power
 fix put a connected device on the root hub (`4125` port 1
 `ccs=1 pp=1 ped=1 speed=3`) with the other four ports powered but empty,
-yet `UsbDevice::enumerate_first_connected` still returned `device_fault`
-*inside* `enumerate_hid`. The single coarse `DriverError::DeviceFault`
+yet the bring-up walk still returned `device_fault`
+inside the root attach. The single coarse `DriverError::DeviceFault`
 could not pin that down, so the driver keeps a breadcrumb:
 `UsbDevice::enum_stage` records the `EnumStage` it last entered, and
 `UsbDevice::last_completion_code` the raw xHCI completion code of the last
@@ -1477,8 +1479,8 @@ event that step observed (reset to `0` — "none/timeout" — at the start of
 each command/control transfer). On the failure path `bring_up_keyboard`
 logs both as `4126` (`stage_hex` + `completion_hex`) before the `4125`
 port dump. Host-proven by the `lib/usb` tests
-`enumerate_hid_records_the_configured_stage_on_success` and
-`enumerate_hid_stage_breadcrumb_localises_a_class_stall`.
+`root_attach_records_the_configured_stage_on_success` and
+`root_attach_fails_closed_on_a_non_stall_class_fault`.
 
 **Non-coherent DMA cache maintenance.** The metal `4126` capture read
 `stage_hex=2` (Enable Slot) with `completion_hex=0`: the *very first*
@@ -1549,17 +1551,17 @@ endpoint resumes on the next SETUP, so the device stays usable in its
 default protocol (this is exactly what USB HID class drivers do: a stalled
 `SET_PROTOCOL` is ignored). The driver previously treated *any* non-Success
 control completion as a `device_fault`, so the optional request's STALL
-aborted an otherwise fully enumerable keyboard. `enumerate_hid` now issues
+aborted an otherwise fully enumerable keyboard. The enumeration now issues
 `SET_PROTOCOL(boot)` through a new `control_optional` helper that absorbs a
 STALL completion (the raw code is still preserved in `last_completion`),
 continues to prime the interrupt-IN ring, and reaches `EnumStage::Configured`;
 every *other* completion still fails closed (`AGENTS.md` §2.9 / §5.4). It
 is issued as the last EP0 transfer of enumeration and EP0 is not used
 again, so a halted control endpoint after the STALL is immaterial.
-Host-proven by `enumerate_hid_tolerates_a_stalled_set_protocol` (a mock
+Host-proven by `root_attach_tolerates_a_stalled_set_protocol` (a mock
 that STALLs the class request now enumerates to `Configured` with
 `last_completion = Stall` and no protocol selected) and
-`enumerate_hid_fails_closed_on_a_non_stall_class_fault` (a genuine
+`root_attach_fails_closed_on_a_non_stall_class_fault` (a genuine
 non-STALL class fault still aborts at the `SetProtocol` breadcrumb).
 **Metal-confirmed:** the capture now logs `4102 vendor=2109 product=3431`
 — enumeration runs end to end. The tolerated STALL *was* the last
@@ -1590,7 +1592,7 @@ faulting read instead renders the all-ones `wstatus` sentinel and the
 then read `4101 reading the hub descriptor failed err=device_fault`: the
 class `GET_DESCRIPTOR(hub)` faulted even though the device-descriptor and
 configuration-descriptor reads on the same EP0 had succeeded. Root cause:
-`enumerate_hid` issued the HID `SET_PROTOCOL(boot)` to *every* enumerated
+the enumeration issued the HID `SET_PROTOCOL(boot)` to *every* enumerated
 device, including the hub. A hub is not a HID device, so it STALLs that
 class request — and an xHCI STALL **halts** the control endpoint (xHCI
 §4.10.2.4): the controller runs no further TRBs on EP0 until software
@@ -1608,13 +1610,13 @@ descriptor failed" log now also carries `completion_hex` (the failed
 transfer's raw xHCI completion code) so a future fault distinguishes a
 STALL (`6`) from a transaction error (`4`) or a missing completion (`0`).
 Host-proven by the `lib/usb` tests
-`enumerate_hid_flags_a_hub_via_the_device_class`,
+`root_attach_recognises_a_hub_via_the_device_class`,
 `enumerating_a_hub_leaves_ep0_usable_for_the_hub_descriptor` (the mock now
 STALLs the hub's `SET_PROTOCOL` and models the EP0 halt, so it fails before
 the gating fix and passes after),
 `hub_discovery_finds_the_downstream_device`,
 `hub_port_reads_disconnected_until_powered`, and
-`hub_num_ports_fails_closed_on_a_forged_descriptor`.
+`a_forged_hub_descriptor_fails_the_attach_closed`.
 
 **Per-port `GET_STATUS` faults — the current lever.** With the EP0 fix the
 hub-descriptor read succeeds (`4127 num_ports=4`) and Port Power is

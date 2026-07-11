@@ -71,22 +71,6 @@ fn waitset_ctl_result(ret: i64) -> Result<(), i64> {
 #[cfg(freestanding)]
 const WAIT_FOREVER_NS: u64 = u64::MAX;
 
-/// One-shot deadline for the event-loop wait while a hub is watched, and the
-/// minimum spacing between two downstream-port poll sweeps.
-///
-/// Metal capture on the Raspberry Pi 4 proved its integrated hub raises no
-/// interrupt at all for a downstream connect: the status-change endpoint
-/// never posts a completion, so the event-driven hub watch has no wake
-/// source and a device plugged in after boot was never enumerated. The poll
-/// sweep is the charter-sanctioned tickless fallback for an event with no
-/// working interrupt: the loop parks the whole interval (the CPU sleeps,
-/// never a busy-poll) and one sweep of `GET_PORT_STATUS` reads runs per
-/// tick. 256 ms keeps a plug-in humanly instant while costing four wakes a
-/// second only while a hub is watched — with no hub the wait stays
-/// unbounded and a quiet controller takes no periodic wakes.
-#[cfg(freestanding)]
-const RECONNECT_POLL_NS: u64 = 256_000_000;
-
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
@@ -97,13 +81,14 @@ mod program {
     use rustos_abi::{CapabilityId, Errno};
     use rustos_caps::CapabilitySet;
     use rustos_drv_bus_usb::bringup::{
-        bring_up_controller_diagnostic, derive_controller_resources,
+        bring_up_controller_diagnostic, derive_controller_resources, BringupPhase,
     };
     use rustos_drv_bus_usb::serve::{attach_transport_grants, UrbOutcome, UrbReply, UrbService};
     use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
     use rustos_log::{log, Event, EventId, Field, Level};
     use rustos_rt::{ClockDelay, LogSink};
-    use rustos_usb::device::{HubEvent, MAX_INTERFACES, XHCI_MAX_SLOTS};
+    use rustos_usb::device::{EventWait, HubEvent, MAX_INTERFACES, XHCI_MAX_SLOTS};
+    use rustos_usb::XhciOpenStage;
     use rustos_util::fmt::format_hex_u64;
 
     /// Exit code when the rt-backed driver host could not be built from the
@@ -120,6 +105,12 @@ mod program {
     /// Exit code when the controller came up but the URB transport seam (the
     /// shared buffer or the call endpoint) could not be created.
     const EXIT_NO_TRANSPORT: i32 = 83;
+
+    /// Exit code when the controller's interrupt line could not be bound.
+    /// The engine's synchronous event waits park on that line, so a
+    /// controller with no usable interrupt cannot be served — refused
+    /// fail-closed before any register is touched.
+    const EXIT_NO_IRQ: i32 = 84;
 
     /// Diagnostic event id: a one-shot controller bring-up failure.
     const HCD_BRINGUP_FAILED: EventId = EventId(4126);
@@ -174,11 +165,6 @@ mod program {
     /// the first block on its first try).
     const URB_ENDPOINT_BLOCKS: u64 = 64;
 
-    /// `waitset_wait`'s "the armed deadline elapsed with no ready member"
-    /// result (`-Errno::TimedOut`): the poll tick's scheduled wake, never a
-    /// failure.
-    const WAIT_TIMED_OUT: i64 = -(Errno::TimedOut as i64);
-
     /// Bytes of shared buffer per interface: one bulk chunk
     /// ([`rustos_usb::device::BULK_BUF_LEN`], the engine's per-TD ceiling —
     /// one definition, never a second constant), which also comfortably
@@ -191,6 +177,30 @@ mod program {
     /// driver submits one at a time (it blocks on the reply); a small queue
     /// absorbs a re-submit racing the previous reply.
     const ENDPOINT_CAPACITY: usize = 4;
+
+    /// The engine's parked event-wait seam on metal: waits park on the
+    /// controller's bound interrupt line with the remaining wall-clock
+    /// budget as the deadline, so a completion wakes the wait early, a
+    /// timeout returns it to the caller's deadline check, and a quiet
+    /// controller costs no CPU. The clock is the kernel monotonic clock,
+    /// the same source [`rustos_rt::ClockDelay`] reads.
+    struct IrqEventWait {
+        /// The bound controller interrupt line ([`rustos_rt::irq_bind`]).
+        handle: u64,
+    }
+
+    impl EventWait for IrqEventWait {
+        fn now_us(&self) -> u64 {
+            rustos_rt::clock_get() / 1_000
+        }
+
+        fn wait_us(&self, budget_us: u64) {
+            // A refused wait (a revoked handle) degrades to the caller's
+            // deadline check rather than spinning: the caller re-reads the
+            // clock and fails closed when the budget is spent.
+            let _ = rustos_rt::irq_wait(self.handle, budget_us.saturating_mul(1_000));
+        }
+    }
 
     /// Wait-set token for "the controller completion interrupt fired".
     const TOKEN_IRQ: u64 = 0;
@@ -364,97 +374,58 @@ mod program {
         }
     }
 
-    /// Check whether the watched hub assembly's own root port has lost its
-    /// connection; if so, tear the assembly down and retract every published
-    /// interface. Every external device on the Pi 4 hangs off the onboard
-    /// hub, and pulling that assembly out takes the hub with it: the unplug
-    /// surfaces as the *root* port clearing its connect bit, not as a
-    /// downstream hub-port change — the hub is gone, so it answers neither
-    /// its status-change endpoint nor a control transfer. Returns `true`
-    /// when the assembly was gone (a re-plug then re-enumerates from
-    /// scratch); a failed root-port check is logged and treated as "still
-    /// present", so the caller's finer-grained per-port service still runs.
-    fn retract_all_if_hub_assembly_gone(
-        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
-        transports: &mut Vec<Option<Transport>>,
-    ) -> bool {
-        match device.detach_if_hub_root_gone() {
-            Ok(true) => {
-                for transport in transports.iter_mut().flatten() {
-                    retract_interface(transport);
-                }
-                log(
-                    &LogSink,
-                    &Event {
-                        level: Level::Info,
-                        id: HCD_DISCONNECT,
-                        message:
-                            "usb-hcd: hub assembly disconnected at root port, interfaces retracted",
-                        fields: &[],
-                    },
-                );
-                true
-            }
-            Ok(false) => false,
-            Err(err) => {
-                log_hex_event(
-                    HCD_WAIT_ERROR,
-                    Level::Warn,
-                    "usb-hcd: hub root-port check failed",
-                    "err_hex",
-                    err as u64,
-                );
-                false
-            }
-        }
-    }
-
-    /// One tick of the tickless downstream-port poll: reconcile every
-    /// watched hub's ports against the live tracking tables and true up the
-    /// published interface nodes.
-    ///
-    /// Some hubs (the Pi 4's integrated hub among them) never raise their
-    /// status-change interrupt for a downstream connect, so a device plugged
-    /// in after boot produces no IRQ at all — this poll is that event's only
-    /// wake source (see [`RECONNECT_POLL_NS`](super::RECONNECT_POLL_NS)).
-    /// The whole-assembly unplug is checked first, exactly as the
-    /// interrupt-driven path does; a sweep failure is logged and retried on
-    /// the next tick (the engine's sweep is per-port fail-soft).
-    fn poll_hub_topology(
+    /// Service every pending root-port connect/disconnect: the engine scans
+    /// the `PORTSC.CSC` latches (a SuperSpeed device trains directly on a
+    /// root port — on the Pi 4 the USB3 side of every jack is one — and
+    /// pulling a hub assembly clears the root port it sat on), attaches or
+    /// detaches what changed, and the published interfaces are reconciled
+    /// after each event. Loops until the scan reports quiet, since one
+    /// interrupt can carry several ports' changes; a failed service is
+    /// logged with its whole attach-fault breadcrumb and the loop stops
+    /// (the latch was consumed, so it cannot re-fire spuriously).
+    fn service_root_changes(
         device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
         transports: &mut Vec<Option<Transport>>,
         set: u64,
         urb_base: u64,
         delay: &ClockDelay,
     ) {
-        if retract_all_if_hub_assembly_gone(device, transports) {
-            return;
-        }
-        match device.poll_hub_ports(delay) {
-            Ok(outcome) => {
-                if outcome.attached == 0 && outcome.detached == 0 {
-                    return;
+        loop {
+            match device.next_root_change(delay) {
+                Ok(HubEvent::None) => return,
+                Ok(HubEvent::Attached(_) | HubEvent::HubAttached(_)) => {
+                    reconcile_interfaces(device, transports, set, urb_base);
+                    log(
+                        &LogSink,
+                        &Event {
+                            level: Level::Info,
+                            id: HCD_READY,
+                            message: "usb-hcd: root-port device attached and served",
+                            fields: &[],
+                        },
+                    );
                 }
-                reconcile_interfaces(device, transports, set, urb_base);
-                if outcome.detached > 0 {
+                Ok(HubEvent::Detached(_) | HubEvent::HubDetached(_)) => {
+                    reconcile_interfaces(device, transports, set, urb_base);
                     log(
                         &LogSink,
                         &Event {
                             level: Level::Info,
                             id: HCD_DISCONNECT,
-                            message: "usb-hcd: device disconnected, interface retracted",
+                            message: "usb-hcd: root-port device disconnected, interfaces retracted",
                             fields: &[],
                         },
                     );
                 }
+                Err(err) => {
+                    log_topology_service_failure(
+                        device,
+                        "usb-hcd: root-port hot-plug service failed",
+                        err,
+                    );
+                    return;
+                }
             }
-            Err(err) => log_hex_event(
-                HCD_WAIT_ERROR,
-                Level::Warn,
-                "usb-hcd: downstream port poll failed",
-                "err_hex",
-                err as u64,
-            ),
         }
     }
 
@@ -544,18 +515,17 @@ mod program {
         }
     }
 
-    /// Reset the controller and re-enumerate from scratch, re-arming the
-    /// interrupter the reset cleared and publishing a fresh interface node
-    /// for every device found back, so `devmgr` re-autoloads each class
-    /// driver onto the same per-index transport.
+    /// Reset the controller and re-enumerate from scratch (the engine
+    /// re-programs the controller and re-enables its interrupter as part of
+    /// the reset), publishing a fresh interface node for every device found
+    /// back, so `devmgr` re-autoloads each class driver onto the same
+    /// per-index transport.
     ///
-    /// This is the recovery a root-port re-attach uses and the recovery from
-    /// a latched controller fault uses: in both cases the controller is
-    /// returned to the same state a cold boot reaches, from which the next
-    /// connect enumerates through the normal attach path. With no device
-    /// present yet it simply leaves the controller awaiting that connect.
-    /// The caller refreshes its watched root port from `device.root_port()`
-    /// afterwards.
+    /// This is the recovery from a latched controller fault: the controller
+    /// is returned to the same state a cold boot reaches, from which the
+    /// next connect enumerates through the normal attach path. With no
+    /// device present yet it simply leaves the controller awaiting that
+    /// connect.
     fn reset_reenumerate_and_publish(
         device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
         transports: &mut Vec<Option<Transport>>,
@@ -566,7 +536,6 @@ mod program {
         if device.reset_and_reenumerate(delay).is_err() {
             return;
         }
-        let _ = device.enable_interrupter();
         reconcile_interfaces(device, transports, set, urb_base);
     }
 
@@ -579,7 +548,8 @@ mod program {
     /// never saw the re-plug. Retract every still-live interface, abort the
     /// held URBs, then reset and re-enumerate so the controller returns to the
     /// proven await-connect state and a re-plug enumerates normally. Returns
-    /// whether a recovery ran (so the caller refreshes its watched root port).
+    /// whether a recovery ran (the caller then restarts its service pass on
+    /// the freshly reset controller).
     fn recover_if_controller_faulted(
         device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
         transports: &mut Vec<Option<Transport>>,
@@ -590,13 +560,19 @@ mod program {
         if !device.controller_faulted() {
             return false;
         }
+        // The whole register breadcrumb: which USBSTS fault bit latched
+        // (HSE/HCE/HCHalted) is the only evidence a metal capture gets for
+        // *why* a controller died mid-service (QEMU models no Pi USB).
         log(
             &LogSink,
             &Event {
                 level: Level::Warn,
                 id: HCD_DISCONNECT,
                 message: "usb-hcd: controller fault latched, resetting to recover",
-                fields: &[],
+                fields: &[
+                    opt_u32_field("usbsts", device.read_usbsts()),
+                    opt_u32_field("usbcmd", device.read_usbcmd()),
+                ],
             },
         );
         for transport in transports.iter_mut().flatten() {
@@ -718,18 +694,6 @@ mod program {
         })
     }
 
-    /// Whether the enumerated device is still connected on its root port (the
-    /// `CCS` connect bit). A read fault defaults to "connected" so a transient
-    /// read never triggers a spurious retraction.
-    fn still_connected(
-        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
-        root_port: u8,
-    ) -> bool {
-        device
-            .port_status_raw(root_port)
-            .is_none_or(|portsc| portsc & 1 != 0)
-    }
-
     /// Build and publish the served device at `index`'s interface node — its
     /// `vid:pid:class` match keys plus the per-interface URB-transport grants
     /// (the call endpoint and the shared buffer) the class driver inherits —
@@ -756,6 +720,319 @@ mod program {
         Some(emit as u32)
     }
 
+    /// Drive every transport with a URB outstanding: drained controller
+    /// events may complete any of them. Called after the IRQ arm's drain
+    /// **and** after a URB submit is serviced — a synchronous engine wait
+    /// inside a submit parks on the same interrupt line and consumes its
+    /// edge, stashing any asynchronous completion that edge carried, so the
+    /// stash must be drained here rather than waiting for another
+    /// interrupt. A transport whose device just detached has already had
+    /// its URB aborted, so it is simply not busy.
+    fn service_busy_urbs(
+        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
+        transports: &mut Vec<Option<Transport>>,
+        set: u64,
+        urb_base: u64,
+        delay: &ClockDelay,
+    ) {
+        for index in 0..transports.len() {
+            let busy = transports[index]
+                .as_ref()
+                .is_some_and(|transport| transport.service.is_busy());
+            if !busy {
+                continue;
+            }
+            let Some(outcome) = transports[index].as_mut().map(|transport| {
+                transport
+                    .service
+                    .on_event(transport.shm, &mut device.engine_for(index))
+            }) else {
+                continue;
+            };
+            match outcome {
+                UrbOutcome::Reply(reply) => {
+                    if let Some(errno) = urb_reply_errno(&reply) {
+                        log_urb_error(device, index, errno);
+                    }
+                    let node_live = transports[index]
+                        .as_ref()
+                        .is_some_and(|transport| transport.node_live);
+                    let detached = node_live
+                        && retract_after_fault_if_gone(
+                            device, index, transports, set, urb_base, reply, delay,
+                        );
+                    if !detached {
+                        if let Some(transport) = transports[index].as_ref() {
+                            reply_to_urb(transport.endpoint_id, reply);
+                        }
+                    }
+                }
+                UrbOutcome::Held => {
+                    let _ = log(
+                        &LogSink,
+                        &Event {
+                            level: Level::Debug,
+                            id: HCD_URB_HELD,
+                            message: "usb-hcd: event did not complete held URB yet",
+                            fields: &[],
+                        },
+                    );
+                }
+                // `is_busy` was checked above, so an Idle outcome cannot
+                // occur; nothing to service either way.
+                UrbOutcome::Idle => {}
+            }
+        }
+    }
+
+    /// A diagnostic field carrying a controller value that may not have been
+    /// readable: an unreadable register is logged `Null`, never a fabricated
+    /// zero.
+    fn opt_u32_field(key: &'static str, value: Option<u32>) -> Field<'static> {
+        Field {
+            key,
+            value: value.map_or(rustos_log::FieldValue::Null, |v| {
+                rustos_log::FieldValue::UnsignedInt(u64::from(v))
+            }),
+        }
+    }
+
+    /// A URB completed with an error: log the errno the class driver will
+    /// see **and** the engine's latched raw completion code for the
+    /// device's own endpoint, so a metal capture shows the controller's
+    /// verdict (transaction error, stall, babble, …) behind the coarse
+    /// errno — e.g. the keyboard's collateral fault while a sibling
+    /// port's attach was being serviced.
+    fn log_urb_error(
+        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
+        index: usize,
+        errno: Errno,
+    ) {
+        log(
+            &LogSink,
+            &Event {
+                level: Level::Warn,
+                id: HCD_WAIT_ERROR,
+                message: "usb-hcd: URB completed with an error",
+                fields: &[
+                    Field {
+                        key: "index",
+                        value: rustos_log::FieldValue::UnsignedInt(index as u64),
+                    },
+                    Field {
+                        key: "errno",
+                        value: rustos_log::FieldValue::UnsignedInt(errno as u64),
+                    },
+                    Field {
+                        key: "fault_code",
+                        value: rustos_log::FieldValue::UnsignedInt(u64::from(
+                            device.last_report_fault_code(index),
+                        )),
+                    },
+                ],
+            },
+        );
+    }
+
+    /// Emit a topology (hub status-change or root-port) service failure
+    /// with its **whole** breadcrumb: the coarse error alone cannot name
+    /// the failing hot-plug step, so a failed attach's snapshot — the
+    /// stage it failed in, the last observed completion/event-type/reject,
+    /// the targeted port and its final observed `wPortStatus` (`0` for a
+    /// root port, which has none) — is logged when one exists (the
+    /// snapshot is taken at the failure, before the cleanup transfers
+    /// overwrite the live state). A failure outside an attach (a status
+    /// read, retire, or watch re-arm) logs the live diagnostics instead.
+    /// This is how a metal capture localises a failed hot-plug (QEMU
+    /// models no Pi USB).
+    fn log_topology_service_failure(
+        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
+        message: &'static str,
+        err: rustos_abi::DriverError,
+    ) {
+        let u = |v: u64| rustos_log::FieldValue::UnsignedInt(v);
+        let usbsts = opt_u32_field("usbsts", device.read_usbsts());
+        let event = |fields: &[Field<'_>]| {
+            log(
+                &LogSink,
+                &Event {
+                    level: Level::Warn,
+                    id: HCD_WAIT_ERROR,
+                    message,
+                    fields,
+                },
+            );
+        };
+        if let Some(fault) = device.last_attach_fault() {
+            event(&[
+                Field {
+                    key: "err",
+                    value: u(err as u64),
+                },
+                Field {
+                    key: "attach_port",
+                    value: u(u64::from(fault.port)),
+                },
+                Field {
+                    key: "enum_stage",
+                    value: u(u64::from(fault.stage.as_u8())),
+                },
+                Field {
+                    key: "completion",
+                    value: u(u64::from(fault.completion)),
+                },
+                Field {
+                    key: "event_type",
+                    value: u(u64::from(fault.event_type)),
+                },
+                Field {
+                    key: "reject",
+                    value: u(u64::from(fault.reject)),
+                },
+                Field {
+                    key: "port_status",
+                    value: u(u64::from(fault.port_status)),
+                },
+                usbsts,
+            ]);
+        } else {
+            event(&[
+                Field {
+                    key: "err",
+                    value: u(err as u64),
+                },
+                Field {
+                    key: "enum_stage",
+                    value: u(u64::from(device.enum_stage().as_u8())),
+                },
+                Field {
+                    key: "completion",
+                    value: u(u64::from(device.last_completion_code())),
+                },
+                Field {
+                    key: "event_type",
+                    value: u(u64::from(device.last_event_type())),
+                },
+                Field {
+                    key: "reject",
+                    value: u(u64::from(device.last_reject_reason())),
+                },
+                usbsts,
+            ]);
+        }
+    }
+
+    /// Emit the one-shot controller bring-up failure with its **whole**
+    /// breadcrumb: QEMU models no Pi USB, so this diagnostic is how a metal
+    /// run localises the stall. The phase alone cannot separate a timeout
+    /// from a rejected completion or name the failing enumeration step, so
+    /// the phase-specific controller state is always included.
+    fn log_bringup_failure(err: &rustos_drv_bus_usb::bringup::ControllerBringupError) {
+        let phase = Field {
+            key: "phase",
+            value: rustos_log::FieldValue::Str(err.phase.as_str()),
+        };
+        let error = Field {
+            key: "error",
+            value: rustos_log::FieldValue::UnsignedInt(err.error as u64),
+        };
+        let event = |fields: &[Field<'_>]| {
+            log(
+                &LogSink,
+                &Event {
+                    level: Level::Error,
+                    id: HCD_BRINGUP_FAILED,
+                    message: "usb-hcd: controller bring-up failed",
+                    fields,
+                },
+            );
+        };
+        match err.phase {
+            BringupPhase::ControllerOpen => event(&[
+                phase,
+                error,
+                Field {
+                    key: "open_stage",
+                    value: rustos_log::FieldValue::Str(
+                        err.open_stage.map_or("-", XhciOpenStage::as_str),
+                    ),
+                },
+                opt_u32_field("usbcmd", err.usbcmd),
+                opt_u32_field("usbsts", err.usbsts),
+            ]),
+            BringupPhase::Enumerate => event(&[
+                phase,
+                error,
+                Field {
+                    key: "enum_stage",
+                    value: rustos_log::FieldValue::UnsignedInt(u64::from(
+                        err.enum_stage.map_or(0, |stage| stage.as_u8()),
+                    )),
+                },
+                Field {
+                    key: "completion",
+                    value: rustos_log::FieldValue::UnsignedInt(u64::from(err.last_completion)),
+                },
+                Field {
+                    key: "event_type",
+                    value: rustos_log::FieldValue::UnsignedInt(u64::from(err.last_event_type)),
+                },
+                Field {
+                    key: "reject",
+                    value: rustos_log::FieldValue::UnsignedInt(u64::from(err.last_reject)),
+                },
+                opt_u32_field("port1_portsc", err.port1_portsc),
+            ]),
+            BringupPhase::Setup | BringupPhase::BarMap | BringupPhase::ControllerStart => {
+                event(&[phase, error]);
+            }
+        }
+    }
+
+    /// Emit the post-bring-up topology summary, so a metal capture shows
+    /// what the walk actually served — and warn when a connected device was
+    /// present but failed enumeration and was skipped, which otherwise looks
+    /// exactly like an empty port.
+    fn log_bringup_summary(device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>) {
+        let live = (0..device.device_table_len())
+            .filter(|&index| device.device_live(index))
+            .count();
+        log(
+            &LogSink,
+            &Event {
+                level: Level::Info,
+                id: HCD_READY,
+                message: "usb-hcd: bring-up walk complete",
+                fields: &[
+                    Field {
+                        key: "devices",
+                        value: rustos_log::FieldValue::UnsignedInt(live as u64),
+                    },
+                    Field {
+                        key: "hub_watch",
+                        value: rustos_log::FieldValue::Bool(device.hub_watch_active()),
+                    },
+                ],
+            },
+        );
+        if device.skipped_port_count() > 0 {
+            log(
+                &LogSink,
+                &Event {
+                    level: Level::Warn,
+                    id: HCD_BRINGUP_FAILED,
+                    message: "usb-hcd: connected device(s) failed enumeration and were skipped",
+                    fields: &[Field {
+                        key: "skipped_ports",
+                        value: rustos_log::FieldValue::UnsignedInt(u64::from(
+                            device.skipped_port_count(),
+                        )),
+                    }],
+                },
+            );
+        }
+    }
+
     /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime is
     /// set up and routes its return value through the `exit` syscall.
     fn main() -> i32 {
@@ -768,33 +1045,73 @@ mod program {
             return EXIT_NO_RESOURCES;
         };
         let delay = ClockDelay::new();
+
+        // Bind the controller's interrupt line **before** the controller is
+        // brought up: the engine's synchronous event waits park on this line
+        // (its interrupter is enabled as part of starting the controller),
+        // so it must already be kernel-owned — a completion posted the moment
+        // interrupts are enabled then latches instead of going astray. A
+        // controller with no usable interrupt line cannot be served
+        // event-driven and is refused fail-closed here, before any register
+        // is touched.
+        let irq_handle = match host.irq_line() {
+            Some(line) => {
+                let handle = rustos_rt::irq_bind(line);
+                if handle >= 0 {
+                    #[allow(clippy::cast_sign_loss)] // `handle >= 0` is the bound IrqHandle.
+                    let handle = handle as u64;
+                    log_hex_event(
+                        HCD_URB_SETUP,
+                        Level::Info,
+                        "usb-hcd: controller IRQ line bound",
+                        "handle_hex",
+                        handle,
+                    );
+                    Some(handle)
+                } else {
+                    log_hex_event(
+                        HCD_URB_SETUP,
+                        Level::Warn,
+                        "usb-hcd: IRQ bind failed",
+                        "line_hex",
+                        u64::from(line),
+                    );
+                    None
+                }
+            }
+            _ => {
+                log(
+                    &LogSink,
+                    &Event {
+                        level: Level::Warn,
+                        id: HCD_URB_SETUP,
+                        message: "usb-hcd: no IRQ line grant for event-driven service",
+                        fields: &[],
+                    },
+                );
+                None
+            }
+        };
+        let Some(irq_handle) = irq_handle else {
+            return EXIT_NO_IRQ;
+        };
+        let wait = IrqEventWait { handle: irq_handle };
+
         let mut device = match bring_up_controller_diagnostic(
             &host,
             &delay,
+            &wait,
             resources.bar_base,
             resources.bar_len,
             resources.dma_aperture_top,
         ) {
             Ok(device) => device,
             Err(err) => {
-                // Pin the failing controller step on the captured serial log
-                // before exiting fail-closed: QEMU models no Pi USB, so this
-                // one-shot diagnostic is how a metal run localises the stall.
-                log(
-                    &LogSink,
-                    &Event {
-                        level: Level::Error,
-                        id: HCD_BRINGUP_FAILED,
-                        message: "usb-hcd: controller bring-up failed",
-                        fields: &[Field {
-                            key: "phase",
-                            value: rustos_log::FieldValue::Str(err.phase.as_str()),
-                        }],
-                    },
-                );
+                log_bringup_failure(&err);
                 return EXIT_BRINGUP_FAILED;
             }
         };
+        log_bringup_summary(&mut device);
 
         // Build the wait-set the loop parks on: every transport endpoint and
         // the controller IRQ line. All must succeed before any interface is
@@ -819,58 +1136,6 @@ mod program {
         };
         let mut transports: Vec<Option<Transport>> = Vec::new();
 
-        // `root_port` tracks the directly-attached device's root port for the
-        // disconnect watch; it is refreshed after a re-enumeration. `0` while
-        // no directly-attached device is present (a cold boot, or the hub
-        // topology where the hub-status watch is used instead).
-        let mut root_port = device.root_port();
-
-        // Bind the controller's IRQ line before arming the completion
-        // interrupter, so a completion produced immediately after `USBCMD.INTE`
-        // is set has a kernel-owned line to latch onto instead of becoming a
-        // stray message. The loop then parks on the interrupt rather than
-        // polling a quiet controller.
-        let irq_handle = match host.irq_line() {
-            Some(line) => {
-                let handle = rustos_rt::irq_bind(line);
-                if handle >= 0 && device.enable_interrupter().is_ok() {
-                    #[allow(clippy::cast_sign_loss)] // `handle >= 0` is the bound IrqHandle.
-                    let handle = handle as u64;
-                    log_hex_event(
-                        HCD_URB_SETUP,
-                        Level::Info,
-                        "usb-hcd: IRQ bound and interrupter enabled",
-                        "handle_hex",
-                        handle,
-                    );
-                    Some(handle)
-                } else {
-                    log_hex_event(
-                        HCD_URB_SETUP,
-                        Level::Warn,
-                        "usb-hcd: IRQ bind or interrupter enable failed",
-                        "line_hex",
-                        u64::from(line),
-                    );
-                    None
-                }
-            }
-            _ => {
-                log(
-                    &LogSink,
-                    &Event {
-                        level: Level::Warn,
-                        id: HCD_URB_SETUP,
-                        message: "usb-hcd: no IRQ line grant for event-driven URB transport",
-                        fields: &[],
-                    },
-                );
-                None
-            }
-        };
-        let Some(irq_handle) = irq_handle else {
-            return EXIT_NO_TRANSPORT;
-        };
         let irq_add = rustos_rt::waitset_ctl(
             set,
             WaitSetOp::Add,
@@ -925,40 +1190,16 @@ mod program {
             },
         );
 
-        // The asynchronous event loop: park until the transport endpoint or
-        // the controller interrupt is ready, never spinning a quiet
-        // controller. While a hub is watched the wait carries a one-shot
-        // `RECONNECT_POLL_NS` deadline driving the downstream-port poll tick
-        // at the top of the loop — the only wake source for a hub that
-        // raises no interrupt on a downstream connect. The tick is gated on
-        // the elapsed monotonic clock, not on *how* the loop woke, so an
-        // interrupt storm can neither starve the poll nor make it flood the
-        // hub's control ring, and with no hub watched the wait is unbounded
-        // (no periodic wakes at all).
-        let mut last_poll_ns = rustos_rt::clock_get();
+        // The asynchronous event loop: park — unbounded, with no periodic
+        // wakes — until a transport endpoint or the controller interrupt is
+        // ready, never spinning a quiet controller. Downstream hot-plug
+        // arrives through the watched hub's status-change interrupt-IN
+        // completion; a root-port connect/disconnect through the controller's
+        // Port Status Change interrupt.
         loop {
-            if device.hub_watch_active() {
-                let now = rustos_rt::clock_get();
-                if now.saturating_sub(last_poll_ns) >= super::RECONNECT_POLL_NS {
-                    last_poll_ns = now;
-                    poll_hub_topology(&mut device, &mut transports, set, urb_base, &delay);
-                }
-            }
-            let timeout_ns = if device.hub_watch_active() {
-                super::RECONNECT_POLL_NS
-            } else {
-                super::WAIT_FOREVER_NS
-            };
             let mut token = 0u64;
-            let wait_ret = rustos_rt::waitset_wait(set, timeout_ns, &mut token);
+            let wait_ret = rustos_rt::waitset_wait(set, super::WAIT_FOREVER_NS, &mut token);
             if wait_ret < 0 {
-                // The armed poll deadline elapsing is the scheduled wake, not
-                // a failure: no member wrote a token (`TOKEN_IRQ` is 0, so
-                // the untouched token must not be dispatched) — loop back to
-                // the poll tick.
-                if wait_ret == WAIT_TIMED_OUT {
-                    continue;
-                }
                 log_hex_event(
                     HCD_WAIT_ERROR,
                     Level::Warn,
@@ -980,7 +1221,17 @@ mod program {
                     };
                     let mut request = [0u8; URB_REQUEST_LEN];
                     let mut ticket = 0u64;
-                    match rustos_rt::call_recv(transport.endpoint_id, &mut request, &mut ticket) {
+                    // Non-blocking: the wait-set's readiness peek is not a
+                    // guarantee — the queued call may have been cancelled by
+                    // its poster's exit (the kernel scrubs a dead caller's
+                    // in-flight calls) — and this loop serves every transport
+                    // plus the controller IRQ, so it must never park on one
+                    // endpoint.
+                    match rustos_rt::call_recv_nonblock(
+                        transport.endpoint_id,
+                        &mut request,
+                        &mut ticket,
+                    ) {
                         Ok(n) => {
                             match transport.service.on_submit(
                                 transport.node_live,
@@ -1002,6 +1253,10 @@ mod program {
                                 ),
                             }
                         }
+                        // An empty queue after a wake is benign: the queued
+                        // call was cancelled (its poster exited) between the
+                        // readiness peek and this receive.
+                        Err(err) if Errno::from_syscall(err) == Errno::WouldBlock => {}
                         Err(err) => {
                             log_hex_event(
                                 HCD_WAIT_ERROR,
@@ -1012,6 +1267,11 @@ mod program {
                             );
                         }
                     }
+                    // A synchronous wait inside the submit may have consumed
+                    // the interrupt edge that carried another transport's
+                    // asynchronous completion (now stashed); drain it rather
+                    // than leaving it parked until the next interrupt.
+                    service_busy_urbs(&mut device, &mut transports, set, urb_base, &delay);
                 }
                 TOKEN_IRQ => {
                     // Acknowledge IMAN.IP before draining so a completion
@@ -1023,103 +1283,60 @@ mod program {
                     // spins the loop, while a per-event advance only ever clears
                     // EHB once the ring is genuinely caught up.
                     let _ = device.acknowledge_interrupt();
-                    // Hot-plug. When a hub is watched (the devices sit behind
-                    // the onboard hub, so its root port never changes), a hub
-                    // status-change report drives connect/disconnect: a fresh
-                    // device is enumerated and a new interface node published
-                    // on its index's transport (so `devmgr` autoloads the
-                    // class driver onto the same endpoint across a re-plug),
-                    // and a disconnect retracts only that device's node. A
-                    // directly-attached device instead has its root port
-                    // watched for disconnect, and a root-port connect — whether
-                    // the first ever (cold boot, nothing attached at bring-up)
-                    // or a re-attach — drives a fresh re-enumeration. All leave
-                    // the controller up.
+                    // Hot-plug. Root-port connects/disconnects are serviced
+                    // first, from the `PORTSC.CSC` latches (a SuperSpeed
+                    // device trains directly on a root port; pulling a hub
+                    // assembly clears the root port it sat on — either way
+                    // the change stays latched even when its Port Status
+                    // Change Event was drained by an engine wait). Then a
+                    // watched hub's status-change report drives downstream
+                    // connect/disconnect: a fresh device is enumerated and a
+                    // new interface node published on its index's transport
+                    // (so `devmgr` autoloads the class driver onto the same
+                    // endpoint across a re-plug), and a disconnect retracts
+                    // only that device's node. All leave the controller up.
+                    service_root_changes(&mut device, &mut transports, set, urb_base, &delay);
                     if device.hub_watch_active() {
-                        // Check the hub assembly's own root port first; if it
-                        // is gone, everything was retracted and a re-plug
-                        // re-enumerates from scratch. Otherwise service the
-                        // hub's status-change report.
-                        if !retract_all_if_hub_assembly_gone(&mut device, &mut transports) {
-                            match device.next_hub_change(&delay) {
-                                Ok(HubEvent::Attached(_) | HubEvent::HubAttached(_)) => {
-                                    // A fresh leaf device — or a fresh hub
-                                    // tier whose downstream devices were
-                                    // enumerated with it — is published by
-                                    // diffing every live index.
-                                    reconcile_interfaces(
-                                        &mut device,
-                                        &mut transports,
-                                        set,
-                                        urb_base,
-                                    );
-                                }
-                                Ok(HubEvent::Detached(_) | HubEvent::HubDetached(_)) => {
-                                    // A vanished leaf device — or a vanished
-                                    // hub tier with everything behind it —
-                                    // is retracted by the same diff.
-                                    reconcile_interfaces(
-                                        &mut device,
-                                        &mut transports,
-                                        set,
-                                        urb_base,
-                                    );
-                                    log(
-                                        &LogSink,
-                                        &Event {
-                                            level: Level::Info,
-                                            id: HCD_DISCONNECT,
-                                            message:
-                                                "usb-hcd: device disconnected, interface retracted",
-                                            fields: &[],
-                                        },
-                                    );
-                                }
-                                Ok(HubEvent::None) => {}
-                                Err(err) => log_hex_event(
-                                    HCD_WAIT_ERROR,
-                                    Level::Warn,
-                                    "usb-hcd: hub status-change service failed",
-                                    "err_hex",
-                                    err as u64,
-                                ),
+                        match device.next_hub_change(&delay) {
+                            Ok(HubEvent::Attached(_) | HubEvent::HubAttached(_)) => {
+                                // A fresh leaf device — or a fresh hub
+                                // tier whose downstream devices were
+                                // enumerated with it — is published by
+                                // diffing every live index.
+                                reconcile_interfaces(&mut device, &mut transports, set, urb_base);
+                                log(
+                                    &LogSink,
+                                    &Event {
+                                        level: Level::Info,
+                                        id: HCD_READY,
+                                        message: "usb-hcd: hub-port device attached and served",
+                                        fields: &[],
+                                    },
+                                );
                             }
-                        }
-                    } else if device.any_device_live() {
-                        // Directly-attached device: retract on a root-port
-                        // disconnect (the `CCS` connect bit clearing).
-                        if !still_connected(&mut device, root_port) {
-                            for transport in transports.iter_mut().flatten() {
-                                retract_interface(transport);
+                            Ok(HubEvent::Detached(_) | HubEvent::HubDetached(_)) => {
+                                // A vanished leaf device — or a vanished
+                                // hub tier with everything behind it —
+                                // is retracted by the same diff.
+                                reconcile_interfaces(&mut device, &mut transports, set, urb_base);
+                                log(
+                                    &LogSink,
+                                    &Event {
+                                        level: Level::Info,
+                                        id: HCD_DISCONNECT,
+                                        message:
+                                            "usb-hcd: device disconnected, interface retracted",
+                                        fields: &[],
+                                    },
+                                );
                             }
-                            log(
-                                &LogSink,
-                                &Event {
-                                    level: Level::Info,
-                                    id: HCD_DISCONNECT,
-                                    message: "usb-hcd: device disconnected, interface retracted",
-                                    fields: &[],
-                                },
-                            );
+                            Ok(HubEvent::None) => {}
+                            Err(err) => log_topology_service_failure(
+                                &mut device,
+                                "usb-hcd: hub status-change service failed",
+                                err,
+                            ),
                         }
-                    } else if device.any_root_port_connected() {
-                        // A device appeared on a root port — either the first
-                        // connect after a cold boot with nothing attached at
-                        // bring-up, or a re-attach after a disconnect. Reset
-                        // the controller and re-run the bring-up walk, re-arm
-                        // the interrupter the reset cleared (so the next
-                        // connect/disconnect still wakes the loop), refresh
-                        // the watched root port, and publish fresh interface
-                        // nodes so each class driver is autoloaded onto its
-                        // index's transport.
-                        reset_reenumerate_and_publish(
-                            &mut device,
-                            &mut transports,
-                            set,
-                            urb_base,
-                            &delay,
-                        );
-                        root_port = device.root_port();
                     }
                     // A disconnect-handling teardown above (a hub status-change
                     // detach or a hub-assembly detach) can leave the controller
@@ -1132,79 +1349,25 @@ mod program {
                         urb_base,
                         &delay,
                     ) {
-                        root_port = device.root_port();
                         continue;
                     }
-                    // Drive every transport with a URB outstanding: the drained
-                    // event(s) may complete any of them, and a completion the
-                    // hot-plug handling above parked must not wait for another
-                    // interrupt. A transport whose device just detached has
-                    // already had its URB aborted, so it is simply not busy.
-                    for index in 0..transports.len() {
-                        let busy = transports[index]
-                            .as_ref()
-                            .is_some_and(|transport| transport.service.is_busy());
-                        if !busy {
-                            continue;
-                        }
-                        let Some(outcome) = transports[index].as_mut().map(|transport| {
-                            transport
-                                .service
-                                .on_event(transport.shm, &mut device.engine_for(index))
-                        }) else {
-                            continue;
-                        };
-                        match outcome {
-                            UrbOutcome::Reply(reply) => {
-                                let node_live = transports[index]
-                                    .as_ref()
-                                    .is_some_and(|transport| transport.node_live);
-                                let detached = node_live
-                                    && retract_after_fault_if_gone(
-                                        &mut device,
-                                        index,
-                                        &mut transports,
-                                        set,
-                                        urb_base,
-                                        reply,
-                                        &delay,
-                                    );
-                                if !detached {
-                                    if let Some(transport) = transports[index].as_ref() {
-                                        reply_to_urb(transport.endpoint_id, reply);
-                                    }
-                                }
-                            }
-                            UrbOutcome::Held => {
-                                let _ = log(
-                                    &LogSink,
-                                    &Event {
-                                        level: Level::Debug,
-                                        id: HCD_URB_HELD,
-                                        message: "usb-hcd: IRQ did not complete held URB yet",
-                                        fields: &[],
-                                    },
-                                );
-                            }
-                            // `is_busy` was checked above, so an Idle outcome
-                            // cannot occur; nothing to service either way.
-                            UrbOutcome::Idle => {}
-                        }
-                    }
+                    // Drive every transport with a URB outstanding: the
+                    // drained event(s) may complete any of them, and a
+                    // completion the hot-plug handling above parked must not
+                    // wait for another interrupt.
+                    service_busy_urbs(&mut device, &mut transports, set, urb_base, &delay);
                     // The transfer-fault disconnect teardown (the Disable Slot in
                     // `retract_after_fault_if_gone`) latches the same controller
                     // fault on the Pi 4 VL805 after it completes; recover here too
                     // so the re-plug is seen rather than the controller staying
                     // halted and silent.
-                    if recover_if_controller_faulted(
+                    let _ = recover_if_controller_faulted(
                         &mut device,
                         &mut transports,
                         set,
                         urb_base,
                         &delay,
-                    ) {
-                        root_port = device.root_port();
-                    }
+                    );
                 }
                 _ => {}
             }

@@ -26,6 +26,7 @@ use super::{
     bring_up_controller, bring_up_controller_diagnostic, derive_controller_resources, BringupPhase,
     ControllerResources,
 };
+use rustos_usb::device::EventWait;
 use rustos_usb::XhciOpenStage;
 
 /// The controller's register BAR base/len the HCD maps (the metal VL805 BAR0
@@ -126,6 +127,18 @@ impl Delay for NoopDelay {
     }
 }
 
+/// A deterministic event-wait stand-in: every path here fails before an
+/// event wait, so the clock is never read and the park is never entered.
+struct NoopWait;
+
+impl EventWait for NoopWait {
+    fn now_us(&self) -> u64 {
+        0
+    }
+
+    fn wait_us(&self, _budget_us: u64) {}
+}
+
 fn host_with(phys: u64, mmio_map: bool, mapper: bool, dma: bool) -> MockHost {
     MockHost {
         mmio_map,
@@ -138,7 +151,14 @@ fn bring_up(
     host: &MockHost,
     dma_aperture_top: u64,
 ) -> Result<super::ControllerDevice<'_>, DriverError> {
-    bring_up_controller(host, &NoopDelay, BAR_BASE, BAR_LEN, dma_aperture_top)
+    bring_up_controller(
+        host,
+        &NoopDelay,
+        &NoopWait,
+        BAR_BASE,
+        BAR_LEN,
+        dma_aperture_top,
+    )
 }
 
 #[test]
@@ -196,9 +216,16 @@ fn diagnostic_localises_the_controller_open_stall() {
     // `Capability` reset sub-stage, so a metal capture localises the stall
     // rather than seeing a bare `DeviceFault`.
     let host = host_with(DMA_PHYS_IN_APERTURE, true, true, true);
-    let err = bring_up_controller_diagnostic(&host, &NoopDelay, BAR_BASE, BAR_LEN, APERTURE_TOP)
-        .err()
-        .expect("an inert controller window fails closed");
+    let err = bring_up_controller_diagnostic(
+        &host,
+        &NoopDelay,
+        &NoopWait,
+        BAR_BASE,
+        BAR_LEN,
+        APERTURE_TOP,
+    )
+    .err()
+    .expect("an inert controller window fails closed");
     assert_eq!(err.phase, BringupPhase::ControllerOpen);
     assert_eq!(err.error, DriverError::DeviceFault);
     assert_eq!(err.open_stage, Some(XhciOpenStage::Capability));
@@ -213,9 +240,16 @@ fn diagnostic_localises_a_setup_stall() {
     // exists: the structured error names the `Setup` phase and carries no
     // controller snapshot.
     let host = host_with(DMA_PHYS_IN_APERTURE, true, false, true);
-    let err = bring_up_controller_diagnostic(&host, &NoopDelay, BAR_BASE, BAR_LEN, APERTURE_TOP)
-        .err()
-        .expect("a host with no mapper fails closed");
+    let err = bring_up_controller_diagnostic(
+        &host,
+        &NoopDelay,
+        &NoopWait,
+        BAR_BASE,
+        BAR_LEN,
+        APERTURE_TOP,
+    )
+    .err()
+    .expect("a host with no mapper fails closed");
     assert_eq!(err.phase, BringupPhase::Setup);
     assert_eq!(err.error, DriverError::Unsupported);
     assert_eq!(err.open_stage, None);

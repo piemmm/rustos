@@ -913,19 +913,63 @@ pub fn clock_get() -> u64 {
     unsafe { raw_syscall(NUM_CLOCK_GET, [0, 0, 0, 0, 0, 0]) }
 }
 
-/// Park, yielding the CPU, until `now()` reaches `deadline_ns`.
-///
-/// The shared core of [`ClockDelay`]'s
-/// [`delay_us`](rustos_abi::Delay::delay_us): it reads the monotonic clock
-/// through `now` and surrenders the CPU through `yield_fn` between reads, so
-/// it is a cooperative wait rather than a hard spin. A
-/// deadline already in the past returns immediately without yielding. The
-/// generic seams keep the loop host-testable against a deterministic clock
-/// without issuing a real trap.
+/// Yield-loop until `now()` reaches `deadline_ns` — the **degraded
+/// fallback** of [`ClockDelay`]'s [`delay_us`](rustos_abi::Delay::delay_us),
+/// used only when the kernel refuses the sleep wait-set ([`sleep_waitset`])
+/// so a timed park is unavailable: it reads the monotonic clock through
+/// `now` and surrenders the CPU through `yield_fn` between reads, keeping
+/// the timed contract without a hard spin. A deadline already in the past
+/// returns immediately without yielding. The generic seams keep the loop
+/// host-testable against a deterministic clock without issuing a real trap.
 fn spin_until_ns(deadline_ns: u64, mut now: impl FnMut() -> u64, mut yield_fn: impl FnMut()) {
     while now() < deadline_ns {
         yield_fn();
     }
+}
+
+/// Park, off-CPU, until `now()` reaches `deadline_ns`.
+///
+/// The core of [`ClockDelay`]'s [`delay_us`](rustos_abi::Delay::delay_us):
+/// between clock reads it blocks through `park` (a kernel timed park for
+/// the remaining nanoseconds), so the task sleeps instead of yielding in a
+/// loop. A spurious early wake re-parks for the remainder; a deadline
+/// already in the past returns immediately without parking. The generic
+/// seams keep the loop host-testable against a deterministic clock.
+fn park_until_ns(deadline_ns: u64, mut now: impl FnMut() -> u64, mut park: impl FnMut(u64)) {
+    loop {
+        let reading = now();
+        if reading >= deadline_ns {
+            return;
+        }
+        park(deadline_ns - reading);
+    }
+}
+
+/// The process's lazily created sleep wait-set handle, stored plus one so
+/// `0` means "not yet created". A wait-set with **no members** parked with a
+/// timeout is a pure kernel timed park: no member can ever become ready, so
+/// `waitset_wait` blocks the task until the deadline elapses. Cached per
+/// process so a delay costs one syscall, not a create per call.
+static SLEEP_WAITSET_PLUS_ONE: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// The process's sleep wait-set (created on first use), or `None` when the
+/// kernel refuses one — the caller then degrades to the cooperative
+/// yield wait rather than losing the timed contract.
+fn sleep_waitset() -> Option<u64> {
+    use core::sync::atomic::Ordering;
+    let cached = SLEEP_WAITSET_PLUS_ONE.load(Ordering::Relaxed);
+    if cached != 0 {
+        return Some(cached - 1);
+    }
+    let set = waitset_create();
+    if set < 0 {
+        return None;
+    }
+    #[allow(clippy::cast_sign_loss)] // `set >= 0` is the wait-set handle.
+    let set = set as u64;
+    SLEEP_WAITSET_PLUS_ONE.store(set + 1, Ordering::Relaxed);
+    Some(set)
 }
 
 /// Nanoseconds in one microsecond — the [`ClockDelay`] conversion factor.
@@ -941,9 +985,14 @@ const NANOS_PER_MICRO: u64 = 1_000;
 /// so every driver process shares a single clock-backed `Delay` rather than
 /// each rolling its own over [`clock_get`].
 ///
-/// The wait is cooperative: [`delay_us`](rustos_abi::Delay::delay_us) yields
-/// the CPU to other runnable tasks between clock reads instead of busy-spinning. It carries no authority — `clock_get` needs no
-/// capability — and holds no state, so it is `Copy` and trivially shareable.
+/// The wait genuinely sleeps: [`delay_us`](rustos_abi::Delay::delay_us)
+/// parks the task on the process's memberless sleep wait-set
+/// (`sleep_waitset`) with the remaining window as the `waitset_wait`
+/// deadline, so the kernel's one-shot timer wakes it — no yield loop, no
+/// periodic wakes. Only when the kernel refuses a wait-set does it degrade
+/// to the cooperative yield wait, keeping the timed contract. It carries no
+/// authority — `clock_get` and the wait-set need no capability — and holds
+/// no state, so it is `Copy` and trivially shareable.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ClockDelay;
 
@@ -957,12 +1006,25 @@ impl ClockDelay {
 
 impl rustos_abi::Delay for ClockDelay {
     fn delay_us(&self, us: u32) {
-        // Compute the deadline from the clock the loop polls, saturating so a
-        // reading near `u64::MAX` can never wrap the deadline below `now`
-        // (which would return instantly); the monotonic clock realistically
-        // never approaches that, but the wait must not silently shorten.
+        // Compute the deadline from the clock the wait re-checks, saturating
+        // so a reading near `u64::MAX` can never wrap the deadline below
+        // `now` (which would return instantly); the monotonic clock
+        // realistically never approaches that, but the wait must not
+        // silently shorten.
         let deadline = clock_get().saturating_add(u64::from(us).saturating_mul(NANOS_PER_MICRO));
-        spin_until_ns(deadline, clock_get, yield_now);
+        match sleep_waitset() {
+            Some(set) => park_until_ns(deadline, clock_get, |remaining_ns| {
+                // The set has no members, so this is a pure timed park; the
+                // outer loop re-checks the clock, so an early return (a
+                // torn-down set) still honours the deadline.
+                let mut token = 0u64;
+                let _ = waitset_wait(set, remaining_ns, &mut token);
+            }),
+            // The kernel refused a wait-set (handle exhaustion): degrade to
+            // the cooperative yield wait rather than shortening the timed
+            // contract.
+            None => spin_until_ns(deadline, clock_get, yield_now),
+        }
     }
 
     fn now_us(&self) -> u64 {
@@ -2197,6 +2259,52 @@ pub fn call_create(
 /// foreign endpoint (`PermissionDenied`), or an unknown/destroyed endpoint
 /// (`NotFound`). The wrapper hides no error.
 pub fn call_recv(endpoint: u64, buf: &mut [u8], ticket_out: &mut u64) -> Result<usize, i64> {
+    call_recv_with_flags(
+        endpoint,
+        buf,
+        ticket_out,
+        rustos_abi::CallRecvFlags::empty(),
+    )
+}
+
+/// Receive the next request posted to a call endpoint this task owns,
+/// **without blocking** (`SyscallNumber::CALL_RECV` with
+/// [`rustos_abi::CallRecvFlags::NON_BLOCKING`]).
+///
+/// The mode a wait-set-driven event loop uses after a member endpoint
+/// reported ready: the readiness peek is not a guarantee — the queued call
+/// may have been cancelled because its poster exited — and a loop serving
+/// several sources must never park on one of them. On success the request
+/// payload is copied into `buf`, the per-call ticket is written to
+/// `ticket_out`, and the number of request bytes is returned.
+///
+/// # Errors
+///
+/// Returns the raw negative kernel result (`-errno`): an empty queue
+/// (`WouldBlock` — benign for an event loop, simply nothing to service), a
+/// request larger than `buf` (`BufferTooSmall`, left queued), a missing
+/// receive capability or a foreign endpoint (`PermissionDenied`), or an
+/// unknown/destroyed endpoint (`NotFound`). The wrapper hides no error.
+pub fn call_recv_nonblock(
+    endpoint: u64,
+    buf: &mut [u8],
+    ticket_out: &mut u64,
+) -> Result<usize, i64> {
+    call_recv_with_flags(
+        endpoint,
+        buf,
+        ticket_out,
+        rustos_abi::CallRecvFlags::NON_BLOCKING,
+    )
+}
+
+/// The one `CALL_RECV` invocation both receive modes share.
+fn call_recv_with_flags(
+    endpoint: u64,
+    buf: &mut [u8],
+    ticket_out: &mut u64,
+    flags: rustos_abi::CallRecvFlags,
+) -> Result<usize, i64> {
     let buf_ptr = buf.as_mut_ptr() as usize as u64;
     let ticket_ptr = (ticket_out as *mut u64) as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
@@ -2207,7 +2315,14 @@ pub fn call_recv(endpoint: u64, buf: &mut [u8], ticket_out: &mut u64) -> Result<
     let ret = unsafe {
         raw_syscall(
             NUM_CALL_RECV,
-            [endpoint, buf_ptr, buf.len() as u64, ticket_ptr, 0, 0],
+            [
+                endpoint,
+                buf_ptr,
+                buf.len() as u64,
+                ticket_ptr,
+                u64::from(flags.bits()),
+                0,
+            ],
         )
     } as i64;
     if ret < 0 {
@@ -4490,6 +4605,37 @@ mod tests {
         // Reads at 0,250,500,750 are below the deadline (4 yields); the read
         // at 1_000 stops the loop.
         assert_eq!(yields, 4);
+    }
+
+    #[test]
+    fn park_until_ns_returns_immediately_for_a_past_deadline() {
+        // A deadline already reached must not park even once (no needless
+        // kernel round-trip).
+        let mut parks = 0u32;
+        park_until_ns(100, || 100, |_| parks += 1);
+        assert_eq!(parks, 0);
+        park_until_ns(50, || 100, |_| parks += 1);
+        assert_eq!(parks, 0);
+    }
+
+    #[test]
+    fn park_until_ns_grants_the_full_remainder_and_reparks_on_an_early_wake() {
+        // The park is granted exactly the remaining window, so the kernel's
+        // one-shot deadline wakes the task once; a spurious early wake
+        // re-parks for what is left rather than returning short.
+        let clock = core::cell::Cell::new(0u64);
+        let granted = core::cell::RefCell::new(alloc::vec::Vec::new());
+        park_until_ns(
+            1_000,
+            || clock.get(),
+            |remaining| {
+                granted.borrow_mut().push(remaining);
+                // The first wake is spurious (the clock is only half way);
+                // the second reaches the deadline.
+                clock.set(if clock.get() == 0 { 400 } else { 1_000 });
+            },
+        );
+        assert_eq!(granted.into_inner(), alloc::vec![1_000, 600]);
     }
 
     #[test]

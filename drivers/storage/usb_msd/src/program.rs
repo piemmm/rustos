@@ -724,7 +724,10 @@ where
         };
         let mut request = [0u8; BLK_REQUEST_LEN];
         let mut ticket = 0u64;
-        let Ok(n) = rustos_rt::call_recv(serve.endpoint, &mut request, &mut ticket) else {
+        // Non-blocking: this wait-set serves every LUN's endpoint, and the
+        // queued call the wake reported may have been cancelled by its
+        // poster's exit — parking here would starve the other LUNs.
+        let Ok(n) = rustos_rt::call_recv_nonblock(serve.endpoint, &mut request, &mut ticket) else {
             continue;
         };
         let lun = index as u8;

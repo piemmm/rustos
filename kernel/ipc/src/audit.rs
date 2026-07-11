@@ -44,6 +44,7 @@
 //! | 3048 | Debug | `CALL_REPLIED`                | A server delivered a reply to an in-flight call. Recorded at `Debug` for the same reason as `CALL_POSTED` (3043): routine high-throughput RPC completion. Its denial (3049) stays at `Error`. |
 //! | 3049 | Error | `CALL_REPLY_DENIED`           | A reply was refused (unknown ticket, or reply exceeded `max_reply`). |
 //! | 3050 | Error | `CALL_ENDPOINT_REGISTER_DENIED` | A registry bind was refused because the `EndpointId` was already bound (the created endpoint is dropped; mirrors `PORT_REGISTER_DENIED`, 3004). |
+//! | 3051 | Info  | `CALL_POSTER_VANISHED`        | A caller task exited with calls still in flight on this endpoint; the kernel cancelled them (queued requests dropped before service, in-service tickets retired so the server's reply fails closed, unclaimed replies discarded). |
 //!
 //! Adding a new event requires assigning the next free identifier in
 //! this file and appending a row to the table in
@@ -124,6 +125,8 @@ pub enum AuditEvent {
     CallReplyDenied,
     /// A registry bind was refused because the id was already bound.
     CallEndpointRegisterDenied,
+    /// A caller exited with calls still in flight; the kernel cancelled them.
+    CallPosterVanished,
 }
 
 impl AuditEvent {
@@ -163,6 +166,7 @@ impl AuditEvent {
             Self::CallReplied => 3048,
             Self::CallReplyDenied => 3049,
             Self::CallEndpointRegisterDenied => 3050,
+            Self::CallPosterVanished => 3051,
         })
     }
 
@@ -194,7 +198,8 @@ impl AuditEvent {
             | Self::NotifyBound
             | Self::NotifySignalled
             | Self::CallEndpointCreated
-            | Self::CallEndpointDestroyed => Level::Info,
+            | Self::CallEndpointDestroyed
+            | Self::CallPosterVanished => Level::Info,
             Self::CallPosted | Self::CallReplied => Level::Debug,
             Self::PortCreateDenied
             | Self::PortRegisterDenied
@@ -254,6 +259,7 @@ impl AuditEvent {
             Self::CallReplied => "ipc call replied",
             Self::CallReplyDenied => "ipc call reply denied",
             Self::CallEndpointRegisterDenied => "ipc call endpoint registration denied",
+            Self::CallPosterVanished => "ipc calls cancelled, poster exited",
         }
     }
 }
@@ -373,6 +379,7 @@ mod tests {
         assert_eq!(AuditEvent::CallReplied.id(), EventId(3048));
         assert_eq!(AuditEvent::CallReplyDenied.id(), EventId(3049));
         assert_eq!(AuditEvent::CallEndpointRegisterDenied.id(), EventId(3050));
+        assert_eq!(AuditEvent::CallPosterVanished.id(), EventId(3051));
     }
 
     #[test]
@@ -410,6 +417,7 @@ mod tests {
             AuditEvent::CallReplied,
             AuditEvent::CallReplyDenied,
             AuditEvent::CallEndpointRegisterDenied,
+            AuditEvent::CallPosterVanished,
         ] {
             let id = ev.id().0;
             assert!(
