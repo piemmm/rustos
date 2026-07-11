@@ -965,6 +965,45 @@ mod format {
     }
 
     #[test]
+    fn format_lays_out_fsinfo_and_the_backup_boot_pair() {
+        // Regression: the formatter used to leave BPB offsets 48/50 zero
+        // and write no FSInfo structure at all — a format-conformance
+        // defect that also left a RustOS-formatted volume without the
+        // mutation-evidence window the verified re-insert path compares
+        // (`plans/DEVICES.md` D4c).
+        let fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
+        let image = fs.into_block();
+        let boot = &image.store[..512];
+        let fsinfo_sector = u16::from_le_bytes([boot[48], boot[49]]) as usize;
+        let backup_sector = u16::from_le_bytes([boot[50], boot[51]]) as usize;
+        assert_eq!(fsinfo_sector, 1);
+        assert_eq!(backup_sector, 6);
+
+        // Both FSInfo copies carry the structure's three signatures and
+        // the documented "unknown" hints (this driver counts free space
+        // from the FAT itself).
+        for base in [fsinfo_sector * 512, (backup_sector + 1) * 512] {
+            let info = &image.store[base..base + 512];
+            assert_eq!(&info[0..4], &0x4161_5252u32.to_le_bytes());
+            assert_eq!(&info[484..488], &0x6141_7272u32.to_le_bytes());
+            assert_eq!(&info[488..492], &0xFFFF_FFFFu32.to_le_bytes());
+            assert_eq!(&info[492..496], &0xFFFF_FFFFu32.to_le_bytes());
+            assert_eq!(&info[508..512], &0xAA55_0000u32.to_le_bytes());
+        }
+        // The backup boot sector is byte-identical to the primary.
+        assert_eq!(
+            &image.store[backup_sector * 512..backup_sector * 512 + 512],
+            boot
+        );
+        // The formatted head now declares an evidence window covering the
+        // boot sector through FSInfo.
+        assert_eq!(
+            rustos_fsprobe::evidence_len(&image.store[..rustos_fsprobe::PROBE_HEAD_LEN]),
+            Some(((fsinfo_sector as u64) + 1) * 512)
+        );
+    }
+
+    #[test]
     fn format_then_reopen_round_trips_files_and_directories() {
         let dev = {
             let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");

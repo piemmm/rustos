@@ -466,7 +466,12 @@ event IDs (`AGENTS.md` §5.4, §19.4): `fs.root.{discovered,attached}`,
 nothing uncommitted / with its uncommitted writes retained / after retention
 was abandoned), `fs.hotplug.force_unmount` (a volume force-unmounted, its
 retained uncommitted writes deliberately discarded — the event carries the
-discarded byte count and the reason a clean commit was impossible), and
+discarded byte count and the reason a clean commit was impossible),
+`fs.hotplug.reinsert_replayed` (a re-inserted volume proven unmutated, its
+retained writes replayed and committed — carries the replayed byte count),
+`fs.hotplug.reinsert_conflict` (a re-inserted volume whose non-mutation could
+not be proven, mounted fresh and read-only with the retained set kept —
+carries the refusing cause and the retained byte count), and
 `fs.conflict.alias_ambiguous`. No secret, key,
 capability-token value, or private path content beyond the audit subsystem's
 policy set is logged.

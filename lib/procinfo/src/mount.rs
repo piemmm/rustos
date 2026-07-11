@@ -71,15 +71,18 @@ pub fn for_each_mount(
 /// line, the long-standing Unix `mount` listing shape.
 ///
 /// A surprise-removed volume carries a trailing ` [unavailable-dirty]` /
-/// ` [unavailable-lost]` marker — additive, so a healthy volume's line is
-/// byte-identical to the classic shape while a dead one never looks
-/// healthy (`plans/DEVICES.md` D4b).
+/// ` [unavailable-lost]` marker, and a re-inserted volume whose
+/// non-mutation could not be proven carries ` [recovery-conflict]`
+/// (`plans/DEVICES.md` D4c) — additive, so a healthy volume's line is
+/// byte-identical to the classic shape while a dead or conflicted one
+/// never looks healthy (`plans/DEVICES.md` D4b).
 #[must_use]
 pub fn render_mount(record: &MountRecord) -> String {
     let marker = match record.availability() {
         MountAvailability::Available => "",
         MountAvailability::UnavailableDirty => " [unavailable-dirty]",
         MountAvailability::UnavailableLost => " [unavailable-lost]",
+        MountAvailability::RecoveryConflict => " [recovery-conflict]",
     };
     format!(
         "{} on {} type {} ({}){}",
@@ -276,6 +279,7 @@ mod tests {
     fn an_unavailable_volume_is_marked_in_the_render() {
         for (availability, marker) in [
             (MountAvailability::UnavailableDirty, "[unavailable-dirty]"),
+            (MountAvailability::RecoveryConflict, "[recovery-conflict]"),
             (MountAvailability::UnavailableLost, "[unavailable-lost]"),
         ] {
             let record = MountRecord::new(

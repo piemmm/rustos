@@ -4409,7 +4409,7 @@ per-increment guarantees.
 
 ## DEVICES — device inventory commands + USB mass storage (`plans/DEVICES.md`)
 
-**Status: in progress (DEVICE1 V1–V3 done; DEVICE2 D1–D3, D4a, and D4b done; D4c remains).**
+**Status: done (DEVICE1 V1–V3; DEVICE2 D1–D4). Live path: Pi 4 metal acceptance (no emulated fixture publishes USB nodes).**
 DEVICE1 adds the `lspci` and `lsusb` system command apps: they render the
 discovered PCI/USB nodes from the existing `CAP_SYSINFO_HW`-gated
 hardware-tree query, naming devices through the `lib/devids` lookup crate
@@ -4528,9 +4528,20 @@ with the loss audited), the `MountRecord` availability byte + stable
 volume identity (so the mount listing marks
 `unavailable-dirty`/`unavailable-lost` and the tooling resolves names to
 detach identities), and the new `unmount` command-app bundle
-(`userland/apps/unmount`, `unmount [-f|--force] NAME`). D4c remains:
-verified re-insert (mutation evidence + retained-write replay). See
-`plans/DEVICES.md` for the binding design and staging.
+(`userland/apps/unmount`, `unmount [-f|--force] NAME`). D4c (done)
+landed verified re-insert: an attach whose `lib/fsprobe`-probed identity
+matches an unavailable volume is recovered in place — the journal's
+dual-acceptance mutation-evidence shadow (seeded from the per-format
+`fsprobe::evidence_len` window: `RustFS` superblock ring / ext4
+superblock / FAT32 boot+FSInfo) is re-read and, when every evidence
+block matches its committed-or-latest copy, the retained writes replay
+and commit (event 4185) and the volume returns to full service under
+its original mount and `id::` root; any doubt fails closed to the
+read-only `MountAvailability::RecoveryConflict` state with the retained
+set kept for the audited force-discard (event 4186). `Fat32::format`
+now lays out the FSInfo sector and backup boot pair (a
+format-conformance defect the evidence window exposed). See
+`plans/DEVICES.md` for the binding design and per-increment guarantees.
 
 ---
 

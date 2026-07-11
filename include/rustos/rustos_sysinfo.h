@@ -71,6 +71,7 @@
 #define ROS_MOUNT_AVAILABLE ((uint8_t)0u)
 #define ROS_MOUNT_UNAVAILABLE_DIRTY ((uint8_t)1u)
 #define ROS_MOUNT_UNAVAILABLE_LOST ((uint8_t)2u)
+#define ROS_MOUNT_RECOVERY_CONFLICT ((uint8_t)3u)
 #define ROS_USER_DIRECTORY_NAME_MAX 32u
 
 /* Packed little-endian wire size of each sysinfo record type, in bytes. */

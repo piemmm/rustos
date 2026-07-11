@@ -53,6 +53,24 @@
 //! when it can; only when nothing can be committed — the volume is
 //! unavailable, or its flush fails — does it discard the retained set,
 //! logging the deliberate data loss with its own event id.
+//!
+//! # Verified re-insert (`plans/DEVICES.md` D4c)
+//!
+//! An attach whose probed identity (`lib/fsprobe`) matches an unavailable
+//! volume is a **re-insert** and is recovered in place rather than
+//! re-attached as a duplicate. The journal carries a dual-acceptance
+//! shadow of the volume's mutation-evidence window (the region any
+//! foreign mutation must rewrite: the `RustFS` superblock ring, the ext4
+//! superblock, the FAT32 boot+`FSInfo` head — honestly weaker for weaker
+//! formats), seeded at attach and maintained on every write. When the
+//! re-read window proves non-mutation — every evidence block equals its
+//! last-committed or latest shadow copy — the retained writes are
+//! replayed, the device cache committed, and the volume returns to full
+//! service under its original mount, name, and published root. Any doubt
+//! (foreign mutation, a moved extent, abandoned retention, a replay or
+//! flush failure) fails closed: the volume returns **read-only** in the
+//! *recovery-conflict* state with the retained set still held for
+//! explicit salvage or the audited force-discard — never a silent merge.
 
 use alloc::format;
 use alloc::string::String;
@@ -127,6 +145,19 @@ const VOLUME_SURPRISE_REMOVED_LOST: EventId = EventId(4178);
 /// impossible (drives.md `fs.hotplug.force_unmount`).
 const VOLUME_FORCE_UNMOUNTED: EventId = EventId(4179);
 
+/// Audit event: a re-inserted volume was proven unmutated and its
+/// retained uncommitted writes were replayed and committed; the volume is
+/// back in service (drives.md `fs.hotplug.reinsert_replayed`). Carries the
+/// replayed byte count.
+const VOLUME_REINSERT_REPLAYED: EventId = EventId(4185);
+
+/// Audit event: a re-inserted volume's non-mutation could not be proven
+/// (or retention had been abandoned): it is mounted fresh and read-only
+/// with the retained set kept for explicit salvage or force-discard
+/// (drives.md `fs.hotplug.reinsert_conflict`). Carries the refusing cause
+/// and the retained byte count still held.
+const VOLUME_REINSERT_CONFLICT: EventId = EventId(4186);
+
 /// Base of the runtime volume mount-handle space (`"VOL"` tagged). Fresh
 /// handles are minted from here, disjoint from the boot volumes' fixed
 /// handles by construction.
@@ -144,6 +175,10 @@ enum Availability {
     /// The serving driver vanished after retention was abandoned:
     /// uncommitted data existed that the journal does not hold.
     UnavailableLost,
+    /// The volume was re-inserted but non-mutation could not be proven:
+    /// it is mounted fresh and read-only over a live driver while the
+    /// retained set stays held for the audited force-discard (D4c).
+    RecoveryConflict,
 }
 
 /// One attached runtime volume: the facts detach and surprise removal
@@ -169,6 +204,12 @@ struct AttachedVolume {
     /// The registry's filesystem-type label, for the unavailable-stub
     /// re-registration on a dirty surprise removal.
     fstype: &'static str,
+    /// The attached extent's first device LBA — the frame of reference
+    /// the journal's retained LBAs and evidence window live in. A
+    /// re-insert may replay only onto the identical extent.
+    first_lba: u64,
+    /// The attached extent's block count.
+    blocks: u64,
     /// Whether the serving driver is still live.
     availability: Availability,
 }
@@ -460,27 +501,26 @@ fn open_filesystem(
     }
 }
 
-/// The journalled extent window an attach opens its filesystem over,
-/// together with the shared journal handle and the device write policy.
-struct AttachedWindow {
-    window: PartitionBlock<JournaledBlock<BlkClient>>,
-    journal: Arc<SpinLock<RetainedWrites>>,
+/// The device transport an attach or recovery operates over: the
+/// connected kernel blkio client with its write policy and geometry, the
+/// requested extent already validated against the live device.
+struct ConnectedDevice {
+    client: BlkClient,
     read_only: bool,
+    block_size: u32,
 }
 
-/// Connect the kernel blkio client for `request`, validate the extent
-/// against the live geometry, and thread the device through the
-/// uncommitted-write journal (the volume's surprise-removal state is
-/// decided by what that journal holds when the serving driver dies).
+/// Connect the kernel blkio client for `request` and validate the
+/// requested extent against the live geometry.
 ///
 /// # Errors
 ///
 /// `(cause, errno)` pairs the attach path audits through its refusal
 /// helper.
-fn journaled_window(
+fn connect_device(
     request: &VolumeAttachRequest<'_>,
     wiring: &Wiring,
-) -> Result<AttachedWindow, (&'static str, Errno)> {
+) -> Result<ConnectedDevice, (&'static str, Errno)> {
     // Reach the shared data window through the kernel's counted hold.
     let hold = kernel_hold(installed_shared_mem_facility(), request.window)
         .map_err(|err| ("window_unreachable", err))?;
@@ -488,7 +528,7 @@ fn journaled_window(
     let client = BlkClient::connect(request.endpoint, hold, wiring.audit)
         .map_err(|err| ("endpoint_unusable", err))?;
     let read_only = client.read_only();
-    // Bound the requested extent by the live geometry, then window it.
+    // Bound the requested extent by the live geometry.
     let geometry = client
         .geometry()
         .map_err(|err| ("geometry_unreadable", err.as_errno()))?;
@@ -499,18 +539,157 @@ fn journaled_window(
     {
         return Err(("extent_out_of_range", Errno::LengthOutOfRange));
     }
+    Ok(ConnectedDevice {
+        client,
+        read_only,
+        block_size: geometry.block_size,
+    })
+}
+
+/// Read the first `len` bytes of the requested extent, rounded up to
+/// whole blocks (the trailing partial block is read too — the buffer
+/// length is the rounded figure). `None` when the geometry is degenerate,
+/// the extent is too short, the allocation is refused, or the device
+/// refuses the read — the caller fails closed, never guesses.
+fn read_extent_head(
+    client: &mut BlkClient,
+    request: &VolumeAttachRequest<'_>,
+    block_size: u32,
+    len: usize,
+) -> Option<Vec<u8>> {
+    let bs = usize::try_from(block_size).ok().filter(|&bs| bs > 0)?;
+    let blocks = len.div_ceil(bs).max(1);
+    if u64::try_from(blocks).ok()? > request.blocks {
+        return None;
+    }
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(blocks.checked_mul(bs)?).ok()?;
+    buf.resize(blocks * bs, 0);
+    client.read_blocks(request.first_lba, &mut buf).ok()?;
+    Some(buf)
+}
+
+/// The mount-policy flags every runtime volume carries: the removable-
+/// media restrictions, plus `ro` when the device's write policy or the
+/// recovery posture demands it.
+fn mount_flags(read_only: bool) -> MountFlags {
+    let flags = MountFlags::NOSUID
+        .union(MountFlags::NODEV)
+        .union(MountFlags::NOEXEC);
+    if read_only {
+        flags.union(MountFlags::READ_ONLY)
+    } else {
+        flags
+    }
+}
+
+/// The mount point's permission template (a runtime mount point has no
+/// node in the boot layout tree, so the template travels with the
+/// mount). An identity-mapped volume's template matches the map —
+/// system-owned under the storage group, group-writable — so the mount
+/// point itself is as reachable as its content; every other volume gets
+/// the system-owned world-traversable default, writes gated per inode by
+/// the volume's own records.
+fn mount_template(map_gid: Option<GroupId>) -> Metadata {
+    match map_gid {
+        Some(gid) => Metadata::new(UserId(0), gid, Mode::from_bits(0o775)),
+        None => Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755)),
+    }
+}
+
+/// The storage-group identity map an **ownerless** format is mounted
+/// under (`plans/DEVICES.md` D3d); formats with a real owner model keep
+/// their on-disk records.
+fn identity_map_gid(fstype: VolumeFsType) -> Option<GroupId> {
+    match fstype {
+        VolumeFsType::Fat32 => LATE_STORAGE_GID.get(),
+        VolumeFsType::RustFs | VolumeFsType::Ext4 => None,
+    }
+}
+
+/// A fresh uncommitted-write journal for the extent, its
+/// mutation-evidence shadow seeded from the probed extent `head` (D4c).
+/// A volume with no declared window (or an unreadable one) simply holds
+/// no evidence; a later re-insert then fails closed to the conflict path.
+fn seeded_journal(
+    client: &mut BlkClient,
+    request: &VolumeAttachRequest<'_>,
+    block_size: u32,
+    head: Option<&[u8]>,
+) -> Arc<SpinLock<RetainedWrites>> {
     let journal = Arc::new(SpinLock::new(RetainedWrites::new(
-        geometry.block_size,
+        block_size,
         CacheBudget::from_backing(rustos_kalloc::HEAP_BYTES),
     )));
-    let journaled = JournaledBlock::new(client, Arc::clone(&journal), wiring.pressure);
-    let window = PartitionBlock::new(journaled, request.first_lba, request.blocks)
-        .map_err(|err| ("window_invalid", err.as_errno()))?;
-    Ok(AttachedWindow {
-        window,
-        journal,
-        read_only,
-    })
+    if let Some(evidence_len) = head
+        .and_then(rustos_fsprobe::evidence_len)
+        .and_then(|len| usize::try_from(len).ok())
+    {
+        if let Some(evidence) = read_extent_head(client, request, block_size, evidence_len) {
+            journal.lock().set_evidence(request.first_lba, &evidence);
+        }
+    }
+    journal
+}
+
+/// Audit how a re-insert resolved: the replayed recovery (with its byte
+/// count) or the read-only conflict (with its cause and the retained
+/// byte count still held).
+fn audit_recovery_outcome(
+    audit: &'static (dyn Sink + Sync),
+    name: &str,
+    outcome: &RecoveryOutcome,
+    journal: &Arc<SpinLock<RetainedWrites>>,
+) {
+    match outcome {
+        RecoveryOutcome::Replayed(bytes) => {
+            log(
+                audit,
+                &Event {
+                    level: Level::Info,
+                    id: VOLUME_REINSERT_REPLAYED,
+                    message: "volume-service: re-inserted volume proven unmutated; \
+                              retained writes replayed and committed",
+                    fields: &[
+                        Field {
+                            key: "volume",
+                            value: FieldValue::Str(name),
+                        },
+                        Field {
+                            key: "replayed_bytes",
+                            value: FieldValue::UnsignedInt(*bytes),
+                        },
+                    ],
+                },
+            );
+        }
+        RecoveryOutcome::Conflict(cause) => {
+            let retained = journal.lock().retained_bytes();
+            log(
+                audit,
+                &Event {
+                    level: Level::Warn,
+                    id: VOLUME_REINSERT_CONFLICT,
+                    message: "volume-service: re-inserted volume could not be proven \
+                              unmutated; mounted read-only with the retained set kept",
+                    fields: &[
+                        Field {
+                            key: "volume",
+                            value: FieldValue::Str(name),
+                        },
+                        Field {
+                            key: "cause",
+                            value: FieldValue::Str(cause),
+                        },
+                        Field {
+                            key: "retained_bytes",
+                            value: FieldValue::UnsignedInt(retained),
+                        },
+                    ],
+                },
+            );
+        }
+    }
 }
 
 impl VolumeService for RuntimeVolumeService {
@@ -537,20 +716,36 @@ impl VolumeService for RuntimeVolumeService {
         let vfs = LATE_FILESYSTEM
             .vfs()
             .map_err(|err| refused("no_mount_table", err))?;
-        let AttachedWindow {
-            window,
-            journal,
+        let ConnectedDevice {
+            mut client,
             read_only,
-        } = journaled_window(request, wiring).map_err(|(cause, errno)| refused(cause, errno))?;
+            block_size,
+        } = connect_device(request, wiring).map_err(|(cause, errno)| refused(cause, errno))?;
 
-        // Open the matched filesystem and take its stable identity. An
-        // ownerless format (FAT32) is mounted under the storage-group
-        // identity map when the unlock has resolved that group; formats
-        // with a real owner model keep their on-disk records.
-        let map_gid = match request.fstype {
-            VolumeFsType::Fat32 => LATE_STORAGE_GID.get(),
-            VolumeFsType::RustFs | VolumeFsType::Ext4 => None,
-        };
+        // A re-insert of a surprise-removed volume is recovered in place
+        // — proven unmutated and replayed, or held read-only with its
+        // retained set — never re-attached as a duplicate (D4c). The
+        // extent head names the volume's durable identity; a head that
+        // matches nothing simply attaches fresh.
+        let head = read_extent_head(
+            &mut client,
+            request,
+            block_size,
+            rustos_fsprobe::PROBE_HEAD_LEN,
+        );
+        if let Some(target) = self.reinsert_target(head.as_deref()) {
+            return self.recover(request, wiring, client, read_only, block_size, &target);
+        }
+
+        // Thread the device through the uncommitted-write journal, its
+        // mutation-evidence shadow seeded from the extent head.
+        let journal = seeded_journal(&mut client, request, block_size, head.as_deref());
+        let journaled = JournaledBlock::new(client, Arc::clone(&journal), wiring.pressure);
+        let window = PartitionBlock::new(journaled, request.first_lba, request.blocks)
+            .map_err(|err| refused("window_invalid", err.as_errno()))?;
+
+        // Open the matched filesystem and take its stable identity.
+        let map_gid = identity_map_gid(request.fstype);
         let handle_raw = self.next_handle.fetch_add(1, Ordering::Relaxed);
         let opened = open_filesystem(
             window,
@@ -568,25 +763,13 @@ impl VolumeService for RuntimeVolumeService {
         // flags; the device's write policy is carried as `ro`.
         let path = Path::parse(&format!("/Storage/{name}"))
             .map_err(|_| refused("mount_path_invalid", Errno::OutOfRange))?;
-        let mut flags = MountFlags::NOSUID
-            .union(MountFlags::NODEV)
-            .union(MountFlags::NOEXEC);
-        if read_only {
-            flags = flags.union(MountFlags::READ_ONLY);
-        }
-        // The mount carries its own permission template (a runtime mount
-        // point has no node in the boot layout tree). An identity-mapped
-        // volume's template matches the map — system-owned under the
-        // storage group, group-writable — so the mount point itself is as
-        // reachable as its content; every other volume gets the
-        // system-owned world-traversable default, writes gated per inode
-        // by the volume's own records.
-        let template = match map_gid {
-            Some(gid) => Metadata::new(UserId(0), gid, Mode::from_bits(0o775)),
-            None => Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755)),
-        };
         vfs.mounts_write()
-            .mount_with_template(path.clone(), flags, handle, template)
+            .mount_with_template(
+                path.clone(),
+                mount_flags(read_only),
+                handle,
+                mount_template(map_gid),
+            )
             .map_err(|_| refused("name_in_use", Errno::AlreadyExists))?;
 
         // Register the live driver, then publish the identity last; each
@@ -619,6 +802,8 @@ impl VolumeService for RuntimeVolumeService {
             window: request.window,
             journal,
             fstype: opened.fstype,
+            first_lba: request.first_lba,
+            blocks: request.blocks,
             availability: Availability::Available,
         });
         RuntimeVolumeService::audit_event(
@@ -694,6 +879,10 @@ impl VolumeService for RuntimeVolumeService {
                 Some(("volume_unavailable_dirty", Errno::DeviceFault))
             }
             Availability::UnavailableLost => Some(("volume_unavailable_lost", Errno::DeviceFault)),
+            // A conflicted volume's device is live, but its journal still
+            // holds the retained set: a plain detach would discard it
+            // silently, so only the audited force is the exit.
+            Availability::RecoveryConflict => Some(("volume_recovery_conflict", Errno::NotEmpty)),
         };
         let discarded = match commit_refusal {
             None => None,
@@ -824,6 +1013,40 @@ fn commit_for_detach(
     }
 }
 
+/// The facts of an unavailable volume a re-insert may recover
+/// (`plans/DEVICES.md` D4c), snapshotted out of the registry so the
+/// device I/O below never runs under the registry guard.
+struct RecoveryTarget {
+    /// The catalog name the volume keeps through recovery.
+    name: String,
+    /// The existing mount-table path, remounted in place.
+    path: Path,
+    /// The existing registry handle, re-pointed at the live driver.
+    handle: DriverHandle,
+    /// The published 16-byte identity the re-insert matched.
+    id: [u8; 16],
+    /// The journal holding the retained set and the evidence shadow.
+    journal: Arc<SpinLock<RetainedWrites>>,
+    /// The original extent — the frame of reference the retained LBAs
+    /// live in; replay requires the identical extent.
+    first_lba: u64,
+    blocks: u64,
+    /// Whether retention had been abandoned (the unavailable-lost state).
+    lost: bool,
+}
+
+/// How a re-insert resolved: the retained writes replayed onto the
+/// proven-unmutated medium, or the read-only conflict fallback with the
+/// cause that forbade replay.
+enum RecoveryOutcome {
+    /// Non-mutation was proven; this many retained bytes were replayed
+    /// and committed.
+    Replayed(u64),
+    /// Replay was refused for the named cause; the volume returns
+    /// read-only with its retained set kept.
+    Conflict(&'static str),
+}
+
 /// The applied surprise-removal transition [`RuntimeVolumeService::
 /// handle_vanished`] reports on: the volume either retracted cleanly or
 /// became unavailable with its journal's outcome on record.
@@ -842,15 +1065,236 @@ enum VanishOutcome {
 }
 
 impl RuntimeVolumeService {
+    /// The recovery target an attach's probed extent `head` re-inserts,
+    /// if any: the head must carry a supported signature whose identity
+    /// matches an unavailable volume.
+    fn reinsert_target(&self, head: Option<&[u8]>) -> Option<RecoveryTarget> {
+        let identity = head.and_then(rustos_fsprobe::probe)?.identity;
+        self.unavailable_target(&identity)
+    }
+
+    /// The unavailable volume the probed `identity` re-inserts, if any.
+    /// Only a volume whose serving driver is gone is a recovery target: a
+    /// live volume with the same identity is a duplicate, refused by the
+    /// normal attach path's publish step.
+    fn unavailable_target(&self, identity: &[u8; 16]) -> Option<RecoveryTarget> {
+        let state = self.state.lock();
+        state
+            .iter()
+            .find(|v| {
+                v.id == *identity
+                    && matches!(
+                        v.availability,
+                        Availability::UnavailableDirty | Availability::UnavailableLost
+                    )
+            })
+            .map(|v| RecoveryTarget {
+                name: v.name.clone(),
+                path: v.path.clone(),
+                handle: v.handle,
+                id: v.id,
+                journal: Arc::clone(&v.journal),
+                first_lba: v.first_lba,
+                blocks: v.blocks,
+                lost: v.availability == Availability::UnavailableLost,
+            })
+    }
+
+    /// Prove the re-inserted medium was not mutated elsewhere and replay
+    /// the retained writes onto it, or name the conflict that forbids
+    /// replay (`plans/DEVICES.md` D4c). Any doubt is a conflict — never a
+    /// silent merge.
+    fn attempt_replay(
+        request: &VolumeAttachRequest<'_>,
+        client: &mut BlkClient,
+        block_size: u32,
+        target: &RecoveryTarget,
+        device_read_only: bool,
+    ) -> RecoveryOutcome {
+        // Nothing retained can be replayed after retention was abandoned.
+        if target.lost || target.journal.lock().is_lost() {
+            return RecoveryOutcome::Conflict("retention_lost");
+        }
+        // The retained LBAs live in the original extent's frame of
+        // reference; a moved or resized extent can never accept them.
+        if target.first_lba != request.first_lba || target.blocks != request.blocks {
+            return RecoveryOutcome::Conflict("extent_changed");
+        }
+        // The retained writes cannot land on a now write-protected medium.
+        if device_read_only {
+            return RecoveryOutcome::Conflict("device_read_only");
+        }
+        let Some((evidence_lba, evidence_len)) = target.journal.lock().evidence_window() else {
+            return RecoveryOutcome::Conflict("no_evidence");
+        };
+        if evidence_lba != request.first_lba {
+            return RecoveryOutcome::Conflict("no_evidence");
+        }
+        let Some(current) = read_extent_head(client, request, block_size, evidence_len) else {
+            return RecoveryOutcome::Conflict("evidence_unreadable");
+        };
+        if !target.journal.lock().verify_evidence(&current) {
+            return RecoveryOutcome::Conflict("evidence_mismatch");
+        }
+        // Proven unmutated: replay the retained set, commit it to the
+        // medium, and empty the journal. A failure mid-replay falls back
+        // to the conflict path with the set still held (the journal is
+        // only committed after the device confirms the flush).
+        let Some(snapshot) = target.journal.lock().retained_snapshot() else {
+            return RecoveryOutcome::Conflict("replay_failed");
+        };
+        let mut replayed = 0u64;
+        for (lba, data) in snapshot.blocks() {
+            if client.write_blocks(*lba, data).is_err() {
+                return RecoveryOutcome::Conflict("replay_failed");
+            }
+            replayed += data.len() as u64;
+        }
+        match client.flush() {
+            Ok(()) | Err(DriverError::Unsupported) => {}
+            Err(_) => return RecoveryOutcome::Conflict("replay_failed"),
+        }
+        target.journal.lock().commit();
+        RecoveryOutcome::Replayed(replayed)
+    }
+
+    /// Recover the unavailable volume `target` over the re-inserted
+    /// device: verify and replay ([`Self::attempt_replay`]), then rebuild
+    /// the volume in place — same handle, mount path, catalog name, and
+    /// published root — live and writable when proven, read-only with the
+    /// retained set kept when not. Runs under the caller's operation
+    /// lock.
+    fn recover(
+        &self,
+        request: &VolumeAttachRequest<'_>,
+        wiring: &Wiring,
+        mut client: BlkClient,
+        device_read_only: bool,
+        block_size: u32,
+        target: &RecoveryTarget,
+    ) -> Result<(), Errno> {
+        let audit = wiring.audit;
+        let refused = |cause: &'static str, errno: Errno| -> Errno {
+            RuntimeVolumeService::audit_event(
+                audit,
+                VOLUME_ATTACH_REFUSED,
+                "volume-service: runtime volume attach refused",
+                &target.name,
+                Some(cause),
+            );
+            errno
+        };
+        let vfs = LATE_FILESYSTEM
+            .vfs()
+            .map_err(|err| refused("no_mount_table", err))?;
+
+        let outcome =
+            Self::attempt_replay(request, &mut client, block_size, target, device_read_only);
+        let conflict = matches!(outcome, RecoveryOutcome::Conflict(_));
+        // A conflicted volume returns read-only until its retained set is
+        // explicitly discarded; a proven one returns per the device.
+        let read_only = device_read_only || conflict;
+
+        // Rebuild the volume over the retained journal and new transport.
+        let journaled = JournaledBlock::new(client, Arc::clone(&target.journal), wiring.pressure);
+        let window = PartitionBlock::new(journaled, request.first_lba, request.blocks)
+            .map_err(|err| refused("window_invalid", err.as_errno()))?;
+        let map_gid = identity_map_gid(request.fstype);
+        let opened = open_filesystem(
+            window,
+            request.fstype,
+            read_only,
+            map_gid,
+            wiring,
+            target.handle.as_u64(),
+        )
+        .map_err(|err| refused("recovery_open_failed", err))?;
+        if opened.identity != target.id {
+            // The head that matched the probe does not govern the opened
+            // volume: never adopt a different identity into this entry.
+            return Err(refused("recovery_identity_mismatch", Errno::BadMagic));
+        }
+
+        // Swap the fail-closed stand-in for the live driver and remount
+        // with the recovered posture. A refusal here leaves the handle
+        // and path unresolved — fail closed, audited — and cannot occur
+        // under the operation lock (the handle was just freed, the path
+        // just unmounted).
+        let _ = LATE_FILESYSTEM.unregister(target.handle);
+        if LATE_FILESYSTEM
+            .register(
+                target.handle,
+                opened.driver,
+                &target.name,
+                opened.fstype,
+                target.id,
+            )
+            .is_err()
+        {
+            return Err(refused("handle_in_use", Errno::AlreadyExists));
+        }
+        let _ = LATE_FILESYSTEM.set_availability(
+            target.handle,
+            if conflict {
+                MountAvailability::RecoveryConflict
+            } else {
+                MountAvailability::Available
+            },
+        );
+        {
+            let mut mounts = vfs.mounts_write();
+            let _ = mounts.unmount(&target.path);
+            if mounts
+                .mount_with_template(
+                    target.path.clone(),
+                    mount_flags(read_only),
+                    target.handle,
+                    mount_template(map_gid),
+                )
+                .is_err()
+            {
+                return Err(refused("mount_path_invalid", Errno::AlreadyExists));
+            }
+        }
+        {
+            let mut state = self.state.lock();
+            if let Some(entry) = state.iter_mut().find(|v| v.id == target.id) {
+                entry.endpoint = request.endpoint;
+                entry.window = request.window;
+                entry.fstype = opened.fstype;
+                entry.availability = if conflict {
+                    Availability::RecoveryConflict
+                } else {
+                    Availability::Available
+                };
+            }
+        }
+        audit_recovery_outcome(audit, &target.name, &outcome, &target.journal);
+        // Close the recover/unplug race exactly as attach does: if the
+        // endpoint was torn down while the volume was rebuilt, run the
+        // transition the observer would have.
+        if !rustos_kernel_core::callreg::contains(EndpointId(request.endpoint)) {
+            self.handle_vanished(request.endpoint);
+        }
+        Ok(())
+    }
+
     /// Decide and apply the state transition for the volume served over
     /// the vanished `endpoint`, under the registry guard: a clean volume
     /// leaves the registry, a dirty/lost one is marked unavailable.
     /// `None` when no available volume matches (idempotency).
     fn vanish_outcome(&self, endpoint: u64) -> Option<VanishOutcome> {
         let mut state = self.state.lock();
-        let index = state
-            .iter()
-            .position(|v| v.endpoint == endpoint && v.availability == Availability::Available)?;
+        // A conflicted volume is served by a live driver too: when that
+        // driver dies its cache-bearing stand-in must be replaced and the
+        // (still-dirty) journal re-decides the unavailable state.
+        let index = state.iter().position(|v| {
+            v.endpoint == endpoint
+                && matches!(
+                    v.availability,
+                    Availability::Available | Availability::RecoveryConflict
+                )
+        })?;
         let (dirty, lost, retained) = {
             let journal = state[index].journal.lock();
             (

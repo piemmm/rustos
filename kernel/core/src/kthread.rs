@@ -1507,7 +1507,10 @@ mod tests {
         let mut control = control_with(cs, stack);
         let ctl_addr = addr_of_mut!(*control) as u64;
 
-        let action = dispatch_step(&mut control, 0);
+        // Every test that steps a dispatch uses its own CPU index: the
+        // resume and preempt tables are process-wide, so parallel test
+        // threads sharing an index would observe each other's slots.
+        let action = dispatch_step(&mut control, 40);
 
         // One prepare, with the stack's top, the trampoline entry, and the
         // control block address as the entry argument.
@@ -1549,8 +1552,8 @@ mod tests {
         let rec = recorder();
         let mut control = control_with(RecordingCs(rec), BoxStack::new());
 
-        let _ = dispatch_step(&mut control, 0);
-        let _ = dispatch_step(&mut control, 0);
+        let _ = dispatch_step(&mut control, 41);
+        let _ = dispatch_step(&mut control, 41);
 
         // Prepare happens once; each step switches in.
         assert_eq!(rec.prepares.load(Ordering::SeqCst), 1);
@@ -1562,7 +1565,7 @@ mod tests {
     fn failed_prepare_exits_without_switching() {
         let mut control = control_with(FailingCs, BoxStack::new());
 
-        let action = dispatch_step(&mut control, 0);
+        let action = dispatch_step(&mut control, 42);
 
         // Fail closed: report Exit, mark terminal, never switch into an
         // unrunnable context.
@@ -1576,7 +1579,7 @@ mod tests {
         let mut control = control_with(RecordingCs(rec), BoxStack::new());
         control.state = RunState::Finished;
 
-        let action = dispatch_step(&mut control, 0);
+        let action = dispatch_step(&mut control, 43);
 
         assert_eq!(action, TaskAction::Exit);
         // A terminal task is never prepared or switched into again.
@@ -2009,12 +2012,12 @@ mod tests {
         // The first step prepares the frame and switches in (a host no-op),
         // then the switch-back guard check trips: the task is failed closed
         // (terminal + `Exit`) rather than trusted on a corrupt stack.
-        assert_eq!(dispatch_step(&mut control, 0), TaskAction::Exit);
+        assert_eq!(dispatch_step(&mut control, 46), TaskAction::Exit);
         assert_eq!(control.state, RunState::Finished);
 
         // It stays terminal and is never switched into again.
         let before = rec.switches.load(Ordering::SeqCst);
-        assert_eq!(dispatch_step(&mut control, 0), TaskAction::Exit);
+        assert_eq!(dispatch_step(&mut control, 46), TaskAction::Exit);
         assert_eq!(rec.switches.load(Ordering::SeqCst), before);
     }
 
@@ -2029,7 +2032,7 @@ mod tests {
 
         // With the guard intact the shim reports the task's requested action
         // (the default `Yield`) and the task stays runnable.
-        assert_eq!(dispatch_step(&mut control, 0), TaskAction::Yield);
+        assert_eq!(dispatch_step(&mut control, 47), TaskAction::Yield);
         assert_eq!(control.state, RunState::Running);
     }
 }

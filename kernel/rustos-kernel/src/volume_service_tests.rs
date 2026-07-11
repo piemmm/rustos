@@ -503,6 +503,8 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
     dirty_surprise_removal_scenario(window_ptr, facility);
     clean_surprise_removal_scenario(window_ptr, facility);
     forced_unmount_of_a_healthy_volume_scenario(window_ptr, facility);
+    verified_reinsert_replays_scenario(window_ptr, facility);
+    mutated_reinsert_conflicts_scenario(window_ptr, facility);
 }
 
 /// The per-scenario facts for [`attach_then_yank`]: the owning task, the
@@ -680,6 +682,276 @@ fn clean_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
         Err(Errno::NotFound),
         "nothing remains to detach"
     );
+}
+
+/// One yank round for the re-insert scenarios: format a FAT32 image
+/// carrying `hello.txt`, serve it, attach it under `name`, dirty the
+/// journal through the production write path, and yank the serving
+/// driver. Returns the volume identity, the image bytes as they stood
+/// **before** the dirty write (the state a device that lost its cache
+/// presents), and the image bytes at yank time.
+struct YankedRound {
+    identity: [u8; 16],
+    pristine: Vec<u8>,
+    at_yank: Vec<u8>,
+}
+
+fn dirty_yank_round(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+    scenario: &YankScenario,
+) -> YankedRound {
+    assert!(
+        scenario.dirty,
+        "a re-insert round always dirties the journal"
+    );
+    let endpoint = register_endpoint(scenario.endpoint_id, scenario.owner);
+    let (image, identity) = fat32_image(scenario.serial, b"scenario payload");
+    let pristine = image.data.clone();
+    let blocks = (image.data.len() / BLOCK_SIZE) as u64;
+    let device = StdArc::new(Mutex::new(ServedDevice {
+        block: image,
+        flushes: 0,
+    }));
+    let stop = StdArc::new(AtomicBool::new(false));
+    let server = serve(
+        StdArc::clone(&endpoint),
+        window_ptr as usize,
+        StdArc::clone(&device),
+        StdArc::clone(&stop),
+    );
+    let (_va, region) =
+        sharedreg::create(facility, TaskId(scenario.region_task), 8).expect("region");
+    VOLUME_SERVICE
+        .attach(&VolumeAttachRequest {
+            endpoint: scenario.endpoint_id,
+            window: region,
+            first_lba: 0,
+            blocks,
+            fstype: VolumeFsType::Fat32,
+            name: scenario.name,
+        })
+        .expect("attach re-insert round volume");
+    let path = std::format!(
+        "/Storage/{}/hello.txt",
+        core::str::from_utf8(scenario.name).expect("ascii name")
+    );
+    FS_SERVICE
+        .write(0, &NoCaps, &path, 0, false, b"D")
+        .expect("write dirties the journal");
+    rustos_kernel_core::callreg::teardown_owned_by(scenario.owner, &SINK);
+    stop.store(true, Ordering::Relaxed);
+    server.join().expect("re-insert round server thread");
+    let at_yank = device.lock().unwrap().block.data.clone();
+    YankedRound {
+        identity,
+        pristine,
+        at_yank,
+    }
+}
+
+/// The served re-inserted device and its round facts: the device (for
+/// post-recovery image assertions), the stop/join pair the caller ends
+/// the round with, and the attach outcome.
+struct ReinsertRound {
+    device: StdArc<Mutex<ServedDevice>>,
+    stop: StdArc<AtomicBool>,
+    server: thread::JoinHandle<()>,
+    outcome: Result<(), Errno>,
+}
+
+/// Serve `image` as the re-inserted device and re-attach it.
+fn reinsert(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+    endpoint_id: u64,
+    owner: u64,
+    region_task: u64,
+    name: &'static [u8],
+    image: Vec<u8>,
+) -> ReinsertRound {
+    let endpoint = register_endpoint(endpoint_id, owner);
+    let blocks = (image.len() / BLOCK_SIZE) as u64;
+    let device = StdArc::new(Mutex::new(ServedDevice {
+        block: RamBlock { data: image },
+        flushes: 0,
+    }));
+    let stop = StdArc::new(AtomicBool::new(false));
+    let server = serve(
+        StdArc::clone(&endpoint),
+        window_ptr as usize,
+        StdArc::clone(&device),
+        StdArc::clone(&stop),
+    );
+    let (_va, region) = sharedreg::create(facility, TaskId(region_task), 8).expect("region");
+    let outcome = VOLUME_SERVICE.attach(&VolumeAttachRequest {
+        endpoint: endpoint_id,
+        window: region,
+        first_lba: 0,
+        blocks,
+        fstype: VolumeFsType::Fat32,
+        name,
+    });
+    ReinsertRound {
+        device,
+        stop,
+        server,
+        outcome,
+    }
+}
+
+/// Verified re-insert (`plans/DEVICES.md` D4c): the device lost its
+/// cached writes (the medium is the pre-write image), non-mutation is
+/// proven from the evidence window, and the retained writes replay — the
+/// dirty write is back on the medium and the volume returns to full
+/// service under its original mount and published root.
+fn verified_reinsert_replays_scenario(window_ptr: *mut u8, facility: &'static TestFacility) {
+    let round = dirty_yank_round(
+        window_ptr,
+        facility,
+        &YankScenario {
+            owner: 0x70_1007,
+            endpoint_id: 0xB1D0_5E17_0000_0005,
+            serial: 0x0D15_C005,
+            region_task: 0x70_0007,
+            name: b"usb5",
+            dirty: true,
+        },
+    );
+    // Re-insert the pre-write image: the device accepted the writes into
+    // its volatile cache and lost them with the power.
+    let inserted = reinsert(
+        window_ptr,
+        facility,
+        0xB1D0_5E17_0000_0006,
+        0x70_1008,
+        0x70_0008,
+        b"usb5",
+        round.pristine,
+    );
+    inserted.outcome.expect("the re-insert recovers the volume");
+
+    // The volume is back in full service: available, its root published,
+    // and the replayed write visible through the production service.
+    let record = FS_SERVICE
+        .mount_snapshot()
+        .into_iter()
+        .find(|r| r.source_bytes() == b"usb5")
+        .expect("the recovered volume appears in the mount snapshot");
+    assert_eq!(record.availability(), MountAvailability::Available);
+    assert_eq!(record.volume_id(), round.identity);
+    assert_eq!(
+        VOLUME_FOREST.resolve(&round.identity),
+        Some(vec![String::from("Storage"), String::from("usb5")]),
+        "the durable root survived the whole unplug/re-insert cycle"
+    );
+    let mut buf = [0u8; 32];
+    let n = FS_SERVICE
+        .read(0, &NoCaps, "/Storage/usb5/hello.txt", 0, &mut buf)
+        .expect("the recovered volume serves reads");
+    assert_eq!(
+        &buf[..1],
+        b"D",
+        "the retained dirty write was replayed onto the medium"
+    );
+    assert!(n >= 1);
+    // The recovered volume is writable again.
+    FS_SERVICE
+        .write(0, &NoCaps, "/Storage/usb5/hello.txt", 0, false, b"E")
+        .expect("the recovered volume accepts writes");
+
+    // A clean detach ends the round: the replay left nothing uncommitted
+    // that a flush cannot commit.
+    VOLUME_SERVICE
+        .detach(&VolumeDetachRequest {
+            volume_id: round.identity,
+            force: false,
+        })
+        .expect("the recovered volume detaches cleanly");
+    inserted.stop.store(true, Ordering::Relaxed);
+    inserted.server.join().expect("reinsert server thread");
+    assert!(
+        inserted.device.lock().unwrap().flushes >= 1,
+        "the replay committed the device cache"
+    );
+}
+
+/// Mutated re-insert (`plans/DEVICES.md` D4c): the medium's evidence
+/// window changed while unplugged (a foreign mount touched `FSInfo`), so
+/// replay is refused — the volume returns read-only in the
+/// recovery-conflict state with the retained set kept; a plain detach
+/// stays refused and the audited force-unmount is the exit.
+fn mutated_reinsert_conflicts_scenario(window_ptr: *mut u8, facility: &'static TestFacility) {
+    let round = dirty_yank_round(
+        window_ptr,
+        facility,
+        &YankScenario {
+            owner: 0x70_1009,
+            endpoint_id: 0xB1D0_5E17_0000_0007,
+            serial: 0x0D15_C006,
+            region_task: 0x70_0009,
+            name: b"usb6",
+            dirty: true,
+        },
+    );
+    // A foreign mount updated the FSInfo free-cluster hint (sector 1,
+    // offset 488) — inside the evidence window, outside the identity.
+    let mut mutated = round.at_yank;
+    mutated[512 + 488..512 + 492].copy_from_slice(&1234u32.to_le_bytes());
+    let inserted = reinsert(
+        window_ptr,
+        facility,
+        0xB1D0_5E17_0000_0008,
+        0x70_100A,
+        0x70_000A,
+        b"usb6",
+        mutated,
+    );
+    inserted
+        .outcome
+        .expect("the conflicted re-insert still mounts (read-only)");
+
+    // The volume is visible but conflicted: reads serve, writes are
+    // refused by the read-only mount, and the snapshot says why.
+    let record = FS_SERVICE
+        .mount_snapshot()
+        .into_iter()
+        .find(|r| r.source_bytes() == b"usb6")
+        .expect("the conflicted volume appears in the mount snapshot");
+    assert_eq!(record.availability(), MountAvailability::RecoveryConflict);
+    let mut buf = [0u8; 32];
+    FS_SERVICE
+        .read(0, &NoCaps, "/Storage/usb6/hello.txt", 0, &mut buf)
+        .expect("the conflicted volume serves reads");
+    assert_eq!(
+        FS_SERVICE
+            .write(0, &NoCaps, "/Storage/usb6/hello.txt", 0, false, b"X")
+            .err(),
+        Some(Errno::PermissionDenied),
+        "the conflicted volume is read-only until acknowledged"
+    );
+    // The retained set is still held: a plain detach would discard it
+    // silently, so it is refused; the audited force is the exit.
+    assert_eq!(
+        VOLUME_SERVICE.detach(&VolumeDetachRequest {
+            volume_id: round.identity,
+            force: false,
+        }),
+        Err(Errno::NotEmpty),
+        "a plain detach never discards the conflicted volume's retained set"
+    );
+    VOLUME_SERVICE
+        .detach(&VolumeDetachRequest {
+            volume_id: round.identity,
+            force: true,
+        })
+        .expect("force-unmount discards and retracts the conflicted volume");
+    assert_eq!(VOLUME_FOREST.resolve(&round.identity), None);
+    inserted.stop.store(true, Ordering::Relaxed);
+    inserted
+        .server
+        .join()
+        .expect("conflict reinsert server thread");
 }
 
 /// A force detach of a **healthy** volume commits cleanly — the flush

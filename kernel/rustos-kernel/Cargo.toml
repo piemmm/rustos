@@ -136,6 +136,13 @@ rustos-drv-fs-ext4 = { path = "../../drivers/filesystem/ext4", version = "=0.0.0
 # Scheme- and architecture-neutral (MBR on the Pi, GPT on UEFI x86_64), so
 # it is a common dependency and its host tests run on the CI host.
 rustos-partition = { path = "../../lib/partition", version = "=0.0.0" }
+# The shared filesystem signature/identity probe and its mutation-evidence
+# window definition (`plans/DEVICES.md` D4c): the runtime volume service
+# matches a re-inserted volume to its unavailable record by the probed
+# identity and sizes the evidence window it verifies before replaying
+# retained writes — the same definitions the volmgr policy driver and the
+# filesystem drivers import, so probe and verifier can never disagree.
+rustos-fsprobe = { path = "../../lib/fsprobe", version = "=0.0.0" }
 # The bootstrap-floor storage path (`AGENTS.md` §18.6): the block drivers
 # that must be up before the signed driver store under `/System/Drivers/`
 # is reachable. They are compiled in (not discovered from the store) and

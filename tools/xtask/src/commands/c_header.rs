@@ -1478,6 +1478,10 @@ fn sysinfo_emit_record_sizes(out: &mut String) {
             "ROS_MOUNT_UNAVAILABLE_LOST",
             MountAvailability::UnavailableLost,
         ),
+        (
+            "ROS_MOUNT_RECOVERY_CONFLICT",
+            MountAvailability::RecoveryConflict,
+        ),
     ];
     for (name, state) in mount_availabilities {
         let _ = writeln!(out, "#define {name} ((uint8_t){}u)", state.as_u8());

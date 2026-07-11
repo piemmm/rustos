@@ -98,6 +98,73 @@ pub fn probe(head: &[u8]) -> Option<ProbedVolume> {
         .or_else(|| probe_fat32(head))
 }
 
+/// Ceiling on a mutation-evidence extent ([`evidence_len`]), in bytes: the
+/// largest any supported format's declaration can reach (the `RustFS`
+/// superblock ring of eight 4 KiB blocks). A head whose declared evidence
+/// would exceed it is refused (`None`), never clamped — a clamped window
+/// could no longer prove non-mutation.
+pub const EVIDENCE_MAX: u64 = 32 * 1024;
+
+/// Physical blocks of the `RustFS` superblock ring: four logical slots,
+/// each a mirrored pair. Defined here (like [`RUSTFS_HEADER_MAGIC`]) so
+/// the `RustFS` driver and the [`evidence_len`] window share one value.
+pub const RUSTFS_RING_BLOCKS: u64 = 8;
+
+/// The largest `RustFS` declaration (the ring at the format's maximum
+/// 4 KiB block size) fits the ceiling, so a structurally valid head is
+/// never refused for size alone.
+const _: () = assert!(RUSTFS_RING_BLOCKS * 4096 <= EVIDENCE_MAX);
+
+/// Byte length, from the start of the extent, of the region whose content
+/// any *foreign mutation* of the volume must rewrite — the
+/// mutation-evidence window the verified re-insert path compares
+/// (`plans/DEVICES.md` D4c). One definition per format, beside the
+/// signatures, so the probe and the verifier can never disagree:
+///
+/// * `RustFS`: the whole superblock ring ([`RUSTFS_RING_BLOCKS`] mirrored
+///   slot blocks) — every committed transaction publishes a new generation
+///   into a ring slot, so a foreign writer must land there.
+/// * ext4: the first 2048 bytes — the primary superblock (bytes
+///   1024..2048), whose write-time, mount count, and checksums a foreign
+///   kernel updates on any read-write mount.
+/// * FAT32: the reserved sectors through the `FSInfo` sector — a foreign
+///   writer updates the `FSInfo` free-cluster fields (honestly weaker than
+///   the other formats; the format offers nothing stronger).
+///
+/// `None` when `head` matches no supported signature or the declared
+/// window is structurally implausible (fail closed — no evidence means no
+/// replay, never a guess).
+#[must_use]
+pub fn evidence_len(head: &[u8]) -> Option<u64> {
+    let len = match probe(head)?.fstype {
+        VolumeFsType::RustFs => {
+            // The plaintext block-size field of the superblock payload
+            // (byte 128, following the metadata-block header). It is
+            // unauthenticated here, but only sizes the window: a lying
+            // value fails the format's power-of-two 512..=4096 bounds and
+            // the whole declaration fails closed.
+            let block_size = u64::from(le_u32(head, 128)?);
+            if !block_size.is_power_of_two() || !(512..=4096).contains(&block_size) {
+                return None;
+            }
+            RUSTFS_RING_BLOCKS * block_size
+        }
+        VolumeFsType::Ext4 => 2048,
+        VolumeFsType::Fat32 => {
+            let bytes_per_sector = u64::from(le_u16(head, 11)?);
+            let fsinfo_sector = u64::from(le_u16(head, 48)?);
+            let reserved_sectors = u64::from(le_u16(head, 14)?);
+            // FSInfo lives in the reserved region; a boot sector that
+            // points elsewhere is lying.
+            if fsinfo_sector == 0 || fsinfo_sector >= reserved_sectors {
+                return None;
+            }
+            (fsinfo_sector + 1) * bytes_per_sector
+        }
+    };
+    (len <= EVIDENCE_MAX).then_some(len)
+}
+
 /// The stable FAT32 identity derived from a boot sector: the BPB volume
 /// serial (4 bytes) + label (11 bytes) when the extended boot signature
 /// (`0x29` at byte 66) declares them, else zeros, with a trailing tag byte
@@ -429,6 +496,46 @@ mod tests {
         let rust = rustfs_head([9u8; 16]);
         head[..32].copy_from_slice(&rust[..32]);
         assert_eq!(probe(&head).map(|p| p.fstype), Some(VolumeFsType::RustFs));
+    }
+
+    #[test]
+    fn evidence_windows_cover_each_formats_mutation_surface() {
+        // FAT32: the boot sector must name its FSInfo sector inside the
+        // reserved region for the window to exist.
+        let mut fat = fat32_boot(*b"SRLN", b"MYDISK     ");
+        fat[48..50].copy_from_slice(&1u16.to_le_bytes());
+        assert_eq!(evidence_len(&fat), Some(2 * 512));
+
+        // ext4: the primary superblock ends at byte 2048.
+        assert_eq!(evidence_len(&ext4_head([7u8; 16], b"backup")), Some(2048));
+
+        // RustFS: the whole mirrored superblock ring, sized by the
+        // plaintext block-size field.
+        let mut rust = rustfs_head([9u8; 16]);
+        rust[128..132].copy_from_slice(&512u32.to_le_bytes());
+        assert_eq!(evidence_len(&rust), Some(RUSTFS_RING_BLOCKS * 512));
+        rust[128..132].copy_from_slice(&4096u32.to_le_bytes());
+        assert_eq!(evidence_len(&rust), Some(RUSTFS_RING_BLOCKS * 4096));
+    }
+
+    #[test]
+    fn lying_evidence_declarations_fail_closed() {
+        // An unrecognised head declares nothing.
+        assert_eq!(evidence_len(&[0u8; PROBE_HEAD_LEN]), None);
+
+        // FAT32: an absent, zero, or out-of-reserved FSInfo pointer.
+        let fat = fat32_boot(*b"SRLN", b"MYDISK     ");
+        assert_eq!(evidence_len(&fat), None, "no FSInfo pointer");
+        let mut lying = fat;
+        lying[48..50].copy_from_slice(&32u16.to_le_bytes()); // == reserved
+        assert_eq!(evidence_len(&lying), None);
+
+        // RustFS: a block size outside the format's bounds.
+        for bad in [0u32, 256, 768, 8192] {
+            let mut rust = rustfs_head([9u8; 16]);
+            rust[128..132].copy_from_slice(&bad.to_le_bytes());
+            assert_eq!(evidence_len(&rust), None);
+        }
     }
 
     #[test]

@@ -329,9 +329,11 @@ and the generic `offset`/`limit` page walk — so none of it is copied
 `source on target type fstype (options)` line per mount; the option list
 opens with `ro`/`rw` and then names each restriction in force, and a
 surprise-removed volume carries a trailing ` [unavailable-dirty]` /
-` [unavailable-lost]` marker (`plans/DEVICES.md` D4b) — additive, so a
-healthy volume's line keeps the classic shape while a dead one never
-looks healthy. The query
+` [unavailable-lost]` marker (`plans/DEVICES.md` D4b) and a re-inserted
+volume whose non-mutation could not be proven carries
+` [recovery-conflict]` (`plans/DEVICES.md` D4c) — additive, so a
+healthy volume's line keeps the classic shape while a dead or
+conflicted one never looks healthy. The query
 is ungated: the mount table is system-wide and secret-free, so any task
 may read it (`AGENTS.md` §16.6).
 
@@ -400,12 +402,18 @@ unmount [-f | --force] [--] NAME
 
 A surprise-removed volume (`unavailable-dirty`/`unavailable-lost` in
 the mount listing) refuses a plain detach: its retained uncommitted
-writes are held for the verified re-insert. `--force` is the
+writes are held for the verified re-insert. So does a re-inserted
+volume in the `recovery-conflict` state (`plans/DEVICES.md` D4c): it is
+mounted read-only while its retained set is still held, and only the
+audited force-discard releases it. `--force` is the
 deliberate, separately-audited exit — the kernel discards the retained
 set, retracts the volume, and logs the data loss with its own event
 (`fs.hotplug.force_unmount`, carrying the discarded byte count and the
 reason a clean commit was impossible). On a healthy volume `--force`
 still commits cleanly; nothing is discarded when the flush succeeds.
+A verified re-insert needs no tool at all: a re-attached volume whose
+non-mutation is proven has its retained writes replayed by the kernel
+and returns to full service (`fs.hotplug.reinsert_replayed`).
 When a plain detach is refused because the volume is unavailable, the
 tool spells out the `--force` consequence on standard error and emits
 an fd-3 `suggestion` record (`fs.volume_unavailable_force_required`,

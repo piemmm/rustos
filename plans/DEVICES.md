@@ -775,26 +775,73 @@ first, then the force-unmount exit, then the verified re-insert replay.
   the render marker, and the unmount engine suite. Live path: Pi 4
   metal acceptance (QEMU models no Pi USB — the D2/D3/D4a precedent).
 
-#### 2.5.3 D4c — verified re-insert
+#### 2.5.3 D4c — verified re-insert. **Done.**
 
-- On re-attach, `volmgr` matches the new volume against each
-  `unavailable-dirty` record by durable identity (volume UUID/id) **and
-  proves non-mutation before replaying**: the filesystem driver compares
-  its mutation evidence — RustFS generation/root checksum; ext4
-  superblock write-time/mount-count/checksums; FAT32 FSInfo + a bounded
-  re-read comparison of the exact regions the retained writes depend on
-  (declared per driver through the filesystem capability API, honestly
-  weaker for weaker formats). Provably unmutated → the retained writes
-  replay, the volume returns to service, and the recovery is logged. Any
-  doubt → fail closed: the volume mounts fresh and
-  read-only-until-acknowledged, the retained set is kept (budget
-  permitting) for explicit salvage or `--force` discard, and the
-  conflict is logged. Never silently merge (§5.4, §26.5).
-- Tests: host simulations of unplug-with-dirty-data (retain → replay on
-  identical image; retain → refuse on mutated image; force-unmount
-  discard), each with its syslog assertion; a QEMU vertical driving
-  detach/re-attach of a `usb-storage` image where the emulated path
-  exists.
+- **The kernel volume service owns recovery** (not `volmgr`, which
+  simply re-probes and re-attaches on plug — zero volmgr changes): an
+  attach whose probed identity (`lib/fsprobe`, read from the extent
+  head before anything opens) matches an `unavailable-dirty`/`-lost`
+  record is a re-insert, recovered in place under the same handle,
+  mount path, catalog name, and published `id::` root — never
+  re-attached as a duplicate.
+- **Mutation evidence is a dual-acceptance shadow in the journal,
+  fs-neutral in mechanics, per-format only in extent.** `lib/fsprobe`
+  gained `evidence_len` (beside the signatures, so probe and verifier
+  share one definition, §2.2): the window any foreign mutation must
+  rewrite — the whole `RustFS` superblock ring (`RUSTFS_RING_BLOCKS`,
+  now the one shared constant the rustfs driver re-exports), the ext4
+  primary superblock (write-time/mount-count/checksums live there), and
+  the FAT32 boot+FSInfo sectors (honestly weaker; the format offers
+  nothing stronger), each bounded by `EVIDENCE_MAX` and fail-closed on
+  a lying header. `RetainedWrites` seeds the window's content at attach
+  and keeps **two** acceptable per-block states — last-committed and
+  latest-written — because the yanked device may have committed any
+  per-block subset of the uncommitted writes; at re-insert every
+  re-read evidence block must equal one of the two. A lost episode or
+  an overlapping discard invalidates the shadow (fail closed); commit
+  promotes latest → committed. Rationale for the deliberate divergence
+  from the planned driver-side comparison: the in-memory driver is
+  dropped at the dirty transition (D4a re-points the slot at the
+  fail-closed stand-in), so evidence must live in the journal that
+  survives the unplug — and one shadow mechanism replaces three
+  per-driver evidence surfaces (§2.2).
+- **Proven unmutated → replay**: extent equality is required (the
+  retained LBAs' frame of reference), the retained set is snapshotted
+  (`ReplaySnapshot`, wiped on drop), written back, the device cache
+  flushed, and the journal committed — the volume returns to full
+  service (event 4185, `fs.hotplug.reinsert_replayed`). **Any doubt →
+  conflict**: retention lost, extent moved, write-protected medium,
+  missing/stale/unreadable/mismatching evidence, or a replay/flush
+  failure mounts the volume fresh and **read-only** in the new
+  `MountAvailability::RecoveryConflict` state (ABI + C headers + the
+  ` [recovery-conflict]` mount marker), retained set kept; a plain
+  detach stays refused (`Errno::NotEmpty` — the device is live, the
+  data is what is held) and the audited `--force` discard is the exit
+  (event 4186, `fs.hotplug.reinsert_conflict`). A conflicted volume's
+  own unplug re-enters the unavailable states through the same vanish
+  observer. Never a silent merge (§5.4, §26.5).
+- **Defects fixed en route (§2.18), each with a regression test:**
+  `Fat32::format` wrote no FSInfo sector and no backup boot sector
+  (BPB 48/50 zero) — format-nonconformant, and it left RustOS-formatted
+  FAT32 volumes without an evidence window; it now lays out FSInfo
+  (sector 1, "unknown" hints — deterministic, images stay
+  bit-reproducible) and the backup boot/FSInfo pair (sectors 6/7). Six
+  `kthread` host tests shared per-CPU resume/preempt slots with the
+  production dispatch pipeline the syscall tests drive on CPU 0 — a
+  cross-test interference flake surfaced by the whole-suite run; each
+  now uses its own CPU index (the file's own convention).
+- Host-proven: fsprobe evidence-window units (per-format sizes, lying
+  headers, cap), retained-shadow units (dual acceptance, commit
+  promotion, lost/discard invalidation, malformed windows, snapshot
+  order + drop-wipe), and two lifecycle scenarios over served volumes —
+  a re-insert of the pre-write image (device lost its cache) that
+  replays and returns the volume writable with the dirty write back on
+  the medium, and a re-insert with a mutated FSInfo that mounts
+  read-only, refuses the plain detach, and force-retracts — plus the
+  existing force-discard scenario. Live path: Pi 4 metal acceptance,
+  and the `usb-storage` detach/re-attach vertical rides the first
+  emulated target that carries the USB stack (the D2/D3/D4a/b
+  precedent — QEMU models no Pi USB).
 
 ### 2.6 DEVICE2 increment order
 
@@ -813,6 +860,7 @@ first, then the force-unmount exit, then the verified re-insert replay.
 - **D4b** force-unmount (`unmount --force`, the detach force flag, the
   sysinfo availability mark). **Done** (§2.5.2).
 - **D4c** verified re-insert (mutation evidence + retained-write replay).
+  **Done** (§2.5.3).
 
 D3 is deliberately after D2 so automount is proven against a real
 hot-pluggable block source, but its volume-forest core is bus-neutral

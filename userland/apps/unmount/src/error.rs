@@ -72,7 +72,7 @@ impl fmt::Display for UnmountError {
                 unavailable: true,
             } => write!(
                 f,
-                "volume is unavailable with retained uncommitted data \
+                "volume holds retained uncommitted data \
                  (use --force to discard it): {errno}"
             ),
             Self::Detach {

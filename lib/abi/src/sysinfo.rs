@@ -1696,6 +1696,12 @@ pub enum MountAvailability {
     /// The serving device vanished after write retention was abandoned:
     /// uncommitted data existed that is not held.
     UnavailableLost = 2,
+    /// The volume was re-inserted but non-mutation could not be proven
+    /// (or retention had been abandoned), so it is mounted fresh and
+    /// read-only with its retained set still held: the conflict is
+    /// resolved only by the audited force-unmount, which discards the
+    /// set — never silently (`plans/DEVICES.md` D4c).
+    RecoveryConflict = 3,
 }
 
 impl MountAvailability {
@@ -1716,6 +1722,7 @@ impl MountAvailability {
             0 => Ok(Self::Available),
             1 => Ok(Self::UnavailableDirty),
             2 => Ok(Self::UnavailableLost),
+            3 => Ok(Self::RecoveryConflict),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -2850,10 +2857,11 @@ mod tests {
             MountAvailability::Available,
             MountAvailability::UnavailableDirty,
             MountAvailability::UnavailableLost,
+            MountAvailability::RecoveryConflict,
         ] {
             assert_eq!(MountAvailability::from_u8(state.as_u8()), Ok(state));
         }
-        assert_eq!(MountAvailability::from_u8(3), Err(Errno::OutOfRange));
+        assert_eq!(MountAvailability::from_u8(4), Err(Errno::OutOfRange));
     }
 
     #[test]
@@ -2986,7 +2994,7 @@ mod tests {
         assert_eq!(MountRecord::from_bytes(&bytes), Err(Errno::OutOfRange));
         // An availability byte naming no known state.
         let mut bytes = rec.to_le_bytes();
-        bytes[7] = 3;
+        bytes[7] = 4;
         assert_eq!(MountRecord::from_bytes(&bytes), Err(Errno::OutOfRange));
         // A length byte beyond its buffer.
         let mut bytes = rec.to_le_bytes();

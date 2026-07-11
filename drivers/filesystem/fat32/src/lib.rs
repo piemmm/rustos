@@ -379,6 +379,45 @@ fn pick_cluster_bytes(total_bytes: u64, bps: u64) -> u64 {
     target.max(bps).min(bps * 128)
 }
 
+/// `FSInfo` sector (BPB offset 48): the format's customary sector 1.
+const FSINFO_SECTOR: u16 = 1;
+
+/// Backup boot sector (BPB offset 50): the format's customary sector 6,
+/// with the `FSInfo` copy at the following sector.
+const BACKUP_BOOT_SECTOR: u16 = 6;
+
+/// Write the reserved-region structures the FAT32 format requires around
+/// the finished `boot` sector: the `FSInfo` structure, the backup
+/// boot/`FSInfo` pair the BPB points at, and finally the primary boot
+/// sector itself.
+///
+/// This driver derives its free-space accounting from the FAT itself (the
+/// open-time scan), so both `FSInfo` hint fields carry the format's
+/// documented "unknown" value — deterministic, so images stay
+/// bit-reproducible — and are left untouched at runtime.
+fn write_reserved_structures<B: Block>(
+    block: &mut B,
+    block_size: u32,
+    block_count: u64,
+    boot: &[u8; 512],
+) -> Result<(), DriverError> {
+    let mut fsinfo = [0u8; 512];
+    put_le32(&mut fsinfo, 0, 0x4161_5252); // FSI_LeadSig
+    put_le32(&mut fsinfo, 484, 0x6141_7272); // FSI_StrucSig
+    put_le32(&mut fsinfo, 488, 0xFFFF_FFFF); // FSI_Free_Count: unknown
+    put_le32(&mut fsinfo, 492, 0xFFFF_FFFF); // FSI_Nxt_Free: unknown
+    put_le32(&mut fsinfo, 508, 0xAA55_0000); // FSI_TrailSig
+    let bps64 = u64::from(block_size);
+    for (sector, image) in [
+        (u64::from(FSINFO_SECTOR), &fsinfo),
+        (u64::from(BACKUP_BOOT_SECTOR), boot),
+        (u64::from(BACKUP_BOOT_SECTOR) + 1, &fsinfo),
+    ] {
+        device_write(block, block_size, block_count, sector * bps64, image)?;
+    }
+    device_write(block, block_size, block_count, 0, boot)
+}
+
 /// Write `len` zero bytes to `block` starting at device byte `offset`,
 /// staged through a stack scratch buffer one chunk at a time.
 fn write_zeros<B: Block>(
@@ -884,6 +923,7 @@ impl<B: Block> Fat32<B> {
     pub fn format(mut block: B, serial: u32) -> Result<Self, DriverError> {
         const RESERVED_SECTORS: u16 = 32;
         const NUM_FATS: u8 = 2;
+        const _: () = assert!(BACKUP_BOOT_SECTOR + 1 < RESERVED_SECTORS);
 
         if serial == 0 {
             return Err(DriverError::OutOfRange);
@@ -953,13 +993,15 @@ impl<B: Block> Fat32<B> {
         put_le32(&mut boot, 32, total_sectors);
         put_le32(&mut boot, 36, fat_size_32);
         put_le32(&mut boot, 44, 2); // root directory first cluster
+        put_le16(&mut boot, 48, FSINFO_SECTOR);
+        put_le16(&mut boot, 50, BACKUP_BOOT_SECTOR);
         boot[66] = 0x29; // extended boot signature
         boot[67..71].copy_from_slice(&serial.to_le_bytes());
         boot[71..82].copy_from_slice(b"NO NAME    ");
         boot[82..90].copy_from_slice(b"FAT32   ");
         boot[510] = 0x55;
         boot[511] = 0xAA;
-        device_write(&mut block, bps, block_count, 0, &boot)?;
+        write_reserved_structures(&mut block, bps, block_count, &boot)?;
 
         // Mirrored FATs: zero every entry, then plant the two reserved
         // entries and the root directory's end-of-chain marker.

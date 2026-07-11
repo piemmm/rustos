@@ -29,7 +29,16 @@ pub const RING_SLOTS: u64 = 4;
 /// metadata copies: 2 minimum). The mirroring uses the same companion rule
 /// (`primary + 1`) as every other metadata block, so there is one redundancy
 /// mechanism, not two.
-pub const RING_BLOCKS: u64 = RING_SLOTS * 2;
+///
+/// The one definition lives in `lib/fsprobe` (like the header magic): the
+/// verified re-insert path sizes its mutation-evidence window from the same
+/// value, so the driver and the verifier can never disagree about where the
+/// ring ends.
+pub use rustos_fsprobe::RUSTFS_RING_BLOCKS as RING_BLOCKS;
+
+/// The shared ring constant covers exactly the mirrored slots this module
+/// lays out.
+const _: () = assert!(RING_BLOCKS == RING_SLOTS * 2);
 
 /// Primary block address of logical ring slot `slot` (`0..RING_SLOTS`); its
 /// companion mirror lives at `slot_block(slot) + 1`.

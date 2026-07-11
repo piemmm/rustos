@@ -71,7 +71,7 @@ pub use path::{
     resolve_machine_alias, Path, MAX_COMPONENT_LEN, MAX_PATH_COMPONENTS, ROOT_TEMPLATE,
 };
 pub use perm::{Access, AclEntry, AclWho, Credentials, Metadata, Mode};
-pub use retained::{FlushBlock, JournaledBlock, RetainedWrites};
+pub use retained::{FlushBlock, JournaledBlock, ReplaySnapshot, RetainedWrites};
 pub use service::{FilesystemService, NullFilesystemService, ReaddirEntry, NULL_FILESYSTEM};
 pub use vfs::Vfs;
 pub use volsvc::{NullVolumeService, VolumeService, NULL_VOLUME_SERVICE};

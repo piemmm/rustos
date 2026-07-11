@@ -115,7 +115,7 @@ fn resolve(name: &str, transport: &dyn Transport) -> Result<Option<Resolved>, Un
 /// and additive — it never changes the diagnostic, exit status, or
 /// pipeline behaviour.
 fn emit_force_suggestion(err: &dyn Output, name: &str) {
-    let message = String::from("The volume is unavailable with retained uncommitted data.");
+    let message = String::from("The volume holds retained uncommitted data.");
     let suggestion = format!("Use `unmount --force {name}` to discard it.");
     let ai = format!(
         "{{\"subject\":\"volume_detach\",\
