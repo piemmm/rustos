@@ -67,17 +67,31 @@ pub struct UserStack {
 /// derived from the image by [`derive_user_layout`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UserLayout {
-    /// Page-aligned user virtual address of the lowest stack page.
+    /// Page-aligned user virtual address of the lowest page of the whole
+    /// reserved stack span. The pages between here and [`Self::stack_base`]
+    /// are reserved growth room: unmapped at spawn, backed on demand by the
+    /// stack-growth fault path, bounded by the task's stack resource limit.
+    pub stack_reserve_base: u64,
+    /// Page-aligned user virtual address of the lowest *committed* stack
+    /// page — the bottom of the eagerly mapped top of the span.
     pub stack_base: u64,
     /// Page-aligned user virtual address of the startup-vector block.
     pub block_base: u64,
 }
 
 /// Derive the stack and startup-vector-block placement for one spawned
-/// image: the stack's lowest page sits one unmapped guard page above the
-/// image's highest mapped page, and the block one unmapped guard page
-/// above the stack top, so an overrun off the image or the stack faults
-/// on the gap instead of silently corrupting its neighbour.
+/// image: the reserved stack span's lowest page sits one unmapped guard
+/// page above the image's highest mapped page, and the block one unmapped
+/// guard page above the span top, so an overrun off the image or below
+/// the span faults on the gap instead of silently corrupting its
+/// neighbour.
+///
+/// The span reserves `stack_reserve_pages` of virtual address space but
+/// only the top `stack_commit_pages` of it are eagerly mapped at spawn
+/// (the returned [`UserLayout::stack_base`] is the committed bottom); the
+/// uncommitted remainder below is growth room the stack-growth fault path
+/// backs on demand, so a deep stack costs address space up front and
+/// frames only as it is actually used.
 ///
 /// The placement scales with the image instead of capping it at a fixed
 /// slot — a fixed stack offset silently collides with any program whose
@@ -91,17 +105,19 @@ pub struct UserLayout {
 /// reserved below it, so no argument vector can collide with the window.
 ///
 /// Fails closed with `None` — the caller refuses the spawn — when
-/// `stack_pages` is zero, the layout cannot fit below `ceiling`, or an
-/// address computation overflows.
+/// `stack_commit_pages` is zero, the committed pages exceed the reserved
+/// span, the layout cannot fit below `ceiling`, or an address computation
+/// overflows.
 #[must_use]
 pub fn derive_user_layout(
     image: &LoadImage,
     bias: u64,
-    stack_pages: u64,
+    stack_reserve_pages: u64,
+    stack_commit_pages: u64,
     ceiling: u64,
 ) -> Option<UserLayout> {
     let page = PAGE_SIZE as u64;
-    if stack_pages == 0 {
+    if stack_commit_pages == 0 || stack_commit_pages > stack_reserve_pages {
         return None;
     }
     // Highest relocated one-past-the-end address across the image's mapped
@@ -113,12 +129,16 @@ pub fn derive_user_layout(
         let bytes = segment.page_count().checked_mul(page)?;
         image_top = image_top.max(base.checked_add(bytes)?);
     }
-    let stack_base = image_top.checked_add(page)?;
-    let stack_top = stack_base.checked_add(stack_pages.checked_mul(page)?)?;
+    let stack_reserve_base = image_top.checked_add(page)?;
+    let stack_top = stack_reserve_base.checked_add(stack_reserve_pages.checked_mul(page)?)?;
+    // The committed top of the span: cannot underflow past the reserve
+    // base because `stack_commit_pages <= stack_reserve_pages`.
+    let stack_base = stack_top.checked_sub(stack_commit_pages.checked_mul(page)?)?;
     let block_base = stack_top.checked_add(page)?;
     let block_reserve = process::PROCESS_START_MAX_TOTAL_LEN.checked_next_multiple_of(page)?;
     let layout_end = block_base.checked_add(block_reserve)?;
     (layout_end <= ceiling).then_some(UserLayout {
+        stack_reserve_base,
         stack_base,
         block_base,
     })
@@ -747,6 +767,9 @@ mod tests {
 
     const LAYOUT_BIAS: u64 = 64 << 30;
     const LAYOUT_STACK_PAGES: u64 = 288;
+    // A reserve wider than the committed top: the extra pages are the
+    // demand-grown room below the committed stack.
+    const LAYOUT_RESERVE_PAGES: u64 = 1024;
     // The lowest reserved window above the image region (1 GiB up, the
     // production device-window offset).
     const LAYOUT_CEILING: u64 = LAYOUT_BIAS + 0x4000_0000;
@@ -781,15 +804,54 @@ mod tests {
         let bytes = layout_bytes(&[(0x1_0000, 2), (0x10_0000, 1)]);
         let image = LoadImage::parse(&bytes, &TAG).unwrap();
 
-        let layout = derive_user_layout(&image, LAYOUT_BIAS, LAYOUT_STACK_PAGES, LAYOUT_CEILING)
-            .expect("layout fits");
+        let layout = derive_user_layout(
+            &image,
+            LAYOUT_BIAS,
+            LAYOUT_STACK_PAGES,
+            LAYOUT_STACK_PAGES,
+            LAYOUT_CEILING,
+        )
+        .expect("layout fits");
 
         let image_top = LAYOUT_BIAS + 0x10_0000 + PAGE;
-        assert_eq!(layout.stack_base, image_top + PAGE);
-        let stack_top = layout.stack_base + LAYOUT_STACK_PAGES * PAGE;
+        assert_eq!(layout.stack_reserve_base, image_top + PAGE);
+        // A fully committed span (reserve == commit) has no growth room:
+        // the committed bottom is the span bottom.
+        assert_eq!(layout.stack_base, layout.stack_reserve_base);
+        let stack_top = layout.stack_reserve_base + LAYOUT_STACK_PAGES * PAGE;
         assert_eq!(layout.block_base, stack_top + PAGE);
         assert_eq!(layout.stack_base % PAGE, 0);
         assert_eq!(layout.block_base % PAGE, 0);
+    }
+
+    #[test]
+    fn layout_commits_only_the_top_of_a_wider_reserve() {
+        let bytes = layout_bytes(&[(0x1_0000, 2)]);
+        let image = LoadImage::parse(&bytes, &TAG).unwrap();
+
+        let layout = derive_user_layout(
+            &image,
+            LAYOUT_BIAS,
+            LAYOUT_RESERVE_PAGES,
+            LAYOUT_STACK_PAGES,
+            LAYOUT_CEILING,
+        )
+        .expect("layout fits");
+
+        let image_top = LAYOUT_BIAS + 0x1_0000 + 2 * PAGE;
+        assert_eq!(layout.stack_reserve_base, image_top + PAGE);
+        let stack_top = layout.stack_reserve_base + LAYOUT_RESERVE_PAGES * PAGE;
+        // The committed bottom sits `commit` pages below the span top; the
+        // growth room is the gap back down to the reserve base.
+        assert_eq!(layout.stack_base, stack_top - LAYOUT_STACK_PAGES * PAGE);
+        assert!(layout.stack_base > layout.stack_reserve_base);
+        assert_eq!(
+            layout.stack_base - layout.stack_reserve_base,
+            (LAYOUT_RESERVE_PAGES - LAYOUT_STACK_PAGES) * PAGE
+        );
+        // The block still sits one guard page above the whole span, not
+        // above the committed top, so growth can never collide with it.
+        assert_eq!(layout.block_base, stack_top + PAGE);
     }
 
     #[test]
@@ -803,12 +865,14 @@ mod tests {
             &small_image,
             LAYOUT_BIAS,
             LAYOUT_STACK_PAGES,
+            LAYOUT_STACK_PAGES,
             LAYOUT_CEILING,
         )
         .expect("small image fits");
         let large = derive_user_layout(
             &large_image,
             LAYOUT_BIAS,
+            LAYOUT_STACK_PAGES,
             LAYOUT_STACK_PAGES,
             LAYOUT_CEILING,
         )
@@ -827,9 +891,14 @@ mod tests {
         let bytes = layout_bytes(&[(0, pages)]);
         let image = LoadImage::parse(&bytes, &TAG).unwrap();
 
-        assert!(
-            derive_user_layout(&image, LAYOUT_BIAS, LAYOUT_STACK_PAGES, LAYOUT_CEILING).is_none()
-        );
+        assert!(derive_user_layout(
+            &image,
+            LAYOUT_BIAS,
+            LAYOUT_STACK_PAGES,
+            LAYOUT_STACK_PAGES,
+            LAYOUT_CEILING
+        )
+        .is_none());
     }
 
     #[test]
@@ -839,16 +908,42 @@ mod tests {
         let bytes = layout_bytes(&[((u64::MAX - (1 << 35)) & !(PAGE - 1), 1)]);
         let image = LoadImage::parse(&bytes, &TAG).unwrap();
 
+        assert!(derive_user_layout(
+            &image,
+            LAYOUT_BIAS,
+            LAYOUT_STACK_PAGES,
+            LAYOUT_STACK_PAGES,
+            LAYOUT_CEILING
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn layout_with_zero_committed_stack_pages_is_refused() {
+        let bytes = layout_bytes(&[(0x1_0000, 1)]);
+        let image = LoadImage::parse(&bytes, &TAG).unwrap();
+
         assert!(
-            derive_user_layout(&image, LAYOUT_BIAS, LAYOUT_STACK_PAGES, LAYOUT_CEILING).is_none()
+            derive_user_layout(&image, LAYOUT_BIAS, LAYOUT_RESERVE_PAGES, 0, LAYOUT_CEILING)
+                .is_none()
         );
     }
 
     #[test]
-    fn layout_with_zero_stack_pages_is_refused() {
+    fn layout_with_commit_exceeding_the_reserve_is_refused() {
+        // A committed top wider than the span it must fit inside is a
+        // caller error; the derivation fails closed rather than placing a
+        // committed bottom below the reserved span.
         let bytes = layout_bytes(&[(0x1_0000, 1)]);
         let image = LoadImage::parse(&bytes, &TAG).unwrap();
 
-        assert!(derive_user_layout(&image, LAYOUT_BIAS, 0, LAYOUT_CEILING).is_none());
+        assert!(derive_user_layout(
+            &image,
+            LAYOUT_BIAS,
+            LAYOUT_STACK_PAGES,
+            LAYOUT_STACK_PAGES + 1,
+            LAYOUT_CEILING
+        )
+        .is_none());
     }
 }

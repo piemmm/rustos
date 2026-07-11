@@ -32,9 +32,10 @@ use rustos_abi::CapabilityId;
 /// below; the per-capability rationale lives on that definition. A
 /// program's manifest is sized to its own code paths — the shell's is
 /// [`SHELL_MANIFEST`], not this ceiling.
-// Consumed by the exact-set pinning tests on the CI host, which verify
-// every session tool's request against this ceiling.
-#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
+// Consumed only by the exact-set pinning tests on the CI host, which
+// verify every session tool's request against this ceiling; a freestanding
+// production build has no consumer, so the re-export is test-gated.
+#[cfg(test)]
 pub use rustos_users::SESSION_BASELINE;
 
 /// The shell's manifest: the console pair for its REPL, `CAP_FS_ACCESS`

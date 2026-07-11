@@ -150,7 +150,7 @@ mod reclaim_integration_tests;
 pub use appspawn::{
     app_error_errno, bundle_run_path, AnchorVerifier, AppStore, BundleRunPath, FsBundleStore,
 };
-pub use aspace::{AddressSpaceRegistry, AspaceError};
+pub use aspace::{AddressSpaceRegistry, AspaceError, StackSpan};
 pub use audit::AuditEvent;
 pub use blockwait::{FallbackPark, IrqParkWaiter};
 pub use bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch, MAX_COMMAND_LINE_BYTES};
@@ -209,7 +209,7 @@ pub use procwait::{
     NULL_PROCESS_WAIT,
 };
 pub use random::{reserve_errno, BootReserve, NullEntropy, RandomReserve};
-pub use rlimit::{authorize_set, LimitSet};
+pub use rlimit::{authorize_set, LimitSet, DEFAULT_STACK_LIMIT_BYTES};
 pub use seat::{
     seat_errno, PresentGate, SeatRegistry, KEYBOARD_CHANNEL_CAPACITY, NULL_SEAT_REGISTRY,
 };

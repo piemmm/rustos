@@ -337,14 +337,16 @@ pub mod riscv64;
 // `CAP_PROC_SPAWN` `SpawnAuthority`, and PID 1 `init`'s own grant + argument
 // vector. These describe one user-space contract, not a per-architecture
 // register layout, so they are defined once here rather than copy-pasted into
-// each `init_spawn` / `spawn_producer` sibling. Gated to
+// each `init_spawn` / `spawn_producer` sibling. Public because the QEMU
+// stack-growth verticals derive their role parameters from the one stack
+// policy defined here rather than carrying a copy. Gated to
 // exactly the configurations whose consumers compile, so it is never dead
 // code.
 #[cfg(all(
     freestanding,
     any(kernel_isa = "aarch64", kernel_isa = "x86_64", kernel_isa = "riscv64")
 ))]
-mod spawn_layout;
+pub mod spawn_layout;
 
 // The absolute paths the embedded programs are registered under — pure
 // data, free of the rxe-laden registry rows in `spawn_layout` that consume

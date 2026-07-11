@@ -15,20 +15,39 @@
 //!
 //! Until a principal imposes a tighter ceiling, every resource is governed
 //! by the discovered, growable default policy — *not* by a hard-wired
-//! `const` ceiling. L2 expresses that "no ceiling imposed here" as
-//! [`ResourceLimit::UNLIMITED`] for every kind ([`LimitSet::DEFAULT`]); the
-//! actual capacity a task can reach is bounded by the growable kernel
-//! structures, which L3 sizes from the-discovered hardware. A future
-//! discovered-hardware default policy slots in by tightening
-//! [`LimitSet::DEFAULT`] (or deriving it per boot); every consumer reads it
-//! through this one definition, and inheritance already
-//! intersects against it so a child can never widen past it.
+//! `const` ceiling. L2 expresses "no ceiling imposed here" as
+//! [`ResourceLimit::UNLIMITED`] ([`LimitSet::DEFAULT`]); the actual
+//! capacity a task can reach is bounded by the growable kernel structures,
+//! which L3 sizes from the discovered hardware. The one exception with a
+//! real default today is the per-task stack: its default bound
+//! ([`DEFAULT_STACK_LIMIT_BYTES`]) equals the reserved user-stack span the
+//! spawn layout places, so the settable limit and the structural span
+//! coincide until a principal tightens (or, under
+//! `CAP_RLIMIT_RAISE`, raises) it. A future discovered-hardware default
+//! policy slots in by tightening [`LimitSet::DEFAULT`] (or deriving it per
+//! boot); every consumer reads it through this one definition, and
+//! inheritance already intersects against it so a child can never widen
+//! past it.
 //!
 //! This is a *capacity* facility. It must never loosen the fixed
 //! security/format bounds on untrusted input; those stay fixed and
 //! fail closed in their own modules.
 
 use rustos_abi::{Errno, LimitKind, ResourceLimit};
+
+/// The default `LimitKind::StackBytes` policy: the size, in bytes, of the
+/// reserved user-stack span every spawned process receives (8 MiB — the
+/// familiar general-purpose per-task stack default, generous for deep
+/// recursion while bounding a runaway one long before it can exhaust a
+/// small machine's RAM).
+///
+/// This is the single definition the spawn layout derives its reserved
+/// span from (`spawn_layout::USER_STACK_RESERVE_PAGES`), so the settable
+/// bound and the structural span can never silently diverge: by default a
+/// stack may grow to the whole span, growth past the soft bound is refused
+/// fail-closed at the fault path, and the unmapped guard page below the
+/// span stays the terminal structural defence.
+pub const DEFAULT_STACK_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
 
 /// One task's effective resource limits: a [`ResourceLimit`] for every
 /// [`LimitKind`].
@@ -47,13 +66,21 @@ impl LimitSet {
     /// The default policy a task runs under until a tighter ceiling is
     /// imposed.
     ///
-    /// Every resource is [`ResourceLimit::UNLIMITED`]: L2 imposes no
-    /// `rlimit` ceiling of its own, leaving each capacity governed by the
-    /// growable kernel structures L3 sizes from discovered hardware. The
-    /// single source of truth — tighten it here (or derive it per boot) and
-    /// every task, including inheritance, follows.
-    pub const DEFAULT: Self = Self {
-        limits: [ResourceLimit::UNLIMITED; LimitKind::COUNT],
+    /// Every resource except the stack is [`ResourceLimit::UNLIMITED`]: L2
+    /// imposes no `rlimit` ceiling of its own there, leaving each capacity
+    /// governed by the growable kernel structures L3 sizes from discovered
+    /// hardware. `StackBytes` defaults to [`DEFAULT_STACK_LIMIT_BYTES`]
+    /// (soft and hard — the reserved span is the structural bound, so a
+    /// wider grant would be meaningless without `CAP_RLIMIT_RAISE` *and* a
+    /// wider span). The single source of truth — tighten it here (or
+    /// derive it per boot) and every task, including inheritance, follows.
+    pub const DEFAULT: Self = {
+        let mut limits = [ResourceLimit::UNLIMITED; LimitKind::COUNT];
+        limits[LimitKind::StackBytes.as_u32() as usize] = ResourceLimit {
+            soft: DEFAULT_STACK_LIMIT_BYTES,
+            hard: DEFAULT_STACK_LIMIT_BYTES,
+        };
+        Self { limits }
     };
 
     /// The effective limit for `kind`.
@@ -131,16 +158,26 @@ pub fn authorize_set(
 
 #[cfg(test)]
 mod tests {
-    use super::{authorize_set, LimitSet};
+    use super::{authorize_set, LimitSet, DEFAULT_STACK_LIMIT_BYTES};
     use rustos_abi::{Errno, LimitKind, ResourceLimit, RLIMIT_INFINITY};
 
     #[test]
-    fn default_is_unlimited_for_every_kind() {
+    fn default_is_unlimited_for_every_kind_except_the_stack() {
         let set = LimitSet::DEFAULT;
         for kind in LimitKind::ALL {
+            if kind == LimitKind::StackBytes {
+                continue;
+            }
             assert_eq!(set.get(kind), ResourceLimit::UNLIMITED);
             assert_eq!(set.get(kind).hard, RLIMIT_INFINITY);
         }
+        // The stack's default bound is the reserved span: soft and hard,
+        // well-formed, and genuinely finite.
+        let stack = set.get(LimitKind::StackBytes);
+        assert_eq!(stack.soft, DEFAULT_STACK_LIMIT_BYTES);
+        assert_eq!(stack.hard, DEFAULT_STACK_LIMIT_BYTES);
+        assert!(stack.is_well_formed());
+        assert_ne!(stack.hard, RLIMIT_INFINITY);
         assert_eq!(LimitSet::default(), LimitSet::DEFAULT);
     }
 
@@ -163,7 +200,12 @@ mod tests {
         // The child inherits the parent's tighter ceiling verbatim while the
         // default is unlimited.
         assert_eq!(child.get(LimitKind::Processes), cap);
-        assert_eq!(child.get(LimitKind::StackBytes), ResourceLimit::UNLIMITED);
+        // The stack's finite default caps the child even when the parent
+        // holds a wider bound: intersection never widens.
+        assert_eq!(
+            child.get(LimitKind::StackBytes),
+            LimitSet::DEFAULT.get(LimitKind::StackBytes)
+        );
     }
 
     #[test]

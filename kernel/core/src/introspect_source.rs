@@ -423,14 +423,29 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         };
         let task_id = found.ok_or(Errno::NotFound)?;
 
-        // Read the task's effective limit set and build the positional
-        // per-kind report. Live usage has no accounter yet, so it is reported
-        // conservatively as zero (the array stays `LimitKind::COUNT` long and
+        // Read the task's effective limit set plus the live accounting
+        // behind each kind under one registry read, and build the
+        // positional per-kind report. A kind with no live accounter yet
+        // reports zero — the honest "none measured" answer, never a
+        // fabricated count (the array stays `LimitKind::COUNT` long and
         // positional, never omitting a kind).
-        let limits = self.state.aspaces.read().limits(SecTaskId(task_id.0));
+        let (limits, aspace_usage, stack_usage) = {
+            let aspaces = self.state.aspaces.read();
+            let task = SecTaskId(task_id.0);
+            (
+                aspaces.limits(task),
+                aspaces.mapped_aspace_bytes(task),
+                aspaces.stack_committed_bytes(task),
+            )
+        };
         let mut out = Vec::with_capacity(RESOURCE_LIMITS_REPORT_LEN);
         for kind in LimitKind::ALL {
-            let record = ResourceLimitRecord::new(kind, limits.get(kind), 0);
+            let usage = match kind {
+                LimitKind::AddressSpaceBytes => aspace_usage,
+                LimitKind::StackBytes => stack_usage,
+                _ => 0,
+            };
+            let record = ResourceLimitRecord::new(kind, limits.get(kind), usage);
             out.extend_from_slice(&record.to_le_bytes());
         }
         Ok(out)

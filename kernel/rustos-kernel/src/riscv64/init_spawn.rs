@@ -199,6 +199,12 @@ impl InitSpawn for RiscvInitSpawn {
         let Some(layout) = spawn_layout::user_layout(&image, INIT_USER_BIAS) else {
             return;
         };
+        // The span record the admission path stores so the stack-growth
+        // fault path can back pages inside it (one shared derivation
+        // across the ports; a malformed span fails the boot closed).
+        let Some(stack_span) = spawn_layout::stack_span(&layout) else {
+            return;
+        };
 
         let request = SpawnRequest {
             image: &image,
@@ -206,7 +212,7 @@ impl InitSpawn for RiscvInitSpawn {
             bias: INIT_USER_BIAS,
             stack: UserStack {
                 base: layout.stack_base,
-                page_count: spawn_layout::USER_STACK_PAGES,
+                page_count: spawn_layout::USER_STACK_COMMIT_PAGES,
             },
             start_block_base: layout.block_base,
             args: spawn_layout::INIT_ARGS,
@@ -329,6 +335,7 @@ impl InitSpawn for RiscvInitSpawn {
                 spawn_layout::init_caps(),
                 frozen,
                 physmap,
+                stack_span,
                 kernel_stack,
                 pre_resume,
                 live,

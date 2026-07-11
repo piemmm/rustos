@@ -1106,6 +1106,159 @@ attach block wires only the standard fd 0–3.**
 
 ---
 
+## SP11 — demand-grown user stack (remove the fixed stack capacity ceiling)
+
+The spawned-process user stack is today an eagerly committed, hand-picked
+288-page (1.125 MiB) constant — the §24.1 fixed-capacity defect twice over:
+a scaling cliff (deep recursion faults the guard page and dies with no
+`ulimit`/manifest remedy) and a wasted reservation (288 zeroed frames per
+process up front, §26.2/§26.3). The guard pages and the fail-closed spawn
+refusal are correct and stay; the target is a demand-grown stack inside a
+reserved virtual span, bounded by the settable §24.3 `StackBytes` limit
+(the `LimitKind` exists, inherits, and is settable via `ulimit`, but is
+enforced nowhere yet). Session-to-session working notes:
+`.junie/fix-fixed-stack-size.md`.
+
+**Binding decisions:**
+
+1. **The span is the structural bound; the limit is the settable bound
+   within it.** `derive_user_layout` places a `stack_reserve_pages` span one
+   guard page above the image top and eagerly maps only its top
+   `stack_commit_pages`; the guard page below the span never maps, so a
+   true overrun still faults deterministically (§2.17 — the structural
+   control is untouched).
+2. **Growth is fault-driven through the existing seams — no new seam.**
+   The arch ports' shared `set_user_fault_resolver` →
+   `KernelDispatchHook::resolve_user_fault` path gains a stack case
+   (offered for reads *and* writes, before the "any write is fatal" file
+   rule): a fault inside the task's recorded span below the committed
+   bottom maps one zeroed `RW` page through the installed `MemMap`
+   producer (`MapFlags::FIXED` at the faulting page — `LiveSpace::
+   map_anonymous` already accepts any unmapped page-aligned VA and fails
+   closed on the already-resident race), then re-freezes the registry
+   snapshot, exactly as `resolve_file_fault` does.
+3. **`StackBytes` is enforced at the growth path, fail closed.** Growth
+   stops at the effective soft bound (per-task `LimitSet`, inherited and
+   intersected at spawn); a fault past the limit or below the span stays
+   fatal with its own audited fault class. Frame exhaustion is the typed
+   OOM outcome, never a panic (§4).
+4. **The span record lives in the one registry.** A per-task stack-span
+   record (reserve base / committed bottom / span top) joins
+   `AddressSpaceRegistry` (same lifecycle as `LimitSet`/file regions),
+   recorded at admission by threading the span through
+   `SpawnCtx::admit_process` / `InitSpawnCtx::admit_init` (in-place
+   signature evolution, every port updated together, §2.13).
+5. **wasm32 is an honest n/a** (linear memory, no MMU fault growth),
+   declared like the SP5 precedent.
+
+**Staging (one fully-gated increment per landing):**
+
+- **SP11a — layout mechanism (host-proven) `[x]`.** **Landed.**
+  `rustos_kernel_mem::derive_user_layout` takes the
+  `(stack_reserve_pages, stack_commit_pages)` pair and `UserLayout` carries
+  `stack_reserve_base` beside the committed `stack_base`; fail-closed on a
+  zero commit, a commit exceeding the reserve, the ceiling, and overflow
+  (host-tested, including the committed-top-of-a-wider-reserve shape).
+  `spawn_layout` splits the one policy constant into
+  `USER_STACK_RESERVE_PAGES` / `USER_STACK_COMMIT_PAGES` — **equal (288)
+  in this increment**, a compile-time assert pinning commit ≤ reserve —
+  so production behaviour is byte-identical until the growth path exists;
+  the six port `init_spawn`/`spawn_producer` files consume the committed
+  constant. `memory.md` §7c describes the reserve/commit shape.
+- **SP11b — kernel/core growth path (host-proven) `[x]`.** **Landed.**
+  `StackSpan` (fail-closed constructor: page-aligned bounds, committed ≥
+  reserve, non-empty committed top) lives in `AddressSpaceRegistry` with
+  the per-process lifecycle (recorded at admission, withdrawn at exit);
+  the span threads through `SpawnCtx::admit_process` /
+  `InitSpawnCtx::admit_init` (in-place signature evolution, every port +
+  double updated together) from the one shared derivation
+  `spawn_layout::stack_span`. `resolve_stack_fault` sits beside
+  `resolve_file_fault` and is offered first in
+  `KernelDispatchHook::resolve_user_fault` — for reads *and* writes, so
+  the write-fatal file rule can never kill a growth fault — backing
+  **every page from the committed base down to the faulting page** with
+  zeroed `RW` pages through the installed `MemMap` producer
+  (`MapFlags::FIXED`, `Errno::BadAddress` folded per page as the benign
+  resident race), lowering the committed base per page (truthful even on
+  a mid-walk frame exhaustion), and re-freezing the snapshot once.
+  Contiguous growth is the invariant that makes a large frame's
+  first-touch-anywhere order safe: no unmapped hole can ever strand above
+  the low-water mark (the single-faulting-page walk it replaced wrongly
+  killed a later touch inside the skipped pages; host-regression-tested).
+  The `copy_in_user` retry offers stack growth too. `StackBytes` soft bound
+  enforced before any page maps; committed bytes are the live usage the
+  `TaskLimits` introspect report carries (`AddressSpaceBytes` usage now
+  reports `mapped_aspace_bytes` there too — a noticed drift fixed in the
+  same change). The audited kill classifies `stack_limit` / `stack`
+  beside `file_region` / `wild`. Host tests cover span shapes, record
+  lifecycle, growth, bounds, the limit gate, the race/OOM folds, and the
+  fault classes; `resource-limits.md`'s "not yet wired" list is down to
+  `OpenStreams` / `Processes`.
+- **SP11c — policy flip + `-M virt` verticals `[x]`.** **Landed.**
+  `USER_STACK_RESERVE_PAGES` is 2048 pages (8 MiB), derived from the one
+  default stack policy value — `rustos_kernel_core::DEFAULT_STACK_LIMIT_BYTES`
+  (`kernel/core/src/rlimit.rs`), which `LimitSet::DEFAULT` carries as the
+  `StackBytes` bound (soft and hard: the span is the structural bound, so
+  a wider grant is meaningless without `CAP_RLIMIT_RAISE` *and* a wider
+  span) — so the settable default and the structural span share one
+  definition. `USER_STACK_COMMIT_PAGES` is 32 (128 KiB): ample for
+  `rustos-rt` startup (the 1 MiB "scratch carve" is the C-compat `crt0`'s,
+  reached only under the production growth path, and the c-program
+  verticals map their own bespoke fully-eager stacks). QEMU verticals
+  landed on aarch64 + riscv64: `tests/integration/stack_grow_program`
+  (four argv-selected roles — parent / grow / limit / guard, numeric
+  parameters passed via chassis argv derived from the one `spawn_layout`
+  policy) driven by `stack_grow_qemu_aarch64` / `…_riscv64` through the
+  production `KernelDispatchHook` + user-fault resolver + `LiveMemMap` +
+  production spawn/wait: growth past the commit is transparent and
+  byte-verified, a `rlimit_set`-lowered `StackBytes` bound fault-kills
+  (exit 139), and the below-span guard page stays fatal (exit 139).
+  `spawn_layout` is now a public module so the verticals import the
+  policy instead of copying it.
+- **SP11d — docs finish `[x]`.** **Landed.** `memory.md` §7c describes
+  the landed design (reserve/commit values, contiguous growth invariant,
+  vertical coverage); `resource-limits.md` carries the finite default
+  `StackBytes` prose. No README matrix row: the demand-grown stack is
+  arch-neutral kernel behaviour on every MMU port (wasm32 linear memory
+  stays the honest n/a), not a per-arch feature split.
+- **SP11e — x86_64 QEMU vertical `[x]`.** **Landed.** The x86_64 twin of
+  the SP11c verticals, unblocked by factoring the x86_64 bring-up into a
+  composable piece rather than forking it (§2.2): `x86_64/boot.rs` now
+  exposes `bring_up_bsp(boot_info, log_sink) -> BspBringUp` — the whole
+  shared board bring-up (per-CPU/GDT/TSS/IDT ordering, the dedicated
+  `#PF` entry + uaccess window, NXE, park root, LAPIC calibration, the
+  firmware memory map + guard-arena carve, the MADT walk, the production
+  dispatch callback **and** user-fault resolver, syscall TLS + `syscall`/
+  TSS entry, masked IO-APIC routing; every set-once install lives here,
+  and a second resolver occupant now refuses the boot with the typed
+  `BootError::UserFaultResolverInstall` instead of a silent park) —
+  returning the discovered facts (`bsp_lapic_id`, `cpu_to_lapic`,
+  `calibration`, `memory_map`, `irq_routing`); the private `try_boot` is
+  now `bring_up_bsp` + arch-handle construction + `BootInfo` assembly.
+  Because `production_dispatch`/`production_user_fault` resolve through
+  the bin-crate `DISPATCH_SLOT`, the chassis
+  (`tests/integration/stack_grow_qemu_x86_64`) runs the same bring-up and
+  installs its **own** production `KernelDispatchHook` into that same
+  slot (no `kernel_main`, no second dispatch shim) — two `BinArch`
+  handles from the returned facts, the production `LiveMemMap` +
+  `KernelProcessWait` + `X86_64_PROCESS_SPAWN` + `KernelInitSpawner`
+  composition, the same four-role fixture and policy-derived argv as the
+  SP11c twins (failure sites are logged messages + a `parent_exit_code`
+  field: x86_64's `isa-debug-exit` carries no per-site code). Grow /
+  limit / guard all proven on the QEMU x86_64 machine. The same
+  `bring_up_bsp` seam unblocks the staged `file_map`/`mem_map` x86_64
+  resolver siblings.
+
+**Done when (SP11):** a first-party EL0 program can recurse past the
+spawn-time committed stack and keep running, bounded by a `ulimit`-settable
+`StackBytes` limit that kills it (audited) when exceeded; no process pays
+more eager stack frames than the committed top; the guard page below the
+span still faults; host + QEMU matrices and the headless build stay green.
+**Met end to end on all three MMU ports (SP11c aarch64/riscv64, SP11e
+x86_64); wasm32 linear memory stays the honest n/a.**
+
+---
+
 ## 2. Cross-cutting requirements (apply to every stage)
 
 - **No new HAL trait unless deliberate (§17.2).** SP1–SP5 reuse the closed

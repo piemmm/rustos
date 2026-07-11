@@ -3846,6 +3846,23 @@ and fail-closed (§24.4) — this work must not loosen them.
   (§19.6). **No syscall/hash change.** Docs:
   `docs/src/architecture/resource-limits.md`, `docs/src/abi/sysinfo.md`,
   `docs/src/userland/{sysinfod,utilities}.md` + the two READMEs.
+- L5 — **done on the MMU ports** (staged as `plans/SPAWN.md` **SP11**;
+  notes in `.junie/fix-fixed-stack-size.md`). The user stack is a
+  **demand-grown** stack inside an 8 MiB reserved virtual span (guard page
+  below the span preserved) with a 128 KiB eager commit: growth is
+  fault-driven and **contiguous** (every page from the committed base down
+  to the faulting page, so no unmapped hole can strand above the low-water
+  mark) through the existing user-fault-resolver + `MemMap`-producer
+  seams, bounded fail-closed by the settable `StackBytes` soft limit whose
+  default (`rustos_kernel_core::DEFAULT_STACK_LIMIT_BYTES` in
+  `LimitSet::DEFAULT`) is the one policy value the span is derived from.
+  Proven end to end on all three MMU ports by the QEMU verticals
+  (`stack_grow_program` + `stack_grow_qemu_{aarch64,riscv64,x86_64}`:
+  transparent byte-verified growth, `rlimit_set`-lowered bound
+  fault-kill, below-span guard kill) and the kernel/core host tests; the
+  x86_64 twin composes the factored shared board bring-up
+  (`x86_64::boot::bring_up_bsp`, SP11e) with the production hook in the
+  production `DISPATCH_SLOT`. wasm32 linear memory is the honest n/a.
 
 **Tests**
 - Default policy yields a workable capacity on both a tiny and a large

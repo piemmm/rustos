@@ -29,7 +29,7 @@ use rustos_abi::{CapabilityId, CapabilityQuery, LoadImage};
 use rustos_caps::CapabilitySet;
 #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
 use rustos_kernel_core::EmbeddedProgram;
-use rustos_kernel_core::ProgramRegistry;
+use rustos_kernel_core::{ProgramRegistry, StackSpan};
 use rustos_kernel_mem::{derive_user_layout, UserLayout};
 
 use crate::program_manifests::INIT_MANIFEST;
@@ -275,14 +275,41 @@ pub fn init_caps() -> CapabilitySet {
     caps
 }
 
-/// User stack pages (1.125 MiB): generous headroom over the `rustos-rt`
-/// runtime's scratch span plus call frames (the runtime carves scratch
-/// space off the stack, so the stack must comfortably exceed it).
-pub const USER_STACK_PAGES: u64 = 288;
+/// Reserved user stack span in pages (8 MiB — 2048 pages). The span is
+/// the structural bound the stack may ever occupy: its bottom guard page
+/// is what a runaway stack faults on, and the demand-grown stack path
+/// (`plans/SPAWN.md` SP11) backs pages inside it on fault, bounded by the
+/// task's settable stack resource limit. Derived from the one default
+/// stack policy value ([`rustos_kernel_core::DEFAULT_STACK_LIMIT_BYTES`],
+/// which `LimitSet::DEFAULT` carries as the `StackBytes` bound), so the
+/// settable default and the structural span can never silently diverge.
+pub const USER_STACK_RESERVE_PAGES: u64 =
+    rustos_kernel_core::DEFAULT_STACK_LIMIT_BYTES / rustos_kernel_mem::PAGE_SIZE as u64;
+
+// The default stack policy must be a whole number of pages, or the span
+// derivation above would silently round it down.
+const _: () = assert!(
+    rustos_kernel_core::DEFAULT_STACK_LIMIT_BYTES % rustos_kernel_mem::PAGE_SIZE as u64 == 0
+);
+
+/// Eagerly committed user stack pages at the top of the reserved span
+/// (128 KiB — 32 pages): enough that a program's startup (`rustos-rt`
+/// `_start` → startup-vector validation → `main`'s first frames) never
+/// takes a growth fault, while the uncommitted remainder of the span is
+/// backed on demand by the fault-driven growth path — so a process pays
+/// only the stack it actually touches (RAM sized to the working set, not
+/// to the span).
+pub const USER_STACK_COMMIT_PAGES: u64 = 32;
+
+// The committed top must fit inside the reserved span; a policy that
+// violates this would refuse every spawn (the derivation fails closed),
+// so it is rejected at compile time instead.
+const _: () = assert!(USER_STACK_COMMIT_PAGES <= USER_STACK_RESERVE_PAGES);
 
 /// Derive the stack and startup-vector-block placement for one spawned
 /// image (the [`rustos_kernel_mem::derive_user_layout`] mechanism bound
-/// to this workspace's layout policy): [`USER_STACK_PAGES`] stack pages,
+/// to this workspace's layout policy): a [`USER_STACK_RESERVE_PAGES`]
+/// stack span with its top [`USER_STACK_COMMIT_PAGES`] eagerly mapped,
 /// with the device window at [`MMIO_WINDOW_OFFSET`] as the ceiling the
 /// layout must stay below.
 ///
@@ -300,7 +327,30 @@ pub const USER_STACK_PAGES: u64 = 288;
 #[must_use]
 pub fn user_layout(image: &LoadImage, bias: u64) -> Option<UserLayout> {
     let ceiling = bias.checked_add(MMIO_WINDOW_OFFSET)?;
-    derive_user_layout(image, bias, USER_STACK_PAGES, ceiling)
+    derive_user_layout(
+        image,
+        bias,
+        USER_STACK_RESERVE_PAGES,
+        USER_STACK_COMMIT_PAGES,
+        ceiling,
+    )
+}
+
+/// The stack span the admission path records for one spawned process,
+/// derived from `layout`: the reserved span's lowest page, the committed
+/// bottom, and the span top [`USER_STACK_COMMIT_PAGES`] above that bottom
+/// (one guard page below the startup block). Every port passes this one
+/// derivation to `admit_process`/`admit_init`, so the recorded span and
+/// the mapped layout can never diverge per architecture.
+///
+/// Fails closed with `None` when the span arithmetic overflows or the
+/// bounds are malformed — the caller refuses the spawn, exactly as for a
+/// [`user_layout`] refusal.
+#[must_use]
+pub fn stack_span(layout: &UserLayout) -> Option<StackSpan> {
+    let commit_bytes = USER_STACK_COMMIT_PAGES.checked_mul(rustos_kernel_mem::PAGE_SIZE as u64)?;
+    let top = layout.stack_base.checked_add(commit_bytes)?;
+    StackSpan::new(layout.stack_reserve_base, layout.stack_base, top)
 }
 
 /// Offset of the device-window virtual region above the image bias
