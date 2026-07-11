@@ -3846,6 +3846,20 @@ and fail-closed (§24.4) — this work must not loosen them.
   (§19.6). **No syscall/hash change.** Docs:
   `docs/src/architecture/resource-limits.md`, `docs/src/abi/sysinfo.md`,
   `docs/src/userland/{sysinfod,utilities}.md` + the two READMEs.
+- L5 — **in progress** (staged as `plans/SPAWN.md` **SP11**; notes in
+  `.junie/fix-fixed-stack-size.md`). The **user stack** is the remaining
+  §24.1 capacity: an eagerly committed, hand-picked 288-page constant with
+  `LimitKind::StackBytes` enforced nowhere. Target: a demand-grown stack
+  inside a reserved virtual span (guard page below the span preserved),
+  grown page-by-page through the existing user-fault-resolver +
+  `MemMap`-producer seams, bounded fail-closed by the settable `StackBytes`
+  soft limit. **SP11a (landed):** `derive_user_layout` takes a
+  reserve/commit pair and `UserLayout` carries `stack_reserve_base`;
+  `spawn_layout` splits the policy into `USER_STACK_RESERVE_PAGES` /
+  `USER_STACK_COMMIT_PAGES` (equal, 288, until the growth path lands, so
+  behaviour is unchanged). Remaining: SP11b (kernel/core growth path +
+  `StackBytes` enforcement), SP11c (policy flip + QEMU verticals), SP11d
+  (docs finish).
 
 **Tests**
 - Default policy yields a workable capacity on both a tiny and a large

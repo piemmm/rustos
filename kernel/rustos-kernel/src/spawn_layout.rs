@@ -275,14 +275,32 @@ pub fn init_caps() -> CapabilitySet {
     caps
 }
 
-/// User stack pages (1.125 MiB): generous headroom over the `rustos-rt`
-/// runtime's scratch span plus call frames (the runtime carves scratch
-/// space off the stack, so the stack must comfortably exceed it).
-pub const USER_STACK_PAGES: u64 = 288;
+/// Reserved user stack span in pages (1.125 MiB today). The span is the
+/// structural bound the stack may ever occupy: its bottom guard page is
+/// what a runaway stack faults on, and the demand-grown stack path
+/// (`plans/SPAWN.md` SP11) backs pages inside it on fault, bounded by the
+/// task's settable stack resource limit. Until that growth path lands the
+/// reserve equals the committed top below, so every page is eagerly
+/// mapped exactly as before; SP11c widens the reserve and shrinks the
+/// commit once faults can grow the stack.
+pub const USER_STACK_RESERVE_PAGES: u64 = 288;
+
+/// Eagerly committed user stack pages at the top of the reserved span:
+/// generous headroom over the `rustos-rt` runtime's scratch span plus
+/// call frames (the runtime carves scratch space off the stack, so the
+/// committed top must comfortably exceed it until the fault-driven growth
+/// path lands).
+pub const USER_STACK_COMMIT_PAGES: u64 = 288;
+
+// The committed top must fit inside the reserved span; a policy that
+// violates this would refuse every spawn (the derivation fails closed),
+// so it is rejected at compile time instead.
+const _: () = assert!(USER_STACK_COMMIT_PAGES <= USER_STACK_RESERVE_PAGES);
 
 /// Derive the stack and startup-vector-block placement for one spawned
 /// image (the [`rustos_kernel_mem::derive_user_layout`] mechanism bound
-/// to this workspace's layout policy): [`USER_STACK_PAGES`] stack pages,
+/// to this workspace's layout policy): a [`USER_STACK_RESERVE_PAGES`]
+/// stack span with its top [`USER_STACK_COMMIT_PAGES`] eagerly mapped,
 /// with the device window at [`MMIO_WINDOW_OFFSET`] as the ceiling the
 /// layout must stay below.
 ///
@@ -300,7 +318,13 @@ pub const USER_STACK_PAGES: u64 = 288;
 #[must_use]
 pub fn user_layout(image: &LoadImage, bias: u64) -> Option<UserLayout> {
     let ceiling = bias.checked_add(MMIO_WINDOW_OFFSET)?;
-    derive_user_layout(image, bias, USER_STACK_PAGES, ceiling)
+    derive_user_layout(
+        image,
+        bias,
+        USER_STACK_RESERVE_PAGES,
+        USER_STACK_COMMIT_PAGES,
+        ceiling,
+    )
 }
 
 /// Offset of the device-window virtual region above the image bias

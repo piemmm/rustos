@@ -578,12 +578,22 @@ cryptographic layer they are required to route through.
 
 ## 7c. Anonymous user memory (`mem_map` / `mem_unmap`)
 
-A spawned process boots with exactly its fixed spawn-time image:
-code/data/bss plus a fixed-size user stack and the startup-vector block,
-placed above the image's mapped top with an unmapped guard page between
-each region (`rustos_kernel_mem::derive_user_layout`, bound to the shared
-policy in `spawn_layout::user_layout` — the placement scales with the
-image instead of capping it at a fixed slot; `plans/SPAWN.md` SP2/SP3). The
+A spawned process boots with exactly its spawn-time image: code/data/bss
+plus a user stack and the startup-vector block, placed above the image's
+mapped top with an unmapped guard page between each region
+(`rustos_kernel_mem::derive_user_layout`, bound to the shared policy in
+`spawn_layout::user_layout` — the placement scales with the image instead
+of capping it at a fixed slot; `plans/SPAWN.md` SP2/SP3). The stack is a
+*reserved span* whose top `USER_STACK_COMMIT_PAGES` are eagerly mapped:
+the uncommitted remainder below the committed bottom is growth room the
+demand-grown stack path (`plans/SPAWN.md` SP11) backs on fault, bounded by
+the settable `StackBytes` resource limit, and the guard page below the
+span stays unmapped so a true overrun still faults deterministically.
+Until SP11's fault-growth path lands, the shared policy keeps
+`USER_STACK_RESERVE_PAGES == USER_STACK_COMMIT_PAGES` (288 pages,
+1.125 MiB) so behaviour is unchanged — the eagerly committed fixed-size
+stack is the capacity-ceiling defect (`AGENTS.md` §24.1) SP11 removes,
+staged rather than left unstated. The
 `mem_map` (`abi-v1` no. 14) / `mem_unmap` (no. 15) syscalls are the one
 mechanism by which a process obtains and releases *additional* memory at
 runtime — the foundation the `lib/rt` userland heap allocator (§7d) layers its

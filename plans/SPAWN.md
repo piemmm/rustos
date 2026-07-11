@@ -1106,6 +1106,97 @@ attach block wires only the standard fd 0–3.**
 
 ---
 
+## SP11 — demand-grown user stack (remove the fixed stack capacity ceiling)
+
+The spawned-process user stack is today an eagerly committed, hand-picked
+288-page (1.125 MiB) constant — the §24.1 fixed-capacity defect twice over:
+a scaling cliff (deep recursion faults the guard page and dies with no
+`ulimit`/manifest remedy) and a wasted reservation (288 zeroed frames per
+process up front, §26.2/§26.3). The guard pages and the fail-closed spawn
+refusal are correct and stay; the target is a demand-grown stack inside a
+reserved virtual span, bounded by the settable §24.3 `StackBytes` limit
+(the `LimitKind` exists, inherits, and is settable via `ulimit`, but is
+enforced nowhere yet). Session-to-session working notes:
+`.junie/fix-fixed-stack-size.md`.
+
+**Binding decisions:**
+
+1. **The span is the structural bound; the limit is the settable bound
+   within it.** `derive_user_layout` places a `stack_reserve_pages` span one
+   guard page above the image top and eagerly maps only its top
+   `stack_commit_pages`; the guard page below the span never maps, so a
+   true overrun still faults deterministically (§2.17 — the structural
+   control is untouched).
+2. **Growth is fault-driven through the existing seams — no new seam.**
+   The arch ports' shared `set_user_fault_resolver` →
+   `KernelDispatchHook::resolve_user_fault` path gains a stack case
+   (offered for reads *and* writes, before the "any write is fatal" file
+   rule): a fault inside the task's recorded span below the committed
+   bottom maps one zeroed `RW` page through the installed `MemMap`
+   producer (`MapFlags::FIXED` at the faulting page — `LiveSpace::
+   map_anonymous` already accepts any unmapped page-aligned VA and fails
+   closed on the already-resident race), then re-freezes the registry
+   snapshot, exactly as `resolve_file_fault` does.
+3. **`StackBytes` is enforced at the growth path, fail closed.** Growth
+   stops at the effective soft bound (per-task `LimitSet`, inherited and
+   intersected at spawn); a fault past the limit or below the span stays
+   fatal with its own audited fault class. Frame exhaustion is the typed
+   OOM outcome, never a panic (§4).
+4. **The span record lives in the one registry.** A per-task stack-span
+   record (reserve base / committed bottom / span top) joins
+   `AddressSpaceRegistry` (same lifecycle as `LimitSet`/file regions),
+   recorded at admission by threading the span through
+   `SpawnCtx::admit_process` / `InitSpawnCtx::admit_init` (in-place
+   signature evolution, every port updated together, §2.13).
+5. **wasm32 is an honest n/a** (linear memory, no MMU fault growth),
+   declared like the SP5 precedent.
+
+**Staging (one fully-gated increment per landing):**
+
+- **SP11a — layout mechanism (host-proven) `[x]`.** **Landed.**
+  `rustos_kernel_mem::derive_user_layout` takes the
+  `(stack_reserve_pages, stack_commit_pages)` pair and `UserLayout` carries
+  `stack_reserve_base` beside the committed `stack_base`; fail-closed on a
+  zero commit, a commit exceeding the reserve, the ceiling, and overflow
+  (host-tested, including the committed-top-of-a-wider-reserve shape).
+  `spawn_layout` splits the one policy constant into
+  `USER_STACK_RESERVE_PAGES` / `USER_STACK_COMMIT_PAGES` — **equal (288)
+  in this increment**, a compile-time assert pinning commit ≤ reserve —
+  so production behaviour is byte-identical until the growth path exists;
+  the six port `init_spawn`/`spawn_producer` files consume the committed
+  constant. `memory.md` §7c describes the reserve/commit shape.
+- **SP11b — kernel/core growth path (host-proven) `[ ]`.** The per-task
+  stack-span record + accessors in `AddressSpaceRegistry`; the span
+  threaded through `admit_process`/`admit_init` (all ports + test doubles
+  in the same change); `resolve_stack_fault` beside `resolve_file_fault`
+  with the reordered write gate; `StackBytes` soft-bound enforcement +
+  committed-bytes usage accounting (surfaced through `sysinfo limits`
+  like `mapped_anon_bytes`); the `stack_limit` fault class on the audited
+  kill. Unit tests: growth, write-fault growth, resident race, past-limit
+  refusal, below-span refusal, frame exhaustion, withdraw clears the
+  record, usage accounting. `resource-limits.md`'s "not yet wired" list
+  shrinks accordingly.
+- **SP11c — policy flip + `-M virt` verticals `[ ]`.** Widen
+  `USER_STACK_RESERVE_PAGES` (proposal 2048 pages / 8 MiB; verify the
+  largest `Run` image still fits below the device window) and shrink
+  `USER_STACK_COMMIT_PAGES` (proposal 32 pages / 128 KiB; must cover the
+  `rustos-rt` scratch carve — verify first). Default `StackBytes` policy
+  = the span. QEMU verticals on the three MMU ports: recursion past the
+  committed top grows transparently; a lowered `ulimit` stack bound kills
+  with the audited class; the below-span guard still faults fatally
+  (extend `stack_overrun_qemu_*`).
+- **SP11d — docs finish `[ ]`.** With SP11c, rewrite the `memory.md` §7c
+  stack prose as the landed design (drop the staging note) and add the
+  README support-matrix row if per-arch state varies (wasm32 n/a).
+
+**Done when (SP11):** a first-party EL0 program can recurse past the
+spawn-time committed stack and keep running, bounded by a `ulimit`-settable
+`StackBytes` limit that kills it (audited) when exceeded; no process pays
+more eager stack frames than the committed top; the guard page below the
+span still faults; host + QEMU matrices and the headless build stay green.
+
+---
+
 ## 2. Cross-cutting requirements (apply to every stage)
 
 - **No new HAL trait unless deliberate (§17.2).** SP1–SP5 reuse the closed

@@ -280,7 +280,7 @@ impl ProcessSpawn for X86_64ProcessSpawn {
             bias: CHILD_USER_BIAS,
             stack: UserStack {
                 base: layout.stack_base,
-                page_count: spawn_layout::USER_STACK_PAGES,
+                page_count: spawn_layout::USER_STACK_COMMIT_PAGES,
             },
             start_block_base: layout.block_base,
             args,
