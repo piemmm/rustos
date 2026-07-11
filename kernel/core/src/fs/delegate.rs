@@ -27,10 +27,12 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use rustos_abi::driver::filesystem::{
-    FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeInfo, NodeKind,
+    FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeInfo,
+    NodeKind,
 };
 use rustos_abi::driver::DriverError;
 use rustos_abi::time::Time64;
+use rustos_fsmeta::{AttrKey, NamespaceAccess, KEY_MAX};
 
 use super::path::MAX_COMPONENT_LEN;
 use super::perm::{Access, Credentials, Metadata};
@@ -209,6 +211,206 @@ impl<'fs, R: FilesystemRead + FilesystemSecurity + ?Sized> DelegatedFs<'fs, R, P
         let mut sec = self.fs.security(node).map_err(map_driver_error)?;
         sec.mode = mode;
         self.fs.set_security(node, sec).map_err(map_driver_error)
+    }
+}
+
+impl<R: FilesystemRead + FilesystemSecurity + FilesystemAttrs + ?Sized>
+    DelegatedFs<'_, R, PerInode>
+{
+    /// Read the extended attribute `key` of the node at `components` into
+    /// `value_out`, returning the value's byte count.
+    ///
+    /// The key is validated against the one shared `lib/fsmeta` grammar and
+    /// its namespace's access class decides the gate: the ordinary
+    /// namespaces (`user`, the foreign presets, `rustos`) need read
+    /// permission on the node itself — the same [`Metadata::authorize`]
+    /// decision every delegated read uses, `required_cap` included — while
+    /// the privileged namespaces (`system`, `trusted`) are refused outright
+    /// (their dedicated capability is introduced with the service that
+    /// holds it, and until then the namespaces are reserved, fail closed).
+    ///
+    /// Implemented only for the per-inode policy: attribute storage is a
+    /// per-inode record, which a uniform-template mount does not have.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::InvalidKey`] for a key outside the grammar.
+    /// * [`VfsError::NoData`] if the node carries no such attribute (a
+    ///   value may legitimately be empty, so absence is never an empty
+    ///   read).
+    /// * [`VfsError::BufferTooSmall`] if the value does not fit
+    ///   `value_out` (never truncated).
+    /// * [`VfsError::NotFound`], [`VfsError::NotADirectory`],
+    ///   [`VfsError::PermissionDenied`], or [`VfsError::Io`].
+    pub fn get_attr(
+        &mut self,
+        cred: &Credentials<'_>,
+        components: &[String],
+        key: &[u8],
+        value_out: &mut [u8],
+    ) -> Result<usize, VfsError> {
+        let key = parse_unprivileged_key(key)?;
+        let (node, _info, meta) = self.resolve(cred, components)?;
+        meta.authorize(cred, Access::Read)?;
+        match self
+            .fs
+            .get_attr(node, key.as_bytes(), value_out)
+            .map_err(map_attr_driver_error)?
+        {
+            Some(len) => Ok(len),
+            None => Err(VfsError::NoData),
+        }
+    }
+
+    /// Set (insert or replace) the extended attribute `key` of the node at
+    /// `components` to `value`, in one copy-on-write driver transaction.
+    ///
+    /// Gated exactly as [`DelegatedFs::get_attr`], with write permission on
+    /// the node in place of read. The value is opaque; the driver enforces
+    /// the fixed per-inode bounds and fails closed at them.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::InvalidKey`] for a key outside the grammar (or an
+    ///   over-long key/value an in-kernel caller passed — the dispatcher
+    ///   bounds syscall inputs first).
+    /// * [`VfsError::NoSpace`] at the per-inode attribute bounds or a full
+    ///   volume.
+    /// * [`VfsError::NotFound`], [`VfsError::NotADirectory`],
+    ///   [`VfsError::PermissionDenied`], or [`VfsError::Io`].
+    pub fn set_attr(
+        &mut self,
+        cred: &Credentials<'_>,
+        components: &[String],
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), VfsError> {
+        let key = parse_unprivileged_key(key)?;
+        let (node, _info, meta) = self.resolve(cred, components)?;
+        meta.authorize(cred, Access::Write)?;
+        self.fs
+            .set_attr(node, key.as_bytes(), value)
+            .map_err(map_attr_driver_error)
+    }
+
+    /// Yield the `index`-th *visible* extended-attribute key of the node at
+    /// `components` into `key_out`, returning its byte count, or `None`
+    /// once `index` is past the last visible attribute.
+    ///
+    /// Needs read permission on the node. Keys in a privileged namespace
+    /// are omitted from the enumeration entirely — `index` addresses the
+    /// filtered sequence, so a caller can never learn a `system.*` key
+    /// exists, not even as a gap. Iteration order is the driver's stable
+    /// on-disk order. Enumeration scans through a fixed [`KEY_MAX`]
+    /// scratch, so an over-long `key_out` refusal can only name the key
+    /// actually selected, never one that was skipped.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::BufferTooSmall`] if the selected key does not fit
+    ///   `key_out`.
+    /// * [`VfsError::NotFound`], [`VfsError::NotADirectory`],
+    ///   [`VfsError::PermissionDenied`], or [`VfsError::Io`].
+    pub fn list_attr(
+        &mut self,
+        cred: &Credentials<'_>,
+        components: &[String],
+        index: u64,
+        key_out: &mut [u8],
+    ) -> Result<Option<usize>, VfsError> {
+        let (node, _info, meta) = self.resolve(cred, components)?;
+        meta.authorize(cred, Access::Read)?;
+        let mut scratch = [0u8; KEY_MAX];
+        let mut visible = 0u64;
+        let mut raw = 0u64;
+        loop {
+            let Some(len) = self
+                .fs
+                .list_attr(node, raw, &mut scratch)
+                .map_err(map_attr_driver_error)?
+            else {
+                return Ok(None);
+            };
+            raw += 1;
+            // A stored key that fails the shared grammar cannot be judged,
+            // so it is hidden like a privileged one (fail closed) — a
+            // conforming driver never stores such a key.
+            let readable = AttrKey::parse(&scratch[..len])
+                .is_ok_and(|k| k.access() != NamespaceAccess::Privileged);
+            if !readable {
+                continue;
+            }
+            if visible == index {
+                let Some(out) = key_out.get_mut(..len) else {
+                    return Err(VfsError::BufferTooSmall);
+                };
+                out.copy_from_slice(&scratch[..len]);
+                return Ok(Some(len));
+            }
+            visible += 1;
+        }
+    }
+
+    /// Remove the extended attribute `key` from the node at `components`,
+    /// in one copy-on-write driver transaction.
+    ///
+    /// Gated exactly as [`DelegatedFs::set_attr`] (write permission,
+    /// privileged namespaces refused).
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::InvalidKey`] for a key outside the grammar.
+    /// * [`VfsError::NoData`] if the node carries no such attribute (the
+    ///   node itself was already resolved, so the driver's not-found can
+    ///   only mean the attribute).
+    /// * [`VfsError::NotFound`], [`VfsError::NotADirectory`],
+    ///   [`VfsError::PermissionDenied`], or [`VfsError::Io`].
+    pub fn remove_attr(
+        &mut self,
+        cred: &Credentials<'_>,
+        components: &[String],
+        key: &[u8],
+    ) -> Result<(), VfsError> {
+        let key = parse_unprivileged_key(key)?;
+        let (node, _info, meta) = self.resolve(cred, components)?;
+        meta.authorize(cred, Access::Write)?;
+        self.fs
+            .remove_attr(node, key.as_bytes())
+            .map_err(|error| match error {
+                DriverError::NotFound => VfsError::NoData,
+                other => map_attr_driver_error(other),
+            })
+    }
+}
+
+/// Validate `key` against the shared `lib/fsmeta` grammar and refuse the
+/// privileged namespaces.
+///
+/// `system.*` and `trusted.*` guard a security boundary whose dedicated
+/// capability is introduced together with the first service that holds and
+/// enforces it; until that service exists the namespaces are reserved and
+/// every request fails closed as a permission denial — the same answer a
+/// capability check would give a holder-less caller.
+fn parse_unprivileged_key(key: &[u8]) -> Result<AttrKey, VfsError> {
+    let key = AttrKey::parse(key).map_err(|_| VfsError::InvalidKey)?;
+    if key.access() == NamespaceAccess::Privileged {
+        return Err(VfsError::PermissionDenied);
+    }
+    Ok(key)
+}
+
+/// Map a [`DriverError`] from a [`FilesystemAttrs`] call onto the VFS
+/// error surface. Attribute reads and writes carry outcomes the
+/// path-resolution mapping ([`map_driver_error`]) would misreport — a
+/// too-small *value* buffer is the caller's to grow, not an invalid path,
+/// and an exhausted attribute bound is a space refusal — so they map here.
+const fn map_attr_driver_error(error: DriverError) -> VfsError {
+    match error {
+        DriverError::NotFound => VfsError::NotFound,
+        DriverError::BufferTooSmall => VfsError::BufferTooSmall,
+        DriverError::NoSpace => VfsError::NoSpace,
+        DriverError::OutOfRange | DriverError::LengthOutOfRange => VfsError::InvalidKey,
+        _ => VfsError::Io,
     }
 }
 

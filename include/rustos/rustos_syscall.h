@@ -107,6 +107,10 @@ extern "C" {
 #define ROS_SYS_VOLUME_DETACH 81u
 #define ROS_SYS_SHM_GRANT 82u
 #define ROS_SYS_CALL_PEER_SEAT 83u
+#define ROS_SYS_FS_ATTR_GET 84u
+#define ROS_SYS_FS_ATTR_SET 85u
+#define ROS_SYS_FS_ATTR_LIST 86u
+#define ROS_SYS_FS_ATTR_REMOVE 87u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns ROS_E_WOULD_BLOCK when a
@@ -177,6 +181,16 @@ typedef struct ros_spawn_attach {
 * carrying any higher bit (a file-type bit, say) is rejected with
 * ROS_E_OUT_OF_RANGE, never silently masked. */
 #define ROS_FS_MODE_MASK 0xfffu
+
+/* fs_attr_*() bounds: an extended-attribute key (a `namespace.rest`
+* lib/fsmeta-grammar key) carries 1..=ROS_FS_ATTR_KEY_MAX bytes, and a value
+* at most ROS_FS_ATTR_VALUE_MAX opaque bytes; a call outside either bound is
+* rejected with ROS_E_LENGTH_OUT_OF_RANGE before any copy. An absent
+* attribute reads as ROS_E_NO_DATA (a value may be empty, so absence is
+* never an empty read), and a mount whose on-disk format stores no
+* attributes answers every fs_attr_*() call with ROS_E_NOT_SUPPORTED. */
+#define ROS_FS_ATTR_KEY_MAX 255u
+#define ROS_FS_ATTR_VALUE_MAX 3072u
 
 /* signal() control signals (the `signal` argument, uint32_t). 0 is reserved and
 * never valid; a value outside this set is rejected with ROS_E_OUT_OF_RANGE. */
@@ -271,6 +285,10 @@ int32_t ros_sys_volume_attach(void * a0, uintptr_t a1);
 int32_t ros_sys_volume_detach(void * a0, uintptr_t a1);
 uint64_t ros_sys_shm_grant(uint64_t a0, uint64_t a1);
 uint64_t ros_sys_call_peer_seat(uint64_t a0, uint64_t a1, uint64_t a2);
+uint64_t ros_sys_fs_attr_get(void * a0, uintptr_t a1, void * a2, uintptr_t a3, void * a4, uintptr_t a5);
+int32_t ros_sys_fs_attr_set(void * a0, uintptr_t a1, void * a2, uintptr_t a3, void * a4, uintptr_t a5);
+uint64_t ros_sys_fs_attr_list(void * a0, uintptr_t a1, uint64_t a2, void * a3, uintptr_t a4);
+int32_t ros_sys_fs_attr_remove(void * a0, uintptr_t a1, void * a2, uintptr_t a3);
 
 #ifdef __cplusplus
 } /* extern "C" */

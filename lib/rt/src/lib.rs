@@ -289,6 +289,12 @@ const NUM_FS_RENAME: u64 = SyscallNumber::FS_RENAME.as_u16() as u64;
 /// `fs_set_mode` syscall number (as above).
 const NUM_FS_SET_MODE: u64 = SyscallNumber::FS_SET_MODE.as_u16() as u64;
 
+/// `fs_attr_*` syscall numbers (as above).
+const NUM_FS_ATTR_GET: u64 = SyscallNumber::FS_ATTR_GET.as_u16() as u64;
+const NUM_FS_ATTR_SET: u64 = SyscallNumber::FS_ATTR_SET.as_u16() as u64;
+const NUM_FS_ATTR_LIST: u64 = SyscallNumber::FS_ATTR_LIST.as_u16() as u64;
+const NUM_FS_ATTR_REMOVE: u64 = SyscallNumber::FS_ATTR_REMOVE.as_u16() as u64;
+
 /// `call_peer_origin` syscall number (as above).
 const NUM_CALL_PEER_ORIGIN: u64 = SyscallNumber::CALL_PEER_ORIGIN.as_u16() as u64;
 
@@ -3118,6 +3124,125 @@ pub fn fs_set_mode(path: &[u8], mode: u32) -> i64 {
     ret as i64
 }
 
+/// Read the extended attribute `key` of the file or directory at the
+/// absolute `path` into `value_out` (`SyscallNumber::FS_ATTR_GET`, the
+/// `getxattr(2)` shape).
+///
+/// `key` is a `lib/fsmeta`-grammar `namespace.rest` key of
+/// `1..=`[`rustos_abi::FS_ATTR_KEY_MAX`] bytes. Returns the value's byte
+/// count (a value may be empty), or `-errno`: `Errno::NoData` when the node
+/// carries no such attribute, `Errno::BufferTooSmall` when the value does
+/// not fit `value_out` (never truncated), `Errno::NotSupported` on a mount
+/// whose format stores no attributes, and the usual path/permission
+/// refusals. The kernel authorises through the secured VFS: read permission
+/// on the node, privileged namespaces refused.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding.
+pub fn fs_attr_get(path: &[u8], key: &[u8], value_out: &mut [u8]) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // every `(ptr, len)` pair against the caller's address space before
+    // touching it. All three buffers are live for the duration of the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_ATTR_GET,
+            [
+                path.as_ptr() as usize as u64,
+                path.len() as u64,
+                key.as_ptr() as usize as u64,
+                key.len() as u64,
+                value_out.as_mut_ptr() as usize as u64,
+                value_out.len() as u64,
+            ],
+        )
+    };
+    ret as i64
+}
+
+/// Set (insert or replace) the extended attribute `key` of the file or
+/// directory at the absolute `path` to `value`
+/// (`SyscallNumber::FS_ATTR_SET`, the `setxattr(2)` shape).
+///
+/// `value` carries at most [`rustos_abi::FS_ATTR_VALUE_MAX`] opaque bytes;
+/// a larger payload is refused at dispatch with `Errno::LengthOutOfRange`.
+/// The write is one copy-on-write transaction. Returns `0` on success or
+/// `-errno` (`Errno::NoSpace` at the per-inode bounds,
+/// `Errno::NotSupported` on a mount without attribute storage, and the
+/// usual path/permission refusals — write permission on the node, a
+/// writable mount, privileged namespaces refused).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding.
+pub fn fs_attr_set(path: &[u8], key: &[u8], value: &[u8]) -> i64 {
+    // SAFETY: as `fs_attr_get`; all three buffers are live shared slices.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_ATTR_SET,
+            [
+                path.as_ptr() as usize as u64,
+                path.len() as u64,
+                key.as_ptr() as usize as u64,
+                key.len() as u64,
+                value.as_ptr() as usize as u64,
+                value.len() as u64,
+            ],
+        )
+    };
+    ret as i64
+}
+
+/// Yield the `index`-th visible extended-attribute key of the file or
+/// directory at the absolute `path` into `key_out`
+/// (`SyscallNumber::FS_ATTR_LIST`).
+///
+/// Returns the key's byte count, `0` once `index` is past the last visible
+/// attribute (a real key is never empty), or `-errno`. Keys whose namespace
+/// the caller may not read are omitted, never revealed.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding.
+pub fn fs_attr_list(path: &[u8], index: u64, key_out: &mut [u8]) -> i64 {
+    // SAFETY: as `fs_attr_get`; both buffers are live for the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_ATTR_LIST,
+            [
+                path.as_ptr() as usize as u64,
+                path.len() as u64,
+                index,
+                key_out.as_mut_ptr() as usize as u64,
+                key_out.len() as u64,
+                0,
+            ],
+        )
+    };
+    ret as i64
+}
+
+/// Remove the extended attribute `key` from the file or directory at the
+/// absolute `path` (`SyscallNumber::FS_ATTR_REMOVE`, the `removexattr(2)`
+/// shape).
+///
+/// Returns `0` on success or `-errno` (`Errno::NoData` when no such
+/// attribute is stored, `Errno::NotSupported` on a mount without attribute
+/// storage, and the usual path/permission refusals).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding.
+pub fn fs_attr_remove(path: &[u8], key: &[u8]) -> i64 {
+    // SAFETY: as `fs_attr_get`; both buffers are live shared slices.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_ATTR_REMOVE,
+            [
+                path.as_ptr() as usize as u64,
+                path.len() as u64,
+                key.as_ptr() as usize as u64,
+                key.len() as u64,
+                0,
+                0,
+            ],
+        )
+    };
+    ret as i64
+}
+
 /// Change the calling process's working directory to `path`
 /// (`SyscallNumber::FS_CHDIR`).
 ///
@@ -4880,6 +5005,49 @@ mod tests {
         assert_eq!(args[1], path.len() as u64);
         assert_eq!(args[2], 0o640);
         assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_attr_calls_marshal_path_key_and_buffers() {
+        let path = b"/Users/me/notes.txt";
+        let key = b"user.comment";
+        let mut out = [0u8; 16];
+
+        let (number, args) = capture(0, || {
+            assert_eq!(fs_attr_get(path, key, &mut out), 0);
+        });
+        assert_eq!(number, NUM_FS_ATTR_GET);
+        assert_eq!(args[0], path.as_ptr() as usize as u64);
+        assert_eq!(args[1], path.len() as u64);
+        assert_eq!(args[2], key.as_ptr() as usize as u64);
+        assert_eq!(args[3], key.len() as u64);
+        assert_eq!(args[4], out.as_ptr() as usize as u64);
+        assert_eq!(args[5], out.len() as u64);
+
+        let value = b"hi";
+        let (number, args) = capture(0, || {
+            assert_eq!(fs_attr_set(path, key, value), 0);
+        });
+        assert_eq!(number, NUM_FS_ATTR_SET);
+        assert_eq!(args[4], value.as_ptr() as usize as u64);
+        assert_eq!(args[5], value.len() as u64);
+
+        let (number, args) = capture(0, || {
+            assert_eq!(fs_attr_list(path, 3, &mut out), 0);
+        });
+        assert_eq!(number, NUM_FS_ATTR_LIST);
+        assert_eq!(args[2], 3);
+        assert_eq!(args[3], out.as_ptr() as usize as u64);
+        assert_eq!(args[4], out.len() as u64);
+        assert_eq!(args[5], 0);
+
+        let (number, args) = capture(0, || {
+            assert_eq!(fs_attr_remove(path, key), 0);
+        });
+        assert_eq!(number, NUM_FS_ATTR_REMOVE);
+        assert_eq!(args[2], key.as_ptr() as usize as u64);
+        assert_eq!(args[3], key.len() as u64);
+        assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]

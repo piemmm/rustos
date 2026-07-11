@@ -17,11 +17,13 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use rustos_abi::driver::filesystem::{
-    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId,
-    NodeInfo, NodeKind, NodeSecurity, VolumeStats,
+    DirEntry, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
+    FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity,
+    VolumeStats,
 };
 use rustos_abi::driver::DriverError;
 use rustos_abi::time::Time64;
+use rustos_fsmeta::{AttrFlags, AttrSet};
 
 /// Default owner uid baked into a freshly created node's security record.
 pub(crate) const ADMIN_UID: u32 = 1;
@@ -40,6 +42,9 @@ enum RwNode {
 pub(crate) struct RwMockFs {
     nodes: Vec<RwNode>,
     sec: Vec<NodeSecurity>,
+    /// Per-node extended-attribute set, parallel to `nodes`/`sec`,
+    /// validated through the one `lib/fsmeta` definition.
+    attrs: Vec<AttrSet>,
     /// Security applied to a node created through [`FilesystemWrite::create`].
     create_uid: u32,
     create_gid: u32,
@@ -54,6 +59,7 @@ impl RwMockFs {
             // Root is admin-owned and world-traversable by default, so a test
             // can vary just the node it cares about.
             sec: alloc::vec![NodeSecurity::new(0o755, ADMIN_UID, ADMIN_GID)],
+            attrs: alloc::vec![AttrSet::new()],
             create_uid: ADMIN_UID,
             create_gid: ADMIN_GID,
             create_mode: 0o755,
@@ -227,6 +233,7 @@ impl FilesystemWrite for RwMockFs {
             self.create_uid,
             self.create_gid,
         ));
+        self.attrs.push(AttrSet::new());
         let dir_idx = Self::index(dir)?;
         if let RwNode::Dir(children) = &mut self.nodes[dir_idx] {
             children.insert(name, new_index);
@@ -330,6 +337,71 @@ impl FilesystemWrite for RwMockFs {
 
     fn flush(&mut self) -> Result<(), DriverError> {
         Ok(())
+    }
+}
+
+impl FilesystemAttrs for RwMockFs {
+    fn get_attr(
+        &mut self,
+        node: NodeId,
+        key: &[u8],
+        value_out: &mut [u8],
+    ) -> Result<Option<usize>, DriverError> {
+        let idx = Self::index(node)?;
+        let set = self.attrs.get(idx).ok_or(DriverError::NotFound)?;
+        let Some(value) = set.get(key) else {
+            return Ok(None);
+        };
+        let Some(out) = value_out.get_mut(..value.len()) else {
+            return Err(DriverError::BufferTooSmall);
+        };
+        out.copy_from_slice(value);
+        Ok(Some(value.len()))
+    }
+
+    fn set_attr(&mut self, node: NodeId, key: &[u8], value: &[u8]) -> Result<(), DriverError> {
+        let idx = Self::index(node)?;
+        let set = self.attrs.get_mut(idx).ok_or(DriverError::NotFound)?;
+        set.set(key, AttrFlags::empty(), value)
+            .map_err(DriverError::from)
+    }
+
+    fn list_attr(
+        &mut self,
+        node: NodeId,
+        index: u64,
+        key_out: &mut [u8],
+    ) -> Result<Option<usize>, DriverError> {
+        let idx = Self::index(node)?;
+        let set = self.attrs.get(idx).ok_or(DriverError::NotFound)?;
+        let Ok(index) = usize::try_from(index) else {
+            return Ok(None);
+        };
+        let Some(entry) = set.iter().nth(index) else {
+            return Ok(None);
+        };
+        let key = entry.key().as_bytes();
+        let Some(out) = key_out.get_mut(..key.len()) else {
+            return Err(DriverError::BufferTooSmall);
+        };
+        out.copy_from_slice(key);
+        Ok(Some(key.len()))
+    }
+
+    fn remove_attr(&mut self, node: NodeId, key: &[u8]) -> Result<(), DriverError> {
+        let idx = Self::index(node)?;
+        let set = self.attrs.get_mut(idx).ok_or(DriverError::NotFound)?;
+        if set.remove(key) {
+            Ok(())
+        } else {
+            Err(DriverError::NotFound)
+        }
+    }
+}
+
+impl FilesystemAttrsProvider for RwMockFs {
+    fn attrs_fs(&mut self) -> Option<&mut dyn FilesystemAttrsFs> {
+        Some(self)
     }
 }
 

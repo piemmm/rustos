@@ -50,8 +50,9 @@ use alloc::vec::Vec;
 
 use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{
-    DirEntry, FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemStats,
-    FilesystemTimestamps, FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeTimes, VolumeStats,
+    DirEntry, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
+    FilesystemSecurity, FilesystemStats, FilesystemTimestamps, FilesystemWrite, NodeId, NodeInfo,
+    NodeKind, NodeTimes, VolumeStats,
 };
 pub use rustos_abi::driver::filesystem::{
     NodeSecurity as Security, SecurityAcl as AclEntry, SecuritySubject as AclSubject,
@@ -3571,6 +3572,14 @@ impl<B: Block> FilesystemStats for RustFs<B> {
             files: 0,
             files_free: 0,
         })
+    }
+}
+
+impl<B: Block> FilesystemAttrsProvider for RustFs<B> {
+    /// `RustFS` stores a per-inode attribute set as first-class metadata,
+    /// so the mounted volume serves the `fs_attr_*` surface itself.
+    fn attrs_fs(&mut self) -> Option<&mut dyn FilesystemAttrsFs> {
+        Some(self)
     }
 }
 

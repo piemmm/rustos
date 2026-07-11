@@ -133,6 +133,10 @@ const NUM_FS_MKDIR: u64 = SyscallNumber::FS_MKDIR.as_u16() as u64;
 const NUM_FS_UNLINK: u64 = SyscallNumber::FS_UNLINK.as_u16() as u64;
 const NUM_FS_RENAME: u64 = SyscallNumber::FS_RENAME.as_u16() as u64;
 const NUM_FS_SET_MODE: u64 = SyscallNumber::FS_SET_MODE.as_u16() as u64;
+const NUM_FS_ATTR_GET: u64 = SyscallNumber::FS_ATTR_GET.as_u16() as u64;
+const NUM_FS_ATTR_SET: u64 = SyscallNumber::FS_ATTR_SET.as_u16() as u64;
+const NUM_FS_ATTR_LIST: u64 = SyscallNumber::FS_ATTR_LIST.as_u16() as u64;
+const NUM_FS_ATTR_REMOVE: u64 = SyscallNumber::FS_ATTR_REMOVE.as_u16() as u64;
 const NUM_PORT_RESOLVE: u64 = SyscallNumber::PORT_RESOLVE.as_u16() as u64;
 const NUM_CALL_PEER_ORIGIN: u64 = SyscallNumber::CALL_PEER_ORIGIN.as_u16() as u64;
 const NUM_WALL_TIME_GET: u64 = SyscallNumber::WALL_TIME_GET.as_u16() as u64;
@@ -1816,6 +1820,145 @@ pub extern "C" fn sys_fs_set_mode(path: *mut c_void, path_len: usize, mode: u32)
     }
 }
 
+/// `fs_attr_get`: read the extended attribute `(key, key_len)` of the file
+/// or directory at the absolute path `(path, path_len)` into
+/// `(value_out, value_out_len)` (`SyscallNumber::FS_ATTR_GET`, the
+/// `getxattr(2)` shape). Returns the value's byte count, or a negative
+/// `ROS_E_*` code encoded in the `u64` (the `ros_sys_spawn` convention):
+/// `ROS_E_NO_DATA` when no such attribute is stored, `ROS_E_BUFFER_TOO_SMALL`
+/// when the value does not fit (never truncated), `ROS_E_NOT_SUPPORTED` on a
+/// mount whose format stores no attributes. Requires `ROS_CAP_FS_ACCESS`;
+/// the key is a `namespace.rest` key of at most `ROS_FS_ATTR_KEY_MAX` bytes,
+/// the privileged namespaces are refused, and the caller needs read
+/// permission on the node.
+#[must_use]
+#[export_name = "ros_sys_fs_attr_get"]
+pub extern "C" fn sys_fs_attr_get(
+    path: *mut c_void,
+    path_len: usize,
+    key: *mut c_void,
+    key_len: usize,
+    value_out: *mut c_void,
+    value_out_len: usize,
+) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates every `(ptr, len)`
+    // pair against the caller's address space before touching it.
+    unsafe {
+        raw_syscall(
+            NUM_FS_ATTR_GET,
+            [
+                ptr_arg(path),
+                path_len as u64,
+                ptr_arg(key),
+                key_len as u64,
+                ptr_arg(value_out),
+                value_out_len as u64,
+            ],
+        )
+    }
+}
+
+/// `fs_attr_set`: set the extended attribute `(key, key_len)` of the file
+/// or directory at the absolute path `(path, path_len)` to the opaque
+/// bytes `(value, value_len)` (`SyscallNumber::FS_ATTR_SET`, the
+/// `setxattr(2)` shape). Returns a `ROS_E_*` code.
+///
+/// The value carries at most `ROS_FS_ATTR_VALUE_MAX` bytes; a larger
+/// payload fails closed with `ROS_E_LENGTH_OUT_OF_RANGE`. Requires
+/// `ROS_CAP_FS_ACCESS`, write permission on the node, and a writable
+/// mount; the privileged namespaces are refused.
+#[must_use]
+#[export_name = "ros_sys_fs_attr_set"]
+pub extern "C" fn sys_fs_attr_set(
+    path: *mut c_void,
+    path_len: usize,
+    key: *mut c_void,
+    key_len: usize,
+    value: *mut c_void,
+    value_len: usize,
+) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates every `(ptr, len)`
+    // pair and the key/value bounds before touching anything.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_FS_ATTR_SET,
+            [
+                ptr_arg(path),
+                path_len as u64,
+                ptr_arg(key),
+                key_len as u64,
+                ptr_arg(value),
+                value_len as u64,
+            ],
+        ))
+    }
+}
+
+/// `fs_attr_list`: yield the `index`-th visible extended-attribute key of
+/// the file or directory at the absolute path `(path, path_len)` into
+/// `(key_out, key_out_len)` (`SyscallNumber::FS_ATTR_LIST`). Returns the
+/// key's byte count, `0` once `index` is past the last visible attribute,
+/// or a negative `ROS_E_*` code encoded in the `u64`. Keys the caller may
+/// not read are omitted, never revealed. Requires `ROS_CAP_FS_ACCESS` and
+/// read permission on the node.
+#[must_use]
+#[export_name = "ros_sys_fs_attr_list"]
+pub extern "C" fn sys_fs_attr_list(
+    path: *mut c_void,
+    path_len: usize,
+    index: u64,
+    key_out: *mut c_void,
+    key_out_len: usize,
+) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates both `(ptr, len)`
+    // pairs against the caller's address space before touching them.
+    unsafe {
+        raw_syscall(
+            NUM_FS_ATTR_LIST,
+            [
+                ptr_arg(path),
+                path_len as u64,
+                index,
+                ptr_arg(key_out),
+                key_out_len as u64,
+                0,
+            ],
+        )
+    }
+}
+
+/// `fs_attr_remove`: remove the extended attribute `(key, key_len)` from
+/// the file or directory at the absolute path `(path, path_len)`
+/// (`SyscallNumber::FS_ATTR_REMOVE`, the `removexattr(2)` shape). Returns
+/// a `ROS_E_*` code: `ROS_E_NO_DATA` when no such attribute is stored,
+/// `ROS_E_NOT_SUPPORTED` on a mount whose format stores no attributes.
+/// Requires `ROS_CAP_FS_ACCESS`, write permission on the node, and a
+/// writable mount; the privileged namespaces are refused.
+#[must_use]
+#[export_name = "ros_sys_fs_attr_remove"]
+pub extern "C" fn sys_fs_attr_remove(
+    path: *mut c_void,
+    path_len: usize,
+    key: *mut c_void,
+    key_len: usize,
+) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates both `(ptr, len)`
+    // pairs and the key bound before touching anything.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_FS_ATTR_REMOVE,
+            [
+                ptr_arg(path),
+                path_len as u64,
+                ptr_arg(key),
+                key_len as u64,
+                0,
+                0,
+            ],
+        ))
+    }
+}
+
 /// `port_resolve`: resolve the published port name at `(name, name_len)` to
 /// its live IPC endpoint id (`SyscallNumber::PORT_RESOLVE`). Returns the
 /// endpoint id, or a negative `ROS_E_*` code encoded in the `u64` (the
@@ -2055,6 +2198,10 @@ mod tests {
         (NUM_SELF_ORIGIN, "self_origin", 2),
         (NUM_PIPE_CREATE, "pipe_create", 1),
         (NUM_FS_SET_MODE, "fs_set_mode", 3),
+        (NUM_FS_ATTR_GET, "fs_attr_get", 6),
+        (NUM_FS_ATTR_SET, "fs_attr_set", 6),
+        (NUM_FS_ATTR_LIST, "fs_attr_list", 5),
+        (NUM_FS_ATTR_REMOVE, "fs_attr_remove", 4),
         (NUM_PORT_RESOLVE, "port_resolve", 2),
         (NUM_POINTER_INJECT, "pointer_inject", 3),
         (NUM_POINTER_READ, "pointer_read", 3),
@@ -2990,6 +3137,74 @@ mod tests {
         assert_eq!(args[1], path.len() as u64);
         assert_eq!(args[2], 0o640);
         assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_attr_stubs_marshal_path_key_and_buffers() {
+        let mut path = *b"/Storage/file";
+        let mut key = *b"user.comment";
+        let mut value = *b"hi";
+        let mut out = [0u8; 16];
+        let path_ptr = path.as_mut_ptr().cast::<c_void>();
+        let key_ptr = key.as_mut_ptr().cast::<c_void>();
+
+        let (number, args) = capture(0, || {
+            assert_eq!(
+                sys_fs_attr_get(
+                    path_ptr,
+                    path.len(),
+                    key_ptr,
+                    key.len(),
+                    out.as_mut_ptr().cast(),
+                    out.len()
+                ),
+                0
+            );
+        });
+        assert_eq!(number, NUM_FS_ATTR_GET);
+        assert_eq!(args[0], path_ptr as usize as u64);
+        assert_eq!(args[1], path.len() as u64);
+        assert_eq!(args[2], key_ptr as usize as u64);
+        assert_eq!(args[3], key.len() as u64);
+        assert_eq!(args[5], out.len() as u64);
+
+        let (number, args) = capture(0, || {
+            assert_eq!(
+                sys_fs_attr_set(
+                    path_ptr,
+                    path.len(),
+                    key_ptr,
+                    key.len(),
+                    value.as_mut_ptr().cast(),
+                    value.len()
+                ),
+                0
+            );
+        });
+        assert_eq!(number, NUM_FS_ATTR_SET);
+        assert_eq!(args[5], value.len() as u64);
+
+        let (number, args) = capture(0, || {
+            assert_eq!(
+                sys_fs_attr_list(path_ptr, path.len(), 2, out.as_mut_ptr().cast(), out.len()),
+                0
+            );
+        });
+        assert_eq!(number, NUM_FS_ATTR_LIST);
+        assert_eq!(args[2], 2);
+        assert_eq!(args[4], out.len() as u64);
+        assert_eq!(args[5], 0);
+
+        let (number, args) = capture(0, || {
+            assert_eq!(
+                sys_fs_attr_remove(path_ptr, path.len(), key_ptr, key.len()),
+                0
+            );
+        });
+        assert_eq!(number, NUM_FS_ATTR_REMOVE);
+        assert_eq!(args[2], key_ptr as usize as u64);
+        assert_eq!(args[3], key.len() as u64);
+        assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]

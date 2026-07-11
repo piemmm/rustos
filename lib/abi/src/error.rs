@@ -244,6 +244,28 @@ pub enum Errno {
     /// supported); a caller treats it as the device being unhealthy, not
     /// as a protocol error of its own making.
     DeviceFault = 30,
+    /// The object exists but carries no data under the requested name.
+    ///
+    /// Semantically equivalent to POSIX `ENODATA`. Emitted by `fs_attr_get`
+    /// when the file or directory at the path exists (and the caller may
+    /// read it) but no extended attribute with the requested key is stored
+    /// on it — deliberately distinct from [`NotFound`](Self::NotFound),
+    /// which reports that the *path itself* does not resolve. A value may
+    /// legitimately be zero bytes long, so absence is reported as this
+    /// errno, never as an empty read.
+    NoData = 31,
+    /// The operation is well-formed on the ABI but the object's backing
+    /// cannot support it.
+    ///
+    /// Semantically equivalent to POSIX `ENOTSUP`. Emitted by the
+    /// `fs_attr_*` syscalls when the mounted filesystem's on-disk format
+    /// has nowhere to store extended attributes (FAT32, ext4 today) —
+    /// deliberately distinct from
+    /// [`NotImplemented`](Self::NotImplemented) (the kernel subsystem is
+    /// not wired in at all): the subsystem is live, this particular
+    /// backing simply cannot represent the request, and retrying can
+    /// never succeed on that mount.
+    NotSupported = 32,
 }
 
 impl Errno {
@@ -309,6 +331,8 @@ impl Errno {
             28 => Some(Self::BrokenPipe),
             29 => Some(Self::EndpointStalled),
             30 => Some(Self::DeviceFault),
+            31 => Some(Self::NoData),
+            32 => Some(Self::NotSupported),
             _ => None,
         }
     }
@@ -347,6 +371,8 @@ impl fmt::Display for Errno {
             Self::BrokenPipe => "broken pipe",
             Self::EndpointStalled => "endpoint stalled",
             Self::DeviceFault => "device fault",
+            Self::NoData => "no such attribute",
+            Self::NotSupported => "not supported by the backing",
         };
         f.write_str(message)
     }
@@ -389,6 +415,8 @@ mod tests {
         assert_eq!(Errno::BrokenPipe.as_i32(), 28);
         assert_eq!(Errno::EndpointStalled.as_i32(), 29);
         assert_eq!(Errno::DeviceFault.as_i32(), 30);
+        assert_eq!(Errno::NoData.as_i32(), 31);
+        assert_eq!(Errno::NotSupported.as_i32(), 32);
     }
 
     #[test]
@@ -426,11 +454,13 @@ mod tests {
             Errno::BrokenPipe,
             Errno::EndpointStalled,
             Errno::DeviceFault,
+            Errno::NoData,
+            Errno::NotSupported,
         ] {
             assert_eq!(Errno::from_i32(errno.as_i32()), Some(errno));
         }
         assert_eq!(Errno::from_i32(0), None);
-        assert_eq!(Errno::from_i32(31), None);
+        assert_eq!(Errno::from_i32(33), None);
         assert_eq!(Errno::from_i32(-1), None);
     }
 

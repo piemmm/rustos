@@ -28,8 +28,8 @@
 use core::cell::RefCell;
 use rustos_abi::{
     spec_for, AbiType, CapabilityId, Errno, IrqHandle, MapFlags, OpenFlags, RandomFlags,
-    SyscallNumber, UnlinkFlags, WaitFlags, ENCODED_TABLE_LEN, FS_MODE_MASK, SYSCALLS,
-    SYSCALL_MAX_ARGS,
+    SyscallNumber, UnlinkFlags, WaitFlags, ENCODED_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX,
+    FS_MODE_MASK, SYSCALLS, SYSCALL_MAX_ARGS,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_sec::{TaskCapabilities, TaskId, UserId};
@@ -594,6 +594,55 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn fs_attr_get(
+        &self,
+        _c: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _key: u64,
+        _key_len: usize,
+        _value_out: u64,
+        _value_out_len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn fs_attr_set(
+        &self,
+        _c: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _key: u64,
+        _key_len: usize,
+        _value: u64,
+        _value_len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn fs_attr_list(
+        &self,
+        _c: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _index: u64,
+        _key_out: u64,
+        _key_out_len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn fs_attr_remove(
+        &self,
+        _c: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _key: u64,
+        _key_len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn port_resolve(&self, _c: &CallerContext<'_>, _name: u64, _name_len: usize) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
@@ -740,6 +789,19 @@ fn would_accept(spec_idx: usize, raw_number: u16, args: &[u64; SYSCALL_MAX_ARGS]
     // permission triads plus setuid/setgid/sticky) rather than masking it.
     // Mirror that here.
     if spec.number == SyscallNumber::FS_SET_MODE && args[2] & !u64::from(FS_MODE_MASK) != 0 {
+        return false;
+    }
+    // The attribute calls bound their key length (arg 3) to
+    // `1..=FS_ATTR_KEY_MAX` at dispatch, and `fs_attr_set` additionally
+    // bounds its value length (arg 5) to `FS_ATTR_VALUE_MAX`. Mirror both.
+    if matches!(
+        spec.number,
+        SyscallNumber::FS_ATTR_GET | SyscallNumber::FS_ATTR_SET | SyscallNumber::FS_ATTR_REMOVE
+    ) && (args[3] == 0 || args[3] > FS_ATTR_KEY_MAX as u64)
+    {
+        return false;
+    }
+    if spec.number == SyscallNumber::FS_ATTR_SET && args[5] > FS_ATTR_VALUE_MAX as u64 {
         return false;
     }
     true
@@ -993,6 +1055,18 @@ fn pointer_shaped_user_ptr_inputs_are_handled_deterministically() {
                 if *ty == AbiType::UserPtr {
                     args[i] = base;
                 }
+            }
+            // The attribute calls bound their key length (arg 3) to
+            // `1..=FS_ATTR_KEY_MAX` at dispatch; seed the zeroed slot with
+            // the minimal in-bounds value so the pointer contract stays the
+            // thing under test.
+            if matches!(
+                spec.number,
+                SyscallNumber::FS_ATTR_GET
+                    | SyscallNumber::FS_ATTR_SET
+                    | SyscallNumber::FS_ATTR_REMOVE
+            ) {
+                args[3] = 1;
             }
 
             let result = dispatcher.dispatch(&ctx, raw_number, RawArgs(args));

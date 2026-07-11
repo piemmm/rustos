@@ -17,6 +17,8 @@ use rustos_abi::driver::filesystem::{
 use rustos_abi::DriverError;
 use rustos_kernel_core::Path;
 
+use rustos_abi::driver::filesystem::FilesystemAttrsProvider;
+
 use super::{system_vfs, KernelFs};
 
 /// A mock filesystem driver whose every method returns a distinct sentinel,
@@ -123,6 +125,10 @@ impl FilesystemStats for SentinelFs {
         })
     }
 }
+
+/// The sentinel observes structural forwarding; it stores no attributes,
+/// so the facet keeps its fail-closed default answer.
+impl FilesystemAttrsProvider for SentinelFs {}
 
 #[test]
 fn system_vfs_mounts_the_writable_volume_as_root() {

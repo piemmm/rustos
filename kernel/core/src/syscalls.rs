@@ -84,9 +84,9 @@ use rustos_abi::{
     InputMode, IntrospectDomain, IrqHandle, LimitKind, MapFlags, OpenFlags, PortName, ProcId,
     ProcessStart, RandomFlags, ResourceLimit, Signal, SpawnAttach, StreamMode, SyscallNumber,
     Time64, UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState,
-    BOOT_ID_LEN, CONSOLE_INHERIT, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX, LOG_FIELDS_MAX,
-    LOG_RECORD_MAX, PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN, PROC_ID_LEN,
-    RANDOM_REQUEST_MAX_BYTES, RESOURCE_REF_MAX, SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT,
+    BOOT_ID_LEN, CONSOLE_INHERIT, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_NAME_MAX,
+    FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN,
+    PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES, RESOURCE_REF_MAX, SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT,
     TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
 };
 use rustos_caps::CapabilitySet;
@@ -1653,6 +1653,27 @@ where
             return Err(Errno::OutOfRange);
         };
         self.resolve_against_cwd(caller, raw)
+    }
+
+    /// Copy an extended-attribute key of `len` bytes from the caller's
+    /// address space at `ptr`, for the `fs_attr_*` handlers.
+    ///
+    /// Re-applies the dispatcher's `1..=FS_ATTR_KEY_MAX` bound (defence in
+    /// depth for an in-kernel caller) before any user memory is staged; the
+    /// key *grammar* is the secured VFS's to judge, so the bytes are
+    /// returned uninterpreted.
+    fn copy_attr_key_in(
+        &self,
+        caller: &CallerContext<'_>,
+        ptr: u64,
+        len: usize,
+    ) -> Result<Vec<u8>, Errno> {
+        if len == 0 || len > FS_ATTR_KEY_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut buf = vec![0u8; len];
+        self.copy_in_user(caller, ptr, &mut buf)?;
+        Ok(buf)
     }
 
     /// Copy a resource reference of `len` bytes from the caller's address
@@ -6149,6 +6170,114 @@ where
         let uid = caller.caps.owner().0;
         self.filesystem
             .set_mode(uid, caller.caps.effective(), &path, mode)?;
+        Ok(0)
+    }
+
+    fn fs_attr_get(
+        &self,
+        caller: &CallerContext<'_>,
+        path: u64,
+        path_len: usize,
+        key: u64,
+        key_len: usize,
+        value_out: u64,
+        value_out_len: usize,
+    ) -> SyscallResult {
+        // The dispatcher already checked `CAP_FS_ACCESS`, the pointers, and
+        // the key bound. The key grammar and the read-permission rule are
+        // the secured VFS's, applied under the caller's attested identity.
+        let path = self.copy_path_in(caller, path, path_len)?;
+        let key = self.copy_attr_key_in(caller, key, key_len)?;
+        let uid = caller.caps.owner().0;
+        // Stage at most the fixed value bound: no stored value can exceed
+        // it, and a smaller caller buffer must be reported as too small by
+        // the service (never truncated), so the stage mirrors the caller's
+        // own capacity up to that bound.
+        let mut stage = vec![0u8; value_out_len.min(FS_ATTR_VALUE_MAX)];
+        let read =
+            self.filesystem
+                .attr_get(uid, caller.caps.effective(), &path, &key, &mut stage)?;
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(value_out), &stage[..read])
+        }) {
+            Some(Ok(())) => Ok(read as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
+    }
+
+    fn fs_attr_set(
+        &self,
+        caller: &CallerContext<'_>,
+        path: u64,
+        path_len: usize,
+        key: u64,
+        key_len: usize,
+        value: u64,
+        value_len: usize,
+    ) -> SyscallResult {
+        // The dispatcher already checked `CAP_FS_ACCESS`, the pointers, the
+        // key bound, and the value bound; the bound is re-applied here so no
+        // in-kernel caller can stage an oversize payload (defence in depth).
+        if value_len > FS_ATTR_VALUE_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let path = self.copy_path_in(caller, path, path_len)?;
+        let key = self.copy_attr_key_in(caller, key, key_len)?;
+        let mut payload = vec![0u8; value_len];
+        self.copy_in_user(caller, value, &mut payload)?;
+        let uid = caller.caps.owner().0;
+        self.filesystem
+            .attr_set(uid, caller.caps.effective(), &path, &key, &payload)?;
+        Ok(0)
+    }
+
+    fn fs_attr_list(
+        &self,
+        caller: &CallerContext<'_>,
+        path: u64,
+        path_len: usize,
+        index: u64,
+        key_out: u64,
+        key_out_len: usize,
+    ) -> SyscallResult {
+        // The dispatcher already checked `CAP_FS_ACCESS` and the pointers.
+        // Read permission and the visibility filtering are the secured
+        // VFS's; `0` is the end-of-list answer (a real key is never empty).
+        let path = self.copy_path_in(caller, path, path_len)?;
+        let uid = caller.caps.owner().0;
+        let mut stage = vec![0u8; key_out_len.min(FS_ATTR_KEY_MAX)];
+        let Some(read) =
+            self.filesystem
+                .attr_list(uid, caller.caps.effective(), &path, index, &mut stage)?
+        else {
+            return Ok(0);
+        };
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(key_out), &stage[..read])
+        }) {
+            Some(Ok(())) => Ok(read as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
+    }
+
+    fn fs_attr_remove(
+        &self,
+        caller: &CallerContext<'_>,
+        path: u64,
+        path_len: usize,
+        key: u64,
+        key_len: usize,
+    ) -> SyscallResult {
+        // The dispatcher already checked `CAP_FS_ACCESS`, the pointers, and
+        // the key bound. Write permission and the key grammar are the
+        // secured VFS's, applied under the caller's attested identity.
+        let path = self.copy_path_in(caller, path, path_len)?;
+        let key = self.copy_attr_key_in(caller, key, key_len)?;
+        let uid = caller.caps.owner().0;
+        self.filesystem
+            .attr_remove(uid, caller.caps.effective(), &path, &key)?;
         Ok(0)
     }
 
@@ -10923,6 +11052,49 @@ mod tests {
             mode: u32,
         ) -> Result<(), Errno> {
             self.inner.set_mode(uid, caps, path, mode)
+        }
+
+        fn attr_get(
+            &self,
+            uid: u32,
+            caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+            key: &[u8],
+            value_out: &mut [u8],
+        ) -> Result<usize, Errno> {
+            self.inner.attr_get(uid, caps, path, key, value_out)
+        }
+
+        fn attr_set(
+            &self,
+            uid: u32,
+            caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+            key: &[u8],
+            value: &[u8],
+        ) -> Result<(), Errno> {
+            self.inner.attr_set(uid, caps, path, key, value)
+        }
+
+        fn attr_list(
+            &self,
+            uid: u32,
+            caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+            index: u64,
+            key_out: &mut [u8],
+        ) -> Result<Option<usize>, Errno> {
+            self.inner.attr_list(uid, caps, path, index, key_out)
+        }
+
+        fn attr_remove(
+            &self,
+            uid: u32,
+            caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+            key: &[u8],
+        ) -> Result<(), Errno> {
+            self.inner.attr_remove(uid, caps, path, key)
         }
     }
 
@@ -21915,6 +22087,82 @@ mod tests {
             ));
             Ok(())
         }
+
+        // The attribute methods record the marshalled call and serve one
+        // canned attribute (`user.demo` = `v1`), so the handler tests can
+        // assert both the copy-in wiring and the copy-out path.
+        fn attr_get(
+            &self,
+            uid: u32,
+            _caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+            key: &[u8],
+            value_out: &mut [u8],
+        ) -> Result<usize, Errno> {
+            self.record(alloc::format!(
+                "attr_get uid={uid} path={path} key={}",
+                core::str::from_utf8(key).unwrap_or("<bad>")
+            ));
+            if key != b"user.demo" {
+                return Err(Errno::NoData);
+            }
+            let value = b"v1";
+            let out = value_out
+                .get_mut(..value.len())
+                .ok_or(Errno::BufferTooSmall)?;
+            out.copy_from_slice(value);
+            Ok(value.len())
+        }
+
+        fn attr_set(
+            &self,
+            uid: u32,
+            _caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+            key: &[u8],
+            value: &[u8],
+        ) -> Result<(), Errno> {
+            self.record(alloc::format!(
+                "attr_set uid={uid} path={path} key={} value_len={}",
+                core::str::from_utf8(key).unwrap_or("<bad>"),
+                value.len()
+            ));
+            Ok(())
+        }
+
+        fn attr_list(
+            &self,
+            uid: u32,
+            _caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+            index: u64,
+            key_out: &mut [u8],
+        ) -> Result<Option<usize>, Errno> {
+            self.record(alloc::format!(
+                "attr_list uid={uid} path={path} index={index}"
+            ));
+            if index != 0 {
+                return Ok(None);
+            }
+            let key = b"user.demo";
+            let out = key_out.get_mut(..key.len()).ok_or(Errno::BufferTooSmall)?;
+            out.copy_from_slice(key);
+            Ok(Some(key.len()))
+        }
+
+        fn attr_remove(
+            &self,
+            uid: u32,
+            _caps: &dyn rustos_abi::CapabilityQuery,
+            path: &str,
+            key: &[u8],
+        ) -> Result<(), Errno> {
+            self.record(alloc::format!(
+                "attr_remove uid={uid} path={path} key={}",
+                core::str::from_utf8(key).unwrap_or("<bad>")
+            ));
+            Ok(())
+        }
     }
 
     /// `fs_open` resolves+authorises through the service under the caller's
@@ -22662,6 +22910,98 @@ mod tests {
                 "set_mode uid=1000 path=/Users/bob/notes mode=640"
             )],
             "the service saw the attested uid, the resolved path, and the mode"
+        );
+    }
+
+    /// The four `fs_attr_*` handlers copy the path and key in, reach the
+    /// service under the caller's attested uid, and copy the value/key
+    /// results back out through the validated boundary.
+    #[test]
+    fn fs_attr_calls_attest_the_caller_and_round_trip_through_the_service() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // One RW page: the path at 0x1000, the key at 0x1010, and the
+        // scratch the results are copied back into at 0x1100.
+        let (space, physmap) = send_aspace(
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            b"/Users/bob/notesuser.demo",
+        );
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+        let (path, path_len) = (0x1000, "/Users/bob/notes".len());
+        let (key, key_len) = (0x1010, "user.demo".len());
+
+        // set: the payload ("us", two bytes of the mapped page) reaches the
+        // service with the attested uid.
+        h.fs_attr_set(&ctx, path, path_len, key, key_len, 0x1010, 2)
+            .expect("attr_set succeeds");
+        // get: the canned two-byte value is copied out and its length
+        // returned.
+        let n = h
+            .fs_attr_get(&ctx, path, path_len, key, key_len, 0x1100, 64)
+            .expect("attr_get succeeds");
+        assert_eq!(n, 2);
+        // list: index 0 yields the canned key, index 1 is end-of-list (0).
+        let n = h
+            .fs_attr_list(&ctx, path, path_len, 0, 0x1100, 64)
+            .expect("attr_list succeeds");
+        assert_eq!(usize::try_from(n).unwrap(), "user.demo".len());
+        assert_eq!(
+            h.fs_attr_list(&ctx, path, path_len, 1, 0x1100, 64),
+            Ok(0),
+            "past the last visible attribute the answer is 0, never an error"
+        );
+        h.fs_attr_remove(&ctx, path, path_len, key, key_len)
+            .expect("attr_remove succeeds");
+
+        let copied = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = alloc::vec![0u8; "user.demo".len()];
+                copy_in(space, physmap, VirtAddr::new(0x1100), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller space");
+        assert_eq!(
+            copied.as_slice(),
+            b"user.demo",
+            "the listed key bytes were copied out through the validated boundary"
+        );
+        assert_eq!(
+            fs.calls(),
+            alloc::vec![
+                alloc::string::String::from(
+                    "attr_set uid=1000 path=/Users/bob/notes key=user.demo value_len=2"
+                ),
+                alloc::string::String::from(
+                    "attr_get uid=1000 path=/Users/bob/notes key=user.demo"
+                ),
+                alloc::string::String::from("attr_list uid=1000 path=/Users/bob/notes index=0"),
+                alloc::string::String::from("attr_list uid=1000 path=/Users/bob/notes index=1"),
+                alloc::string::String::from(
+                    "attr_remove uid=1000 path=/Users/bob/notes key=user.demo"
+                ),
+            ],
+            "every call reached the service with the attested uid and copied-in arguments"
         );
     }
 

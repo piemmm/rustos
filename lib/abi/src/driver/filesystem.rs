@@ -790,6 +790,39 @@ pub trait FilesystemAttrs {
     fn remove_attr(&mut self, node: NodeId, key: &[u8]) -> Result<(), DriverError>;
 }
 
+/// The combined per-node view an attribute operation runs against: path
+/// resolution ([`FilesystemRead`]), the per-inode security records the VFS
+/// authorises with ([`FilesystemSecurity`]), and the attribute store itself
+/// ([`FilesystemAttrs`]) — one object, because the secured VFS must resolve
+/// and authorise on the *same* driver it then reads or mutates.
+///
+/// Blanket-implemented for every type carrying the three traits; never
+/// implemented by hand.
+pub trait FilesystemAttrsFs: FilesystemRead + FilesystemSecurity + FilesystemAttrs {}
+
+impl<T: FilesystemRead + FilesystemSecurity + FilesystemAttrs + ?Sized> FilesystemAttrsFs for T {}
+
+/// Opt-in discovery of a driver's extended-attribute support.
+///
+/// [`FilesystemAttrs`] is deliberately implemented only by drivers whose
+/// on-disk format can hold attributes, so a type-erased mount (the kernel's
+/// `Box<dyn KernelFs>`) cannot require it as a bound. This facet is the
+/// honest bridge: every mountable driver implements the *provider*, and the
+/// default answer is `None` — "this format stores no attributes" — so an
+/// `fs_attr_*` call on such a mount fails closed with a typed refusal. A
+/// driver that does implement [`FilesystemAttrs`] overrides
+/// [`attrs_fs`](Self::attrs_fs) to return itself; a caching or forwarding
+/// wrapper delegates to its inner driver. The facet grants nothing: the VFS
+/// still authorises every operation against the per-inode model before the
+/// returned view is touched.
+pub trait FilesystemAttrsProvider {
+    /// The attribute-capable view of this driver, or `None` when its
+    /// on-disk format has nowhere to store extended attributes.
+    fn attrs_fs(&mut self) -> Option<&mut dyn FilesystemAttrsFs> {
+        None
+    }
+}
+
 /// The space accounting a mounted volume reports about itself.
 ///
 /// Sizes are counted in whole blocks of `block_size` bytes — the unit the

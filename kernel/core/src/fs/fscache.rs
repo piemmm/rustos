@@ -75,8 +75,9 @@ use alloc::vec::Vec;
 use core::mem::size_of;
 
 use rustos_abi::driver::filesystem::{
-    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId,
-    NodeInfo, NodeKind, NodeSecurity, VolumeStats,
+    DirEntry, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
+    FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity,
+    VolumeStats,
 };
 use rustos_abi::DriverError;
 use rustos_kernel_mem::{
@@ -1027,6 +1028,81 @@ impl<F: FilesystemStats> FilesystemStats for CachedFs<F> {
     fn stats(&mut self) -> Result<VolumeStats, DriverError> {
         // Volume accounting is live driver state, never cached.
         self.inner.stats()
+    }
+}
+
+/// Attribute values are never cached (they are rare, opaque reads), but the
+/// calls still route *through* the cache wrapper rather than around it: a
+/// mutation may grow or shrink the inode's attribute storage, so the node's
+/// cached [`NodeInfo`] is invalidated exactly as a data write's is — a
+/// bypass would leave a stale `allocated` behind.
+impl<F> FilesystemAttrs for CachedFs<F>
+where
+    F: FilesystemRead + FilesystemSecurity + FilesystemAttrsProvider,
+{
+    fn get_attr(
+        &mut self,
+        node: NodeId,
+        key: &[u8],
+        value_out: &mut [u8],
+    ) -> Result<Option<usize>, DriverError> {
+        // Reachable only through `attrs_fs`, which answers `None` when the
+        // inner driver stores no attributes; the guard here keeps the
+        // failure closed for a caller that ignores the facet.
+        let Some(inner) = self.inner.attrs_fs() else {
+            return Err(DriverError::Unsupported);
+        };
+        inner.get_attr(node, key, value_out)
+    }
+
+    fn set_attr(&mut self, node: NodeId, key: &[u8], value: &[u8]) -> Result<(), DriverError> {
+        let result = match self.inner.attrs_fs() {
+            Some(inner) => inner.set_attr(node, key, value),
+            None => return Err(DriverError::Unsupported),
+        };
+        // Invalidate on success and failure alike; the next `node_info`
+        // re-reads the stored record (attribute blocks count against the
+        // inode's allocation).
+        self.invalidate_stat(node.raw());
+        result
+    }
+
+    fn list_attr(
+        &mut self,
+        node: NodeId,
+        index: u64,
+        key_out: &mut [u8],
+    ) -> Result<Option<usize>, DriverError> {
+        let Some(inner) = self.inner.attrs_fs() else {
+            return Err(DriverError::Unsupported);
+        };
+        inner.list_attr(node, index, key_out)
+    }
+
+    fn remove_attr(&mut self, node: NodeId, key: &[u8]) -> Result<(), DriverError> {
+        let result = match self.inner.attrs_fs() {
+            Some(inner) => inner.remove_attr(node, key),
+            None => return Err(DriverError::Unsupported),
+        };
+        self.invalidate_stat(node.raw());
+        result
+    }
+}
+
+impl<F> FilesystemAttrsProvider for CachedFs<F>
+where
+    F: FilesystemRead + FilesystemSecurity + FilesystemAttrsProvider,
+{
+    fn attrs_fs(&mut self) -> Option<&mut dyn FilesystemAttrsFs> {
+        // Support is the wrapped driver's fact; the cache adds none. When
+        // the inner driver provides attributes the returned view is the
+        // cache itself, so resolution reads stay cached and mutations
+        // invalidate what they touch.
+        if self.inner.attrs_fs().is_some() {
+            Some(self)
+        } else {
+            None
+        }
     }
 }
 

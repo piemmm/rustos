@@ -1118,6 +1118,13 @@ the `FilesystemAttrs` ABI, and the RustFS attribute store with its tests
 (round-trip and remount, case-sensitive keys, unknown-namespace and oversize
 rejection, block-overflow fail-closed, encryption at rest, read-only refusal,
 crash-atomicity replay, free-on-remove with no leak, and reflink independence).
+**Delivered since:** the userland surface — the `fs_attr_get`/`fs_attr_set`/
+`fs_attr_list`/`fs_attr_remove` syscalls (nos. 84–87,
+`docs/src/architecture/syscalls.md`) over the secured VFS, with a driver's
+support declared through the `FilesystemAttrsProvider` facet (a mount whose
+format stores no attributes answers `Errno::NotSupported`) and the privileged
+`system`/`trusted` namespaces refused and hidden until their capability
+arrives with its first holder.
 **Staged (not yet delivered):** the `cp`/`mv`/desktop/archive
 preserve-metadata tooling, the resource-fork *named-stream* content path for
 values above the single-block bound, and the per-family foreign-filesystem

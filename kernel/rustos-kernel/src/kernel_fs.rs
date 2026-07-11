@@ -20,20 +20,30 @@
 use alloc::boxed::Box;
 
 use rustos_abi::driver::filesystem::{
-    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId,
-    NodeInfo, NodeKind, NodeSecurity, VolumeStats,
+    DirEntry, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity,
+    FilesystemStats, FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity, VolumeStats,
 };
 use rustos_abi::DriverError;
 
 /// The mounted-volume filesystem driver, type-erased. See the module
 /// docs.
 pub trait KernelFs:
-    FilesystemRead + FilesystemWrite + FilesystemSecurity + FilesystemStats + Send
+    FilesystemRead
+    + FilesystemWrite
+    + FilesystemSecurity
+    + FilesystemStats
+    + FilesystemAttrsProvider
+    + Send
 {
 }
 
 impl<T> KernelFs for T where
-    T: FilesystemRead + FilesystemWrite + FilesystemSecurity + FilesystemStats + Send
+    T: FilesystemRead
+        + FilesystemWrite
+        + FilesystemSecurity
+        + FilesystemStats
+        + FilesystemAttrsProvider
+        + Send
 {
 }
 
@@ -115,5 +125,11 @@ impl FilesystemSecurity for Box<dyn KernelFs> {
 impl FilesystemStats for Box<dyn KernelFs> {
     fn stats(&mut self) -> Result<VolumeStats, DriverError> {
         (**self).stats()
+    }
+}
+
+impl FilesystemAttrsProvider for Box<dyn KernelFs> {
+    fn attrs_fs(&mut self) -> Option<&mut dyn FilesystemAttrsFs> {
+        (**self).attrs_fs()
     }
 }

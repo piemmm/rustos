@@ -60,6 +60,11 @@ rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 # (relative → absolute, `.`/`..` collapsed, escape blocked) through
 # `rustos_path` rather than a second path normaliser.
 rustos-path = { path = "../../lib/path", version = "=0.0.0" }
+# The single extended-attribute key grammar (`AGENTS.md` §2.2): the secured
+# VFS attribute operations (`src/fs/delegate.rs`) validate every key and
+# resolve its namespace's access class through `rustos_fsmeta` rather than a
+# second key parser.
+rustos-fsmeta = { path = "../../lib/fsmeta", version = "=0.0.0" }
 # The single shared resource-reference parser (`AGENTS.md` §2.2): the
 # `resource_open` resolver (`src/resource.rs`) lexes a caller's reference
 # string (`sys:random`, …) through `rustos_resref` rather than a second

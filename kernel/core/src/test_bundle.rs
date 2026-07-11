@@ -191,6 +191,51 @@ impl FilesystemService for MemFs {
     ) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
+
+    // The fixture's flat map stores no extended attributes; every attribute
+    // operation answers the typed unsupported-backing refusal.
+    fn attr_get(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _path: &str,
+        _key: &[u8],
+        _value_out: &mut [u8],
+    ) -> Result<usize, Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    fn attr_set(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _path: &str,
+        _key: &[u8],
+        _value: &[u8],
+    ) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    fn attr_list(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _path: &str,
+        _index: u64,
+        _key_out: &mut [u8],
+    ) -> Result<Option<usize>, Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    fn attr_remove(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _path: &str,
+        _key: &[u8],
+    ) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
 }
 
 /// A minimal valid single-segment PIE `rxe` whose CFI tag is the kernel's

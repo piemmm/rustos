@@ -46,5 +46,7 @@
 #define ROS_E_BROKEN_PIPE 28
 #define ROS_E_ENDPOINT_STALLED 29
 #define ROS_E_DEVICE_FAULT 30
+#define ROS_E_NO_DATA 31
+#define ROS_E_NOT_SUPPORTED 32
 
 #endif /* ROS_ERROR_H */

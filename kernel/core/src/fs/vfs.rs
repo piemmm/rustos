@@ -13,8 +13,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use rustos_abi::driver::filesystem::{
-    FilesystemRead, FilesystemSecurity, FilesystemWrite, MountFlags, NodeInfo as DriverNodeInfo,
-    NodeKind as DriverNodeKind,
+    FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemWrite, MountFlags,
+    NodeInfo as DriverNodeInfo, NodeKind as DriverNodeKind,
 };
 use rustos_abi::time::Time64;
 use rustos_abi::CapabilityId;
@@ -505,6 +505,97 @@ impl Vfs {
     ) -> Result<(), VfsError> {
         let (template, remainder) = self.delegate_context(cred, path, true)?;
         DelegatedFs::new_secured(fs, template).set_mode(cred, &remainder, mode)
+    }
+
+    /// Read one extended attribute of the node at `path` under a
+    /// driver-backed mount, delegating to `fs` (the `getxattr(2)` shape).
+    ///
+    /// The per-inode rule is
+    /// [`DelegatedFs::get_attr`](super::delegate::DelegatedFs::get_attr)'s:
+    /// read permission on the node, privileged namespaces refused,
+    /// `required_cap` honoured. Secured-only, like `set_mode`: attribute
+    /// storage is a per-inode record no uniform-template mount carries.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::NotFound`] if no driver-backed mount covers `path`.
+    /// * As [`DelegatedFs::get_attr`](super::delegate::DelegatedFs::get_attr).
+    pub fn get_attr_via_secured<
+        F: FilesystemRead + FilesystemSecurity + FilesystemAttrs + ?Sized,
+    >(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut F,
+        key: &[u8],
+        value_out: &mut [u8],
+    ) -> Result<usize, VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path, false)?;
+        DelegatedFs::new_secured(fs, template).get_attr(cred, &remainder, key, value_out)
+    }
+
+    /// Set one extended attribute of the node at `path` under a writable
+    /// driver-backed mount, delegating to `fs` (the `setxattr(2)` shape).
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::NotFound`] if no driver-backed mount covers `path`.
+    /// * [`VfsError::ReadOnly`] if the covering mount is read-only.
+    /// * As [`DelegatedFs::set_attr`](super::delegate::DelegatedFs::set_attr).
+    pub fn set_attr_via_secured<
+        F: FilesystemRead + FilesystemSecurity + FilesystemAttrs + ?Sized,
+    >(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut F,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path, true)?;
+        DelegatedFs::new_secured(fs, template).set_attr(cred, &remainder, key, value)
+    }
+
+    /// Yield the `index`-th visible extended-attribute key of the node at
+    /// `path` under a driver-backed mount, delegating to `fs`.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::NotFound`] if no driver-backed mount covers `path`.
+    /// * As [`DelegatedFs::list_attr`](super::delegate::DelegatedFs::list_attr).
+    pub fn list_attr_via_secured<
+        F: FilesystemRead + FilesystemSecurity + FilesystemAttrs + ?Sized,
+    >(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut F,
+        index: u64,
+        key_out: &mut [u8],
+    ) -> Result<Option<usize>, VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path, false)?;
+        DelegatedFs::new_secured(fs, template).list_attr(cred, &remainder, index, key_out)
+    }
+
+    /// Remove one extended attribute of the node at `path` under a writable
+    /// driver-backed mount, delegating to `fs` (the `removexattr(2)` shape).
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::NotFound`] if no driver-backed mount covers `path`.
+    /// * [`VfsError::ReadOnly`] if the covering mount is read-only.
+    /// * As [`DelegatedFs::remove_attr`](super::delegate::DelegatedFs::remove_attr).
+    pub fn remove_attr_via_secured<
+        F: FilesystemRead + FilesystemSecurity + FilesystemAttrs + ?Sized,
+    >(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut F,
+        key: &[u8],
+    ) -> Result<(), VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path, true)?;
+        DelegatedFs::new_secured(fs, template).remove_attr(cred, &remainder, key)
     }
 
     /// Move `src` to `dst` under a driver-backed mount, delegating to `fs`.

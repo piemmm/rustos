@@ -68,7 +68,7 @@ use alloc::vec::Vec;
 
 use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{
-    FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
+    FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
 };
 use rustos_abi::DriverHandle;
 use rustos_drv_fs_rustfs::{RustFs, SYSTEM_VOLUME_KEY};
@@ -117,7 +117,13 @@ pub(crate) fn cached<F>(
     audit: &'static (dyn Sink + Sync),
 ) -> Box<dyn KernelFs>
 where
-    F: FilesystemRead + FilesystemWrite + FilesystemSecurity + FilesystemStats + Send + 'static,
+    F: FilesystemRead
+        + FilesystemWrite
+        + FilesystemSecurity
+        + FilesystemStats
+        + FilesystemAttrsProvider
+        + Send
+        + 'static,
 {
     Box::new(CachedFs::new(
         driver,

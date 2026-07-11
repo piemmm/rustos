@@ -104,6 +104,47 @@ pub trait Fs {
     /// changes nothing.
     fn set_mode(&mut self, path: &str, mode: u32) -> Result<(), Errno>;
 
+    /// Every visible extended-attribute key of the entry at `path`, in the
+    /// backing's stable order (the `lib/fsmeta` `namespace.rest` grammar;
+    /// keys the caller may not read are omitted by the kernel, never
+    /// shown).
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises; [`Errno::NotSupported`] means
+    /// the mounted format stores no attributes, which the attributes view
+    /// states honestly rather than treating as an empty set.
+    fn attr_list(&mut self, path: &str) -> Result<Vec<String>, Errno>;
+
+    /// The value of extended attribute `key` on the entry at `path`
+    /// (opaque bytes; a value may be empty).
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises; [`Errno::NoData`] means the
+    /// entry carries no such attribute.
+    fn attr_get(&mut self, path: &str, key: &str) -> Result<Vec<u8>, Errno>;
+
+    /// Set (insert or replace) extended attribute `key` on the entry at
+    /// `path` to `value`. The kernel owns the authorisation: write
+    /// permission on the node, a writable mount, the shared key grammar,
+    /// and the fixed size bounds; a refusal comes back as the frozen
+    /// [`Errno`] the model surfaces unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises; the model reports it and
+    /// changes nothing.
+    fn attr_set(&mut self, path: &str, key: &str, value: &[u8]) -> Result<(), Errno>;
+
+    /// Remove extended attribute `key` from the entry at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises; [`Errno::NoData`] means no
+    /// such attribute was stored.
+    fn attr_remove(&mut self, path: &str, key: &str) -> Result<(), Errno>;
+
     /// The [`FileKind`] of the entry at `path` (a resolve-only stat), used
     /// to probe a destination before any I/O.
     ///

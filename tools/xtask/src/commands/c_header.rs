@@ -60,22 +60,23 @@ use rustos_abi::{
     CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DRIVER_MANIFEST_MAGIC,
     DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_REGISTER_REPLY_MAGIC,
     DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
-    ENCODED_QUERY_TABLE_LEN, FS_MODE_MASK, HOSTNAME_MAX, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX,
-    HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC,
-    KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED,
-    KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC,
-    LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX,
-    LOG_LEVEL_MAX, LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX, MACHINE_ID_LEN,
-    MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT, MOD_CTRL,
-    MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
-    MOUNT_VOLUME_ID_LEN, NANOS_PER_SEC, POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_CPU_NONE,
-    PROCESS_NAME_MAX, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
-    PROCESS_START_MAX_TOTAL_LEN, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES,
-    RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ,
-    SEG_FLAG_WRITE, SPAWN_UID_INHERIT, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1,
-    SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN,
-    SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
-    SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR, USER_DIRECTORY_NAME_MAX,
+    ENCODED_QUERY_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, HOSTNAME_MAX,
+    HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES,
+    HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC,
+    KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, LIBREF_MAX,
+    LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX,
+    LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN,
+    LOG_RECORD_MAX, MACHINE_ID_LEN, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN,
+    MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX,
+    MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, MOUNT_VOLUME_ID_LEN, NANOS_PER_SEC, POINTER_INPUT_MAGIC,
+    PORT_NAME_MAX_LEN, PROCESS_CPU_NONE, PROCESS_NAME_MAX, PROCESS_START_MAGIC,
+    PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN,
+    RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES, RESOURCE_LIMITS_REPORT_LEN,
+    RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ, SEG_FLAG_WRITE,
+    SPAWN_UID_INHERIT, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1, SYSCALLS,
+    SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX,
+    SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
+    SYSTEM_LIBRARIES_DIR, USER_DIRECTORY_NAME_MAX,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -123,6 +124,8 @@ const ERRNO_NAMES: &[(&str, Errno)] = &[
     ("BROKEN_PIPE", Errno::BrokenPipe),
     ("ENDPOINT_STALLED", Errno::EndpointStalled),
     ("DEVICE_FAULT", Errno::DeviceFault),
+    ("NO_DATA", Errno::NoData),
+    ("NOT_SUPPORTED", Errno::NotSupported),
 ];
 
 /// One generated C header: its file name (relative to the include directory)
@@ -2276,6 +2279,19 @@ fn emit_fs_contract(out: &mut String) {
     );
     let _ = writeln!(out, "#define ROS_FS_MODE_MASK {FS_MODE_MASK:#x}u");
     out.push('\n');
+
+    out.push_str(
+        "/* fs_attr_*() bounds: an extended-attribute key (a `namespace.rest`\n\
+         * lib/fsmeta-grammar key) carries 1..=ROS_FS_ATTR_KEY_MAX bytes, and a value\n\
+         * at most ROS_FS_ATTR_VALUE_MAX opaque bytes; a call outside either bound is\n\
+         * rejected with ROS_E_LENGTH_OUT_OF_RANGE before any copy. An absent\n\
+         * attribute reads as ROS_E_NO_DATA (a value may be empty, so absence is\n\
+         * never an empty read), and a mount whose on-disk format stores no\n\
+         * attributes answers every fs_attr_*() call with ROS_E_NOT_SUPPORTED. */\n",
+    );
+    let _ = writeln!(out, "#define ROS_FS_ATTR_KEY_MAX {FS_ATTR_KEY_MAX}u");
+    let _ = writeln!(out, "#define ROS_FS_ATTR_VALUE_MAX {FS_ATTR_VALUE_MAX}u");
+    out.push('\n');
 }
 
 /// Emit the `wait()` contract items into `rustos_syscall.h`: the flag bits
@@ -2651,6 +2667,22 @@ mod tests {
         assert!(
             h.contains("#define ROS_CAP_USER_ADMIN ((uint16_t)5u)"),
             "capability id carries its canonical uint16_t type: {h}"
+        );
+    }
+
+    /// The `fs_attr_*()` bounds are read from `lib/abi`, never hardcoded.
+    #[test]
+    fn syscall_header_carries_the_fs_attr_bounds() {
+        let h = generate_syscall();
+        assert!(
+            h.contains(&format!("#define ROS_FS_ATTR_KEY_MAX {FS_ATTR_KEY_MAX}u")),
+            "fs_attr key bound: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_FS_ATTR_VALUE_MAX {FS_ATTR_VALUE_MAX}u"
+            )),
+            "fs_attr value bound: {h}"
         );
     }
 
@@ -3824,11 +3856,11 @@ mod tests {
             let expected = i32::try_from(idx + 1).expect("small index");
             assert_eq!(errno.as_i32(), expected, "errno values must be dense 1..=N");
         }
-        // DeviceFault is the last appended abi-v1 variant
-        // (discriminant 30).
+        // NotSupported is the last appended abi-v1 variant
+        // (discriminant 32).
         assert_eq!(
             ERRNO_NAMES.last().map(|(_, e)| e.as_i32()),
-            Some(Errno::DeviceFault.as_i32()),
+            Some(Errno::NotSupported.as_i32()),
             "errno table must end at the last frozen variant"
         );
     }

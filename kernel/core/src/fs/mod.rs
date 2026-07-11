@@ -237,6 +237,28 @@ pub enum VfsError {
     /// never produces this; it is reachable only through the
     /// driver-delegation path ([`Vfs::read_via`] and friends).
     Io,
+    /// An extended-attribute key fails the shared `lib/fsmeta` grammar
+    /// (malformed bytes, an unknown namespace, or an over-long key or
+    /// value). Fail closed: the request is refused whole, never stored
+    /// under a corrected key.
+    InvalidKey,
+    /// The node exists and is readable, but carries no extended attribute
+    /// under the requested key. Distinct from [`Self::NotFound`] (the path
+    /// itself does not resolve) because a value may legitimately be empty,
+    /// so absence can never be an empty read.
+    NoData,
+    /// A caller-supplied output buffer is smaller than the attribute value
+    /// or key it must receive. Never truncated: the caller retries with a
+    /// larger buffer.
+    BufferTooSmall,
+    /// The driver cannot store the attribute: the per-inode attribute
+    /// count, total byte, or metadata-block bound would be exceeded, or
+    /// the volume is out of space.
+    NoSpace,
+    /// The covering mount's on-disk format has nowhere to store extended
+    /// attributes (its driver carries no attribute facet). Retrying can
+    /// never succeed on that mount; distinct from a driver fault.
+    NotSupported,
 }
 
 impl VfsError {
@@ -260,7 +282,7 @@ impl VfsError {
         match self {
             Self::NotFound => Errno::NotFound,
             Self::PermissionDenied | Self::ReadOnly => Errno::PermissionDenied,
-            Self::InvalidPath | Self::IsADirectory => Errno::OutOfRange,
+            Self::InvalidPath | Self::IsADirectory | Self::InvalidKey => Errno::OutOfRange,
             Self::NotADirectory => Errno::NotADirectory,
             Self::AlreadyExists => Errno::AlreadyExists,
             Self::NotEmpty => Errno::NotEmpty,
@@ -268,6 +290,10 @@ impl VfsError {
             // An unrecoverable backing fault is reported as what it is: the
             // device failed (or vanished), never "interface not implemented".
             Self::Io => Errno::DeviceFault,
+            Self::NoData => Errno::NoData,
+            Self::BufferTooSmall => Errno::BufferTooSmall,
+            Self::NoSpace => Errno::NoSpace,
+            Self::NotSupported => Errno::NotSupported,
         }
     }
 }
@@ -285,6 +311,11 @@ impl fmt::Display for VfsError {
             Self::ReadOnly => "read-only mount",
             Self::CrossVolume => "paths on different volumes",
             Self::Io => "filesystem driver i/o error",
+            Self::InvalidKey => "invalid attribute key",
+            Self::NoData => "no such attribute",
+            Self::BufferTooSmall => "buffer too small",
+            Self::NoSpace => "no space for attribute",
+            Self::NotSupported => "attributes not supported by the mounted format",
         };
         f.write_str(message)
     }
@@ -308,6 +339,11 @@ mod tests {
         assert_eq!(VfsError::NotADirectory.to_errno(), Errno::NotADirectory);
         assert_eq!(VfsError::NotEmpty.to_errno(), Errno::NotEmpty);
         assert_eq!(VfsError::CrossVolume.to_errno(), Errno::CrossVolume);
+        assert_eq!(VfsError::InvalidKey.to_errno(), Errno::OutOfRange);
+        assert_eq!(VfsError::NoData.to_errno(), Errno::NoData);
+        assert_eq!(VfsError::BufferTooSmall.to_errno(), Errno::BufferTooSmall);
+        assert_eq!(VfsError::NoSpace.to_errno(), Errno::NoSpace);
+        assert_eq!(VfsError::NotSupported.to_errno(), Errno::NotSupported);
         assert_eq!(VfsError::Io.to_errno(), Errno::DeviceFault);
     }
 
@@ -323,6 +359,11 @@ mod tests {
             VfsError::PermissionDenied,
             VfsError::ReadOnly,
             VfsError::Io,
+            VfsError::InvalidKey,
+            VfsError::NoData,
+            VfsError::BufferTooSmall,
+            VfsError::NoSpace,
+            VfsError::NotSupported,
         ] {
             assert!(!alloc::format!("{e}").is_empty());
         }

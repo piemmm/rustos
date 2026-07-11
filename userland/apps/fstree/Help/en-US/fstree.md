@@ -57,9 +57,18 @@ Keys:
   confirmation says so. The confirmation can be turned off in the
   settings menu (`S`).
 - `M` — create a directory in the listed directory, asked for its name.
-- `a` — edit the selected entry's permission bits: an octal prompt
-  pre-filled with the current mode. Enter applies (only the entry's owner
-  may change it — the kernel refuses anyone else), Esc cancels.
+- `a` — open the selected entry's attributes: its permission bits and
+  its extended attributes (`namespace.key = value` pairs, e.g.
+  `user.comment`). Inside the view, arrows move over the attributes,
+  `m` edits the mode (an octal prompt pre-filled with the current bits;
+  Enter applies — only the entry's owner may change it, the kernel
+  refuses anyone else), `n` adds an attribute as a `key=value` line,
+  Enter edits the selected one (pre-filled; a binary value pre-fills the
+  key alone), `d` removes it, and Esc leaves. The kernel decides every
+  change — read and write follow the entry's own permissions, the
+  `system.`/`trusted.` namespaces are reserved, and a refusal is shown
+  verbatim. A filesystem whose format stores no attributes (FAT32,
+  ext4) says so in the view; the mode editor still works there.
 - `t` — tag or untag the selected file-pane entry and step down, so
   repeated presses mark a run. Tagged entries carry a `*` marker.
 - `T` — tag by pattern: a glob (`*`, `?`, `[...]`) matched against

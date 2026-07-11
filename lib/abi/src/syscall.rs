@@ -1549,6 +1549,66 @@ impl SyscallNumber {
     /// present) is the service's to log.
     pub const CALL_PEER_SEAT: Self = Self(83);
 
+    /// Read one extended attribute of the file or directory at an absolute
+    /// path (the `getxattr(2)` shape).
+    ///
+    /// Arguments: `path: *const u8` + `path_len: usize` (at most
+    /// [`crate::FS_PATH_MAX`]), `key: *const u8` + `key_len: usize` (a
+    /// `lib/fsmeta`-grammar `namespace.rest` key, `1..=`
+    /// [`crate::FS_ATTR_KEY_MAX`] bytes), and `value_out: *mut u8` +
+    /// `value_out_len: usize` (the caller's buffer). Returns the number of
+    /// value bytes written. Gated on `CAP_FS_ACCESS`; the per-inode rule is
+    /// the secured VFS's — the caller needs read permission on the node,
+    /// the `system`/`trusted` namespaces are refused outright, and a
+    /// `required_cap` gate on the node is honoured. Fails closed with
+    /// [`crate::Errno::NoData`] when the node carries no such attribute
+    /// (a value may legitimately be empty, so absence is never an empty
+    /// read), [`crate::Errno::BufferTooSmall`] when the value does not fit
+    /// (never truncated), and [`crate::Errno::NotSupported`] on a mount
+    /// whose format stores no attributes.
+    pub const FS_ATTR_GET: Self = Self(84);
+
+    /// Set (insert or replace) one extended attribute of the file or
+    /// directory at an absolute path (the `setxattr(2)` shape).
+    ///
+    /// Arguments: `path`/`path_len`, `key`/`key_len` (as
+    /// [`Self::FS_ATTR_GET`]), and `value: *const u8` + `value_len: usize`
+    /// (at most [`crate::FS_ATTR_VALUE_MAX`] bytes; the value is opaque to
+    /// the kernel). The write is one copy-on-write transaction in the
+    /// driver — fully applied or not at all. Gated on `CAP_FS_ACCESS`; the
+    /// secured VFS requires write permission on the node, a writable
+    /// mount, a valid `lib/fsmeta` key in a non-privileged namespace, and
+    /// honours a `required_cap` gate. Refusals include
+    /// [`crate::Errno::NoSpace`] (the per-inode attribute bounds) and
+    /// [`crate::Errno::NotSupported`] (a mount without attribute storage).
+    pub const FS_ATTR_SET: Self = Self(85);
+
+    /// Enumerate the extended-attribute keys of the file or directory at
+    /// an absolute path, one key per call (the `fs_readdir` iteration
+    /// shape rather than `listxattr(2)`'s packed buffer).
+    ///
+    /// Arguments: `path`/`path_len`, `index: u64` (the position to yield),
+    /// and `key_out: *mut u8` + `key_out_len: usize`. Returns the key's
+    /// byte length (written into `key_out`), or `0` once `index` is past
+    /// the last visible attribute — a real key is never empty, so `0`
+    /// unambiguously means end-of-list. Keys whose namespace the caller
+    /// may not read (`system`/`trusted`) are omitted, never revealed.
+    /// Gated on `CAP_FS_ACCESS`; the secured VFS requires read permission
+    /// on the node. Iteration order is the driver's stable on-disk order.
+    pub const FS_ATTR_LIST: Self = Self(86);
+
+    /// Remove one extended attribute of the file or directory at an
+    /// absolute path (the `removexattr(2)` shape).
+    ///
+    /// Arguments: `path`/`path_len` and `key`/`key_len` (as
+    /// [`Self::FS_ATTR_GET`]). One copy-on-write transaction. Gated on
+    /// `CAP_FS_ACCESS`; the secured VFS requires write permission on the
+    /// node, a writable mount, and a non-privileged namespace. Fails
+    /// closed with [`crate::Errno::NoData`] when the node carries no such
+    /// attribute and [`crate::Errno::NotSupported`] on a mount without
+    /// attribute storage.
+    pub const FS_ATTR_REMOVE: Self = Self(87);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

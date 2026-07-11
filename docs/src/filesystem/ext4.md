@@ -232,7 +232,9 @@ vertical remain future work.
 
 ## Extended-metadata representability
 
-The ext4 driver does **not** implement the `FilesystemAttrs` ABI, so it cannot
+The ext4 driver does **not** implement the `FilesystemAttrs` ABI (its
+attribute facet answers `None`, so the `fs_attr_*` syscalls refuse an ext4
+mount with `NotSupported`), so it cannot
 represent RustFS extended attributes or foreign-filesystem preset metadata
 (`rustfs-spec.md` §21). Under the cross-filesystem preservation contract an
 exact-preservation copy of a file carrying such attributes onto ext4 reports

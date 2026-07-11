@@ -128,6 +128,10 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  81 | `volume_detach` | `user_ptr` (request), `len`            | `errno`       | `CAP_FS_MOUNT`  | yes   |
 |  82 | `shm_grant`    | `Handle` (region), `IpcEndpoint`        | `u64` (handle) | `CAP_SHM`      | yes   |
 |  83 | `call_peer_seat` | `IpcEndpoint`, `Handle` (ticket), `u64 seat` | `u64` (generation) | —     | no    |
+|  84 | `fs_attr_get`  | `user_ptr` (path), `len`, `user_ptr` (key), `len`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
+|  85 | `fs_attr_set`  | `user_ptr` (path), `len`, `user_ptr` (key), `len`, `user_ptr` (value), `len` | `errno` | `CAP_FS_ACCESS` | yes |
+|  86 | `fs_attr_list` | `user_ptr` (path), `len`, `u64 index`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
+|  87 | `fs_attr_remove` | `user_ptr` (path), `len`, `user_ptr` (key), `len` | `errno` | `CAP_FS_ACCESS` | yes |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -169,6 +173,26 @@ its mode (write access does not imply chmod, and holding a capability grants
 no override), the covering mount must be writable, and a node carrying a
 `required_cap` gate demands that capability for this change as for any other
 access. The `chmod` command app and `fstree`'s mode editor are its callers.
+
+The `fs_attr_*` family (nos. 84–87) is the extended-attribute surface — the
+`getxattr`/`setxattr`/`listxattr`/`removexattr` shapes over the per-inode
+`namespace.rest` store `lib/fsmeta` defines and `docs/src/filesystem/rustfs-spec.md`
+§21 specifies. A key carries `1..=FS_ATTR_KEY_MAX` (255) bytes and a value at
+most `FS_ATTR_VALUE_MAX` (3072) opaque bytes; both bounds are refused at
+dispatch with `LengthOutOfRange` before any user memory beyond them is read.
+The secured VFS makes every decision: the ordinary namespaces (`user`, the
+foreign presets, `rustos`) follow the node's own read/write permissions
+(`required_cap` included), while the privileged namespaces (`system`,
+`trusted`) are reserved — refused on every call, and omitted from the listing
+without leaving an index gap — until the service that holds their dedicated
+capability introduces it. An absent attribute reads as `NoData` (a value may
+legitimately be empty, so absence is never an empty read); a too-small output
+buffer is `BufferTooSmall`, never a truncation; `fs_attr_list` yields one key
+per call by index, returning `0` past the last visible attribute; and a mount
+whose on-disk format stores no attributes (FAT32, ext4) answers every call
+with `NotSupported`, decided per driver through the `FilesystemAttrs` facet.
+Mutations are one copy-on-write driver transaction and are audited;
+`fstree`'s attributes editor is the first caller.
 
 `port_resolve` (no. 75) resolves a published port name to its live IPC
 endpoint id — how a process reaches a *well-known* service port (a system
@@ -263,7 +287,7 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_SYSINFO_INTROSPECT` | `sysinfo_introspect` |
 | `CAP_LOG_EMIT`     | `log_emit`                 |
 | `CAP_HW_EMIT`      | `hw_emit_node`, `hw_remove_node` |
-| `CAP_FS_ACCESS`    | `fs_open`, `fs_readdir`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_set_mode`, `fs_chdir` (the path-taking calls), and — enforced *in the handler* on a path-backed descriptor — `fs_read`, `fs_write`, `fs_close` |
+| `CAP_FS_ACCESS`    | `fs_open`, `fs_readdir`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_set_mode`, `fs_attr_get`, `fs_attr_set`, `fs_attr_list`, `fs_attr_remove`, `fs_chdir` (the path-taking calls), and — enforced *in the handler* on a path-backed descriptor — `fs_read`, `fs_write`, `fs_close` |
 | `CAP_TIME_SET`     | `wall_time_set`            |
 
 The `CAP_IRQ_BIND` rationale, the wake-up contract, and the failure

@@ -158,6 +158,7 @@ pub fn render(model: &Model, window: &mut Window) {
         Overlay::Report => render_report(model, window, body, cols),
         Overlay::Volumes => render_volumes(model, window, body, cols),
         Overlay::Settings => render_settings(model, window, body, cols),
+        Overlay::Attrs => render_attrs(model, window, body, cols),
         Overlay::None | Overlay::SortMenu => match model.view {
             View::Panes => render_panes(model, window, body, cols),
             View::Flat => render_flat(model, window, body, cols),
@@ -415,6 +416,65 @@ fn render_volumes(model: &Model, window: &mut Window, body: u16, cols: u16) {
     }
 }
 
+/// The attributes editor (`a`): the entry's mode line, then one row per
+/// extended attribute with the cursor row reversed. A backing without
+/// attribute storage says so in place of an empty list.
+fn render_attrs(model: &Model, window: &mut Window, body: u16, cols: u16) {
+    let Some(view) = model.attrs.as_ref() else {
+        return;
+    };
+    draw_frame(window, body, cols, None, &[(2, " Attributes ", true)]);
+    let width = usize::from(cols - 2);
+    let mut reverse = Attributes::PLAIN;
+    reverse.reverse = true;
+    let header = format!(
+        "{}  mode {:o}   m mode  n new  Enter edit  d delete",
+        view.name, view.mode
+    );
+    let _ = window.move_add_str(Pos::new(1, 1), truncate_to_width(&header, width));
+    if view.unsupported {
+        let _ = window.move_add_str(
+            Pos::new(3, 1),
+            truncate_to_width("attributes not supported by this filesystem", width),
+        );
+        return;
+    }
+    if view.entries.is_empty() {
+        let _ = window.move_add_str(Pos::new(3, 1), truncate_to_width("no attributes", width));
+        return;
+    }
+    for (line, (index, (key, value))) in
+        (0..body.saturating_sub(4)).zip(view.entries.iter().enumerate())
+    {
+        let text = format!("{key} = {}", display_value(value));
+        if index == view.cursor {
+            window.set_attributes(reverse);
+        }
+        let _ = window.move_add_str(Pos::new(line + 3, 1), truncate_to_width(&text, width));
+        window.set_attributes(Attributes::PLAIN);
+    }
+}
+
+/// An attribute value's display form: printable text is shown as typed;
+/// anything else is escaped byte by byte (`\xNN`), never trusted raw onto
+/// the terminal.
+fn display_value(value: &[u8]) -> String {
+    match core::str::from_utf8(value) {
+        Ok(text) if text.chars().all(|c| !c.is_control()) => String::from(text),
+        _ => {
+            let mut out = String::new();
+            for byte in value {
+                if (0x20..=0x7e).contains(byte) {
+                    out.push(char::from(*byte));
+                } else {
+                    let _ = core::fmt::Write::write_fmt(&mut out, format_args!("\\x{byte:02x}"));
+                }
+            }
+            out
+        }
+    }
+}
+
 /// The settings menu (`S`): the persisted confirmation toggles and where
 /// they persist to (or that they cannot).
 fn render_settings(model: &Model, window: &mut Window, body: u16, cols: u16) {
@@ -655,6 +715,10 @@ fn prompt_line(prompt: &Prompt) -> String {
         Prompt::Mode(mode) => format!(
             "mode {} [{:o}]: {}_  (octal, Enter applies, Esc cancels)",
             mode.name, mode.current, mode.input
+        ),
+        Prompt::AttrEdit(edit) => format!(
+            "attribute on {} (key=value): {}_  (Enter applies, Esc cancels)",
+            edit.name, edit.input
         ),
         Prompt::Input(input) => input_prompt_line(input),
         Prompt::OpenAs(prompt) => format!(

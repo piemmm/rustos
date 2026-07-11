@@ -233,6 +233,88 @@ pub trait FilesystemService: Send + Sync {
         mode: u32,
     ) -> Result<(), Errno>;
 
+    /// Read the extended attribute `key` of the node at the absolute
+    /// `path` into `value_out`, returning the value's byte count (the
+    /// `getxattr(2)` shape).
+    ///
+    /// The secured VFS owns the authorisation: the key must satisfy the
+    /// shared `lib/fsmeta` grammar, the caller needs read permission on
+    /// the node, and the privileged namespaces are refused.
+    ///
+    /// # Errors
+    ///
+    /// The stable [`Errno`] for the VFS refusal, [`Errno::NoData`] when
+    /// the node carries no such attribute, [`Errno::BufferTooSmall`] when
+    /// the value does not fit, [`Errno::NotSupported`] when the covering
+    /// mount's format stores no attributes, or [`Errno::NotImplemented`]
+    /// when no filesystem is mounted.
+    fn attr_get(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        key: &[u8],
+        value_out: &mut [u8],
+    ) -> Result<usize, Errno>;
+
+    /// Set (insert or replace) the extended attribute `key` of the node at
+    /// the absolute `path` to `value`, in one copy-on-write transaction
+    /// (the `setxattr(2)` shape). Needs write permission on the node and a
+    /// writable mount.
+    ///
+    /// # Errors
+    ///
+    /// The stable [`Errno`] for the VFS refusal, [`Errno::NoSpace`] at the
+    /// per-inode attribute bounds, [`Errno::NotSupported`] when the
+    /// covering mount's format stores no attributes, or
+    /// [`Errno::NotImplemented`] when no filesystem is mounted.
+    fn attr_set(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), Errno>;
+
+    /// Yield the `index`-th visible extended-attribute key of the node at
+    /// the absolute `path` into `key_out`, returning its byte count, or
+    /// `None` once `index` is past the last visible attribute. Keys the
+    /// caller may not read are omitted, never revealed.
+    ///
+    /// # Errors
+    ///
+    /// The stable [`Errno`] for the VFS refusal, [`Errno::BufferTooSmall`]
+    /// when the selected key does not fit, [`Errno::NotSupported`] when
+    /// the covering mount's format stores no attributes, or
+    /// [`Errno::NotImplemented`] when no filesystem is mounted.
+    fn attr_list(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        index: u64,
+        key_out: &mut [u8],
+    ) -> Result<Option<usize>, Errno>;
+
+    /// Remove the extended attribute `key` from the node at the absolute
+    /// `path`, in one copy-on-write transaction (the `removexattr(2)`
+    /// shape). Needs write permission on the node and a writable mount.
+    ///
+    /// # Errors
+    ///
+    /// The stable [`Errno`] for the VFS refusal, [`Errno::NoData`] when
+    /// the node carries no such attribute, [`Errno::NotSupported`] when
+    /// the covering mount's format stores no attributes, or
+    /// [`Errno::NotImplemented`] when no filesystem is mounted.
+    fn attr_remove(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        key: &[u8],
+    ) -> Result<(), Errno>;
+
     /// Snapshot the system mount table as wire-ready [`MountRecord`]s, in a
     /// stable order (the permanent root mount first), for the System
     /// Information introspection feed.
@@ -350,6 +432,49 @@ impl FilesystemService for NullFilesystemService {
         _caps: &dyn CapabilityQuery,
         _path: &str,
         _mode: u32,
+    ) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn attr_get(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _path: &str,
+        _key: &[u8],
+        _value_out: &mut [u8],
+    ) -> Result<usize, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn attr_set(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _path: &str,
+        _key: &[u8],
+        _value: &[u8],
+    ) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn attr_list(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _path: &str,
+        _index: u64,
+        _key_out: &mut [u8],
+    ) -> Result<Option<usize>, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn attr_remove(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _path: &str,
+        _key: &[u8],
     ) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }

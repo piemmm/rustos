@@ -41,7 +41,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use rustos_abi::driver::filesystem::{
-    FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
+    FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
     NodeKind as DriverNodeKind, VolumeStats,
 };
 use rustos_abi::driver::DriverHandle;
@@ -596,7 +596,13 @@ fn file_kind(kind: DriverNodeKind) -> FileKind {
 
 impl<F> FilesystemService for MountedFilesystemService<F>
 where
-    F: FilesystemRead + FilesystemWrite + FilesystemSecurity + FilesystemStats + Send + 'static,
+    F: FilesystemRead
+        + FilesystemWrite
+        + FilesystemSecurity
+        + FilesystemStats
+        + FilesystemAttrsProvider
+        + Send
+        + 'static,
 {
     fn open(
         &self,
@@ -840,6 +846,72 @@ where
         }
         self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
             vfs.set_mode_via_secured(cred, path, fs, mode)
+        })
+    }
+
+    fn attr_get(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        key: &[u8],
+        value_out: &mut [u8],
+    ) -> Result<usize, Errno> {
+        // A mount whose format stores no attributes answers with the typed
+        // refusal, decided per driver through the attribute facet; every
+        // permission decision stays in the secured VFS.
+        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+            let Some(fs) = fs.attrs_fs() else {
+                return Err(VfsError::NotSupported);
+            };
+            vfs.get_attr_via_secured(cred, path, fs, key, value_out)
+        })
+    }
+
+    fn attr_set(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), Errno> {
+        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+            let Some(fs) = fs.attrs_fs() else {
+                return Err(VfsError::NotSupported);
+            };
+            vfs.set_attr_via_secured(cred, path, fs, key, value)
+        })
+    }
+
+    fn attr_list(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        index: u64,
+        key_out: &mut [u8],
+    ) -> Result<Option<usize>, Errno> {
+        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+            let Some(fs) = fs.attrs_fs() else {
+                return Err(VfsError::NotSupported);
+            };
+            vfs.list_attr_via_secured(cred, path, fs, index, key_out)
+        })
+    }
+
+    fn attr_remove(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        key: &[u8],
+    ) -> Result<(), Errno> {
+        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+            let Some(fs) = fs.attrs_fs() else {
+                return Err(VfsError::NotSupported);
+            };
+            vfs.remove_attr_via_secured(cred, path, fs, key)
         })
     }
 

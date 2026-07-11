@@ -14,7 +14,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use rustos_abi::driver::filesystem::{
-    FilesystemRead, FilesystemWrite, MountFlags, NodeKind, NodeSecurity,
+    FilesystemAttrs as _, FilesystemRead, FilesystemWrite, MountFlags, NodeKind, NodeSecurity,
 };
 use rustos_abi::driver::DriverHandle;
 use rustos_abi::{Errno, FileKind, OpenFlags, UnlinkFlags};
@@ -892,5 +892,379 @@ fn rename_to_a_path_outside_the_mounted_volume_fails_closed() {
     assert_eq!(
         svc.rename(TEST_UID, &caps, &src, "/Apps/b"),
         Err(Errno::NotFound)
+    );
+}
+
+/// Build the service over `fs_driver` mounted at [`MOUNT`], with the test
+/// principal installed — the harness the extended-attribute tests share.
+fn attr_service<F>(fs_driver: F, read_only: bool) -> MountedFilesystemService<F>
+where
+    F: rustos_abi::driver::filesystem::FilesystemRead
+        + rustos_abi::driver::filesystem::FilesystemWrite
+        + rustos_abi::driver::filesystem::FilesystemSecurity
+        + rustos_abi::driver::filesystem::FilesystemStats
+        + rustos_abi::driver::filesystem::FilesystemAttrsProvider
+        + Send
+        + 'static,
+{
+    let cell: &'static LateFilesystem<F> = Box::leak(Box::new(LateFilesystem::new()));
+    cell.install_vfs(vfs(read_only)).expect("install vfs");
+    cell.register(
+        DriverHandle::from_raw(9).expect("handle"),
+        fs_driver,
+        "vol",
+        "memfs",
+        [0u8; 16],
+    )
+    .expect("register");
+    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    identity.install(identity_table()).expect("identity");
+    MountedFilesystemService::new(cell, identity)
+}
+
+/// Set/get/list/remove round-trip for an ordinary-namespace attribute, with
+/// the absent-attribute answer distinct from an empty value.
+#[test]
+fn attrs_round_trip_through_the_service() {
+    let caps = caps();
+    let svc = attr_service(driver(), false);
+    let create = OpenFlags::CREATE.union(OpenFlags::WRITE);
+    let path = "/Storage/vol/f";
+    svc.open(TEST_UID, &caps, path, create).expect("create");
+
+    svc.attr_set(TEST_UID, &caps, path, b"user.comment", b"hi")
+        .expect("set");
+    let mut value = [0u8; 8];
+    assert_eq!(
+        svc.attr_get(TEST_UID, &caps, path, b"user.comment", &mut value),
+        Ok(2)
+    );
+    assert_eq!(&value[..2], b"hi");
+
+    // An empty value is stored and read back as zero bytes, not "absent".
+    svc.attr_set(TEST_UID, &caps, path, b"user.empty", b"")
+        .expect("set empty");
+    assert_eq!(
+        svc.attr_get(TEST_UID, &caps, path, b"user.empty", &mut value),
+        Ok(0)
+    );
+
+    // The listing yields the visible keys in stored order, then ends.
+    let mut key = [0u8; 64];
+    assert_eq!(
+        svc.attr_list(TEST_UID, &caps, path, 0, &mut key),
+        Ok(Some(b"user.comment".len()))
+    );
+    assert_eq!(&key[..b"user.comment".len()], b"user.comment");
+    assert_eq!(
+        svc.attr_list(TEST_UID, &caps, path, 1, &mut key),
+        Ok(Some(b"user.empty".len()))
+    );
+    assert_eq!(svc.attr_list(TEST_UID, &caps, path, 2, &mut key), Ok(None));
+
+    svc.attr_remove(TEST_UID, &caps, path, b"user.comment")
+        .expect("remove");
+    // Absence is the dedicated code, for get and for a second remove alike.
+    assert_eq!(
+        svc.attr_get(TEST_UID, &caps, path, b"user.comment", &mut value),
+        Err(Errno::NoData)
+    );
+    assert_eq!(
+        svc.attr_remove(TEST_UID, &caps, path, b"user.comment"),
+        Err(Errno::NoData)
+    );
+}
+
+/// Attribute reads need read permission and writes need write permission on
+/// the node itself; a read-only mount refuses mutation outright.
+#[test]
+fn attr_access_follows_the_nodes_own_permissions() {
+    // A second principal, in the identity table but with no rights over the
+    // test principal's 0o600 file.
+    const OTHER_UID: u32 = 1001;
+    let mut builder = IdentityTableBuilder::new();
+    builder.push_group(GroupRecord {
+        gid: GroupId(TEST_GID),
+    });
+    builder.push_group(GroupRecord { gid: GroupId(1001) });
+    builder.push_user(UserRecord {
+        uid: UserId(TEST_UID),
+        primary_gid: GroupId(TEST_GID),
+        supplementary_gids: Vec::new(),
+        capability_grants: CapabilitySet::empty(),
+    });
+    builder.push_user(UserRecord {
+        uid: UserId(OTHER_UID),
+        primary_gid: GroupId(1001),
+        supplementary_gids: Vec::new(),
+        capability_grants: CapabilitySet::empty(),
+    });
+    let table = builder.verify(&NullSink).expect("well-formed table");
+
+    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    cell.install_vfs(vfs(false)).expect("install vfs");
+    cell.register(
+        DriverHandle::from_raw(9).expect("handle"),
+        driver(),
+        "vol",
+        "memfs",
+        [0u8; 16],
+    )
+    .expect("register");
+    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    identity.install(table).expect("identity");
+    let svc = MountedFilesystemService::new(cell, identity);
+
+    let caps = caps();
+    let create = OpenFlags::CREATE.union(OpenFlags::WRITE);
+    let path = "/Storage/vol/private";
+    svc.open(TEST_UID, &caps, path, create).expect("create");
+    svc.attr_set(TEST_UID, &caps, path, b"user.comment", b"hi")
+        .expect("owner sets");
+    svc.set_mode(TEST_UID, &caps, path, 0o600).expect("chmod");
+
+    // The other principal can neither read nor write the node's attributes.
+    let mut buf = [0u8; 8];
+    assert_eq!(
+        svc.attr_get(OTHER_UID, &caps, path, b"user.comment", &mut buf),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(
+        svc.attr_list(OTHER_UID, &caps, path, 0, &mut buf),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(
+        svc.attr_set(OTHER_UID, &caps, path, b"user.comment", b"x"),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(
+        svc.attr_remove(OTHER_UID, &caps, path, b"user.comment"),
+        Err(Errno::PermissionDenied)
+    );
+}
+
+/// A read-only mount refuses attribute mutation but still serves reads.
+#[test]
+fn attr_mutation_on_a_read_only_mount_fails_closed() {
+    let caps = caps();
+    // Seed the file and its attribute directly on the driver: the mount is
+    // read-only, so nothing can be created through the service.
+    let mut fs = driver();
+    let root = fs.root();
+    let node = fs
+        .create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    fs.set_attr(node, b"user.comment", b"hi").expect("seed");
+    let svc = attr_service(fs, true);
+    let path = "/Storage/vol/f";
+
+    let mut buf = [0u8; 8];
+    assert_eq!(
+        svc.attr_get(TEST_UID, &caps, path, b"user.comment", &mut buf),
+        Ok(2)
+    );
+    assert_eq!(
+        svc.attr_set(TEST_UID, &caps, path, b"user.comment", b"x"),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(
+        svc.attr_remove(TEST_UID, &caps, path, b"user.comment"),
+        Err(Errno::PermissionDenied)
+    );
+}
+
+/// The privileged namespaces are refused for every caller, and a stored
+/// privileged key is omitted from the listing — its existence is never
+/// revealed, not even as an index gap.
+#[test]
+fn privileged_namespaces_are_refused_and_hidden() {
+    let caps = caps();
+    let mut fs = driver();
+    let root = fs.root();
+    let node = fs
+        .create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    // Stored out-of-band (as a privileged service one day would); the
+    // syscall surface itself refuses to write these namespaces.
+    fs.set_attr(node, b"system.hidden", b"s").expect("seed");
+    fs.set_attr(node, b"user.visible", b"v").expect("seed");
+    let svc = attr_service(fs, false);
+    let path = "/Storage/vol/f";
+
+    let mut buf = [0u8; 64];
+    assert_eq!(
+        svc.attr_set(TEST_UID, &caps, path, b"system.hidden", b"x"),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(
+        svc.attr_get(TEST_UID, &caps, path, b"system.hidden", &mut buf),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(
+        svc.attr_remove(TEST_UID, &caps, path, b"trusted.x"),
+        Err(Errno::PermissionDenied)
+    );
+    // The listing shows only the visible key: index 0 is the user key and
+    // index 1 is already the end, with no gap betraying the hidden one.
+    assert_eq!(
+        svc.attr_list(TEST_UID, &caps, path, 0, &mut buf),
+        Ok(Some(b"user.visible".len()))
+    );
+    assert_eq!(&buf[..b"user.visible".len()], b"user.visible");
+    assert_eq!(svc.attr_list(TEST_UID, &caps, path, 1, &mut buf), Ok(None));
+}
+
+/// Malformed keys and undersized buffers fail closed with their dedicated
+/// codes; nothing is truncated or guessed.
+#[test]
+fn attr_key_grammar_and_buffers_fail_closed() {
+    let caps = caps();
+    let svc = attr_service(driver(), false);
+    let create = OpenFlags::CREATE.union(OpenFlags::WRITE);
+    let path = "/Storage/vol/f";
+    svc.open(TEST_UID, &caps, path, create).expect("create");
+    svc.attr_set(TEST_UID, &caps, path, b"user.comment", b"hello")
+        .expect("set");
+
+    // No `namespace.rest` split, and an unknown namespace: both refused.
+    assert_eq!(
+        svc.attr_set(TEST_UID, &caps, path, b"nodot", b"x"),
+        Err(Errno::OutOfRange)
+    );
+    assert_eq!(
+        svc.attr_set(TEST_UID, &caps, path, b"bogus.key", b"x"),
+        Err(Errno::OutOfRange)
+    );
+    // A value that does not fit is refused whole, never truncated.
+    let mut tiny = [0u8; 2];
+    assert_eq!(
+        svc.attr_get(TEST_UID, &caps, path, b"user.comment", &mut tiny),
+        Err(Errno::BufferTooSmall)
+    );
+    let mut tiny_key = [0u8; 4];
+    assert_eq!(
+        svc.attr_list(TEST_UID, &caps, path, 0, &mut tiny_key),
+        Err(Errno::BufferTooSmall)
+    );
+    // A missing path is the path's own error, not an attribute answer.
+    let mut buf = [0u8; 8];
+    assert_eq!(
+        svc.attr_get(TEST_UID, &caps, "/Storage/vol/absent", b"user.x", &mut buf),
+        Err(Errno::NotFound)
+    );
+}
+
+use rustos_abi::driver::filesystem::{
+    DirEntry, FilesystemAttrsProvider, FilesystemSecurity, FilesystemStats, NodeId, NodeInfo,
+    VolumeStats,
+};
+use rustos_abi::DriverError;
+
+/// [`RwMockFs`] minus its attribute store: the facet keeps its default
+/// `None` answer, standing in for a FAT32/ext4-class mount.
+struct NoAttrsFs(RwMockFs);
+impl FilesystemRead for NoAttrsFs {
+    fn root(&self) -> NodeId {
+        self.0.root()
+    }
+    fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
+        self.0.node_info(node)
+    }
+    fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
+        self.0.lookup(dir, name)
+    }
+    fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
+        self.0.read_at(file, offset, buf)
+    }
+    fn read_dir(
+        &mut self,
+        dir: NodeId,
+        index: u64,
+        name_out: &mut [u8],
+    ) -> Result<Option<DirEntry>, DriverError> {
+        self.0.read_dir(dir, index, name_out)
+    }
+}
+impl FilesystemWrite for NoAttrsFs {
+    fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError> {
+        self.0.create(dir, name, kind)
+    }
+    fn write_at(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        offset: u64,
+        data: &[u8],
+    ) -> Result<usize, DriverError> {
+        self.0.write_at(dir, name, offset, data)
+    }
+    fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
+        self.0.truncate(dir, name, size)
+    }
+    fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
+        self.0.remove(dir, name)
+    }
+    fn rename(
+        &mut self,
+        src_dir: NodeId,
+        src_name: &[u8],
+        dst_dir: NodeId,
+        dst_name: &[u8],
+    ) -> Result<(), DriverError> {
+        self.0.rename(src_dir, src_name, dst_dir, dst_name)
+    }
+    fn flush(&mut self) -> Result<(), DriverError> {
+        self.0.flush()
+    }
+}
+impl FilesystemSecurity for NoAttrsFs {
+    fn security(
+        &mut self,
+        node: NodeId,
+    ) -> Result<rustos_abi::driver::filesystem::NodeSecurity, DriverError> {
+        self.0.security(node)
+    }
+    fn set_security(
+        &mut self,
+        node: NodeId,
+        security: rustos_abi::driver::filesystem::NodeSecurity,
+    ) -> Result<(), DriverError> {
+        self.0.set_security(node, security)
+    }
+}
+impl FilesystemStats for NoAttrsFs {
+    fn stats(&mut self) -> Result<VolumeStats, DriverError> {
+        self.0.stats()
+    }
+}
+impl FilesystemAttrsProvider for NoAttrsFs {}
+
+/// A driver whose format stores no attributes answers every attribute call
+/// with the typed unsupported-backing refusal, decided per mount through
+/// the attribute facet.
+#[test]
+fn attrs_on_an_unsupporting_backing_are_a_typed_refusal() {
+    let caps = caps();
+    let svc = attr_service(NoAttrsFs(driver()), false);
+    let create = OpenFlags::CREATE.union(OpenFlags::WRITE);
+    let path = "/Storage/vol/f";
+    svc.open(TEST_UID, &caps, path, create).expect("create");
+
+    let mut buf = [0u8; 8];
+    assert_eq!(
+        svc.attr_get(TEST_UID, &caps, path, b"user.x", &mut buf),
+        Err(Errno::NotSupported)
+    );
+    assert_eq!(
+        svc.attr_set(TEST_UID, &caps, path, b"user.x", b"v"),
+        Err(Errno::NotSupported)
+    );
+    assert_eq!(
+        svc.attr_list(TEST_UID, &caps, path, 0, &mut buf),
+        Err(Errno::NotSupported)
+    );
+    assert_eq!(
+        svc.attr_remove(TEST_UID, &caps, path, b"user.x"),
+        Err(Errno::NotSupported)
     );
 }

@@ -2071,6 +2071,88 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::FS_ATTR_GET,
+        name: "fs_attr_get",
+        arg_count: 6,
+        args: [
+            // Path bytes, then the fsmeta-grammar key bytes, then the
+            // caller's value-out buffer. The dispatcher bounds the key
+            // length to 1..=FS_ATTR_KEY_MAX before any copy; the grammar
+            // itself is validated by the secured VFS through lib/fsmeta.
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::UserPtr,
+            AbiType::Len,
+        ],
+        // `U64` carries the value byte count (or a negated errno; an
+        // absent attribute is `-NoData`, never an empty read).
+        ret: AbiType::U64,
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        // A pure read, high-volume like fs_stat; not audited per call.
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FS_ATTR_SET,
+        name: "fs_attr_set",
+        arg_count: 6,
+        args: [
+            // Path bytes, key bytes, then the opaque value bytes. The
+            // dispatcher bounds the key to 1..=FS_ATTR_KEY_MAX and the
+            // value to FS_ATTR_VALUE_MAX before any copy.
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::UserPtr,
+            AbiType::Len,
+        ],
+        ret: AbiType::Errno,
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        // Rewrites persistent inode metadata; audited like fs_set_mode.
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FS_ATTR_LIST,
+        name: "fs_attr_list",
+        arg_count: 5,
+        args: [
+            // Path bytes, the index to yield, then the caller's key-out
+            // buffer (the fs_readdir one-entry-per-call iteration shape).
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::U64,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+        ],
+        // `U64` carries the key byte count, `0` for end-of-list (a real
+        // key is never empty), or a negated errno.
+        ret: AbiType::U64,
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        // A pure read, high-volume like fs_readdir; not audited per call.
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FS_ATTR_REMOVE,
+        name: "fs_attr_remove",
+        arg_count: 4,
+        args: [
+            // Path bytes, then the key bytes of the attribute to remove.
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        // Rewrites persistent inode metadata; audited like fs_set_mode.
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -2428,6 +2510,10 @@ mod tests {
             SyscallNumber::FS_UNLINK,
             SyscallNumber::FS_RENAME,
             SyscallNumber::FS_SET_MODE,
+            SyscallNumber::FS_ATTR_GET,
+            SyscallNumber::FS_ATTR_SET,
+            SyscallNumber::FS_ATTR_LIST,
+            SyscallNumber::FS_ATTR_REMOVE,
         ] {
             assert_eq!(
                 spec_for(n).unwrap().required_capability,
@@ -2460,6 +2546,8 @@ mod tests {
             SyscallNumber::FS_UNLINK,
             SyscallNumber::FS_RENAME,
             SyscallNumber::FS_SET_MODE,
+            SyscallNumber::FS_ATTR_SET,
+            SyscallNumber::FS_ATTR_REMOVE,
         ] {
             assert!(
                 spec_for(n).unwrap().audit,
@@ -2473,6 +2561,8 @@ mod tests {
             SyscallNumber::FS_READDIR,
             SyscallNumber::FS_STAT,
             SyscallNumber::FS_SYNC,
+            SyscallNumber::FS_ATTR_GET,
+            SyscallNumber::FS_ATTR_LIST,
         ] {
             assert!(
                 !spec_for(n).unwrap().audit,

@@ -60,6 +60,12 @@ struct FakeFs {
     cross_volume: Vec<String>,
     /// What `list_volumes` reports (empty by default).
     volumes: Vec<VolumeInfo>,
+    /// Per-path extended attributes, in insertion order (the backing's
+    /// stable order the seam contract requires).
+    attrs: BTreeMap<String, Vec<(String, Vec<u8>)>>,
+    /// When set, every attribute call answers `NotSupported` — the
+    /// FAT32/ext4-class mount the view states honestly.
+    attrs_unsupported: bool,
 }
 
 impl FakeFs {
@@ -80,12 +86,23 @@ impl FakeFs {
             write_fail: None,
             cross_volume: Vec::new(),
             volumes: Vec::new(),
+            attrs: BTreeMap::new(),
+            attrs_unsupported: false,
         }
     }
 
     /// Register the volumes `list_volumes` reports.
     fn volumes(mut self, volumes: Vec<VolumeInfo>) -> Self {
         self.volumes = volumes;
+        self
+    }
+
+    /// Register an extended attribute on a path.
+    fn attr(mut self, path: &str, key: &str, value: &[u8]) -> Self {
+        self.attrs
+            .entry(path.to_owned())
+            .or_default()
+            .push((key.to_owned(), value.to_vec()));
         self
     }
 
@@ -203,6 +220,67 @@ impl Fs for FakeFs {
         }
         self.modes.insert(path.to_owned(), mode);
         self.set_modes.borrow_mut().push((path.to_owned(), mode));
+        Ok(())
+    }
+
+    fn attr_list(&mut self, path: &str) -> Result<Vec<String>, Errno> {
+        if self.attrs_unsupported {
+            return Err(Errno::NotSupported);
+        }
+        if self.denied.iter().any(|denied| denied == path) {
+            return Err(Errno::PermissionDenied);
+        }
+        Ok(self
+            .attrs
+            .get(path)
+            .map(|set| set.iter().map(|(key, _)| key.clone()).collect())
+            .unwrap_or_default())
+    }
+
+    fn attr_get(&mut self, path: &str, key: &str) -> Result<Vec<u8>, Errno> {
+        if self.attrs_unsupported {
+            return Err(Errno::NotSupported);
+        }
+        self.attrs
+            .get(path)
+            .and_then(|set| set.iter().find(|(k, _)| k == key))
+            .map(|(_, value)| value.clone())
+            .ok_or(Errno::NoData)
+    }
+
+    fn attr_set(&mut self, path: &str, key: &str, value: &[u8]) -> Result<(), Errno> {
+        if self.attrs_unsupported {
+            return Err(Errno::NotSupported);
+        }
+        if self.set_denied.iter().any(|denied| denied == path) {
+            return Err(Errno::PermissionDenied);
+        }
+        // The real kernel validates the shared key grammar; the fake pins
+        // the split the editor relies on (a namespace dot must exist).
+        if !key.contains('.') {
+            return Err(Errno::OutOfRange);
+        }
+        let set = self.attrs.entry(path.to_owned()).or_default();
+        match set.iter_mut().find(|(k, _)| k == key) {
+            Some((_, stored)) => *stored = value.to_vec(),
+            None => set.push((key.to_owned(), value.to_vec())),
+        }
+        Ok(())
+    }
+
+    fn attr_remove(&mut self, path: &str, key: &str) -> Result<(), Errno> {
+        if self.attrs_unsupported {
+            return Err(Errno::NotSupported);
+        }
+        if self.set_denied.iter().any(|denied| denied == path) {
+            return Err(Errno::PermissionDenied);
+        }
+        let set = self.attrs.get_mut(path).ok_or(Errno::NoData)?;
+        let before = set.len();
+        set.retain(|(k, _)| k != key);
+        if set.len() == before {
+            return Err(Errno::NoData);
+        }
         Ok(())
     }
 
@@ -592,7 +670,7 @@ fn entering_a_directory_from_the_file_pane_descends_both_panes() {
     assert_eq!(rows[m.tree_cursor].path, "/docs");
 }
 
-// --- The mode editor (`a`) ------------------------------------------------
+// --- The mode editor (`m` inside the `a` attributes view) ------------------
 
 #[test]
 fn the_mode_prompt_opens_prefilled_edits_and_applies() {
@@ -602,6 +680,7 @@ fn the_mode_prompt_opens_prefilled_edits_and_applies() {
     // Sorted visible files: docs, locked, a.rs, b.txt, big — a.rs is index 2.
     m.file_cursor = 2;
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('m'));
     let prompt = mode_prompt(&m);
     assert_eq!(prompt.path, "/a.rs");
     assert_eq!(prompt.current, 0o644);
@@ -634,6 +713,7 @@ fn esc_cancels_the_mode_prompt_without_writing() {
     m.pane = Pane::Files;
     m.file_cursor = 2; // a.rs
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('m'));
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('0'));
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Esc);
     assert_eq!(m.prompt, None);
@@ -659,6 +739,7 @@ fn a_kernel_refusal_of_the_change_is_surfaced_and_nothing_applies() {
     m.pane = Pane::Files;
     m.file_cursor = 3; // b.txt — statable, but the change is denied
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('m'));
     assert!(m.prompt.is_some());
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(m.prompt, None);
@@ -674,6 +755,7 @@ fn an_emptied_prompt_applies_nothing() {
     m.pane = Pane::Files;
     m.file_cursor = 2; // a.rs
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('m'));
     for _ in 0..4 {
         handle_event(&mut m, &mut fs, &mut decode(), &Event::Backspace);
     }
@@ -690,6 +772,7 @@ fn the_tree_pane_edits_the_selected_directory() {
     // Tree pane (the default), cursor onto "docs".
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Down);
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('m'));
     let prompt = mode_prompt(&m);
     assert_eq!(prompt.path, "/docs");
     assert_eq!(prompt.current, 0o755);
@@ -702,10 +785,172 @@ fn the_mode_prompt_appears_on_the_message_line() {
     m.pane = Pane::Files;
     m.file_cursor = 2; // a.rs
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('m'));
     let mut window = Window::new(Pos::new(0, 0), Size::new(6, 70));
     render(&m, &mut window);
     let line = row_text(&window, 5);
     assert!(line.starts_with("mode a.rs [644]: 644_"), "{line}");
+}
+
+// --- The attributes editor (`a`) ------------------------------------------
+
+/// The open attributes view, for the editor tests.
+fn attrs_view(m: &Model) -> &crate::model::AttrsView {
+    assert_eq!(m.overlay, Overlay::Attrs);
+    m.attrs.as_ref().expect("attributes view open")
+}
+
+#[test]
+fn the_attributes_view_lists_mode_and_entries() {
+    let mut fs = fixture().attr("/a.rs", "user.comment", b"hi");
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2; // a.rs
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
+    let view = attrs_view(&m);
+    assert_eq!(view.path, "/a.rs");
+    assert_eq!(view.mode, 0o644);
+    assert!(!view.unsupported);
+    assert_eq!(
+        view.entries,
+        vec![(String::from("user.comment"), b"hi".to_vec())]
+    );
+    // Esc leaves the view with nothing changed.
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Esc);
+    assert_eq!(m.overlay, Overlay::None);
+    assert_eq!(m.attrs, None);
+}
+
+#[test]
+fn a_new_attribute_is_typed_as_key_value_and_applies() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2; // a.rs
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('n'));
+    for key in "user.tag=red".chars() {
+        handle_event(&mut m, &mut fs, &mut decode(), &Event::Char(key));
+    }
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    assert_eq!(m.prompt, None);
+    // The view refreshed with the applied attribute.
+    let view = attrs_view(&m);
+    assert_eq!(
+        view.entries,
+        vec![(String::from("user.tag"), b"red".to_vec())]
+    );
+    let message = m.message.clone().expect("success reported");
+    assert!(message.contains("user.tag"), "{message}");
+}
+
+#[test]
+fn enter_edits_the_selected_attribute_prefilled() {
+    let mut fs = fixture().attr("/a.rs", "user.comment", b"hi");
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2; // a.rs
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    match &m.prompt {
+        Some(Prompt::AttrEdit(edit)) => assert_eq!(edit.input, "user.comment=hi"),
+        other => panic!("attr prompt expected, got {other:?}"),
+    }
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('!'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    let view = attrs_view(&m);
+    assert_eq!(
+        view.entries,
+        vec![(String::from("user.comment"), b"hi!".to_vec())]
+    );
+}
+
+#[test]
+fn a_binary_value_prefills_the_key_alone() {
+    let mut fs = fixture().attr("/a.rs", "user.blob", b"\xff\x00");
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2; // a.rs
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    // Bytes that cannot round-trip through the line are never offered
+    // back lossily; only the key pre-fills.
+    match &m.prompt {
+        Some(Prompt::AttrEdit(edit)) => assert_eq!(edit.input, "user.blob="),
+        other => panic!("attr prompt expected, got {other:?}"),
+    }
+}
+
+#[test]
+fn d_removes_the_selected_attribute() {
+    let mut fs = fixture().attr("/a.rs", "user.comment", b"hi");
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2; // a.rs
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('d'));
+    let view = attrs_view(&m);
+    assert!(view.entries.is_empty());
+    let message = m.message.clone().expect("removal reported");
+    assert!(message.contains("user.comment"), "{message}");
+}
+
+#[test]
+fn a_malformed_attribute_line_applies_nothing() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2; // a.rs
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('n'));
+    for key in "nodot".chars() {
+        handle_event(&mut m, &mut fs, &mut decode(), &Event::Char(key));
+    }
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    assert!(attrs_view(&m).entries.is_empty());
+    let message = m.message.clone().expect("the malformed line is reported");
+    assert!(message.contains("key=value"), "{message}");
+}
+
+#[test]
+fn a_kernel_refusal_of_an_attribute_write_is_surfaced() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 3; // b.txt — statable, but every change is denied
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('n'));
+    for key in "user.tag=red".chars() {
+        handle_event(&mut m, &mut fs, &mut decode(), &Event::Char(key));
+    }
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    assert!(attrs_view(&m).entries.is_empty());
+    let message = m.message.clone().expect("denial surfaced");
+    assert!(message.contains("PermissionDenied"), "{message}");
+}
+
+#[test]
+fn a_backing_without_attributes_says_so() {
+    let mut fs = fixture();
+    fs.attrs_unsupported = true;
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2; // a.rs
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
+    let view = attrs_view(&m);
+    assert!(view.unsupported);
+    assert!(view.entries.is_empty());
+    // The editing key states the fact instead of opening a doomed prompt;
+    // the mode editor still works on such a mount.
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('n'));
+    assert_eq!(m.prompt, None);
+    let message = m
+        .message
+        .clone()
+        .expect("the unsupported backing is stated");
+    assert!(message.contains("not supported"), "{message}");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('m'));
+    assert!(matches!(m.prompt, Some(Prompt::Mode(_))));
 }
 
 // --- Renderer: golden grids ---------------------------------------------
@@ -1905,6 +2150,22 @@ impl Fs for SparseFs {
 
     fn set_mode(&mut self, _path: &str, _mode: u32) -> Result<(), Errno> {
         Err(Errno::PermissionDenied)
+    }
+
+    fn attr_list(&mut self, _path: &str) -> Result<Vec<String>, Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    fn attr_get(&mut self, _path: &str, _key: &str) -> Result<Vec<u8>, Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    fn attr_set(&mut self, _path: &str, _key: &str, _value: &[u8]) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    fn attr_remove(&mut self, _path: &str, _key: &str) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
     }
 
     fn stat_kind(&mut self, _path: &str) -> Result<FileKind, Errno> {

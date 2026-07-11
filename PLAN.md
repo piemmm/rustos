@@ -2388,13 +2388,28 @@ copy/archive tools (§2.2).
   `system`/`trusted` namespaces gated by the VFS (capability introduced with its
   enforcement point, §5.2 — none minted here).
 
-**Status: foundation done.** Delivered: `lib/fsmeta` (grammar + AttrSet +
-preset registry + fuzz harness), the `FilesystemAttrs` ABI, and the RustFS
-attribute store (encrypt/decrypt, COW read/write, free-on-remove, free-space
-rebuild accounting, reflink copy) with driver tests (round-trip/remount,
-case-sensitivity, unknown-namespace + oversize + block-overflow fail-closed,
-encryption at rest, read-only refusal, crash-atomicity replay, no-leak,
-reflink independence, acorn preset round-trip).
+**Status: foundation + syscall surface done.** Delivered: `lib/fsmeta`
+(grammar + AttrSet + preset registry + fuzz harness), the `FilesystemAttrs`
+ABI, and the RustFS attribute store (encrypt/decrypt, COW read/write,
+free-on-remove, free-space rebuild accounting, reflink copy) with driver
+tests (round-trip/remount, case-sensitivity, unknown-namespace + oversize +
+block-overflow fail-closed, encryption at rest, read-only refusal,
+crash-atomicity replay, no-leak, reflink independence, acorn preset
+round-trip). The userland surface is live: the `fs_attr_get`/`fs_attr_set`/
+`fs_attr_list`/`fs_attr_remove` syscalls (84–87, `CAP_FS_ACCESS`, mutations
+audited; wire bounds `FS_ATTR_KEY_MAX`/`FS_ATTR_VALUE_MAX` in `lib/abi`,
+aliased by `lib/fsmeta`) flow dispatcher → `MountedFilesystemService` →
+`Vfs::*_attr_via_secured` → `DelegatedFs`, where the shared key grammar is
+validated, ordinary namespaces follow the node's own read/write permissions,
+and the privileged `system`/`trusted` namespaces are refused and hidden from
+listings (their capability still arrives with its first holder, §5.2). A
+driver declares support through the `FilesystemAttrsProvider` facet
+(`RustFs` serves it; `CachedFs`/`GroupMappedFs` forward with cache
+invalidation and mapped authorisation; ext4/FAT32 answer the typed
+`Errno::NotSupported`; the new `Errno::NoData` is the absent-attribute
+answer). `lib/rt` wrappers, `ros_sys_fs_attr_*` C stubs, and the regenerated
+headers complete the ABI; `fstree`'s `a` attributes editor is the first
+caller.
 
 **Remaining (staged, not yet built):**
 - `cp`/`mv`/desktop/archive preserve-metadata tooling (the §6.2/§6.3 copy

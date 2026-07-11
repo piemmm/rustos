@@ -26,8 +26,9 @@
 //! their on-disk owners, modes, and ACLs keep governing access.
 
 use rustos_abi::driver::filesystem::{
-    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId,
-    NodeInfo, NodeKind, NodeSecurity, VolumeStats,
+    DirEntry, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
+    FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity,
+    VolumeStats,
 };
 use rustos_abi::DriverError;
 use rustos_kernel_sec::GroupId;
@@ -198,6 +199,66 @@ impl<F: FilesystemRead> FilesystemSecurity for GroupMappedFs<F> {
 impl<F: FilesystemStats> FilesystemStats for GroupMappedFs<F> {
     fn stats(&mut self) -> Result<VolumeStats, DriverError> {
         self.inner.stats()
+    }
+}
+
+/// Attribute calls pass through to the wrapped driver's store, but the
+/// facet hands out the *mapped* view (this wrapper), never the inner
+/// driver: the secured VFS resolves and authorises attribute paths
+/// against the mapped ownership, exactly as it does every other
+/// delegated operation on the volume.
+impl<F: FilesystemRead + FilesystemAttrsProvider> FilesystemAttrs for GroupMappedFs<F> {
+    fn get_attr(
+        &mut self,
+        node: NodeId,
+        key: &[u8],
+        value_out: &mut [u8],
+    ) -> Result<Option<usize>, DriverError> {
+        // Reachable only through `attrs_fs`, which answers `None` when the
+        // wrapped driver stores no attributes; the guard keeps a facet-
+        // ignoring caller failing closed.
+        let Some(inner) = self.inner.attrs_fs() else {
+            return Err(DriverError::Unsupported);
+        };
+        inner.get_attr(node, key, value_out)
+    }
+
+    fn set_attr(&mut self, node: NodeId, key: &[u8], value: &[u8]) -> Result<(), DriverError> {
+        let Some(inner) = self.inner.attrs_fs() else {
+            return Err(DriverError::Unsupported);
+        };
+        inner.set_attr(node, key, value)
+    }
+
+    fn list_attr(
+        &mut self,
+        node: NodeId,
+        index: u64,
+        key_out: &mut [u8],
+    ) -> Result<Option<usize>, DriverError> {
+        let Some(inner) = self.inner.attrs_fs() else {
+            return Err(DriverError::Unsupported);
+        };
+        inner.list_attr(node, index, key_out)
+    }
+
+    fn remove_attr(&mut self, node: NodeId, key: &[u8]) -> Result<(), DriverError> {
+        let Some(inner) = self.inner.attrs_fs() else {
+            return Err(DriverError::Unsupported);
+        };
+        inner.remove_attr(node, key)
+    }
+}
+
+impl<F: FilesystemRead + FilesystemAttrsProvider> FilesystemAttrsProvider for GroupMappedFs<F> {
+    fn attrs_fs(&mut self) -> Option<&mut dyn FilesystemAttrsFs> {
+        // Support is the wrapped driver's fact; the returned view is the
+        // mapped wrapper so authorisation sees the mapped ownership.
+        if self.inner.attrs_fs().is_some() {
+            Some(self)
+        } else {
+            None
+        }
     }
 }
 

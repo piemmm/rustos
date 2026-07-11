@@ -47,6 +47,27 @@ pub const FS_IO_MAX: usize = 1 << 20;
 /// the filesystem's own and are never settable through the call.
 pub const FS_MODE_MASK: u32 = 0o7777;
 
+/// Longest extended-attribute key, in bytes, a `fs_attr_*` syscall accepts.
+///
+/// A fixed *security* validation bound on untrusted input, never a growable
+/// capacity: the dispatcher refuses a longer (or empty) key with
+/// [`Errno::LengthOutOfRange`] before any user memory beyond it is read.
+/// `lib/fsmeta`'s `KEY_MAX` aliases this value so the wire bound and the
+/// stored-set bound can never diverge; the key *grammar*
+/// (`namespace.rest`, closed namespace set) is validated by the secured
+/// VFS through the one `lib/fsmeta` definition.
+pub const FS_ATTR_KEY_MAX: usize = 255;
+
+/// Largest extended-attribute value, in bytes, a `fs_attr_*` syscall
+/// accepts or returns.
+///
+/// A fixed *security* validation bound (the `lib/fsmeta` `VALUE_MAX`
+/// aliases it): it caps the kernel staging buffer for `fs_attr_set` and
+/// `fs_attr_get`, and is chosen so a full attribute set encodes into one
+/// copy-on-write metadata block on a 4 KiB-block volume. A payload larger
+/// than this is a named stream, not an attribute.
+pub const FS_ATTR_VALUE_MAX: usize = 3072;
+
 /// What an inode is, as reported by [`FileStat`] and each [`DirEntry`].
 ///
 /// Deliberately closed: the VFS distinguishes only regular files and

@@ -31,14 +31,26 @@ is built.
   API's `MOUNT_LIST` query through the shared `rustos_procinfo` mount walk,
   best-effort — an unreachable service simply omits the figure), and either
   an error, the sort prompt, or the key hints.
-- **The mode editor.** `a` edits the focused selection's permission bits
-  (the file pane's entry, or the tree pane's directory): a modal octal
-  prompt on the message line, pre-filled with the entry's current bits
-  (a resolve-only stat through the seam). Octal digits and Backspace
-  edit — a non-octal key and a fifth digit are refused at the prompt,
-  matching the kernel's `FS_MODE_MASK` ceiling — Enter applies through
-  `fs_set_mode` (the kernel's owner-only rule decides; a refusal is
-  surfaced verbatim and nothing changes), and Esc cancels.
+- **The attributes editor.** `a` opens the focused selection's
+  attributes (the file pane's entry, or the tree pane's directory): an
+  overlay showing the entry's permission bits and its extended
+  attributes (`lib/fsmeta` `namespace.key` pairs, loaded through the
+  `fs_attr_list`/`fs_attr_get` syscalls; the kernel omits namespaces
+  the caller may not read). Inside it, arrows move over the entries,
+  `m` opens the mode prompt — a modal octal line pre-filled with the
+  current bits (octal digits and Backspace edit; a non-octal key and a
+  fifth digit are refused, matching the kernel's `FS_MODE_MASK`
+  ceiling; Enter applies through `fs_set_mode`, whose owner-only rule
+  decides) — `n` adds an attribute as a `key=value` line applied
+  through `fs_attr_set`, Enter edits the selected one (pre-filled; a
+  binary value pre-fills the key alone, never a lossy round-trip), `d`
+  removes it through `fs_attr_remove`, and Esc leaves. Every change is
+  the kernel's decision (per-inode read/write permission, the shared
+  key grammar, the reserved `system.`/`trusted.` namespaces); a refusal
+  is surfaced verbatim and nothing changes. A mount whose format stores
+  no attributes answers `NotSupported`, which the view states honestly
+  in place of an empty list; values render escaped (`\xNN`) when not
+  printable text, never raw onto the terminal.
 - **File operations.** `c` copies and `m` moves the focused selection to
   a typed destination, `r` renames it in place (prompt pre-filled with the
   current name), `d` deletes it after an explicit confirmation (a
@@ -184,8 +196,10 @@ The charter's seam pattern (as `vim` and `top`): an I/O-free state machine
 (`src/model.rs`) the pure renderer (`src/render.rs`) draws and the key
 grammar (`src/app.rs`) mutates, over two injected seams —
 
-- `Fs` (`src/fs.rs`) — `list_dir`, `volume_space`, the mode editor's
-  `stat_mode`/`set_mode`, and the S2 mutating operations (`stat_kind`,
+- `Fs` (`src/fs.rs`) — `list_dir`, `volume_space`, the attributes
+  editor's `stat_mode`/`set_mode` and
+  `attr_list`/`attr_get`/`attr_set`/`attr_remove`, and the S2 mutating
+  operations (`stat_kind`,
   streamed `read`/`write`, `create`, `mkdir`, `remove_file`,
   `remove_dir`, `rename` with its `RenameOutcome::CrossDevice` report);
   the `Run` binary implements it over the kernel-authorised `fs_*`

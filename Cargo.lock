@@ -1315,6 +1315,7 @@ dependencies = [
  "rustos-arch-api",
  "rustos-caps",
  "rustos-crypto",
+ "rustos-fsmeta",
  "rustos-itest-harness",
  "rustos-kernel-core",
  "rustos-kernel-ipc",

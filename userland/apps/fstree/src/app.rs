@@ -21,9 +21,10 @@ use rustos_sandbox::decode::{Isa, RegionKind, MAX_INPUT};
 use crate::fs::Fs;
 use crate::info::{note_hidden_entries, Info};
 use crate::model::{
-    child_dirs_of, join, merge_child_dirs, BatchPrompt, ConfirmPrompt, DirNode, InputOp,
-    InputPrompt, IsaPrompt, IsaPurpose, ModePrompt, Model, NameFilter, OpenAsPrompt, Overlay,
-    OverwritePrompt, Pane, Prompt, RepeatOp, SortKey, View, Viewer, ViewerKind,
+    child_dirs_of, join, merge_child_dirs, AttrEditPrompt, AttrEntries, AttrsView, BatchPrompt,
+    ConfirmPrompt, DirNode, InputOp, InputPrompt, IsaPrompt, IsaPurpose, ModePrompt, Model,
+    NameFilter, OpenAsPrompt, Overlay, OverwritePrompt, Pane, Prompt, RepeatOp, SortKey, View,
+    Viewer, ViewerKind,
 };
 use crate::ops::{parent_of, plan_target, resolve_destination, Decision, FileOp, OpProgress};
 use crate::render::render;
@@ -150,6 +151,7 @@ pub fn handle_event(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode,
     if let Some(prompt) = model.prompt.take() {
         match prompt {
             Prompt::Mode(mode) => handle_mode_prompt(model, fs, mode, event),
+            Prompt::AttrEdit(edit) => handle_attr_edit_prompt(model, fs, edit, event),
             Prompt::Input(input) => handle_input_prompt(model, fs, input, event),
             Prompt::ConfirmDelete(confirm) => handle_confirm_prompt(model, fs, &confirm, event),
             Prompt::Overwrite(paused) => handle_overwrite_prompt(model, fs, paused, event),
@@ -180,6 +182,10 @@ pub fn handle_event(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode,
             handle_settings_overlay(model, fs, event);
             return;
         }
+        Overlay::Attrs => {
+            handle_attrs_overlay(model, fs, event);
+            return;
+        }
         Overlay::None => {}
     }
     if model.view == View::Viewer {
@@ -200,7 +206,7 @@ fn handle_panes_key(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode,
         Event::Char('q') => model.quit = true,
         Event::Char('?') => model.overlay = Overlay::Help,
         Event::Char('s') => model.overlay = Overlay::SortMenu,
-        Event::Char('a') => open_mode_prompt(model, fs),
+        Event::Char('a') => open_attrs_view(model, fs),
         Event::Char('c') => open_copy_move(model, false),
         Event::Char('m') => open_copy_move(model, true),
         Event::Char('r') => open_rename_prompt(model),
@@ -278,23 +284,193 @@ fn focused_selection(model: &Model) -> Option<(String, String, FileKind)> {
     }
 }
 
-/// Open the mode-editor prompt on the focused pane's selection. The
-/// prompt starts from the entry's *current* bits (a resolve-only stat
-/// through the seam); a refused stat surfaces its error and opens nothing.
-fn open_mode_prompt(model: &mut Model, fs: &mut dyn Fs) {
+/// Open the attributes editor (`a`) on the focused pane's selection: the
+/// entry's mode bits (a resolve-only stat through the seam) plus its
+/// extended attributes. A refused stat or listing surfaces its error and
+/// opens nothing; a backing without attribute storage opens the view with
+/// that fact stated (the mode editor still works there).
+fn open_attrs_view(model: &mut Model, fs: &mut dyn Fs) {
     let Some((path, name, _)) = focused_selection(model) else {
         return;
     };
-    match fs.stat_mode(&path) {
-        Ok(current) => {
-            model.prompt = Some(Prompt::Mode(ModePrompt {
+    let mode = match fs.stat_mode(&path) {
+        Ok(mode) => mode,
+        Err(errno) => {
+            model.report(&path, errno);
+            return;
+        }
+    };
+    match load_attr_entries(fs, &path) {
+        Ok((entries, unsupported)) => {
+            model.attrs = Some(AttrsView {
                 path,
                 name,
+                mode,
+                entries,
+                cursor: 0,
+                unsupported,
+            });
+            model.overlay = Overlay::Attrs;
+        }
+        Err(errno) => model.report(&path, errno),
+    }
+}
+
+/// The visible extended attributes of `path` as `(key, value)` pairs,
+/// paired with whether the backing stores no attributes at all (the
+/// honest "unsupported" answer, shown in place of an empty list).
+fn load_attr_entries(fs: &mut dyn Fs, path: &str) -> Result<(AttrEntries, bool), Errno> {
+    let keys = match fs.attr_list(path) {
+        Ok(keys) => keys,
+        Err(Errno::NotSupported) => return Ok((Vec::new(), true)),
+        Err(errno) => return Err(errno),
+    };
+    let mut entries = Vec::with_capacity(keys.len());
+    for key in keys {
+        let value = fs.attr_get(path, &key)?;
+        entries.push((key, value));
+    }
+    Ok((entries, false))
+}
+
+/// Re-read the open attributes view's entries after an applied change,
+/// keeping the cursor on a valid row. A refused re-read surfaces its
+/// error; the view keeps its previous rows rather than lying with an
+/// empty list.
+fn refresh_attrs_view(model: &mut Model, fs: &mut dyn Fs) {
+    let Some(view) = model.attrs.as_ref() else {
+        return;
+    };
+    let path = view.path.clone();
+    match load_attr_entries(fs, &path) {
+        Ok((entries, unsupported)) => {
+            if let Some(view) = model.attrs.as_mut() {
+                view.cursor = view.cursor.min(entries.len().saturating_sub(1));
+                view.entries = entries;
+                view.unsupported = unsupported;
+            }
+        }
+        Err(errno) => model.report(&path, errno),
+    }
+}
+
+/// Apply one key in the attributes editor: arrows move over the entries,
+/// `m` opens the octal mode prompt, `n` asks for a new `key=value`,
+/// Enter edits the selected attribute, `d` removes it, Esc leaves. The
+/// kernel decides every change; a refusal is surfaced verbatim.
+fn handle_attrs_overlay(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
+    let Some(view) = model.attrs.as_mut() else {
+        model.overlay = Overlay::None;
+        return;
+    };
+    match event {
+        Event::Esc | Event::Char('q' | 'a') => {
+            model.overlay = Overlay::None;
+            model.attrs = None;
+        }
+        Event::Up | Event::Char('k') => view.cursor = view.cursor.saturating_sub(1),
+        Event::Down | Event::Char('j') => {
+            if view.cursor + 1 < view.entries.len() {
+                view.cursor += 1;
+            }
+        }
+        Event::Char('m') => {
+            let current = view.mode;
+            model.prompt = Some(Prompt::Mode(ModePrompt {
+                path: view.path.clone(),
+                name: view.name.clone(),
                 current,
                 input: format!("{current:o}"),
             }));
         }
-        Err(errno) => model.report(&path, errno),
+        Event::Char('n') => {
+            if view.unsupported {
+                model.message = Some(String::from("attributes not supported by this filesystem"));
+                return;
+            }
+            model.prompt = Some(Prompt::AttrEdit(AttrEditPrompt {
+                path: view.path.clone(),
+                name: view.name.clone(),
+                input: String::new(),
+            }));
+        }
+        Event::Enter | Event::Char('e') => {
+            let Some((key, value)) = view.entries.get(view.cursor) else {
+                return;
+            };
+            // A text value pre-fills for in-place editing; a binary one
+            // pre-fills the key alone — bytes that cannot round-trip
+            // through the line are never lossily offered back.
+            let input = match core::str::from_utf8(value) {
+                Ok(text) if text.chars().all(|c| !c.is_control()) => format!("{key}={text}"),
+                _ => format!("{key}="),
+            };
+            model.prompt = Some(Prompt::AttrEdit(AttrEditPrompt {
+                path: view.path.clone(),
+                name: view.name.clone(),
+                input,
+            }));
+        }
+        Event::Char('d') => {
+            let Some((key, _)) = view.entries.get(view.cursor) else {
+                return;
+            };
+            let key = key.clone();
+            let path = view.path.clone();
+            match fs.attr_remove(&path, &key) {
+                Ok(()) => {
+                    model.message = Some(format!("attribute {key} removed"));
+                    refresh_attrs_view(model, fs);
+                }
+                Err(errno) => model.report(&path, errno),
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Apply one key to the open `key=value` attribute prompt: printable
+/// characters and Backspace edit, Enter applies through the seam, Esc
+/// cancels. The kernel owns the key grammar and every permission and
+/// size bound; a refusal is surfaced verbatim and nothing changes.
+fn handle_attr_edit_prompt(
+    model: &mut Model,
+    fs: &mut dyn Fs,
+    mut prompt: AttrEditPrompt,
+    event: &Event,
+) {
+    match event {
+        Event::Esc => {}
+        Event::Backspace => {
+            prompt.input.pop();
+            model.prompt = Some(Prompt::AttrEdit(prompt));
+        }
+        Event::Enter => {
+            let Some((key, value)) = prompt.input.split_once('=') else {
+                model.message = Some(String::from(
+                    "attribute: key=value expected — nothing applied",
+                ));
+                return;
+            };
+            if key.is_empty() {
+                model.message = Some(String::from("attribute: empty key — nothing applied"));
+                return;
+            }
+            match fs.attr_set(&prompt.path, key, value.as_bytes()) {
+                Ok(()) => {
+                    model.message = Some(format!("attribute {key} set on {}", prompt.name));
+                    refresh_attrs_view(model, fs);
+                }
+                Err(errno) => model.report(&prompt.path, errno),
+            }
+        }
+        Event::Char(c) if !c.is_control() => {
+            prompt.input.push(*c);
+            model.prompt = Some(Prompt::AttrEdit(prompt));
+        }
+        // Any other key is ignored — the prompt accepts only what the
+        // kernel could accept.
+        _ => model.prompt = Some(Prompt::AttrEdit(prompt)),
     }
 }
 
@@ -570,6 +746,13 @@ fn handle_mode_prompt(model: &mut Model, fs: &mut dyn Fs, mut prompt: ModePrompt
             match fs.set_mode(&prompt.path, mode) {
                 Ok(()) => {
                     model.message = Some(format!("mode of {} now {mode:o}", prompt.name));
+                    // The attributes editor shows the same entry's bits;
+                    // keep its mode line current with the applied change.
+                    if let Some(view) = model.attrs.as_mut() {
+                        if view.path == prompt.path {
+                            view.mode = mode;
+                        }
+                    }
                 }
                 Err(errno) => model.report(&prompt.path, errno),
             }

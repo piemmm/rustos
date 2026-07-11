@@ -80,8 +80,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{
-    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, MountFlags,
-    NodeId, NodeInfo, NodeKind, NodeSecurity, VolumeStats,
+    DirEntry, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats,
+    FilesystemWrite, MountFlags, NodeId, NodeInfo, NodeKind, NodeSecurity, VolumeStats,
 };
 use rustos_abi::sysinfo::MountAvailability;
 use rustos_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
@@ -315,6 +315,12 @@ impl FilesystemStats for UnavailableFs {
         Err(DriverError::DeviceFault)
     }
 }
+
+/// A detached volume serves no attribute store; the default facet answer
+/// (`None`) refuses the `fs_attr_*` surface with the typed
+/// unsupported-backing error, consistent with every other operation's
+/// fail-closed fault.
+impl FilesystemAttrsProvider for UnavailableFs {}
 
 /// The boot-installed wiring the service operates with.
 struct Wiring {

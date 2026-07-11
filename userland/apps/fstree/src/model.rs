@@ -54,6 +54,9 @@ pub enum Overlay {
     Volumes,
     /// The settings menu (`S`): the persisted confirmation toggles.
     Settings,
+    /// The attributes editor (`a`): the selection's mode bits and
+    /// extended attributes ([`Model::attrs`]).
+    Attrs,
 }
 
 /// Which body the session shows: the two panes, the flattened branch
@@ -140,8 +143,11 @@ pub struct TreeRow {
 /// While present, keys feed the prompt; the panes underneath stay drawn.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Prompt {
-    /// The mode editor (`a`).
+    /// The mode editor (`m` inside the attributes editor).
     Mode(ModePrompt),
+    /// The attribute editor's `key=value` line (`n` or Enter inside the
+    /// attributes editor).
+    AttrEdit(AttrEditPrompt),
     /// A text-line question: a destination path or a new name.
     Input(InputPrompt),
     /// The delete confirmation (`d`).
@@ -371,7 +377,49 @@ impl NameFilter {
     }
 }
 
-/// The modal mode-editor prompt (`a`): the entry being edited and the
+/// The extended attributes of one entry, `(key, value)`, in the
+/// backing's stable order.
+pub type AttrEntries = Vec<(String, Vec<u8>)>;
+
+/// The attributes editor (`a`): the selection's permission bits and its
+/// extended attributes, loaded once when the view opens and refreshed
+/// after every applied change.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttrsView {
+    /// Full path of the entry whose attributes are shown.
+    pub path: String,
+    /// The entry's name, shown in the title.
+    pub name: String,
+    /// The entry's current permission bits (the `m` editor's subject).
+    pub mode: u32,
+    /// The visible extended attributes, `(key, value)`, in the backing's
+    /// stable order. Values are opaque bytes; the renderer escapes
+    /// non-printable content rather than trusting it.
+    pub entries: AttrEntries,
+    /// Cursor index into [`AttrsView::entries`].
+    pub cursor: usize,
+    /// Whether the mounted format stores no attributes at all
+    /// ([`rustos_abi::Errno::NotSupported`]) — stated honestly in place
+    /// of an empty list, with the editing keys inert.
+    pub unsupported: bool,
+}
+
+/// The attribute editor's modal `key=value` line. While present, keys
+/// feed the prompt (printable characters and Backspace edit, Enter
+/// applies through the seam, Esc cancels); the attributes view underneath
+/// stays drawn.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttrEditPrompt {
+    /// Full path of the entry whose attribute is being edited.
+    pub path: String,
+    /// The entry's name, shown in the prompt.
+    pub name: String,
+    /// The `key=value` line typed so far.
+    pub input: String,
+}
+
+/// The modal mode-editor prompt (`m` inside the attributes editor): the
+/// entry being edited and the
 /// octal digits typed so far. While present, keys feed the prompt (octal
 /// digits and Backspace edit, Enter applies through the seam, Esc
 /// cancels); the panes underneath stay drawn.
@@ -443,6 +491,8 @@ pub struct Model {
     pub volumes: Vec<VolumeInfo>,
     /// Cursor index into [`Model::volumes`].
     pub volume_cursor: usize,
+    /// The attributes editor's state while the `a` overlay is open.
+    pub attrs: Option<AttrsView>,
     /// The last completed file operation, for the repeat key (`.`).
     pub last_op: Option<RepeatOp>,
     /// The persisted session preferences (the confirmation toggles).
@@ -500,6 +550,7 @@ impl Model {
             report_lines: Vec::new(),
             volumes: Vec::new(),
             volume_cursor: 0,
+            attrs: None,
             last_op: None,
             settings: Settings::default(),
             settings_home: None,

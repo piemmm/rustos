@@ -595,6 +595,55 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn fs_attr_get(
+        &self,
+        _c: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _key: u64,
+        _key_len: usize,
+        _value_out: u64,
+        _value_out_len: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_attr_set(
+        &self,
+        _c: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _key: u64,
+        _key_len: usize,
+        _value: u64,
+        _value_len: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_attr_list(
+        &self,
+        _c: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _index: u64,
+        _key_out: u64,
+        _key_out_len: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_attr_remove(
+        &self,
+        _c: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _key: u64,
+        _key_len: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn port_resolve(&self, _c: &CallerContext<'_>, _name: u64, _name_len: usize) -> SyscallResult {
         self.bump();
         Ok(0)

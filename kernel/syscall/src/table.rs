@@ -10,8 +10,8 @@
 
 use rustos_abi::{
     spec_for, AbiType, CapabilityId, Errno, IrqHandle, MapFlags, OpenFlags, RandomFlags, Signal,
-    SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags, ENCODED_TABLE, FS_MODE_MASK,
-    PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
+    SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags, ENCODED_TABLE, FS_ATTR_KEY_MAX,
+    FS_ATTR_VALUE_MAX, FS_MODE_MASK, PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
 };
 use rustos_crypto::{sha256, Sha256Digest};
 use rustos_kernel_sec::{TaskCapabilities, TaskId};
@@ -1824,6 +1824,104 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Read one extended attribute of the file or directory at the
+    /// absolute path `path` (`path_len` bytes) into the caller's
+    /// `value_out` buffer, returning the value's byte count (the
+    /// `getxattr(2)` shape).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::FS_ACCESS`], that the pointers are non-null
+    /// `UserPtr`s, and bounded `key_len` to `1..=FS_ATTR_KEY_MAX`. The key
+    /// grammar and the per-inode read-permission rule are the secured
+    /// VFS's, applied in the handler's filesystem service.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    // The seam mirrors the six syscall argument registers one-to-one (three
+    // pointer/length pairs), exactly as the dispatcher hands them over;
+    // folding them into a struct would give this one syscall a different
+    // shape from every sibling without removing any register.
+    #[allow(clippy::too_many_arguments)]
+    fn fs_attr_get(
+        &self,
+        _caller: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _key: u64,
+        _key_len: usize,
+        _value_out: u64,
+        _value_out_len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Set one extended attribute of the file or directory at the absolute
+    /// path `path` to the `value_len` bytes at `value` (the `setxattr(2)`
+    /// shape).
+    ///
+    /// The dispatcher has already checked [`CapabilityId::FS_ACCESS`],
+    /// the pointers, `key_len` (`1..=FS_ATTR_KEY_MAX`), and `value_len`
+    /// (at most [`FS_ATTR_VALUE_MAX`]). Write permission and the key
+    /// grammar are the secured VFS's.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    // The seam mirrors the six syscall argument registers one-to-one (three
+    // pointer/length pairs), exactly as the dispatcher hands them over;
+    // folding them into a struct would give this one syscall a different
+    // shape from every sibling without removing any register.
+    #[allow(clippy::too_many_arguments)]
+    fn fs_attr_set(
+        &self,
+        _caller: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _key: u64,
+        _key_len: usize,
+        _value: u64,
+        _value_len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Yield the `index`-th visible extended-attribute key of the file or
+    /// directory at the absolute path `path` into the caller's `key_out`
+    /// buffer, returning the key's byte count or `0` past the end.
+    ///
+    /// The dispatcher has already checked [`CapabilityId::FS_ACCESS`] and
+    /// the pointers. Read permission and the visibility filtering are the
+    /// secured VFS's.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_attr_list(
+        &self,
+        _caller: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _index: u64,
+        _key_out: u64,
+        _key_out_len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Remove one extended attribute of the file or directory at the
+    /// absolute path `path` (the `removexattr(2)` shape).
+    ///
+    /// The dispatcher has already checked [`CapabilityId::FS_ACCESS`],
+    /// the pointers, and `key_len` (`1..=FS_ATTR_KEY_MAX`). Write
+    /// permission and the key grammar are the secured VFS's.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_attr_remove(
+        &self,
+        _caller: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _key: u64,
+        _key_len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Resolve a published port name to its live IPC endpoint id.
     ///
     /// The dispatcher has already checked that `name` is a non-null
@@ -2462,6 +2560,59 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 }
                 self.handlers.fs_set_mode(caller, args.0[0], path_len, mode)
             }
+            SyscallNumber::FS_ATTR_GET => {
+                // args[0]/args[2]/args[4] are non-null `UserPtr`s
+                // (dispatcher-checked). The key length is bounded here so no
+                // user memory beyond the fixed key bound is ever staged; the
+                // key grammar itself is the secured VFS's to judge.
+                let path_len = decode_len(args.0[1])?;
+                let key_len = decode_attr_key_len(args.0[3])?;
+                let value_out_len = decode_len(args.0[5])?;
+                self.handlers.fs_attr_get(
+                    caller,
+                    args.0[0],
+                    path_len,
+                    args.0[2],
+                    key_len,
+                    args.0[4],
+                    value_out_len,
+                )
+            }
+            SyscallNumber::FS_ATTR_SET => {
+                // As `fs_attr_get`, plus the value bound: a payload above
+                // the fixed attribute-value maximum is refused before any
+                // copy (a larger payload is a named stream, never silently
+                // truncated into an attribute).
+                let path_len = decode_len(args.0[1])?;
+                let key_len = decode_attr_key_len(args.0[3])?;
+                let value_len = decode_len(args.0[5])?;
+                if value_len > FS_ATTR_VALUE_MAX {
+                    return Err(Errno::LengthOutOfRange);
+                }
+                self.handlers.fs_attr_set(
+                    caller, args.0[0], path_len, args.0[2], key_len, args.0[4], value_len,
+                )
+            }
+            SyscallNumber::FS_ATTR_LIST => {
+                // args[0]/args[3] are non-null `UserPtr`s
+                // (dispatcher-checked); args[2] is the enumeration index.
+                let path_len = decode_len(args.0[1])?;
+                let key_out_len = decode_len(args.0[4])?;
+                self.handlers.fs_attr_list(
+                    caller,
+                    args.0[0],
+                    path_len,
+                    args.0[2],
+                    args.0[3],
+                    key_out_len,
+                )
+            }
+            SyscallNumber::FS_ATTR_REMOVE => {
+                let path_len = decode_len(args.0[1])?;
+                let key_len = decode_attr_key_len(args.0[3])?;
+                self.handlers
+                    .fs_attr_remove(caller, args.0[0], path_len, args.0[2], key_len)
+            }
             SyscallNumber::PORT_RESOLVE => {
                 // args[0] is the non-null name `UserPtr`
                 // (dispatcher-checked); args[1] is the name length in
@@ -2761,6 +2912,20 @@ fn decode_capability(raw: u64) -> Result<CapabilityId, Errno> {
 
 fn decode_len(raw: u64) -> Result<usize, Errno> {
     usize::try_from(raw).map_err(|_| Errno::LengthOutOfRange)
+}
+
+/// Decode an extended-attribute key length, bounding it to
+/// `1..=FS_ATTR_KEY_MAX` before any user memory is staged.
+///
+/// An empty key can never satisfy the `namespace.rest` grammar and an
+/// over-long one can never be stored, so both are refused at dispatch —
+/// the cheap-reject shape `fs_set_mode` uses for an out-of-mask mode word.
+fn decode_attr_key_len(raw: u64) -> Result<usize, Errno> {
+    let len = decode_len(raw)?;
+    if len == 0 || len > FS_ATTR_KEY_MAX {
+        return Err(Errno::LengthOutOfRange);
+    }
+    Ok(len)
 }
 
 /// Narrow a `U32`-typed argument register to `u32`.
@@ -3550,6 +3715,59 @@ mod tests {
             _mode: u32,
         ) -> SyscallResult {
             self.record("fs_set_mode");
+            Ok(0)
+        }
+
+        fn fs_attr_get(
+            &self,
+            _c: &CallerContext<'_>,
+            _path: u64,
+            _path_len: usize,
+            _key: u64,
+            _key_len: usize,
+            _value_out: u64,
+            _value_out_len: usize,
+        ) -> SyscallResult {
+            self.record("fs_attr_get");
+            Ok(0)
+        }
+
+        fn fs_attr_set(
+            &self,
+            _c: &CallerContext<'_>,
+            _path: u64,
+            _path_len: usize,
+            _key: u64,
+            _key_len: usize,
+            _value: u64,
+            _value_len: usize,
+        ) -> SyscallResult {
+            self.record("fs_attr_set");
+            Ok(0)
+        }
+
+        fn fs_attr_list(
+            &self,
+            _c: &CallerContext<'_>,
+            _path: u64,
+            _path_len: usize,
+            _index: u64,
+            _key_out: u64,
+            _key_out_len: usize,
+        ) -> SyscallResult {
+            self.record("fs_attr_list");
+            Ok(0)
+        }
+
+        fn fs_attr_remove(
+            &self,
+            _c: &CallerContext<'_>,
+            _path: u64,
+            _path_len: usize,
+            _key: u64,
+            _key_len: usize,
+        ) -> SyscallResult {
+            self.record("fs_attr_remove");
             Ok(0)
         }
 
@@ -4433,6 +4651,131 @@ mod tests {
             .dispatch(&ctx, SyscallNumber::FS_SET_MODE.as_u16(), args)
             .is_ok());
         assert_eq!(h.last(), Some("fs_set_mode"));
+    }
+
+    #[test]
+    fn fs_attr_calls_bound_key_and_value_lengths_at_dispatch() {
+        // The key length is bounded to `1..=FS_ATTR_KEY_MAX` and the set
+        // value to `FS_ATTR_VALUE_MAX` before any handler (and so any user
+        // copy) is reached; in-bounds calls reach their handlers.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[CapabilityId::FS_ACCESS], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        // An empty key never satisfies the `namespace.rest` grammar.
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 0x1000; // path
+        args.0[1] = 16; // path length
+        args.0[2] = 0x2000; // key
+        args.0[3] = 0; // key length — empty, refused
+        args.0[4] = 0x3000; // value_out
+        args.0[5] = 64;
+        assert_eq!(
+            d.dispatch(&ctx, SyscallNumber::FS_ATTR_GET.as_u16(), args),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(h.last(), None);
+
+        // A key above the fixed bound is refused on every attr call
+        // (remove is the 4-argument shape: its trailing slots stay zero).
+        let mut remove_args = RawArgs::ZERO;
+        remove_args.0[0] = 0x1000;
+        remove_args.0[1] = 16;
+        remove_args.0[2] = 0x2000;
+        remove_args.0[3] = (FS_ATTR_KEY_MAX + 1) as u64;
+        assert_eq!(
+            d.dispatch(&ctx, SyscallNumber::FS_ATTR_REMOVE.as_u16(), remove_args),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(h.last(), None);
+
+        // A value above the fixed bound is refused before any copy.
+        args.0[3] = 9; // "user.demo"
+        args.0[5] = (FS_ATTR_VALUE_MAX + 1) as u64;
+        assert_eq!(
+            d.dispatch(&ctx, SyscallNumber::FS_ATTR_SET.as_u16(), args),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(h.last(), None);
+
+        // In-bounds calls reach their handlers.
+        args.0[5] = 64;
+        assert!(d
+            .dispatch(&ctx, SyscallNumber::FS_ATTR_GET.as_u16(), args)
+            .is_ok());
+        assert_eq!(h.last(), Some("fs_attr_get"));
+        assert!(d
+            .dispatch(&ctx, SyscallNumber::FS_ATTR_SET.as_u16(), args)
+            .is_ok());
+        assert_eq!(h.last(), Some("fs_attr_set"));
+        remove_args.0[3] = 9;
+        assert!(d
+            .dispatch(&ctx, SyscallNumber::FS_ATTR_REMOVE.as_u16(), remove_args)
+            .is_ok());
+        assert_eq!(h.last(), Some("fs_attr_remove"));
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 0x1000;
+        args.0[1] = 16;
+        args.0[2] = 0; // index — a plain U64, zero is valid
+        args.0[3] = 0x2000; // key_out
+        args.0[4] = 64;
+        assert!(d
+            .dispatch(&ctx, SyscallNumber::FS_ATTR_LIST.as_u16(), args)
+            .is_ok());
+        assert_eq!(h.last(), Some("fs_attr_list"));
+    }
+
+    #[test]
+    fn fs_attr_calls_require_the_filesystem_capability() {
+        // The coarse CAP_FS_ACCESS gate refuses every attr call before the
+        // handler is reached, exactly as the other path-taking fs calls.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 0x1000;
+        args.0[1] = 16;
+        args.0[2] = 0x2000;
+        args.0[3] = 9;
+        args.0[4] = 0x3000;
+        args.0[5] = 64;
+        for n in [SyscallNumber::FS_ATTR_GET, SyscallNumber::FS_ATTR_SET] {
+            assert_eq!(
+                d.dispatch(&ctx, n.as_u16(), args),
+                Err(Errno::PermissionDenied)
+            );
+        }
+        // The shorter shapes, with their trailing slots zero.
+        let mut remove_args = RawArgs::ZERO;
+        remove_args.0[0] = 0x1000;
+        remove_args.0[1] = 16;
+        remove_args.0[2] = 0x2000;
+        remove_args.0[3] = 9;
+        assert_eq!(
+            d.dispatch(&ctx, SyscallNumber::FS_ATTR_REMOVE.as_u16(), remove_args),
+            Err(Errno::PermissionDenied)
+        );
+        let mut list_args = RawArgs::ZERO;
+        list_args.0[0] = 0x1000;
+        list_args.0[1] = 16;
+        list_args.0[2] = 0;
+        list_args.0[3] = 0x2000;
+        list_args.0[4] = 64;
+        assert_eq!(
+            d.dispatch(&ctx, SyscallNumber::FS_ATTR_LIST.as_u16(), list_args),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(h.last(), None);
     }
 
     #[test]

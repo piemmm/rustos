@@ -69,8 +69,9 @@
 
 use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{
-    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId,
-    NodeInfo, NodeKind, NodeSecurity, SecurityAcl, SecuritySubject, VolumeStats,
+    DirEntry, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats,
+    FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity, SecurityAcl, SecuritySubject,
+    VolumeStats,
 };
 use rustos_abi::time::Time64;
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
@@ -2677,6 +2678,11 @@ impl<B: Block> FilesystemSecurity for Ext4<B> {
         Err(DriverError::Unsupported)
     }
 }
+
+/// The on-disk format has nowhere to store RustOS extended attributes, so
+/// the default facet answer stands: a mounted volume refuses the
+/// `fs_attr_*` surface with the typed unsupported-backing error.
+impl<B: Block> FilesystemAttrsProvider for Ext4<B> {}
 
 impl<B: Block> FilesystemStats for Ext4<B> {
     fn stats(&mut self) -> Result<VolumeStats, DriverError> {
