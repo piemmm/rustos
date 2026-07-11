@@ -257,7 +257,7 @@ refused reader consumes nothing), the handoff transfer, the bystander
 steal refusals, the input-mode gate, and both no-wedge paths (exit release
 and gate healing).
 
-## Toward the live desktop session (Stages D7a–D7b)
+## Toward the live desktop session (Stages D7a–D7c)
 
 Stage D7 (`plans/DISPLAY.md`) is the display-client present path: a
 user-space window-manager session presenting composited frames to a
@@ -330,9 +330,30 @@ are live (stage D7b):
   validated mode the autoloaded display service reads through
   `sole_framebuffer` before mapping the window through `mmio_map`.
 
-The framebuffer service process (the `Run` binary hosting the engine),
-the desktop session binary, and the end-to-end vertical build on these
-in the remainder of D7b and stages D7c–D7d (`plans/DISPLAY.md`).
+Both `Run` binaries hosting those halves are live (stages D7b–D7c):
+
+- **The framebuffer service process** (`drivers/display/framebuffer`)
+  resolves its granted scan-out surface through `sole_framebuffer`,
+  binds the reserved `DISPLAY_ENDPOINT` under `CAP_IPC_BIND_PRIVILEGED`,
+  and serves the engine from a waitset-parked loop — never a busy poll —
+  with fail-loud reserved exit codes.
+- **The desktop session process** (`userland/gui/session`, stage D7c)
+  is the client half: it acquires the boot seat's lease
+  (`display_acquire`), performs the bring-up handshake (query →
+  `shm_create` the double-buffered frame region → `shm_grant` it to the
+  display endpoint's serving task → configure), and then runs the
+  desktop shell from a `SeatInput` wait-set park: each wake drains the
+  owned seat's pointer and keyboard channels through the fail-closed
+  record path, pumps the decoded events through the compositor and
+  taskbar, and presents the composited damage by frame index. Losing
+  the seat — the typed `SeatRevoked`/`SeatNotOwner` on any drain or
+  present — tears the session down fail-loud (reason on `stderr`, a
+  reserved exit code, an owner-checked release); it never spins or
+  repaints without a live lease.
+
+The end-to-end QEMU vertical (the autoload world growing the display
+node, the framebuffer service bundle, and the spawned session, plus
+login's `graphical_available` flip) is stage D7d (`plans/DISPLAY.md`).
 
 ## Observing seats
 

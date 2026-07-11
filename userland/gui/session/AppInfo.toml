@@ -1,0 +1,16 @@
+# Signed-AppInfo manifest source for the `desktop` graphical-session
+# service (a service is an app, AGENTS.md §16.2; plans/DISPLAY.md D7c).
+# Discovered by the build's app-bundle composer and planted under
+# /System/Services/. The capability list is the bundle's request:
+# CAP_DISPLAY to acquire the boot seat's exclusive, revocable lease,
+# CAP_INPUT_READ to drain the owned seat's pointer/keyboard channels
+# (the kernel additionally owner-gates every drain against the live
+# lease), and CAP_SHM to create and grant the zero-copy frame region the
+# display service maps. No console pair: the session's surface is the
+# seat, not a text console; no CAP_IPC_BIND_PRIVILEGED: it calls the
+# display endpoint, it never binds one.
+id = "os.rustos.desktop"
+name = "desktop"
+version = "0.1.0"
+kind = "service"
+capabilities = ["CAP_DISPLAY", "CAP_INPUT_READ", "CAP_SHM"]

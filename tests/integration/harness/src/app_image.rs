@@ -549,11 +549,11 @@ mod tests {
         assert_eq!(
             names,
             [
-                "basename", "cat", "chmod", "clear", "cp", "devmgr", "df", "dirname", "du", "edit",
-                "elsh", "false", "fstree", "groupadd", "head", "login", "ls", "lspci", "lsusb",
-                "man", "mkdir", "mv", "printf", "ps", "reset", "rm", "rmdir", "seatmgr", "seq",
-                "sysinfo", "sysinfod", "tee", "top", "true", "useradd", "users", "vim", "wc",
-                "whoami", "yes"
+                "basename", "cat", "chmod", "clear", "cp", "desktop", "devmgr", "df", "dirname",
+                "du", "edit", "elsh", "false", "fstree", "groupadd", "head", "login", "ls",
+                "lspci", "lsusb", "man", "mkdir", "mv", "printf", "ps", "reset", "rm", "rmdir",
+                "seatmgr", "seq", "sysinfo", "sysinfod", "tee", "top", "true", "useradd", "users",
+                "vim", "wc", "whoami", "yes"
             ]
         );
         for app in &found {
@@ -565,7 +565,10 @@ mod tests {
             .filter(|d| d.manifest.kind == AppKind::Service)
             .map(|d| d.manifest.name.as_str())
             .collect();
-        assert_eq!(services, ["devmgr", "login", "seatmgr", "sysinfod"]);
+        assert_eq!(
+            services,
+            ["desktop", "devmgr", "login", "seatmgr", "sysinfod"]
+        );
     }
 
     #[test]

@@ -2943,11 +2943,19 @@ transfer, landed in increments:
   grants → `sole_framebuffer` → surface; `DISPLAY_ENDPOINT` bind under
   `CAP_IPC_BIND_PRIVILEGED`; `RtSeatCheck`/`RtShmMapper` seams; a
   waitset-parked serve loop with fail-loud reserved exit codes — its
-  image bundle + bind keys ride the D7d autoload world). Then D7c (the desktop
-  session binary: the live `SeatEventReader` over `rustos_rt::pointer_read`/
-  `keyboard_read` after `display_acquire`, draining after each `SeatInput`
-  wake, driving `DesktopShell` with the queried mode as the screen `Rect`),
-  D7d (the end-to-end QEMU vertical + login's `graphical_available` flip).
+  image bundle + bind keys ride the D7d autoload world). **D7c (the
+  desktop session binary) is done:** `userland/gui/session` ships its
+  `Run` program (freestanding lib+bin shape, `AppInfo.toml` requesting
+  exactly `CAP_DISPLAY`/`CAP_INPUT_READ`/`CAP_SHM`) — `display_acquire` →
+  `DisplayClient` bring-up (query → checked frame arithmetic →
+  `shm_create` double buffer → `shm_grant` to the endpoint's serving
+  task → configure) → `RemoteDisplay` over its own mapping → the live
+  `SeatEventReader`s over `rustos_rt::pointer_read`/`keyboard_read`
+  drained after each `SeatInput` wake → `DesktopShell` pump → composite →
+  present with damage; seat loss tears the session down fail-loud
+  (stderr reason, reserved exit codes, owner-checked release on every
+  exit path). Then D7d (the end-to-end QEMU vertical + login's
+  `graphical_available` flip).
   The virtio pointer feed into the seat channel is done — see above; the
   USB HID mouse joins through the same shared `from_device_event` mapping
   when its metal report pump lands. Then: relay the theme switch over live
