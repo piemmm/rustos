@@ -937,11 +937,13 @@ order (one fully-gated increment each):
          (host-proven).** `drivers/input/usb_hid::service::bring_up_boot_keyboard`
          is the composition the user-space keyboard driver runs at start-up: over
          its `DriverHost` (the rt-backed host built from its kernel-issued
-         grants) it carves the device-shared DMA region and aperture-checks it
-         before any register is touched (fail closed, §5.4), maps its granted
-         xHCI register BAR, brings the controller up (`rustos_usb::Xhci::open` +
-         `UsbDevice::start`, carving the shared `rustos_usb::XHCI_DMA_BYTES` —
-         hoisted from `bus_usb::wiring` into `lib/usb`, §2.2), and runs the
+         grants) it builds the growable `rustos_usb::SlabBank` over its host's
+         DMA seam with the discovered aperture top (every chunk is
+         aperture-checked at allocation time, fail closed, §5.4), maps its
+         granted xHCI register BAR, brings the controller up
+         (`rustos_usb::Xhci::open` + `UsbDevice::start`, growing the
+         geometry-sized shared chunk — the one engine definition in `lib/usb`,
+         §2.2), and runs the
          arch-neutral `enumerate_boot_keyboard`, returning a `BootKeyboard` the
          service loop drives with `pump_once`. It names no PCI/board (§2.20): the
          board PCIe root-complex bring-up + BAR assignment stay in the separate
@@ -2214,7 +2216,7 @@ order (one fully-gated increment each):
            `Bus`/`VirtioPciBus`/`MsixBus`/`PciBus` seams, and the shared
            `find_function_by_class`/`assign_and_map_bar`/`bus_to_cpu_phys`
            locate primitives) and `lib/usb` (the bus-agnostic xHCI protocol +
-           `XHCI_COMPATIBLE`/`XHCI_DMA_BYTES`/`XHCI_BAR_INDEX`), the
+           `XHCI_COMPATIBLE`/`XHCI_BAR_INDEX`/the `SlabBank` DMA bank), the
            `lib/usb`↔`drivers/bus/usb` precedent. Each device's **own** logic,
            by contrast, lives **in its driver crate** as a host-testable `lib`
            target the `Run` binary links (§2.22), since a driver above the
@@ -2231,7 +2233,7 @@ order (one fully-gated increment each):
               the RC node, trains the link, builds the `PciBus` over `lib/pci`,
               assigns+enables the VL805 BAR, and emits node A
               `pci(1106,3483,0C0330)` carrying `Mmio(bar_cpu_phys,bar_len)` +
-              `Dma(aperture_top,XHCI_DMA_BYTES)`. The BCM2711 bring-up engine
+              the inbound-DMA viewport grant. The BCM2711 bring-up engine
               (`BrcmPcieRc`, the `regs`/`wiring`, `BIND_KEYS`) is its own `lib`
               target.
            3. **`drivers/bus/mailbox/vcmailbox`** serves `MAILBOX_ENDPOINT`; the

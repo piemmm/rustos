@@ -91,13 +91,15 @@ controller behaviour is a metal checklist (`plans/PI.md` §0.4).
 
 ## Limitations
 
-- Up to `rustos_usb::device::MAX_DEVICES` concurrently served devices per
-  controller engine, sharing that many device regions with the downstream
-  hubs' contexts. Event-driven hot-plug — hub-downstream connect/disconnect
-  on any tier, directly-attached connect/disconnect, fresh re-enumeration,
-  and cold boot with no device attached — is built and host-proven
-  (`plans/USB.md` U5/U9); live attach/detach/cold-boot acceptance is
-  metal-only (QEMU models no Pi USB).
+- Concurrently served devices are bounded by the controller's reported
+  slot count (`HCSPARAMS1.MaxSlots`, the same bound the silicon imposes on
+  any host) and genuine memory exhaustion: each device's DMA region and
+  its URB transport are allocated when it attaches and released when it
+  detaches, never a fixed table. Event-driven hot-plug — hub-downstream
+  connect/disconnect on any tier, directly-attached connect/disconnect,
+  fresh re-enumeration, and cold boot with no device attached — is built
+  and host-proven (`plans/USB.md` U5/U9); live attach/detach/cold-boot
+  acceptance is metal-only (QEMU models no Pi USB).
 - Hubs are descended recursively (a hub plugged into a hub, up to the xHCI
   route string's five tiers): each tier is installed, marked, and watched on
   its own status-change endpoint, an unplugged hub cascades the teardown of

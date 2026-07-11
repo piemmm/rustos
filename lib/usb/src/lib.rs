@@ -39,18 +39,22 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-// The enumeration engine's device table is heap-allocated (fallibly):
-// at `device::MAX_DEVICES` entries it is far too large for a stack frame.
+// The enumeration engine's tables and the DMA bank's chunk bookkeeping
+// grow with the devices actually served (fallibly — exhaustion is a typed
+// error, never a panic).
 extern crate alloc;
 
 use rustos_abi::driver::mmio::WindowError;
 use rustos_abi::{DriverError, RegisterWindow};
 
+pub mod bank;
 pub mod device;
 pub mod regs;
 pub mod ring;
 pub mod transport;
 pub mod trb;
+
+pub use bank::SlabBank;
 
 #[cfg(test)]
 mod tests;
@@ -64,34 +68,6 @@ mod tests;
 /// Exceeding it fails closed with [`DriverError::DeviceFault`] rather
 /// than spinning forever.
 pub const DEFAULT_POLL_BUDGET: u32 = 1_000_000;
-
-/// Bytes a host carves for one controller's device-shared DMA structures.
-///
-/// The enumeration engine lays the DCBAA, command/event/transfer rings,
-/// device contexts, report buffers, the bulk staging buffers, and the
-/// controller's scratchpad buffers out of this one region
-/// ([`device::UsbDevice::start`]). The rings/contexts of a 255-slot
-/// controller need under 8 KiB; the dominant terms are the per-device
-/// regions — [`device::MAX_DEVICES`] devices, each carrying two bulk rings
-/// of [`device::BULK_SLOTS`] slots × [`device::BULK_BUF_LEN`] bytes of
-/// staging (≈ 67 KiB per device, ≈ 1078 KiB for sixteen) — and the
-/// scratchpad: the controller's `HCSPARAMS2` Max Scratchpad Buffers
-/// page-sized buffers (the VL805 requires **31**, i.e. 31 × 4 KiB =
-/// 124 KiB; xHCI §4.20). 1.5 MiB covers that combined worst case with
-/// headroom. The exact count is read from the controller and laid out by
-/// [`device::UsbDevice::start`], which fails closed if the carve cannot
-/// hold it, so this is a fixed protocol working set for one controller's
-/// device complement, not a scalable capacity.
-///
-/// It lives here, beside the engine that consumes it, so the host-controller
-/// driver (`drivers/bus/usb/xhci`) that carves a controller's DMA region
-/// depends on one definition rather than carrying its own copy.
-pub const XHCI_DMA_BYTES: usize = 1536 * 1024;
-
-// Worst case (255 slots + 31 scratchpad pages at 4 KiB + eight hub watch
-// regions + sixteen ~67 KiB device regions) is ~1.19 MiB; the carve must
-// comfortably exceed that for every reported geometry.
-const _: () = assert!(XHCI_DMA_BYTES >= 1280 * 1024);
 
 /// BAR slot carrying the xHCI register block (xHCI 1.2 §5.2.1: the memory
 /// BAR at offset `0x10`, i.e. BAR0).
@@ -220,8 +196,8 @@ impl PortStatus {
 ///
 /// Every address is device-visible and 64-byte aligned (the strictest
 /// alignment any of the four structures requires); the memory
-/// they point into is owned by the caller's DMA region
-/// ([`device::DmaRegion`]).
+/// they point into is owned by the caller's DMA bank
+/// ([`device::DmaBank`]).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DmaProgram {
     /// Device context base address array, for `DCBAAP`.

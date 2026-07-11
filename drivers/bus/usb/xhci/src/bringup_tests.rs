@@ -137,7 +137,7 @@ fn host_with(phys: u64, mmio_map: bool, mapper: bool, dma: bool) -> MockHost {
 fn bring_up(
     host: &MockHost,
     dma_aperture_top: u64,
-) -> Result<super::ControllerDevice, DriverError> {
+) -> Result<super::ControllerDevice<'_>, DriverError> {
     bring_up_controller(host, &NoopDelay, BAR_BASE, BAR_LEN, dma_aperture_top)
 }
 
@@ -168,33 +168,12 @@ fn requires_a_dma_host() {
     );
 }
 
-#[test]
-fn rejects_a_dma_carve_above_the_aperture() {
-    // The carve sits at the aperture top: its end overruns the window the
-    // bridge lets the controller reach, so the orchestration fails closed
-    // before any register is touched.
-    let host = host_with(APERTURE_TOP, true, true, true);
-    assert_eq!(
-        bring_up(&host, APERTURE_TOP).err(),
-        Some(DriverError::OutOfRange)
-    );
-}
-
-#[test]
-fn propagates_a_dma_allocation_failure() {
-    let host = MockHost {
-        mmio_map: true,
-        mapper: Some(MockMapper),
-        dma: Some(MockDmaHost {
-            phys: DMA_PHYS_IN_APERTURE,
-            fail: true,
-        }),
-    };
-    assert_eq!(
-        bring_up(&host, APERTURE_TOP).err(),
-        Some(DriverError::LengthOutOfRange)
-    );
-}
+// The DMA aperture and allocation-failure refusals live in the bank the
+// engine allocates through, not in this orchestration: every chunk — the
+// shared structures and each device's region — is aperture-checked and
+// exhaustion-checked at allocation time. `rustos_usb`'s `SlabBank` unit
+// tests prove those paths; here the composition only wires the bank up
+// with the discovered aperture top.
 
 #[test]
 fn reaches_the_controller_hand_off() {

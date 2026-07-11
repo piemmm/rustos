@@ -54,6 +54,11 @@
 #![cfg_attr(freestanding, no_main)]
 #![deny(missing_docs)]
 
+// The per-index URB transport table grows with the devices the controller
+// actually serves; `rustos-rt` supplies the process heap.
+#[cfg(freestanding)]
+extern crate alloc;
+
 #[cfg(any(freestanding, test))]
 fn waitset_ctl_result(ret: i64) -> Result<(), i64> {
     if ret == 0 {
@@ -69,6 +74,7 @@ const WAIT_FOREVER_NS: u64 = u64::MAX;
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
+    use alloc::vec::Vec;
     use rustos_abi::hwtree::HW_NODE_ROOT;
     use rustos_abi::usb_urb::{decode_completion, URB_COMPLETION_LEN, URB_REQUEST_LEN};
     use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
@@ -81,7 +87,7 @@ mod program {
     use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
     use rustos_log::{log, Event, EventId, Field, Level};
     use rustos_rt::{ClockDelay, LogSink};
-    use rustos_usb::device::{HubEvent, MAX_DEVICES};
+    use rustos_usb::device::{HubEvent, MAX_INTERFACES, XHCI_MAX_SLOTS};
     use rustos_util::fmt::format_hex_u64;
 
     /// Exit code when the rt-backed driver host could not be built from the
@@ -130,16 +136,26 @@ mod program {
     /// A grant-restricted endpoint id the class driver reaches only through
     /// the kernel-minted grant on its matched node — distinct from the
     /// well-known `DRIVER_STORE_ENDPOINT`. Each controller claims one
-    /// contiguous block of [`MAX_DEVICES`] ids ([`claim_urb_endpoints`]):
-    /// creating a block's first id claims the whole block, so a second
+    /// contiguous block of [`URB_ENDPOINT_BLOCK`] ids ([`claim_urb_block`]):
+    /// creating a block's *base* id claims the whole block, so a second
     /// controller's HCD probes on to the next block and two controllers
-    /// never collide on one id — and, within a claimed block, every create
-    /// succeeds first try, so a boot never logs a rejected `call_create`.
+    /// never collide on one id; the block's interior ids are bound lazily,
+    /// one per device-table index, as devices actually serve
+    /// ([`Transports::reconcile`]).
     const URB_ENDPOINT_BASE: u64 = 0x0055_5242_0000_0000;
 
-    /// How many [`MAX_DEVICES`]-id blocks to probe before giving up (a
-    /// generous bound on simultaneous controllers; the first HCD claims the
-    /// first block on its first try).
+    /// Ids per claimed endpoint block: one per device-table index one
+    /// controller can ever serve concurrently — the xHCI protocol's
+    /// 255-slot ceiling plus the DCBAA's scratchpad slot
+    /// ([`XHCI_MAX_SLOTS`] + 1), times the servable interfaces a composite
+    /// device can put on one slot ([`MAX_INTERFACES`]). Derived from
+    /// protocol maxima, never a tuning knob, so any controller's full
+    /// device complement fits its block.
+    const URB_ENDPOINT_BLOCK: u64 = ((XHCI_MAX_SLOTS + 1) * MAX_INTERFACES) as u64;
+
+    /// How many [`URB_ENDPOINT_BLOCK`]-id blocks to probe before giving up
+    /// (a generous bound on simultaneous controllers; the first HCD claims
+    /// the first block on its first try).
     const URB_ENDPOINT_BLOCKS: u64 = 64;
 
     /// Bytes of shared buffer per interface: one bulk chunk
@@ -249,7 +265,7 @@ mod program {
     /// transport, logging the attach. A device that cannot be described or
     /// whose node the kernel refuses stays unpublished (fail closed).
     fn publish_interface(
-        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice,
+        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
         index: usize,
         transport: &mut Transport,
     ) {
@@ -290,24 +306,39 @@ mod program {
         abort_pending_urb(transport.endpoint_id, &mut transport.service);
     }
 
-    /// Reconcile every transport's published node with the engine's live
-    /// device table: publish a node for each newly served index and retract
-    /// the node of each no-longer-served index (aborting its held URB). A
-    /// composite device — a wireless keyboard+mouse receiver — attaches or
-    /// detaches **several** indices in one hub event, so the whole table is
-    /// trued up rather than a single index.
+    /// Reconcile every device-table index's published node with the
+    /// engine's live device table: grow the per-index transport list to
+    /// cover the table, create a missing transport when its index first
+    /// serves (binding its endpoint id from the claimed block and creating
+    /// its shared buffer), publish a node for each newly served index, and
+    /// retract the node of each no-longer-served index (aborting its held
+    /// URB). A composite device — a wireless keyboard+mouse receiver —
+    /// attaches or detaches **several** indices in one hub event, so the
+    /// whole table is trued up rather than a single index. An index whose
+    /// transport cannot be created stays unpublished (fail closed) and is
+    /// retried on the next reconcile; a created transport is kept across
+    /// detaches so a re-plug finds it waiting.
     fn reconcile_interfaces(
-        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice,
-        transports: &mut [Option<Transport>],
+        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
+        transports: &mut Vec<Option<Transport>>,
+        set: u64,
+        urb_base: u64,
     ) {
+        while transports.len() < device.device_table_len() {
+            transports.push(None);
+        }
         for (index, slot) in transports.iter_mut().enumerate() {
-            let Some(transport) = slot else {
-                continue;
-            };
             if device.device_live(index) {
-                publish_interface(device, index, transport);
-            } else if transport.node_live {
-                retract_interface(transport);
+                if slot.is_none() {
+                    *slot = create_transport(set, index, urb_base);
+                }
+                if let Some(transport) = slot {
+                    publish_interface(device, index, transport);
+                }
+            } else if let Some(transport) = slot {
+                if transport.node_live {
+                    retract_interface(transport);
+                }
             }
         }
     }
@@ -316,8 +347,10 @@ mod program {
     /// the watch, reconciling the published interfaces with whatever the
     /// change attached or detached.
     fn service_hub_after_fault_detach(
-        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice,
-        transports: &mut [Option<Transport>],
+        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
+        transports: &mut Vec<Option<Transport>>,
+        set: u64,
+        urb_base: u64,
         delay: &ClockDelay,
     ) {
         match device.next_hub_change(delay) {
@@ -327,7 +360,7 @@ mod program {
                 | HubEvent::HubAttached(_)
                 | HubEvent::HubDetached(_),
             ) => {
-                reconcile_interfaces(device, transports);
+                reconcile_interfaces(device, transports, set, urb_base);
             }
             Ok(HubEvent::None) => {}
             Err(err) => {
@@ -349,9 +382,11 @@ mod program {
     /// (the reply has then been answered); `false` leaves the reply for the
     /// caller to send.
     fn retract_after_fault_if_gone(
-        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice,
+        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
         index: usize,
-        transports: &mut [Option<Transport>],
+        transports: &mut Vec<Option<Transport>>,
+        set: u64,
+        urb_base: u64,
         reply: UrbReply,
         delay: &ClockDelay,
     ) -> bool {
@@ -363,7 +398,7 @@ mod program {
                 // The detach freed every entry riding the device's slot (a
                 // composite device's siblings vanish together), so true up
                 // the whole node table, then answer the faulted URB.
-                reconcile_interfaces(device, transports);
+                reconcile_interfaces(device, transports, set, urb_base);
                 if let Some(transport) = transports.get_mut(index).and_then(Option::as_mut) {
                     reply_error(transport.endpoint_id, reply.ticket, Errno::NotFound);
                 }
@@ -377,7 +412,7 @@ mod program {
                         fields: &[],
                     },
                 );
-                service_hub_after_fault_detach(device, transports, delay);
+                service_hub_after_fault_detach(device, transports, set, urb_base, delay);
                 true
             }
             Ok(false) => false,
@@ -407,15 +442,17 @@ mod program {
     /// The caller refreshes its watched root port from `device.root_port()`
     /// afterwards.
     fn reset_reenumerate_and_publish(
-        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice,
-        transports: &mut [Option<Transport>],
+        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
+        transports: &mut Vec<Option<Transport>>,
+        set: u64,
+        urb_base: u64,
         delay: &ClockDelay,
     ) {
         if device.reset_and_reenumerate(delay).is_err() {
             return;
         }
         let _ = device.enable_interrupter();
-        reconcile_interfaces(device, transports);
+        reconcile_interfaces(device, transports, set, urb_base);
     }
 
     /// Recover if the controller has latched a fatal error or halted
@@ -429,8 +466,10 @@ mod program {
     /// proven await-connect state and a re-plug enumerates normally. Returns
     /// whether a recovery ran (so the caller refreshes its watched root port).
     fn recover_if_controller_faulted(
-        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice,
-        transports: &mut [Option<Transport>],
+        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
+        transports: &mut Vec<Option<Transport>>,
+        set: u64,
+        urb_base: u64,
         delay: &ClockDelay,
     ) -> bool {
         if !device.controller_faulted() {
@@ -448,7 +487,7 @@ mod program {
         for transport in transports.iter_mut().flatten() {
             retract_interface(transport);
         }
-        reset_reenumerate_and_publish(device, transports, delay);
+        reset_reenumerate_and_publish(device, transports, set, urb_base, delay);
         true
     }
 
@@ -488,42 +527,36 @@ mod program {
         ) == 0
     }
 
-    /// Claim this controller's URB endpoint ids: one contiguous block of
-    /// [`MAX_DEVICES`] ids from the reserved range, bound in one pass.
-    ///
-    /// Creating a block's *first* id claims the block — that create is the
-    /// only contended one, so a second controller's HCD moves to the next
-    /// block without ever touching a claimed block's interior ids, and each
-    /// interior create succeeds first try (a rejected interior create means
-    /// the reserved range was squatted on, and the claim fails closed).
-    /// Returns the bound ids, index-aligned with the device table, or `None`
-    /// when every block is taken or an interior id was refused.
-    fn claim_urb_endpoints() -> Option<[u64; MAX_DEVICES]> {
-        let stride = u64::try_from(MAX_DEVICES).ok()?;
+    /// Claim this controller's URB endpoint-id block: binding a block's
+    /// *base* id claims the whole block — that create is the only contended
+    /// one, so a second controller's HCD moves on to the next block and two
+    /// controllers never collide on an id. The block's interior ids — one
+    /// per device-table index — are bound lazily as devices first serve
+    /// ([`create_transport`]), so an idle controller holds one endpoint,
+    /// not a table of them. Returns the claimed base id, or `None` when
+    /// every block is taken.
+    fn claim_urb_block() -> Option<u64> {
         for block in 0..URB_ENDPOINT_BLOCKS {
-            let base = URB_ENDPOINT_BASE + block * stride;
-            if !bind_urb_endpoint(base) {
-                continue;
+            let base = URB_ENDPOINT_BASE + block * URB_ENDPOINT_BLOCK;
+            if bind_urb_endpoint(base) {
+                return Some(base);
             }
-            let mut ids = [0u64; MAX_DEVICES];
-            ids[0] = base;
-            for (index, id) in ids.iter_mut().enumerate().skip(1) {
-                *id = base + u64::try_from(index).ok()?;
-                if !bind_urb_endpoint(*id) {
-                    return None;
-                }
-            }
-            return Some(ids);
         }
         None
     }
 
-    /// Create device index `index`'s URB transport over its already-bound
-    /// call endpoint `endpoint_id` ([`claim_urb_endpoints`]): its shared
-    /// data buffer and the endpoint's registration on the wait-set under
-    /// the index's token. `None` on any refusal (the caller fails closed —
-    /// a transport-less device could never complete a URB).
-    fn create_transport(set: u64, index: usize, endpoint_id: u64) -> Option<Transport> {
+    /// Create device index `index`'s URB transport: bind its call endpoint
+    /// from the claimed block (`urb_base + index`; the block's base id was
+    /// already bound by [`claim_urb_block`], and doubles as index 0's
+    /// endpoint), create its shared data buffer, and register the endpoint
+    /// on the wait-set under the index's token. `None` on any refusal (the
+    /// caller fails closed — a transport-less device is never published —
+    /// and retries on the next reconcile).
+    fn create_transport(set: u64, index: usize, urb_base: u64) -> Option<Transport> {
+        let endpoint_id = urb_base + u64::try_from(index).ok()?;
+        if index > 0 && !bind_urb_endpoint(endpoint_id) {
+            return None;
+        }
         let mut shm_id = 0u64;
         let shm_base = rustos_rt::shm_create(SHM_LEN, &mut shm_id);
         if shm_base < 0 {
@@ -574,7 +607,7 @@ mod program {
     /// `CCS` connect bit). A read fault defaults to "connected" so a transient
     /// read never triggers a spurious retraction.
     fn still_connected(
-        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice,
+        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
         root_port: u8,
     ) -> bool {
         device
@@ -593,7 +626,7 @@ mod program {
     /// OS sink. `None` if the device is not enumerated or the kernel refuses
     /// the node.
     fn emit_interface_node(
-        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice,
+        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
         index: usize,
         endpoint_id: u64,
         shm_id: u64,
@@ -659,22 +692,17 @@ mod program {
         #[allow(clippy::cast_sign_loss)] // `set >= 0` is the wait-set handle.
         let set = set as u64;
 
-        // Stand up the per-interface URB transport seam — one shared data
-        // buffer and one grant-restricted call endpoint per servable device
-        // index, each minting this HCD the grant it forwards onto that
-        // index's interface node. All are created up front: a hot-plugged
-        // device must never find its transport missing, and an idle
-        // transport costs one page and one endpoint.
-        let Some(endpoint_ids) = claim_urb_endpoints() else {
+        // Claim this controller's URB endpoint-id block. The per-interface
+        // transports — one shared data buffer and one grant-restricted call
+        // endpoint per served device index, each minting this HCD the grant
+        // it forwards onto that index's interface node — are created lazily
+        // as device-table indices first serve (`reconcile_interfaces`), so
+        // the controller pays for the devices actually attached, never a
+        // fixed table.
+        let Some(urb_base) = claim_urb_block() else {
             return EXIT_NO_TRANSPORT;
         };
-        let mut transports: [Option<Transport>; MAX_DEVICES] = [const { None }; MAX_DEVICES];
-        for (index, slot) in transports.iter_mut().enumerate() {
-            let Some(transport) = create_transport(set, index, endpoint_ids[index]) else {
-                return EXIT_NO_TRANSPORT;
-            };
-            *slot = Some(transport);
-        }
+        let mut transports: Vec<Option<Transport>> = Vec::new();
 
         // `root_port` tracks the directly-attached device's root port for the
         // disconnect watch; it is refreshed after a re-enumeration. `0` while
@@ -753,16 +781,13 @@ mod program {
             irq_handle,
         );
 
-        // Publish an interface node for every device enumerated at bring-up.
-        // A cold boot with nothing plugged in is a first-class state: the
-        // controller comes up with no node, and the first hot-plug connect —
-        // delivered through the onboard hub's status-change watch, or a
-        // root-port connect — publishes from the event loop below.
-        for (index, slot) in transports.iter_mut().enumerate() {
-            if let Some(transport) = slot {
-                publish_interface(&mut device, index, transport);
-            }
-        }
+        // Publish an interface node for every device enumerated at bring-up
+        // (creating each served index's transport on the way). A cold boot
+        // with nothing plugged in is a first-class state: the controller
+        // comes up with no node, and the first hot-plug connect — delivered
+        // through the onboard hub's status-change watch, or a root-port
+        // connect — publishes from the event loop below.
+        reconcile_interfaces(&mut device, &mut transports, set, urb_base);
         if !device.any_device_live() {
             log(
                 &LogSink,
@@ -898,13 +923,23 @@ mod program {
                                     // tier whose downstream devices were
                                     // enumerated with it — is published by
                                     // diffing every live index.
-                                    reconcile_interfaces(&mut device, &mut transports);
+                                    reconcile_interfaces(
+                                        &mut device,
+                                        &mut transports,
+                                        set,
+                                        urb_base,
+                                    );
                                 }
                                 Ok(HubEvent::Detached(_) | HubEvent::HubDetached(_)) => {
                                     // A vanished leaf device — or a vanished
                                     // hub tier with everything behind it —
                                     // is retracted by the same diff.
-                                    reconcile_interfaces(&mut device, &mut transports);
+                                    reconcile_interfaces(
+                                        &mut device,
+                                        &mut transports,
+                                        set,
+                                        urb_base,
+                                    );
                                     log(
                                         &LogSink,
                                         &Event {
@@ -960,14 +995,26 @@ mod program {
                         // the watched root port, and publish fresh interface
                         // nodes so each class driver is autoloaded onto its
                         // index's transport.
-                        reset_reenumerate_and_publish(&mut device, &mut transports, &delay);
+                        reset_reenumerate_and_publish(
+                            &mut device,
+                            &mut transports,
+                            set,
+                            urb_base,
+                            &delay,
+                        );
                         root_port = device.root_port();
                     }
                     // A disconnect-handling teardown above (a hub status-change
                     // detach or a hub-assembly detach) can leave the controller
                     // halted with a latched Host System Error on the Pi 4 VL805;
                     // recover before servicing so the re-plug is still seen.
-                    if recover_if_controller_faulted(&mut device, &mut transports, &delay) {
+                    if recover_if_controller_faulted(
+                        &mut device,
+                        &mut transports,
+                        set,
+                        urb_base,
+                        &delay,
+                    ) {
                         root_port = device.root_port();
                         continue;
                     }
@@ -1000,6 +1047,8 @@ mod program {
                                         &mut device,
                                         index,
                                         &mut transports,
+                                        set,
+                                        urb_base,
                                         reply,
                                         &delay,
                                     );
@@ -1030,7 +1079,13 @@ mod program {
                     // fault on the Pi 4 VL805 after it completes; recover here too
                     // so the re-plug is seen rather than the controller staying
                     // halted and silent.
-                    if recover_if_controller_faulted(&mut device, &mut transports, &delay) {
+                    if recover_if_controller_faulted(
+                        &mut device,
+                        &mut transports,
+                        set,
+                        urb_base,
+                        &delay,
+                    ) {
                         root_port = device.root_port();
                     }
                 }

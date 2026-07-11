@@ -13,7 +13,7 @@ use rustos_abi::{
     CapabilityId, DriverError, DriverHost, DriverKind, HwDeviceClass, HwMatchKey, HwNode,
     HwResource, HwResourceKind,
 };
-use rustos_usb::{XHCI_COMPATIBLE, XHCI_DMA_BYTES};
+use rustos_usb::XHCI_COMPATIBLE;
 
 use rustos_vcmailbox::mock::MockFirmware;
 
@@ -28,11 +28,17 @@ const BAR_CPU_PHYS: u64 = 0x6_0000_0000;
 const BAR_LEN: u64 = 0x1000;
 const DMA_APERTURE_TOP: u64 = 0xC000_0000;
 
+/// Length carried on the forwarded DMA-constraint grant in these fixtures
+/// (an arbitrary representative extent; the constraint's meaning is its
+/// aperture top, and the HCD's bank sizes its own allocations from the
+/// controller's reported geometry, not from this grant).
+const DMA_GRANT_LEN: u64 = 0x10_0000;
+
 /// The two grants `node A` carried, in an arbitrary order (the parse must
 /// not depend on ordering).
 fn node_a_grants() -> [HwResource; 2] {
     [
-        HwResource::dma(DMA_APERTURE_TOP, XHCI_DMA_BYTES as u64),
+        HwResource::dma(DMA_APERTURE_TOP, DMA_GRANT_LEN),
         HwResource::mmio(BAR_CPU_PHYS, BAR_LEN),
     ]
 }
@@ -113,14 +119,14 @@ fn build_xhci_node_forwards_the_bar_and_dma_under_the_xhci_compatible_key() {
         .find(|r| r.kind() == Some(HwResourceKind::Dma))
         .expect("DMA forwarded");
     assert_eq!(dma.base(), DMA_APERTURE_TOP);
-    assert_eq!(dma.length(), XHCI_DMA_BYTES as u64);
+    assert_eq!(dma.length(), DMA_GRANT_LEN);
 }
 
 #[test]
 fn build_xhci_node_fails_closed_without_the_bar_grant() {
     // Only the DMA grant: the controller's register window is missing, so no
     // node is fabricated.
-    let dma = [HwResource::dma(DMA_APERTURE_TOP, XHCI_DMA_BYTES as u64)];
+    let dma = [HwResource::dma(DMA_APERTURE_TOP, DMA_GRANT_LEN)];
     assert_eq!(build_xhci_node(dma.iter()), Err(DriverError::NotFound));
 }
 

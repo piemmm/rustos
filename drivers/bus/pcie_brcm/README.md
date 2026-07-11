@@ -34,9 +34,9 @@ carrying exactly two device-resource grant *requests* and no more
   **CPU-physical** address through the discovered outbound window — so it lies
   inside the bridge's outbound `BusWindow` grant and the kernel's
   grant-coverage check admits it (`HwResource::covers`); and
-- a `Dma` constraint declaring the device-visible inbound aperture top and the
-  xHCI DMA working set (`rustos_usb::XHCI_DMA_BYTES`) the matched driver may
-  carve.
+- a `Dma` constraint declaring the device-visible inbound aperture the
+  matched driver's DMA bank verifies every allocation against (each chunk it
+  grows must lie wholly below the aperture top, fail closed).
 
 The node's identity (id/parent) is **kernel-assigned** on publish; the driver
 does not name it (`AGENTS.md` §4 / §18.1). The composition lives — and is

@@ -25,17 +25,21 @@ other (§17.4 — `drivers/* → lib/*` only).
   `ReportSource` seam so the `lib/hid` decoders (composed by the `usb_kbd`/`usb_mouse` class drivers) read reports
   straight off the transfer ring.
 - `regs` / `trb` / `ring` — the register, TRB, and ring-state vocabularies.
-- `XHCI_DMA_BYTES` — the device-shared DMA carve size for one controller
-  (rings, contexts, report buffers, scratchpad), shared by every host that
-  carves a controller's DMA region (§2.2).
+- `SlabBank` — the production `device::DmaBank`: a growable bank of owned
+  DMA chunks minted from the host's `DmaHost` seam, aperture-checked per
+  allocation and freed on release, so per-device memory is allocated on
+  attach and returned on detach — never a fixed carve.
 
 ## Design
 
 - `no_std` + `alloc`, `#![forbid(unsafe_op_in_unsafe_fn)]`, depends only on
   `lib/abi`, so it builds for every Tier-1 target. The enumeration engine's
-  device table is heap-allocated fallibly (allocation failure is a typed
-  error, never a panic); everything else is allocation-free.
-- Every access is mediated by the `XhciHost` / `device::DmaRegion` seams, so
+  tables and DMA chunks grow with the devices actually served, through the
+  fallible allocation paths (exhaustion is a typed error, never a panic):
+  the only concurrency bounds are the controller's reported slot count and
+  genuine memory exhaustion, exactly as on other hosts — never a
+  compile-time budget.
+- Every access is mediated by the `XhciHost` / `device::DmaBank` seams, so
   the bring-up, enumeration, and ring state machines are proven host-side
   against a register-level mock plus an in-memory ring/DMA model (§2.2); the
   doorbell below them is the on-metal acceptance item.

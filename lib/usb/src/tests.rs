@@ -11,9 +11,9 @@ use core::cell::RefCell;
 
 use super::device::{
     hub_port_connected, hub_port_enabled, hub_port_speed, route_for_child, AttachOutcome,
-    BulkDirection, BulkPipe, DeviceDescriptor, DmaRegion, EnumStage, HubEvent, InterfaceInfo,
-    UsbDevice, BULK_BUF_LEN, BULK_SLOTS, EVENT_RING_SEGMENT_MIN_TRBS, MAX_DEVICES, MAX_HUBS,
-    MAX_HUB_DEPTH, REPORT_LEN, RING_TRBS,
+    BulkDirection, BulkPipe, DeviceDescriptor, DmaBank, EnumStage, HubEvent, InterfaceInfo,
+    UsbDevice, BULK_BUF_LEN, BULK_SLOTS, EVENT_RING_SEGMENT_MIN_TRBS, MAX_HUB_DEPTH, REPORT_LEN,
+    RING_TRBS,
 };
 use super::ring::{EventRingCursor, ProducerRing};
 use super::trb::{CompletionCode, Trb, TrbType, CONTROL_CYCLE, TRB_LEN};
@@ -36,12 +36,14 @@ const MOCK_RTSOFF: u32 = 0x2000;
 const MOCK_WINDOW_LEN: usize = 0x3000;
 /// Device-visible base address of the shared DMA buffer.
 const MOCK_DMA_BASE: u64 = 0x0010_0000;
-/// Byte length of the shared DMA buffer (the layout for 32 slots with
-/// 64-byte contexts, plus the hub status-change rings and report buffers,
-/// needs ~7 KiB; each of the `MAX_DEVICES` device regions — output
-/// context, EP0/interrupt/bulk rings, report and bulk staging buffers —
-/// adds ~67 KiB, and the scratchpad test reserves 31 more pages).
-const MOCK_DMA_LEN: usize = 0x18_0000;
+/// Byte length of the shared DMA buffer backing the mock bank. Chunks are
+/// carved monotonically and released space is never reused (mirroring the
+/// production bank's stale-offset fail-closed property), so the buffer is
+/// sized generously: each served device's region chunk is ~67 KiB, a hub
+/// watch chunk ~1 KiB, the shared structures ~2 KiB, and the scratchpad
+/// test reserves 31 more pages — 4 MiB absorbs the deepest fan-out and the
+/// re-attach cycles the tests run.
+const MOCK_DMA_LEN: usize = 0x40_0000;
 /// The mock's 64-byte contexts (its `HCCPARAMS1` sets CSZ).
 const MOCK_CTX_SIZE: usize = 64;
 
@@ -53,7 +55,7 @@ fn event_ring_segment_meets_xhci_minimum() {
     assert_eq!(ring_trbs, 16);
 }
 
-/// Memory shared between the engine's [`DmaRegion`] and the mock
+/// Memory shared between the engine's [`DmaBank`] and the mock
 /// controller's device model — the in-memory stand-in for DMA.
 type SharedMem = Rc<RefCell<Vec<u8>>>;
 
@@ -61,42 +63,93 @@ fn shared_mem() -> SharedMem {
     Rc::new(RefCell::new(alloc::vec![0u8; MOCK_DMA_LEN]))
 }
 
-/// The engine-side view of the shared buffer.
+/// The engine-side [`DmaBank`] view of the shared buffer: chunks are
+/// carved monotonically from the one `Vec`, with each virtual offset equal
+/// to its buffer offset (so the register-level device model reads the same
+/// bytes at `MOCK_DMA_BASE + offset` exactly as before). Released chunk
+/// space is never reused — the production bank's monotonic-base property —
+/// so a stale offset fails closed here too, and exhausting the buffer is
+/// the mock's deterministic-OOM stand-in.
 struct MockDma {
     mem: SharedMem,
     phys: u64,
+    /// Live chunks as `(base, len)`, ascending by base.
+    chunks: Vec<(usize, usize)>,
+    /// The next chunk's base offset; monotonic, 4096-aligned.
+    next_base: usize,
 }
 
-impl DmaRegion for MockDma {
-    fn phys(&self) -> u64 {
-        self.phys
+impl MockDma {
+    fn new(mem: SharedMem, phys: u64) -> Self {
+        Self {
+            mem,
+            phys,
+            chunks: Vec::new(),
+            next_base: 0,
+        }
     }
 
-    fn len(&self) -> usize {
-        self.mem.borrow().len()
+    /// Number of live (unreleased) chunks — the observable the
+    /// release-on-detach tests assert on.
+    fn live_chunks(&self) -> usize {
+        self.chunks.len()
+    }
+
+    /// The live chunk containing `[offset, offset + len)` wholly (and
+    /// `offset` itself strictly inside the chunk).
+    fn chunk_covering(&self, offset: usize, len: usize) -> Result<(), DriverError> {
+        let end = offset.checked_add(len).ok_or(DriverError::OutOfRange)?;
+        self.chunks
+            .iter()
+            .any(|&(base, chunk_len)| {
+                offset >= base && offset < base + chunk_len && end <= base + chunk_len
+            })
+            .then_some(())
+            .ok_or(DriverError::OutOfRange)
+    }
+}
+
+impl DmaBank for MockDma {
+    fn grow(&mut self, len: usize) -> Result<usize, DriverError> {
+        if len == 0 {
+            return Err(DriverError::OutOfRange);
+        }
+        let base = self.next_base;
+        let end = base.checked_add(len).ok_or(DriverError::LengthOutOfRange)?;
+        if end > self.mem.borrow().len() {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        self.next_base = end.next_multiple_of(4096);
+        self.chunks.push((base, len));
+        Ok(base)
+    }
+
+    fn release(&mut self, base: usize) -> Result<(), DriverError> {
+        let index = self
+            .chunks
+            .iter()
+            .position(|&(chunk_base, _)| chunk_base == base)
+            .ok_or(DriverError::NotFound)?;
+        self.chunks.remove(index);
+        Ok(())
+    }
+
+    fn phys_of(&self, offset: usize) -> Result<u64, DriverError> {
+        self.chunk_covering(offset, 0)?;
+        Ok(self.phys + offset as u64)
     }
 
     fn read(&mut self, offset: usize, buf: &mut [u8]) -> Result<(), DriverError> {
+        self.chunk_covering(offset, buf.len())?;
         let mem = self.mem.borrow();
-        let end = offset
-            .checked_add(buf.len())
-            .ok_or(DriverError::OutOfRange)?;
-        if end > mem.len() {
-            return Err(DriverError::OutOfRange);
-        }
-        buf.copy_from_slice(&mem[offset..end]);
+        buf.copy_from_slice(&mem[offset..offset + buf.len()]);
         Ok(())
     }
 
     fn write(&mut self, offset: usize, bytes: &[u8]) -> Result<(), DriverError> {
+        self.chunk_covering(offset, bytes.len())?;
         let mut mem = self.mem.borrow_mut();
-        let end = offset
-            .checked_add(bytes.len())
-            .ok_or(DriverError::OutOfRange)?;
-        if end > mem.len() {
-            return Err(DriverError::OutOfRange);
-        }
-        mem[offset..end].copy_from_slice(bytes);
+        mem[offset..offset + bytes.len()].copy_from_slice(bytes);
         Ok(())
     }
 }
@@ -117,36 +170,186 @@ mod slab_coherency_test_state {
     }
 }
 
-#[test]
-fn dma_slab_region_brackets_writes_and_reads_with_cache_maintenance() {
+/// Test support for the production [`SlabBank`]: a [`DmaHost`] minting
+/// leaked slabs at ascending device-visible bases, with an observable free
+/// count, an injectable allocation failure, and an optional coherency hook
+/// stamped onto every minted slab.
+///
+/// [`DmaHost`]: rustos_abi::driver::dma::DmaHost
+mod bank_test {
+    use core::cell::Cell;
     use core::ptr::NonNull;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use rustos_abi::driver::dma::{DmaHost, DmaSlab, PoolId, SlabCoherencyFn};
+    use rustos_abi::DriverError;
+
+    /// Free shim recording each dropped slab on the host's own counter.
+    ///
+    /// # Safety
+    ///
+    /// `pool` is the address of the minting [`MockSlabHost`]'s `frees`
+    /// counter; the host is borrowed by the bank for the bank's whole
+    /// lifetime, so it outlives every slab it minted.
+    unsafe fn count_free(pool: *const (), _cpu: NonNull<u8>, _slot: usize, _len: usize) {
+        // SAFETY: per the function contract, `pool` points at the live
+        // host's `frees` counter.
+        let frees = unsafe { &*(pool.cast::<AtomicUsize>()) };
+        frees.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The mock slab-minting host.
+    pub(super) struct MockSlabHost {
+        /// Device-visible base of the next minted slab; each allocation
+        /// advances it by 64 KiB, so chunk bases are distinct, 64-aligned,
+        /// and ascending.
+        next_phys: Cell<u64>,
+        /// When set, the next allocation fails (the pool is exhausted).
+        pub(super) fail: Cell<bool>,
+        /// Coherency hook stamped onto every minted slab.
+        pub(super) coherency: Cell<Option<SlabCoherencyFn>>,
+        /// Dropped-slab count, incremented by the free shim.
+        pub(super) frees: AtomicUsize,
+    }
+
+    impl MockSlabHost {
+        pub(super) fn new(phys_base: u64) -> Self {
+            Self {
+                next_phys: Cell::new(phys_base),
+                fail: Cell::new(false),
+                coherency: Cell::new(None),
+                frees: AtomicUsize::new(0),
+            }
+        }
+
+        pub(super) fn free_count(&self) -> usize {
+            self.frees.load(Ordering::SeqCst)
+        }
+    }
+
+    impl DmaHost for MockSlabHost {
+        fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError> {
+            if self.fail.get() {
+                return Err(DriverError::LengthOutOfRange);
+            }
+            let phys = self.next_phys.get();
+            self.next_phys.set(phys + 0x1_0000);
+            let storage = alloc::vec![0u8; size].into_boxed_slice();
+            let leaked: &'static mut [u8] = alloc::boxed::Box::leak(storage);
+            let ptr = NonNull::new(leaked.as_mut_ptr()).expect("box leak is non-null");
+            let pool_ptr: *const () = (&raw const self.frees).cast();
+            // SAFETY: `ptr` covers `size` leaked zeroed bytes nothing else
+            // references; `phys` is the test's device-visible base for
+            // `ptr[0]`; `pool_ptr` is this host's free counter, which
+            // outlives every slab it mints (the host outlives the bank in
+            // every test).
+            let slab = unsafe {
+                DmaSlab::from_pool(phys, ptr, size, PoolId::MOCK, 0, pool_ptr, count_free)
+            };
+            Ok(match self.coherency.get() {
+                Some(hook) => slab.with_coherency(hook),
+                None => slab,
+            })
+        }
+    }
+}
+
+#[test]
+fn slab_bank_grows_reads_writes_and_maps_phys_per_chunk() {
+    let host = bank_test::MockSlabHost::new(0x1000);
+    let mut bank = SlabBank::new(&host);
+    let first = bank.grow(128).expect("first chunk");
+    let second = bank.grow(64).expect("second chunk");
+    assert_ne!(first, second, "chunks own distinct base offsets");
+
+    // A write is read back from the same chunk, and each chunk's phys
+    // derives from its own slab, not a shared base.
+    bank.write(first + 32, &[0xAA; 8]).expect("write");
+    let mut buf = [0u8; 8];
+    bank.read(first + 32, &mut buf).expect("read");
+    assert_eq!(buf, [0xAA; 8]);
+    assert_eq!(bank.phys_of(first).expect("phys"), 0x1000);
+    assert_eq!(bank.phys_of(second).expect("phys"), 0x1_1000);
+
+    // An access crossing a chunk's end fails closed rather than spilling
+    // into whatever chunk follows in the virtual offset space.
+    assert_eq!(
+        bank.read(first + 120, &mut [0u8; 16]).err(),
+        Some(DriverError::OutOfRange)
+    );
+}
+
+#[test]
+fn slab_bank_refuses_a_chunk_beyond_the_aperture() {
+    // The minted slab ends past the controller's inbound-DMA aperture: the
+    // grow is refused fail-closed and the unreachable slab is returned to
+    // the host rather than leaked.
+    let host = bank_test::MockSlabHost::new(0x1000);
+    let mut bank = SlabBank::with_aperture(&host, 0x1040);
+    assert_eq!(bank.grow(0x100).err(), Some(DriverError::OutOfRange));
+    assert_eq!(host.free_count(), 1, "the refused slab was freed");
+
+    // A slab wholly below the aperture is granted.
+    let host = bank_test::MockSlabHost::new(0x1000);
+    let mut bank = SlabBank::with_aperture(&host, 0x2000);
+    assert!(bank.grow(0x100).is_ok());
+}
+
+#[test]
+fn slab_bank_propagates_allocator_exhaustion() {
+    let host = bank_test::MockSlabHost::new(0x1000);
+    let mut bank = SlabBank::new(&host);
+    host.fail.set(true);
+    assert_eq!(bank.grow(64).err(), Some(DriverError::LengthOutOfRange));
+}
+
+#[test]
+fn slab_bank_release_frees_the_chunk_and_stale_offsets_fail_closed() {
+    let host = bank_test::MockSlabHost::new(0x1000);
+    let mut bank = SlabBank::new(&host);
+    let base = bank.grow(64).expect("chunk");
+    bank.write(base, &[1u8; 4]).expect("write");
+
+    bank.release(base).expect("release");
+    assert_eq!(host.free_count(), 1, "the released chunk's slab was freed");
+
+    // The released chunk's offsets map to nothing: every access through a
+    // stale offset fails closed, and base offsets are never reused so a
+    // later grow cannot alias it.
+    assert_eq!(bank.phys_of(base).err(), Some(DriverError::OutOfRange));
+    assert_eq!(
+        bank.read(base, &mut [0u8; 4]).err(),
+        Some(DriverError::OutOfRange)
+    );
+    assert_eq!(bank.release(base).err(), Some(DriverError::NotFound));
+    let fresh = bank.grow(64).expect("fresh chunk");
+    assert_ne!(fresh, base, "released bases are never reused");
+}
+
+#[test]
+fn slab_bank_brackets_writes_and_reads_with_cache_maintenance() {
     use core::sync::atomic::Ordering;
-    use rustos_abi::driver::dma::{DmaSlab, PoolId};
     use slab_coherency_test_state as rec;
 
-    // A leaked 64-byte buffer behind a `DmaSlab` carrying the recording
-    // coherency hook — the metal shape where the BCM2711 PCIe master does
-    // not snoop the CPU caches, so the `DmaRegion` impl must bracket every
-    // ring publish / event consume with cache maintenance.
-    let storage = alloc::vec![0u8; 64].into_boxed_slice();
-    let phys = storage.as_ptr() as u64;
-    let leaked: &'static mut [u8] = alloc::boxed::Box::leak(storage);
-    let ptr = NonNull::new(leaked.as_mut_ptr()).expect("box leak is non-null");
-    // SAFETY: the buffer is leaked (`'static`), exactly 64 bytes, and
-    // nothing else references it.
-    let mut slab =
-        unsafe { DmaSlab::from_leaked(phys, ptr, 64, PoolId::MOCK, 0) }.with_coherency(rec::record);
+    // A bank whose host mints slabs carrying the recording coherency hook —
+    // the metal shape where the BCM2711 PCIe master does not snoop the CPU
+    // caches, so the bank must bracket every ring publish / event consume
+    // with cache maintenance.
+    let host = bank_test::MockSlabHost::new(0x1000);
+    let mut bank = SlabBank::new(&host);
+    host.coherency.set(Some(rec::record));
+    let base = bank.grow(64).expect("chunk");
 
     // A write cleans the published range to memory *after* the CPU copy,
     // so a non-coherent master reads fresh bytes once the doorbell rings.
-    DmaRegion::write(&mut slab, 8, &[0xAB; 4]).expect("write");
+    bank.write(base + 8, &[0xAB; 4]).expect("write");
     assert_eq!(rec::CALLS.load(Ordering::SeqCst), 1);
     assert_eq!(rec::LAST_LEN.load(Ordering::SeqCst), 4);
 
     // A read invalidates the CPU's view of the range *before* the copy,
     // so a master's freshly written bytes are read from memory.
     let mut buf = [0u8; 2];
-    DmaRegion::read(&mut slab, 16, &mut buf).expect("read");
+    bank.read(base + 16, &mut buf).expect("read");
     assert_eq!(rec::CALLS.load(Ordering::SeqCst), 2);
     assert_eq!(rec::LAST_LEN.load(Ordering::SeqCst), 2);
 }
@@ -3047,10 +3250,7 @@ fn dma_program_rejects_unaligned_addresses() {
 /// buffer.
 fn started_device(mock: MockXhci, mem: &SharedMem) -> UsbDevice<MockXhci, MockDma> {
     let xhci = Xhci::open(mock).expect("bring-up succeeds");
-    let dma = MockDma {
-        mem: Rc::clone(mem),
-        phys: MOCK_DMA_BASE,
-    };
+    let dma = MockDma::new(Rc::clone(mem), MOCK_DMA_BASE);
     UsbDevice::start(xhci, dma, 4096).expect("engine starts")
 }
 
@@ -3139,10 +3339,7 @@ fn usb_device_start_programs_dma_and_runs() {
 fn usb_device_start_rejects_bad_regions() {
     let mem = shared_mem();
     let xhci = Xhci::open(MockXhci::with_device(&mem)).expect("bring-up succeeds");
-    let misaligned = MockDma {
-        mem: Rc::clone(&mem),
-        phys: MOCK_DMA_BASE + 4,
-    };
+    let misaligned = MockDma::new(Rc::clone(&mem), MOCK_DMA_BASE + 4);
     assert!(matches!(
         UsbDevice::start(xhci, misaligned, 4096).err(),
         Some(DriverError::OutOfRange)
@@ -3150,10 +3347,7 @@ fn usb_device_start_rejects_bad_regions() {
 
     let tiny = Rc::new(RefCell::new(alloc::vec![0u8; 256]));
     let xhci = Xhci::open(MockXhci::with_device(&tiny)).expect("bring-up succeeds");
-    let small = MockDma {
-        mem: Rc::clone(&tiny),
-        phys: MOCK_DMA_BASE,
-    };
+    let small = MockDma::new(Rc::clone(&tiny), MOCK_DMA_BASE);
     assert!(matches!(
         UsbDevice::start(xhci, small, 4096).err(),
         Some(DriverError::LengthOutOfRange)
@@ -3192,10 +3386,7 @@ fn start_reserves_scratchpad_and_programs_dcbaa0() {
     let xhci = Xhci::open(MockXhci::with_device_scratchpad(&mem, 31)).expect("bring-up succeeds");
     assert_eq!(xhci.max_scratchpad_buffers(), 31);
     assert_eq!(xhci.page_size(), 4096);
-    let dma = MockDma {
-        mem: Rc::clone(&mem),
-        phys: MOCK_DMA_BASE,
-    };
+    let dma = MockDma::new(Rc::clone(&mem), MOCK_DMA_BASE);
     let mut device = UsbDevice::start(xhci, dma, 4096).expect("engine starts with scratchpad");
 
     // `DCBAA[0]` now points at a non-zero scratchpad pointer array...
@@ -3224,10 +3415,7 @@ fn start_stalls_without_scratchpad_on_a_controller_that_needs_it() {
     // `DCBAA[0]` it could not program.
     let small: SharedMem = Rc::new(RefCell::new(alloc::vec![0u8; 0x4000]));
     let xhci = Xhci::open(MockXhci::with_device_scratchpad(&small, 31)).expect("bring-up succeeds");
-    let dma = MockDma {
-        mem: Rc::clone(&small),
-        phys: MOCK_DMA_BASE,
-    };
+    let dma = MockDma::new(Rc::clone(&small), MOCK_DMA_BASE);
     assert_eq!(
         UsbDevice::start(xhci, dma, 4096).err(),
         Some(DriverError::LengthOutOfRange)
@@ -6752,18 +6940,24 @@ fn unplugging_a_nested_hub_cascades_and_a_replug_rebuilds_the_tier() {
 }
 
 #[test]
-fn bring_up_serves_a_deep_hub_fanout_with_every_tier_watched() {
-    // The recorded reference assembly shape: five downstream hubs hanging
-    // below the root-attached hub at once — six tracked hub tiers in all —
-    // with a device behind every tier. Each downstream hub claims a device
-    // region for its own contexts and each leaf claims one of its own, so
-    // the walk needs ten regions live at once. Every tier must be
-    // installed, marked a hub on its own slot, and hold an armed
-    // status-change watch, and every leaf must be served: a tier the
-    // engine cannot track leaves every device behind it undetected.
-    const FANOUT_HUBS: u8 = 5;
+fn bring_up_serves_a_deep_hub_fanout_beyond_any_fixed_working_set() {
+    // Nine downstream hubs hanging below the root-attached hub at once —
+    // ten tracked hub tiers in all — with a device behind every tier:
+    // wider than the recorded reference assembly (five downstream hubs,
+    // ten mass-storage bridges, fifteen concurrently addressed devices)
+    // and past the fixed per-controller budgets this engine used to carry
+    // (sixteen device regions, eight tracked hubs), which silently left
+    // whole tiers unserved. Each downstream hub claims a device-region
+    // chunk for its own contexts plus a watch chunk, and each leaf claims
+    // a region chunk of its own — eighteen device regions live at once —
+    // all demand-allocated, bounded only by the controller's reported
+    // slots and the bank's memory. Every tier must be installed, marked a
+    // hub on its own slot, and hold an armed status-change watch, and
+    // every leaf must be served: a tier the engine cannot track leaves
+    // every device behind it undetected.
+    const FANOUT_HUBS: u8 = 9;
     let mem = shared_mem();
-    let mut device = started_device(MockXhci::with_hub_fanout(&mem, 8, FANOUT_HUBS), &mem);
+    let mut device = started_device(MockXhci::with_hub_fanout(&mem, 12, FANOUT_HUBS), &mem);
     let delay = TestDelay::default();
     device.bring_up(&delay).expect("every hub tier comes up");
 
@@ -6776,7 +6970,9 @@ fn bring_up_serves_a_deep_hub_fanout_with_every_tier_watched() {
             "downstream hub {i}'s status-change watch is configured and armed"
         );
     }
-    let live = (0..MAX_DEVICES).filter(|&i| device.device_live(i)).count();
+    let live = (0..device.device_table_len())
+        .filter(|&i| device.device_live(i))
+        .count();
     assert_eq!(
         live,
         usize::from(FANOUT_HUBS),
@@ -6786,14 +6982,32 @@ fn bring_up_serves_a_deep_hub_fanout_with_every_tier_watched() {
 }
 
 #[test]
-fn capacity_covers_the_reference_deep_fanout_topology() {
-    // Tripwire for the engine's working set: the recorded reference
-    // assembly cascades five downstream hubs below the root-attached hub
-    // (six tracked tiers) and fans out to ten mass-storage bridges —
-    // fifteen concurrently addressed devices. The tracked working set must
-    // cover it, or whole tiers of a real assembly go silently unserved.
-    const REFERENCE_HUBS: usize = 6;
-    const REFERENCE_DEVICES: usize = 15;
-    assert!(MAX_HUBS >= core::hint::black_box(REFERENCE_HUBS));
-    assert!(MAX_DEVICES >= core::hint::black_box(REFERENCE_DEVICES));
+fn detaching_a_downstream_device_releases_its_dma_chunk() {
+    // The engine's per-device memory is demand-allocated: a served
+    // device's region chunk is returned to the bank when the device
+    // detaches, so a long-running controller's footprint tracks the
+    // devices actually attached rather than growing monotonically.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+    device
+        .bring_up(&delay)
+        .expect("the keyboard behind the hub is reached");
+    assert!(device.device_live(0));
+    let with_device = device.dma_ref().live_chunks();
+
+    // Unplug the keyboard: the detach frees its table entry *and* its
+    // DMA chunk.
+    device.host_mut().hub_downstream_status = 0;
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::Detached(0)));
+    assert!(!device.device_live(0));
+    assert_eq!(
+        device.dma_ref().live_chunks(),
+        with_device - 1,
+        "the detached device's region chunk was returned to the bank"
+    );
 }

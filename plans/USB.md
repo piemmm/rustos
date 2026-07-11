@@ -376,10 +376,10 @@ the live controller behaviour is host- and CI-proven first.
     `lib/usb::drive_urb`/`frame_completion`, rejecting submits with `NotFound`
     while no interface node is live) + `attach_transport_grants` (adds the
     endpoint + shm grants onto the `describe_device` node). Host-tested.
-  - `main.rs` (freestanding): `from_grants_query` → bring-up → `shm_create`
-    (the URB buffer) + grant-restricted `call_create` (one `MAX_DEVICES`-id
-    block claimed by its first id, per-index ids inside it, so a boot never
-    logs a rejected create) →
+  - `main.rs` (freestanding): `from_grants_query` → bring-up →
+    grant-restricted `call_create` (one protocol-sized endpoint-id block
+    claimed by its base id; per-index ids and `shm_create` buffers are
+    bound lazily as device-table indices first serve) →
     `describe_device`/`attach_transport_grants`/`hw_emit_node` (now returns the
     assigned node id) → enable interrupter + `irq_bind` → **async wait-set
     loop** (URB endpoint + controller IRQ): recv → `UrbService::on_submit`
@@ -476,12 +476,13 @@ the live controller behaviour is host- and CI-proven first.
     since with no device addressed there is no specific port to watch).
   - **Every reachable device is served concurrently.** `UsbDevice::bring_up`
     enumerates the root device and, when it is the onboard hub, **every**
-    connected downstream port into a table of up to
-    `rustos_usb::device::MAX_DEVICES` concurrently served devices — a
+    connected downstream port into a growable table bounded only by the
+    controller's reported slot count and genuine memory exhaustion — a
     keyboard and a storage stick plugged in together are both served, neither
     displacing the other (the Pi 4 boot defect where a plugged-in stick won
     the single device slot and the keyboard never enumerated). Each device
-    owns its own layout region (EP0/interrupt/bulk rings and buffers) and is
+    owns its own demand-allocated DMA region (EP0/interrupt/bulk rings and
+    buffers), grown on attach and released on detach, and is
     driven through the per-device `engine_for(index)` `UrbEngine` view; the
     HCD serves one URB transport (endpoint + shared buffer + node) per device
     index, so one interface's transfers can never reach another device's
@@ -834,10 +835,10 @@ the live controller behaviour is host- and CI-proven first.
     `ep0_max_packet_validation_follows_the_speed_rules`.
 
 - **U9 — multi-tier hubs (a hub plugged into a hub) `[x]` (DONE; live path
-  metal-only).** The engine tracks every hub in a table
-  (`lib/usb::device::HubState`, up to `MAX_HUBS` concurrently addressed
-  hubs, `MAX_HUB_DEPTH` = 5 route-string tiers), not a single implicit
-  tier:
+  metal-only).** The engine tracks every hub in a growable table
+  (`lib/usb::device::HubState`, bounded only by the controller's slot
+  count, `MAX_HUB_DEPTH` = 5 route-string tiers — the protocol-fixed
+  Route String depth), not a single implicit tier:
   - **Topology is per hub, never assumed.** Each hub records its parent
     hub + port, its Route String, depth, speed, and the TT coordinates its
     slot context carries. A child extends its parent's route by one nibble

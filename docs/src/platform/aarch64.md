@@ -1357,7 +1357,8 @@ device that is present but faults part-way through enumeration.
 **Enumeration orchestration.** The arch-neutral root→hub→downstream
 bring-up sequence (enumerate the first connected root-hub port; if it is a
 hub, power its ports and address the device behind **every** connected one
-on its own xHCI slot, up to `MAX_DEVICES` at once) lives in one place —
+on its own xHCI slot, each with a demand-allocated DMA region, bounded
+only by the controller's reported slot count) lives in one place —
 `rustos_usb::device::UsbDevice::bring_up` — so every device reached through
 the Pi 4B's onboard hub is *discovered*, never a guessed port (`AGENTS.md`
 §2.2 / §18): a keyboard and a storage stick plugged in together are both
@@ -1518,13 +1519,14 @@ signature. `Xhci::open` now reads `HCSPARAMS2`/`PAGESIZE` (exposed as
 `max_scratchpad_buffers()` / `page_size()`, surfaced in the `4106`
 geometry line as `max_scratchpad_hex`), `device::Layout` reserves a
 page-aligned scratchpad pointer array plus that many page-aligned buffers
-(failing closed if the carve cannot hold them or a scratchpad-requiring
-controller reports no page size / an unaligned base), and
-`UsbDevice::start` fills the array with each buffer's device-visible base
-and points `DCBAA[0]` at it. The device-shared DMA carve
-(`rustos_usb::XHCI_DMA_BYTES`) is sized to hold the 31 × 4 KiB scratchpad
-pages plus the rings/contexts and every per-device/per-hub region
-(`MAX_DEVICES` / `MAX_HUBS`). Host-proven by
+(failing closed if the bank cannot supply the chunk or a
+scratchpad-requiring controller reports no page size / an unaligned
+base), and `UsbDevice::start` fills the array with each buffer's
+device-visible base and points `DCBAA[0]` at it. The engine's shared DMA
+chunk is grown from the `rustos_usb::SlabBank` sized exactly to that
+reported geometry — the 31 × 4 KiB scratchpad pages plus the
+rings/contexts — and each device's region is a further chunk grown on
+attach. Host-proven by
 `start_reserves_scratchpad_and_programs_dcbaa0` (a mock that, like the
 VL805, withholds every command completion until `DCBAA[0]` is programmed —
 enumeration then runs end to end), `start_stalls_without_scratchpad_on_a_controller_that_needs_it`
@@ -1792,15 +1794,14 @@ reported `4101 … err=out_of_range`, now *after* the BAR maps. That
 itself, so it could not be localised from the staged `4101`/`4105` lines
 alone.
 
-To measure it (rather than guess, §15.7), the USB bring-up was split:
-`rustos_drv_bus_usb::wiring::open_discovered` now composes a public
-`map_controller` (discovery + DMA carve + BAR assign/map, returning the
-mapped `MappedXhci { window, dma }`) with `Xhci::open` + `UsbDevice::start`,
-and `bring_up_keyboard` drives those three steps with **distinct** failure
+To measure it (rather than guess, §15.7), the USB bring-up was split into
+a map prefix (discovery + DMA provisioning + BAR assign/map) composed
+with `Xhci::open` + `UsbDevice::start`, driven with **distinct** failure
 messages (mapping / open / start) and a one-shot `4106` geometry line in
-between (the carve's device-visible base/length against the aperture top,
-the mapped BAR window length, and the controller's
-`CAPLENGTH`/`DBOFF`/`RTSOFF`/`MaxSlots`/`MaxPorts`).
+between (the provisioned DMA's device-visible base/length against the
+aperture top, the mapped BAR window length, and the controller's
+`CAPLENGTH`/`DBOFF`/`RTSOFF`/`MaxSlots`/`MaxPorts`) — the split that
+evolved into today's `bring_up_controller_diagnostic` phase breadcrumb.
 
 The next metal capture narrowed it further: the `4106` *carve* line
 printed (`dma_phys=0x4_3b08_0000`, `dma_len=0x4000`, below the

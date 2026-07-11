@@ -37,9 +37,12 @@ build on the *same* engine without depending on each other — exactly the split
   it differs from the speed's assumed worst case (a full-speed receiver's
   8-byte EP0) → the full `GET_DESCRIPTOR` reads (the configuration at its
   exact advertised `wTotalLength`) → `SET_CONFIGURATION` →
-  `SET_PROTOCOL(boot)` per HID interface → Configure Endpoint, into a table
-  of up to `MAX_DEVICES` concurrently served **interfaces**, each with its
-  own layout region (EP0 / interrupt / bulk rings and buffers). A composite
+  `SET_PROTOCOL(boot)` per HID interface → Configure Endpoint, into a
+  growable table of concurrently served **interfaces**, each with its own
+  demand-allocated DMA region (EP0 / interrupt / bulk rings and buffers)
+  claimed on attach and released on detach — the only concurrency bounds
+  are the controller's reported slot count and genuine memory exhaustion,
+  never a compile-time budget. A composite
   device — a wireless keyboard+mouse receiver — occupies one entry per
   served interface, the siblings sharing its slot and EP0
   (`InterfaceInfo::decode_all` decodes every default-alternate interface).
@@ -63,15 +66,16 @@ build on the *same* engine without depending on each other — exactly the split
   and each device autoloads when plugged in.
 - `regs` / `trb` / `ring` — the register, TRB, and ring-state vocabularies; the
   ring state machines (`ProducerRing`, `EventRingCursor`) hold no memory of
-  their own, so the owner publishes every write through the `device::DmaRegion`
+  their own, so the owner publishes every write through the `device::DmaBank`
   seam.
-- `XHCI_DMA_BYTES` — the bytes a host carves for one controller's device-shared
-  DMA structures (rings, contexts, report buffers, bulk staging, scratchpad),
-  sized for the VL805's 31-page scratchpad worst case plus the bulk
-  rings/staging. It lives here, beside the engine that
-  lays the region out, so every host that carves it — the PCI bus driver's
-  wiring (`drivers/bus/usb`) and the arch-neutral HID class drivers
-  (`drivers/input/usb_kbd`, `drivers/input/usb_mouse`) — shares one definition (§2.2).
+- `SlabBank` — the production `device::DmaBank`: a growable bank of owned DMA
+  chunks minted from the host's `DmaHost` seam. The engine's first chunk holds
+  the controller-shared structures, sized exactly to the reported geometry
+  (`MaxSlots`, context size, the VL805's 31-page scratchpad); every served
+  device's rings/buffers live in a chunk grown on attach and released on
+  detach, and each allocation is verified against the controller's inbound
+  DMA aperture, failing closed on a chunk the silicon could not reach (§2.2,
+  §24.1).
 - `XHCI_COMPATIBLE` — the `compatible` identity (`usb,xhci`) a discovered xHCI
   controller node carries (§18.1). An xHCI-protocol identity (not a board or
   vendor name), so it lives here as the single definition the emitting bus
@@ -135,9 +139,9 @@ build on the *same* engine without depending on each other — exactly the split
 
 ## Design
 
-- `no_std`, `#![forbid(unsafe_op_in_unsafe_fn)]`, `lib/abi`-only.
+- `no_std` + `alloc`, `#![forbid(unsafe_op_in_unsafe_fn)]`, `lib/abi`-only.
 - Every controller and DMA access is mediated by the `XhciHost` /
-  `device::DmaRegion` seams, so the bring-up, enumeration, and ring state
+  `device::DmaBank` seams, so the bring-up, enumeration, and ring state
   machines are proven host-side against a register-level mock plus an in-memory
   ring/DMA model (§2.2); the doorbell below them is the on-metal acceptance
   item (no QEMU `raspi*` USB vertical exists, §0.4).
