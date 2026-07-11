@@ -52,8 +52,8 @@ use rustos_arch_x86_64::syscall_entry;
 use rustos_arch_x86_64::userentry::UserMode;
 use rustos_caps::CapabilitySet;
 use rustos_kernel_core::{
-    spawn_image, AdmitError, BoxStack, KernelStack, ProcessSpawn, SpawnCallerError, SpawnCtx,
-    SpawnRequest,
+    refuse_admit, refuse_spawn, spawn_caller_errno, spawn_image, BoxStack, KernelStack,
+    ProcessSpawn, SpawnCtx, SpawnRequest,
 };
 use rustos_kernel_mem::{
     AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, LiveUserSpace,
@@ -196,7 +196,9 @@ impl ProcessSpawn for X86_64ProcessSpawn {
         // capacity scales with discovered RAM and grows on demand. A build
         // with no `'static` allocator wired fails closed,
         // as does genuine RAM exhaustion below.
-        let pt_frames = ctx.page_table_allocator().ok_or(Errno::NoSpace)?;
+        let pt_frames = ctx
+            .page_table_allocator()
+            .ok_or_else(|| refuse_spawn(ctx, "page_table_allocator_unwired"))?;
         let table_frames = page_table_source(pt_frames)?;
         // Publish the same `'static` allocator the kthread-stack arena returns
         // idle chained blocks to when a spawned task later exits and its
@@ -218,7 +220,7 @@ impl ProcessSpawn for X86_64ProcessSpawn {
         // The child's own CR3 is reloaded by its `pre_resume` hook before the
         // scheduler first resumes it (`plans/SPAWN.md` SP2, `plans/PI.md` X1).
         let mut arch = ArchAddressSpace::new_identity_first_gib(table_frames, IDENTITY_GIB)
-            .ok_or(Errno::NoSpace)?;
+            .ok_or_else(|| refuse_spawn(ctx, "page_table_frames_exhausted"))?;
         let child_root_phys = arch.pml4_phys();
 
         // Build the child's kernel stack (`plans/PI.md` G3b-2-ii, mirroring
@@ -272,11 +274,13 @@ impl ProcessSpawn for X86_64ProcessSpawn {
         // Place the stack and startup block above the image's mapped top
         // through the shared per-spawn derivation (one definition across
         // the ports); an image too large for the user region fails closed.
-        let layout = spawn_layout::user_layout(&image, CHILD_USER_BIAS).ok_or(Errno::NoSpace)?;
+        let layout = spawn_layout::user_layout(&image, CHILD_USER_BIAS)
+            .ok_or_else(|| refuse_spawn(ctx, "user_layout_unfit"))?;
         // The span record the admission path stores so the stack-growth
         // fault path can back pages inside it (one shared derivation
         // across the ports; a malformed span refuses the spawn closed).
-        let stack_span = spawn_layout::stack_span(&layout).ok_or(Errno::NoSpace)?;
+        let stack_span = spawn_layout::stack_span(&layout)
+            .ok_or_else(|| refuse_spawn(ctx, "stack_span_malformed"))?;
 
         let request = SpawnRequest {
             image: &image,
@@ -427,35 +431,6 @@ impl ProcessSpawn for X86_64ProcessSpawn {
                 enter,
             )
         }
-        .map_err(admit_errno)
-    }
-}
-
-/// Map a [`SpawnCallerError`] onto a stable [`Errno`] for the `spawn` syscall's
-/// caller. The precise cause is already on the audit log via
-/// the `ProcessSpawn*` events `spawn_image` emits. Identical to the aarch64
-/// producer.
-fn spawn_caller_errno(err: SpawnCallerError) -> Errno {
-    match err {
-        // A missing `CAP_PROC_SPAWN` (cannot occur — the dispatcher already
-        // gated the syscall — but mapped for completeness).
-        SpawnCallerError::Denied => Errno::PermissionDenied,
-        // Image construction failed (a frame/pool exhaustion, a malformed
-        // segment, an over-size startup block). One stable resource errno.
-        SpawnCallerError::Build(_) => Errno::NoSpace,
-        // `SpawnCallerError` is `#[non_exhaustive]`: any future variant fails
-        // closed to the same stable resource errno.
-        _ => Errno::NoSpace,
-    }
-}
-
-/// Map an [`AdmitError`] onto a stable [`Errno`].
-fn admit_errno(err: AdmitError) -> Errno {
-    match err {
-        AdmitError::SchedulerFull => Errno::NoSpace,
-        AdmitError::AspaceConflict => Errno::AlreadyExists,
-        // `AdmitError` is `#[non_exhaustive]`: any future variant fails closed
-        // to a stable resource errno.
-        _ => Errno::NoSpace,
+        .map_err(|err| refuse_admit(ctx, err))
     }
 }

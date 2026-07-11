@@ -215,9 +215,9 @@ pub use seat::{
 };
 pub use sleeplock::{SleepGuard, SleepLock};
 pub use spawn::{
-    spawn_and_enter, spawn_image, AdmitError, EmbeddedProgram, InitSpawn, InitSpawnCtx,
-    NullProcessSpawn, ProcessSpawn, ProgramRegistry, SpawnCallerError, SpawnCtx, SpawnRequest,
-    EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
+    refuse_admit, refuse_spawn, spawn_and_enter, spawn_caller_errno, spawn_image, AdmitError,
+    EmbeddedProgram, InitSpawn, InitSpawnCtx, NullProcessSpawn, ProcessSpawn, ProgramRegistry,
+    SpawnCallerError, SpawnCtx, SpawnRequest, EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
 };
 pub use syscalls::{KernelDispatchHook, KernelSpawnCtx, KernelSyscallHandlers};
 pub use useradmin::{

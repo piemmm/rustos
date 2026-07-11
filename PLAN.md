@@ -3180,7 +3180,35 @@ be split into two partial (refused) attempts. Work remaining:
 ## Defect — spawn-session x86_64 failure (user OOM + wrong write count)
 
 **Status: root cause found and fixed** (the x86_64 syscall return path); the
-one remaining piece is the ring-3 fault-handler decision below.
+remaining pieces are the ring-3 fault-handler decision below and the
+re-opened CI-host-only refusal under investigation.
+
+**Re-opened (CI host only): login spawn refused `NoSpace` (err 15).** On the
+self-hosted runner, `rustos-test-spawn-session-qemu-x86-64` fails
+persistently (first seen near the `VfsDirectorySource` commit): PID 1's
+fifth spawn — `/System/Services/login.app/Run` — is rejected by the handler
+with errno 15 *before* any `ProcessSpawned`/`ProcessSpawnFailed` record, and
+the run times out. Not reproducible on a developer machine even with
+byte-identical binaries (`CARGO_INCREMENTAL=0` matches the runner's code
+layout exactly), the same QEMU 8.2.2, parallel guests, a heavily contended
+single core, or `-icount`/`one-insn-per-tb` timing distortion. Ruled out by
+measurement: genuine frame exhaustion (~47 400 frames free at the fifth
+spawn), the fixed user-layout/stack-span derivations (deterministic on the
+same image bytes, which pass locally), the spawn handler's attach/credential
+paths (none returns `NoSpace`), and resource limits (default unlimited).
+The producers' pre-build refusal sites were **silent**, which is what made
+the transcript undiagnosable; they now audit a stable `cause` plus the
+allocator's free-frame margin through the shared
+`kernel_core::{refuse_spawn, refuse_admit}` helpers (all three ports). Work
+remaining:
+
+- Re-run the vertical on the CI host; the `ProcessSpawnFailed` record now
+  names the failing site (`page_table_frames_exhausted` /
+  `user_layout_unfit` / `stack_span_malformed` / admit causes) and its
+  `free_frames` margin distinguishes exhaustion from state corruption.
+- Fix the named cause with a regression test (a corrupted-allocator finding
+  would redirect to the preemption/interrupt save-restore paths, the class
+  the syscall-return-path fix above already exemplified).
 
 **Root cause.** The x86_64 `IA32_LSTAR` entry stub
 (`kernel/arch/x86_64/src/syscall_entry.rs`) tore its on-stack argument array

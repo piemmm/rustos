@@ -588,6 +588,93 @@ where
     ))
 }
 
+/// Audit one spawn-producer refusal taken *around* [`spawn_image`] — the
+/// page-table, layout, and stack-span derivations a
+/// [`ProcessSpawn::spawn_with`] implementation performs before the image
+/// build — and return the stable resource errno the `spawn` caller sees.
+///
+/// [`spawn_image`] audits the capability decision and the image build
+/// itself, but the producer steps around it used to refuse a spawn
+/// silently: the audit log showed a rejected syscall with no cause, which
+/// is exactly the gap that made a boot-service launch refusal
+/// undiagnosable from a serial transcript. A refused spawn is a
+/// security-relevant decision, so it is logged with a stable `cause`
+/// (the same closed cause vocabulary the build-failure audit record
+/// uses) plus the kernel
+/// frame allocator's remaining free-frame count, which tells genuine RAM
+/// exhaustion apart from a derivation or translate failure at the same
+/// site.
+pub fn refuse_spawn(ctx: &dyn SpawnCtx, cause: &'static str) -> Errno {
+    emit(
+        ctx.audit(),
+        AuditEvent::ProcessSpawnFailed,
+        Level::Error,
+        &[
+            Field {
+                key: "cause",
+                value: rustos_log::FieldValue::Str(cause),
+            },
+            Field {
+                key: "free_frames",
+                value: rustos_log::FieldValue::UnsignedInt(ctx.frames().free_frames() as u64),
+            },
+        ],
+    );
+    Errno::NoSpace
+}
+
+/// Map an [`AdmitError`] onto its stable [`Errno`], auditing the refusal
+/// exactly as [`refuse_spawn`] does.
+///
+/// The admit step runs *after* [`spawn_image`]'s `ProcessSpawned` record,
+/// so without this record a failed admission would sit invisibly between
+/// "process spawned" and the rejected syscall. One definition shared by
+/// every port's producer, never a per-arch copy.
+pub fn refuse_admit(ctx: &dyn SpawnCtx, err: AdmitError) -> Errno {
+    // `AdmitError` is `#[non_exhaustive]` only *outside* this crate; here
+    // the match is exhaustive, so a future variant fails the build until it
+    // declares its own stable cause and errno.
+    let (cause, errno) = match err {
+        AdmitError::SchedulerFull => ("scheduler_admit_refused", Errno::NoSpace),
+        AdmitError::AspaceConflict => ("aspace_registry_conflict", Errno::AlreadyExists),
+    };
+    emit(
+        ctx.audit(),
+        AuditEvent::ProcessSpawnFailed,
+        Level::Error,
+        &[
+            Field {
+                key: "cause",
+                value: rustos_log::FieldValue::Str(cause),
+            },
+            Field {
+                key: "free_frames",
+                value: rustos_log::FieldValue::UnsignedInt(ctx.frames().free_frames() as u64),
+            },
+        ],
+    );
+    errno
+}
+
+/// Map a [`SpawnCallerError`] onto a stable [`Errno`] for the `spawn`
+/// syscall's caller. The precise cause is already on the audit log via the
+/// `ProcessSpawn*` events [`spawn_image`] emits, so this mapping is pure —
+/// one definition shared by every port's producer.
+#[must_use]
+pub fn spawn_caller_errno(err: SpawnCallerError) -> Errno {
+    // `SpawnCallerError` is `#[non_exhaustive]` only *outside* this crate;
+    // here the match is exhaustive, so a future variant fails the build
+    // until it declares its own stable errno.
+    match err {
+        // A missing `CAP_PROC_SPAWN` (cannot occur — the dispatcher already
+        // gated the syscall — but mapped for completeness).
+        SpawnCallerError::Denied => Errno::PermissionDenied,
+        // Image construction failed (a frame/pool exhaustion, a malformed
+        // segment, an over-size startup block). One stable resource errno.
+        SpawnCallerError::Build(_) => Errno::NoSpace,
+    }
+}
+
 /// One embedded program the kernel can launch on demand: its absolute
 /// path and the validated `rxe` bytes (`plans/SPAWN.md` SP3).
 ///
@@ -1258,5 +1345,80 @@ mod tests {
             None,
         );
         assert_eq!(result, Err(Errno::NotImplemented));
+    }
+
+    /// The one captured `ProcessSpawnFailed` record on `sink`, asserted to
+    /// carry the expected stable `cause` plus a `free_frames` count.
+    fn assert_refusal_audited(sink: &TestSink, cause: &str) {
+        let records: std::vec::Vec<_> = sink
+            .snapshot()
+            .into_iter()
+            .filter(|e| e.id == AuditEvent::ProcessSpawnFailed.id())
+            .collect();
+        assert_eq!(records.len(), 1, "exactly one refusal record");
+        let record = &records[0];
+        assert_eq!(record.level, Level::Error);
+        assert!(
+            record
+                .fields
+                .iter()
+                .any(|(key, value)| key == "cause" && value == cause),
+            "record names the refusing site: {:?}",
+            record.fields
+        );
+        assert!(
+            record.fields.iter().any(|(key, _)| key == "free_frames"),
+            "record carries the allocator margin: {:?}",
+            record.fields
+        );
+    }
+
+    /// A producer refusal taken before the image build audits its cause and
+    /// the allocator margin, and maps onto the stable resource errno — a
+    /// refused spawn is never silent (regression: the x86_64 spawn-session
+    /// CI failure showed a rejected `spawn` with no cause on the log).
+    #[test]
+    fn refuse_spawn_audits_cause_and_returns_no_space() {
+        set_max_level(Level::Trace);
+        let ctx = StubCtx::new();
+        assert_eq!(
+            refuse_spawn(&ctx, "page_table_frames_exhausted"),
+            Errno::NoSpace
+        );
+        assert_refusal_audited(ctx.sink, "page_table_frames_exhausted");
+    }
+
+    /// A refused admission audits its cause exactly as the pre-build sites
+    /// do, and each [`AdmitError`] keeps its stable errno.
+    #[test]
+    fn refuse_admit_audits_cause_and_maps_stable_errnos() {
+        set_max_level(Level::Trace);
+        let ctx = StubCtx::new();
+        assert_eq!(
+            refuse_admit(&ctx, AdmitError::SchedulerFull),
+            Errno::NoSpace
+        );
+        assert_refusal_audited(ctx.sink, "scheduler_admit_refused");
+
+        let ctx = StubCtx::new();
+        assert_eq!(
+            refuse_admit(&ctx, AdmitError::AspaceConflict),
+            Errno::AlreadyExists
+        );
+        assert_refusal_audited(ctx.sink, "aspace_registry_conflict");
+    }
+
+    /// The shared caller-errno mapping keeps the stable codes: a denied
+    /// spawn is `PermissionDenied`, a failed build the resource errno.
+    #[test]
+    fn spawn_caller_errno_maps_stable_codes() {
+        assert_eq!(
+            spawn_caller_errno(SpawnCallerError::Denied),
+            Errno::PermissionDenied
+        );
+        assert_eq!(
+            spawn_caller_errno(SpawnCallerError::Build(SpawnError::EmptyStack)),
+            Errno::NoSpace
+        );
     }
 }
