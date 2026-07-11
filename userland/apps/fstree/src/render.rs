@@ -156,6 +156,8 @@ pub fn render(model: &Model, window: &mut Window) {
     match model.overlay {
         Overlay::Help => render_help(model, window, body, cols),
         Overlay::Report => render_report(model, window, body, cols),
+        Overlay::Volumes => render_volumes(model, window, body, cols),
+        Overlay::Settings => render_settings(model, window, body, cols),
         Overlay::None | Overlay::SortMenu => match model.view {
             View::Panes => render_panes(model, window, body, cols),
             View::Flat => render_flat(model, window, body, cols),
@@ -387,6 +389,55 @@ fn render_report(model: &Model, window: &mut Window, body: u16, cols: u16) {
             Pos::new(line + 1, 1),
             truncate_to_width(text, usize::from(cols - 2)),
         );
+    }
+}
+
+/// The volume list (`V`): one row per published storage root — mount
+/// target, filesystem type, and free/total bytes (absent figures shown
+/// as `-`, never fabricated). The cursor row is reversed; Enter opens
+/// the root, Esc leaves.
+fn render_volumes(model: &Model, window: &mut Window, body: u16, cols: u16) {
+    draw_frame(window, body, cols, None, &[(2, " Volumes ", true)]);
+    let width = usize::from(cols - 2);
+    let mut reverse = Attributes::PLAIN;
+    reverse.reverse = true;
+    for (line, (index, volume)) in (0..body - 2).zip(model.volumes.iter().enumerate()) {
+        let space = match volume.space {
+            Some(space) => format!("{}/{}", space.free_bytes, space.total_bytes),
+            None => String::from("-"),
+        };
+        let text = format!("{:<24}  {:<8}  free {space}", volume.target, volume.fstype);
+        if index == model.volume_cursor {
+            window.set_attributes(reverse);
+        }
+        let _ = window.move_add_str(Pos::new(line + 1, 1), truncate_to_width(&text, width));
+        window.set_attributes(Attributes::PLAIN);
+    }
+}
+
+/// The settings menu (`S`): the persisted confirmation toggles and where
+/// they persist to (or that they cannot).
+fn render_settings(model: &Model, window: &mut Window, body: u16, cols: u16) {
+    draw_frame(window, body, cols, None, &[(2, " Settings ", true)]);
+    let width = usize::from(cols - 2);
+    let on_off = |on: bool| if on { "on" } else { "off" };
+    let lines = [
+        format!(
+            "1  confirm delete            {}",
+            on_off(model.settings.confirm_delete)
+        ),
+        format!(
+            "2  confirm batch delete      {}",
+            on_off(model.settings.confirm_batch_delete)
+        ),
+        String::new(),
+        match &model.settings_home {
+            Some(home) => format!("saved in {home}/Settings/fstree/"),
+            None => String::from("no home directory — changes last this session only"),
+        },
+    ];
+    for (line, text) in (0..body - 2).zip(lines.iter()) {
+        let _ = window.move_add_str(Pos::new(line + 1, 1), truncate_to_width(text, width));
     }
 }
 
@@ -757,24 +808,8 @@ fn format_stamp(stamp: Time64) -> String {
     }
     let days = stamp.secs().div_euclid(86_400);
     let tod = stamp.secs().rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
+    let (year, month, day) = rustos_fsmeta::calendar::civil_from_days(days);
     let hour = tod / 3_600;
     let minute = (tod % 3_600) / 60;
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}")
-}
-
-/// Proleptic-Gregorian date of an epoch day count (Howard Hinnant's
-/// `civil_from_days` algorithm), exact over the whole `Time64` range.
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if month <= 2 { y + 1 } else { y };
-    (year, month, day)
 }

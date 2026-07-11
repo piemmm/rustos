@@ -19,18 +19,11 @@ use crate::entry::Entry;
 use crate::error::BrowseError;
 use crate::source::DirectorySource;
 
-/// The absolute-path key the mock indexes a directory by, mirroring
-/// [`Browser::path`] so tests and the model agree on the path string.
+/// The absolute-path key the mock indexes a directory by — the one shared
+/// spelling, so tests, the model, and the VFS engine agree on the path
+/// string.
 fn key(components: &[String]) -> String {
-    if components.is_empty() {
-        return "/".to_string();
-    }
-    let mut path = String::new();
-    for component in components {
-        path.push('/');
-        path.push_str(component);
-    }
-    path
+    crate::vfs::spell_absolute_path(components)
 }
 
 /// An in-memory directory tree with an optional set of unreadable paths.
@@ -258,4 +251,142 @@ fn render_into_a_tiny_viewport_does_not_panic() {
     let surface = crate::render(&browser, &theme, Rect::new(0, 0, 4, 3)).expect("surface");
     assert_eq!(surface.width(), 4);
     assert_eq!(surface.height(), 3);
+}
+
+// --- The VFS engine ------------------------------------------------------
+//
+// `VfsDirectorySource` is the production source; these tests drive it (and
+// a `Browser` over it) against in-memory *encoded* `DirEntry` streams — the
+// exact bytes a kernel `fs_readdir` transfer produces — so the spelling,
+// decode, and refusal branches are all host-proven.
+
+use rustos_abi::fs::{DirEntry, FileKind, FS_PATH_MAX};
+use rustos_abi::time::Time64;
+
+use crate::vfs::{absolute_path, entries_from_dir_stream, VfsDirectorySource};
+
+/// Encode `(name, kind)` children as one packed `DirEntry` stream.
+fn encoded_stream(children: &[(&[u8], FileKind)]) -> Vec<u8> {
+    let mut buf = vec![0u8; 4096];
+    let mut off = 0;
+    for (name, kind) in children {
+        off += DirEntry {
+            kind: *kind,
+            size: 0,
+            allocated: 0,
+            modified: Time64::UNIX_EPOCH,
+            name,
+        }
+        .encode_into(&mut buf[off..])
+        .expect("fits");
+    }
+    buf.truncate(off);
+    buf
+}
+
+/// A source over an in-memory path → encoded-stream tree.
+fn tree_source(
+    dirs: BTreeMap<String, Vec<u8>>,
+) -> VfsDirectorySource<impl FnMut(&str) -> Result<Vec<u8>, Errno>> {
+    VfsDirectorySource::new(move |path: &str| dirs.get(path).cloned().ok_or(Errno::NotFound))
+}
+
+#[test]
+fn absolute_path_spells_root_and_nested_directories() {
+    assert_eq!(absolute_path(&[]).expect("root"), "/");
+    assert_eq!(
+        absolute_path(&["System".to_string(), "Fonts".to_string()]).expect("nested"),
+        "/System/Fonts"
+    );
+}
+
+#[test]
+fn absolute_path_refuses_malformed_components() {
+    for bad in ["", ".", "..", "a/b", "nul\0byte"] {
+        assert_eq!(
+            absolute_path(&[bad.to_string()]),
+            Err(Errno::OutOfRange),
+            "component {bad:?} must be refused before any syscall"
+        );
+    }
+}
+
+#[test]
+fn absolute_path_enforces_the_kernel_path_bound() {
+    let long = "a".repeat(FS_PATH_MAX);
+    assert_eq!(
+        absolute_path(&[long]),
+        Err(Errno::LengthOutOfRange),
+        "a spelled path over FS_PATH_MAX must never reach the kernel"
+    );
+}
+
+#[test]
+fn entries_from_dir_stream_maps_names_and_kinds_in_order() {
+    let stream = encoded_stream(&[
+        (b"Logs", FileKind::Directory),
+        (b"motd.txt", FileKind::Regular),
+    ]);
+    let entries = entries_from_dir_stream(&stream).expect("valid stream");
+    assert_eq!(
+        entries,
+        vec![Entry::directory("Logs"), Entry::file("motd.txt")]
+    );
+}
+
+#[test]
+fn entries_from_dir_stream_refuses_a_non_utf8_name_whole() {
+    let stream = encoded_stream(&[(b"ok", FileKind::Regular), (b"\xff\xfe", FileKind::Regular)]);
+    assert_eq!(entries_from_dir_stream(&stream), Err(Errno::OutOfRange));
+}
+
+#[test]
+fn entries_from_dir_stream_refuses_a_truncated_stream_whole() {
+    let mut stream = encoded_stream(&[(b"ok", FileKind::Regular)]);
+    stream.extend_from_slice(&[0u8; 3]);
+    assert_eq!(entries_from_dir_stream(&stream), Err(Errno::BufferTooSmall));
+}
+
+#[test]
+fn a_browser_navigates_the_vfs_source_end_to_end() {
+    let mut dirs = BTreeMap::new();
+    dirs.insert(
+        "/".to_string(),
+        encoded_stream(&[(b"System", FileKind::Directory)]),
+    );
+    dirs.insert(
+        "/System".to_string(),
+        encoded_stream(&[
+            (b"Fonts", FileKind::Directory),
+            (b"motd.txt", FileKind::Regular),
+        ]),
+    );
+    dirs.insert("/System/Fonts".to_string(), encoded_stream(&[]));
+
+    let mut browser = Browser::open_root(tree_source(dirs)).expect("root opens");
+    assert_eq!(browser.entries(), &[Entry::directory("System")]);
+
+    browser.open_index(0).expect("descend into /System");
+    assert_eq!(browser.path(), "/System");
+    assert_eq!(
+        browser.entries(),
+        &[Entry::directory("Fonts"), Entry::file("motd.txt")]
+    );
+
+    browser.open_index(0).expect("descend into /System/Fonts");
+    assert_eq!(browser.path(), "/System/Fonts");
+    assert!(browser.entries().is_empty());
+
+    assert!(browser.go_up().expect("climb back"));
+    assert_eq!(browser.path(), "/System");
+}
+
+#[test]
+fn a_missing_directory_surfaces_the_fetch_refusal() {
+    let mut source = tree_source(BTreeMap::new());
+    assert_eq!(
+        source.list(&["System".to_string()]),
+        Err(Errno::NotFound),
+        "the engine adds no authority and fabricates no listing"
+    );
 }

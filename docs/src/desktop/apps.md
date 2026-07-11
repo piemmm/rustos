@@ -23,6 +23,31 @@ the entries the source returns — it never fabricates a `/proc`/`/sys`-style
 synthetic entry (`AGENTS.md` §16.1). Each entry is an `Entry` carrying a name
 and an `EntryKind` (directory or regular file).
 
+### The production source (`vfs`)
+
+`VfsDirectorySource` is the shipping `DirectorySource` (`plans/APPWIN.md`
+AW1). It composes three pieces, each host-proven:
+
+- `spell_absolute_path` — the app's one path spelling, shared by the
+  browser's displayed path, the tests' tree keys, and the VFS fetch, so the
+  three can never disagree (`AGENTS.md` §2.2).
+- `absolute_path` — validation before spelling: a component that is empty,
+  `.`, `..`, or carries `/`/NUL is refused (`OutOfRange`) *before* any
+  syscall, and the spelled path is bounded by the kernel's `FS_PATH_MAX`
+  (`LengthOutOfRange`) — validate every input, fail closed (`AGENTS.md`
+  §5.4).
+- `entries_from_dir_stream` — the packed `fs_readdir` stream mapped onto
+  `Entry` values through the shared `rustos_abi::fs::DirEntries` walker (the
+  same walker `ls` lists through); one malformed record or non-UTF-8 name
+  refuses the whole listing, never a partial one.
+
+The directory fetch itself is injected (`fetch(path) -> stream`): the
+shipping program passes `rustos_rt::read_dir_all` — the kernel-authorised
+`fs_open` + grow-to-`FS_IO_MAX` `fs_readdir` transfer under the app's own
+attested identity — while tests pass an in-memory tree of encoded streams and
+drive a `Browser` over it end to end. The engine adds no authority and makes
+no permission decision of its own.
+
 ### The navigation model
 
 `Browser` holds the current directory's path and entries plus a selection
@@ -60,9 +85,10 @@ can rather than panicking (`AGENTS.md` §2.9).
 
 ### Still to do
 
-The browser model and renderer are complete and headless-tested; wiring the
-VFS-backed `DirectorySource` and the live window-manager surface is deferred
-until the userland VFS client and the taskbar↔WM event glue land.
+The browser model, renderer, and production VFS source are complete and
+host-tested; the `Run` bundle that wires `VfsDirectorySource` over
+`rustos_rt::read_dir_all` and presents through the window channel lands with
+`plans/APPWIN.md` AW3.
 
 ## Terminal emulator (`rustos-terminal`)
 
@@ -130,7 +156,7 @@ than the grid paints what fits rather than panicking (`AGENTS.md` §2.9).
 
 ### Still to do
 
-The terminal model and renderer are complete and headless-tested; wiring the
-pseudo-terminal `ShellSource` to a real shell process and presenting the live
-window-manager surface is deferred until the userland process/IPC client and
-the taskbar↔WM event glue land.
+The terminal model and renderer are complete and headless-tested; the live
+`ShellSource` (pipe pair + `FdWire`-attached shell spawn) and the presented
+window ride `plans/APPWIN.md` AW4, which also adds the stream wait source the
+serve loop parks on.

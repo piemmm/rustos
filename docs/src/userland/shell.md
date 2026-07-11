@@ -240,7 +240,7 @@ command-position word completes from the builtin table and the `.app`
 bundles of the shared command-search directories
 (`rustos_cmdres::command_search_dirs` — so exactly the names the shell would
 resolve are offered); argument words complete as filesystem paths through
-the injected `WordLister` (kernel-authorised `fs_readdir`); a redirection
+the injected `DirLister` (the shared `lib/complete` seam, kernel-authorised `fs_readdir`); a redirection
 target additionally offers the registered resource namespaces (`sys:` …) and
 their well-known selectors (`rustos_resref::KnownNamespace`) — the same
 registry the redirection classifier applies, cross-checked against the

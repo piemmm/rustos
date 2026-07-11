@@ -47,7 +47,7 @@ use rustos_curses::{Event, Input as KeyDecoder};
 use rustos_vt::control;
 use rustos_vt::line::{LineEditor, LineFeed};
 
-use crate::complete::{complete, Completion, WordLister};
+use crate::complete::{complete, Completion, DirLister};
 use crate::editor::{Completer, Editor, ReadOutcome, Session};
 use crate::host::Console;
 use crate::parser::CommandList;
@@ -313,7 +313,7 @@ pub fn run(
     shell: &mut Shell<'_>,
     console: &dyn Console,
     input: &mut dyn ReplInput,
-    lister: &dyn WordLister,
+    lister: &dyn DirLister,
 ) -> i32 {
     if input.set_mode(InputMode::Raw).is_ok() {
         let code = run_interactive(shell, console, input, lister);
@@ -400,7 +400,7 @@ impl EventStream {
 /// injected directory lister: the one shared engine, never a second policy.
 struct ShellCompleter<'a> {
     path_var: Option<String>,
-    lister: &'a dyn WordLister,
+    lister: &'a dyn DirLister,
 }
 
 impl Completer for ShellCompleter<'_> {
@@ -418,7 +418,7 @@ fn read_edited_line(
     shell: &Shell<'_>,
     console: &dyn Console,
     input: &mut dyn ReplInput,
-    lister: &dyn WordLister,
+    lister: &dyn DirLister,
 ) -> Option<ReadOutcome> {
     let completer = ShellCompleter {
         path_var: shell.environment().get("PATH").map(String::from),
@@ -445,7 +445,7 @@ fn collect_here_docs_interactive(
     shell: &Shell<'_>,
     console: &dyn Console,
     input: &mut dyn ReplInput,
-    lister: &dyn WordLister,
+    lister: &dyn DirLister,
 ) {
     while list.pending_here_doc().is_some() {
         match read_edited_line(
@@ -475,7 +475,7 @@ fn run_interactive(
     shell: &mut Shell<'_>,
     console: &dyn Console,
     input: &mut dyn ReplInput,
-    lister: &dyn WordLister,
+    lister: &dyn DirLister,
 ) -> i32 {
     let mut editor = Editor::new();
     let mut events = EventStream::new();
@@ -629,7 +629,7 @@ mod tests {
     /// An in-memory app store for interactive completion tests.
     struct StoreLister;
 
-    impl crate::complete::WordLister for StoreLister {
+    impl crate::complete::DirLister for StoreLister {
         fn list_dir(
             &self,
             dir: &str,

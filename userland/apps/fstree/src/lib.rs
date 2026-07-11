@@ -74,10 +74,12 @@ extern crate alloc;
 
 pub mod app;
 pub mod fs;
+pub mod info;
 pub mod model;
 pub mod ops;
 pub mod render;
 pub mod search;
+pub mod settings;
 pub mod tag;
 pub mod view_disasm;
 pub mod view_hex;
@@ -88,11 +90,13 @@ pub mod walk;
 mod tests;
 
 pub use app::{handle_event, run, FstreeError};
-pub use fs::{Fs, FsEntry, RenameOutcome, VolumeSpace};
+pub use fs::{Fs, FsEntry, RenameOutcome, VolumeInfo, VolumeSpace};
+pub use info::{Info, NullInfo};
 pub use model::{Model, Pane, SortKey};
 pub use render::render;
 pub use search::{ContentScan, Needle};
-pub use tag::{Batch, BatchProgress, TagEntry, TagSet};
+pub use settings::Settings;
+pub use tag::{Batch, BatchProgress, TagEntry, TagRange, TagSet};
 pub use view_disasm::{Decode, DisasmView};
 pub use view_hex::{HexPattern, HexView};
 pub use view_text::{JobOutcome, TextView};

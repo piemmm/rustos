@@ -1,0 +1,15 @@
+[package]
+name = "rustos-complete"
+description = "RustOS shared filename-completion engine: the one first-party definition of how a partially typed filesystem path is completed — the directory-part/leaf split, the hidden-name (dotfile) rule, the leaf-prefix candidate filter, and the longest-common-prefix Tab discipline — imported by the shell's interactive completion and the tree file manager's prompt-line completion instead of each embedding a private engine. Read-only by construction: the filesystem is reached only through an injected directory-listing seam, so the engine can never create, write, or run anything. no_std + alloc, forbids unsafe, fail-closed (a refused listing completes to nothing, never a guess)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rustos-abi = { path = "../abi", version = "=0.0.0" }

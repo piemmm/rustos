@@ -55,9 +55,9 @@ mod program {
     use rustos_abi::fs::{DirEntry, FS_IO_MAX};
     use rustos_abi::{Errno, FileKind, InputMode, LimitKind, ResourceLimit};
     use rustos_elsh::{
-        parse_invocation, Console, DirEntryInfo, Elevator, Environment, Invocation, LaunchSpec,
-        LimitStore, Pid, PlannedOpen, PlannedWire, ProcessHost, PumpTask, ReplInput,
-        ResolvedCommand, Shell, Signal, WaitOutcome, WordLister, USAGE,
+        parse_invocation, Console, DirEntryInfo, DirLister, Elevator, Environment, Invocation,
+        LaunchSpec, LimitStore, Pid, PlannedOpen, PlannedWire, ProcessHost, PumpTask, ReplInput,
+        ResolvedCommand, Shell, Signal, WaitOutcome, USAGE,
     };
     use rustos_help::{own_short_help, BundleHelp};
     use rustos_rt::io::{write_stderr_line, Stderr, Stdout, Write};
@@ -119,9 +119,9 @@ mod program {
     /// kernel-authorised `fs_readdir`: every path resolution and per-inode
     /// permission check stays kernel-side, and a refusal simply yields no
     /// candidates (the engine degrades, never guesses).
-    struct RtWordLister;
+    struct RtDirLister;
 
-    impl WordLister for RtWordLister {
+    impl DirLister for RtDirLister {
         fn list_dir(&self, dir: &str) -> Result<Vec<DirEntryInfo>, Errno> {
             let handle = rustos_rt::open_dir(dir.as_bytes()).map_err(Errno::from_syscall)?;
             let mut buf = alloc::vec![0u8; DIR_BUF_INITIAL];
@@ -789,7 +789,7 @@ mod program {
         let mut shell = Shell::with_environment(&host, &console, env)
             .with_limits(&limits)
             .with_elevator(&elevator);
-        rustos_elsh::run_repl(&mut shell, &console, &mut input, &RtWordLister)
+        rustos_elsh::run_repl(&mut shell, &console, &mut input, &RtDirLister)
     }
 
     rustos_rt::entry!(main);

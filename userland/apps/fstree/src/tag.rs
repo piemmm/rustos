@@ -14,7 +14,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
+use rustos_abi::time::Time64;
 use rustos_abi::FileKind;
+use rustos_fsmeta::calendar::{civil_from_days, days_from_civil};
 
 use crate::fs::Fs;
 use crate::ops::{plan_target, Conflict, Decision, FileOp, OpError, OpKind, OpProgress};
@@ -307,6 +309,146 @@ impl Batch {
         }
         text
     }
+}
+
+/// Seconds per civil day, for the date bounds' midnight arithmetic.
+const DAY_SECS: i64 = 86_400;
+
+/// A range the tag-by-pattern prompt (`T`) can name instead of a glob:
+/// listed byte sizes (`size:1M..64M`, either bound open) or
+/// modification dates (`date:2024-01-01..2024-06-30`, whole days,
+/// end-date inclusive). A malformed range is a typed refusal that tags
+/// nothing, exactly like a malformed glob.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TagRange {
+    /// Listed size in bytes, both bounds inclusive when present.
+    Size {
+        /// The smallest matching size.
+        min: Option<u64>,
+        /// The largest matching size.
+        max: Option<u64>,
+    },
+    /// Modification instant in seconds: at or after `min` (that day's
+    /// midnight), before `max` (the midnight *after* the named end date,
+    /// so the end date itself is included).
+    Date {
+        /// The first matching instant.
+        min: Option<i64>,
+        /// One past the last matching instant.
+        max: Option<i64>,
+    },
+}
+
+impl TagRange {
+    /// Recognise and parse a range spelling. `Ok(None)` means the text is
+    /// not a range at all (the prompt then treats it as a glob);
+    /// `Err(reason)` means it *is* a range spelling but malformed —
+    /// refused whole, never partially applied.
+    ///
+    /// # Errors
+    ///
+    /// A human-readable reason when the range fails to parse: a missing
+    /// `..`, an empty range, an unparseable size or date, or bounds in
+    /// the wrong order.
+    pub fn parse(text: &str) -> Result<Option<Self>, String> {
+        if let Some(rest) = text.strip_prefix("size:") {
+            let (low, high) = split_bounds(rest)?;
+            let min = low.map(parse_size).transpose()?;
+            let max = high.map(parse_size).transpose()?;
+            if let (Some(a), Some(b)) = (min, max) {
+                if a > b {
+                    return Err(String::from("size: bounds are in the wrong order"));
+                }
+            }
+            return Ok(Some(Self::Size { min, max }));
+        }
+        if let Some(rest) = text.strip_prefix("date:") {
+            let (low, high) = split_bounds(rest)?;
+            let min = low.map(parse_date).transpose()?;
+            // The end date is inclusive: match up to the following
+            // midnight.
+            let max = high
+                .map(parse_date)
+                .transpose()?
+                .map(|secs| secs + DAY_SECS);
+            if let (Some(a), Some(b)) = (min, max) {
+                if a >= b {
+                    return Err(String::from("date: bounds are in the wrong order"));
+                }
+            }
+            return Ok(Some(Self::Date { min, max }));
+        }
+        Ok(None)
+    }
+
+    /// Whether an entry with the listed `size` and `modified` stamp falls
+    /// inside the range. A backing that keeps no stamp (the epoch marker)
+    /// never matches a date range — an unknown date is not a date.
+    #[must_use]
+    pub fn matches(&self, size: u64, modified: Time64) -> bool {
+        match self {
+            Self::Size { min, max } => {
+                min.map_or(true, |m| size >= m) && max.map_or(true, |m| size <= m)
+            }
+            Self::Date { min, max } => {
+                if modified == Time64::UNIX_EPOCH {
+                    return false;
+                }
+                let secs = modified.secs();
+                min.map_or(true, |m| secs >= m) && max.map_or(true, |m| secs < m)
+            }
+        }
+    }
+}
+
+/// Split `A..B` into its optional bounds; `..` alone, or a missing `..`,
+/// is malformed.
+fn split_bounds(text: &str) -> Result<(Option<&str>, Option<&str>), String> {
+    let Some((low, high)) = text.split_once("..") else {
+        return Err(String::from("range needs `..` between its bounds"));
+    };
+    let low = (!low.is_empty()).then_some(low);
+    let high = (!high.is_empty()).then_some(high);
+    if low.is_none() && high.is_none() {
+        return Err(String::from("range needs at least one bound"));
+    }
+    Ok((low, high))
+}
+
+/// Parse a size bound: decimal bytes with an optional binary-unit suffix
+/// (`K`, `M`, `G`, `T`).
+fn parse_size(text: &str) -> Result<u64, String> {
+    let (digits, shift) = match text.as_bytes().last() {
+        Some(b'K' | b'k') => (&text[..text.len() - 1], 10),
+        Some(b'M' | b'm') => (&text[..text.len() - 1], 20),
+        Some(b'G' | b'g') => (&text[..text.len() - 1], 30),
+        Some(b'T' | b't') => (&text[..text.len() - 1], 40),
+        _ => (text, 0),
+    };
+    let value: u64 = digits.parse().map_err(|_| format!("bad size: {text}"))?;
+    value
+        .checked_shl(shift)
+        .filter(|scaled| scaled >> shift == value)
+        .ok_or_else(|| format!("size out of range: {text}"))
+}
+
+/// Parse a `YYYY-MM-DD` date into the seconds of that day's midnight.
+/// The calendar is the arbiter: a spelling that does not round-trip
+/// (2024-02-30) is refused.
+fn parse_date(text: &str) -> Result<i64, String> {
+    let bad = || format!("bad date: {text} (expected YYYY-MM-DD)");
+    let mut parts = text.splitn(3, '-');
+    let year: i64 = parts.next().and_then(|p| p.parse().ok()).ok_or_else(bad)?;
+    let month: u32 = parts.next().and_then(|p| p.parse().ok()).ok_or_else(bad)?;
+    let day: u32 = parts.next().and_then(|p| p.parse().ok()).ok_or_else(bad)?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return Err(bad());
+    }
+    let days = days_from_civil(year, month, day);
+    if civil_from_days(days) != (year, month, day) {
+        return Err(bad());
+    }
+    days.checked_mul(DAY_SECS).ok_or_else(bad)
 }
 
 /// One report line for a failed entry. An error that already names its

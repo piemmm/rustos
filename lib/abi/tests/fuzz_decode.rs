@@ -26,7 +26,7 @@
 
 use rustos_abi::display_ipc::{decode_mode_reply, DisplayRequest};
 use rustos_abi::elevate::{ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN};
-use rustos_abi::fs::{DirEntry, FileKind, FileStat, OpenFlags, FS_NAME_MAX};
+use rustos_abi::fs::{DirEntries, DirEntry, FileKind, FileStat, OpenFlags, FS_NAME_MAX};
 use rustos_abi::input::{KeyInput, PointerInput};
 use rustos_abi::process::{ProcessStart, ProcessStartHeader, StringSlot};
 use rustos_abi::reply::decode_status_reply;
@@ -325,6 +325,23 @@ fn exercise_fs(bytes: &[u8]) {
             DirEntry::decode(&buf).expect("round-trip of an accepted DirEntry must succeed");
         assert_eq!(entry, redecoded);
         assert_eq!(reconsumed, consumed);
+    }
+    // The whole-stream walker must terminate on any input, make the forward
+    // progress its contract states, and fuse after the first refusal — a
+    // hostile stream ends the walk with one clean error, never a panic or a
+    // stall.
+    let mut walked = 0usize;
+    let mut refused = false;
+    for item in DirEntries::new(bytes) {
+        assert!(!refused, "the walker must fuse after its first refusal");
+        match item {
+            Ok(entry) => walked += entry.encoded_len(),
+            Err(_) => refused = true,
+        }
+        assert!(
+            walked <= bytes.len(),
+            "the walker must never claim more bytes than the stream holds"
+        );
     }
     // `FileKind`/`OpenFlags` decode from a scalar rather than a slice; derive
     // the scalar from the fuzz bytes so the boundary between accepted and

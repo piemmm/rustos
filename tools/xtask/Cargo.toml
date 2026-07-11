@@ -39,6 +39,9 @@ rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
 # with the runtime consumers, AGENTS.md §2.2), and drift-checks the
 # committed tables in `ci`.
 rustos-devids = { path = "../../lib/devids", version = "=0.0.0" }
+# `devids` stamps its import provenance with a UTC date through the one
+# civil-date calendar (`lib/fsmeta`), never a private copy.
+rustos-fsmeta = { path = "../../lib/fsmeta", version = "=0.0.0" }
 rustos-kernel-syscall = { path = "../../kernel/syscall", version = "=0.0.0" }
 rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 # `test --qemu` cross-builds the CCOMPAT end-to-end C programs, whose build

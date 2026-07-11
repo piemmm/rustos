@@ -54,6 +54,13 @@ rustos-path = { path = "../../../lib/path", version = "=0.0.0" }
 # The one filename-glob matcher: tag-by-pattern (`T`) compiles and matches
 # through it, never a second in-app wildcard matcher.
 rustos-glob = { path = "../../../lib/glob", version = "=0.0.0" }
+# The one filename-completion engine: the destination prompts' Tab
+# completion applies its path-candidate policy and common-prefix
+# discipline, never a second in-app engine.
+rustos-complete = { path = "../../../lib/complete", version = "=0.0.0" }
+# The one civil-date calendar: the mtime column's date render and the
+# date-range tag bounds both convert through it, never an in-app copy.
+rustos-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
 # The parser-sandbox seam: the disassembly viewer's container summaries,
 # manifest summaries, and instruction windows are decoded only by the
 # sandboxed decode service, never in this process.

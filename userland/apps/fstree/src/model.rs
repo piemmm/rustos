@@ -18,8 +18,9 @@ use alloc::vec::Vec;
 use rustos_abi::FileKind;
 use rustos_glob::Pattern;
 
-use crate::fs::{Fs, FsEntry, VolumeSpace};
+use crate::fs::{Fs, FsEntry, VolumeInfo, VolumeSpace};
 use crate::ops::FileOp;
+use crate::settings::Settings;
 use crate::tag::{Batch, TagSet};
 use crate::view_disasm::DisasmView;
 use crate::view_hex::HexView;
@@ -48,6 +49,11 @@ pub enum Overlay {
     /// A batch's per-file failure report ([`Model::report_lines`]) covers
     /// the panes until a key dismisses it.
     Report,
+    /// The volume list (`V`): the published storage roots, one openable
+    /// per row.
+    Volumes,
+    /// The settings menu (`S`): the persisted confirmation toggles.
+    Settings,
 }
 
 /// Which body the session shows: the two panes, the flattened branch
@@ -315,6 +321,19 @@ pub enum IsaPurpose {
     Override,
 }
 
+/// The last completed file operation the repeat key (`.`) re-applies to
+/// the focused selection: the destination directory of a copy or move,
+/// or a delete (which still asks per the confirmation setting).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RepeatOp {
+    /// Copy the selection into the recorded directory.
+    CopyInto(String),
+    /// Move the selection into the recorded directory.
+    MoveInto(String),
+    /// Delete the selection.
+    Delete,
+}
+
 /// The file pane's live filename filter (`f`): the pattern as typed and
 /// its compiled form. While the typed text is not (yet) a valid glob —
 /// e.g. an unclosed bracket expression mid-edit — `pattern` is `None`,
@@ -420,6 +439,17 @@ pub struct Model {
     pub flat_scroll: usize,
     /// The lines the report overlay shows (a batch's per-file failures).
     pub report_lines: Vec<String>,
+    /// The volume list the `V` overlay shows, fetched when it opens.
+    pub volumes: Vec<VolumeInfo>,
+    /// Cursor index into [`Model::volumes`].
+    pub volume_cursor: usize,
+    /// The last completed file operation, for the repeat key (`.`).
+    pub last_op: Option<RepeatOp>,
+    /// The persisted session preferences (the confirmation toggles).
+    pub settings: Settings,
+    /// The user's home directory the settings persist under, when known;
+    /// `None` keeps changes session-only (and the menu says so).
+    pub settings_home: Option<String>,
     /// Set when the session should end.
     pub quit: bool,
 }
@@ -468,6 +498,11 @@ impl Model {
             flat_cursor: 0,
             flat_scroll: 0,
             report_lines: Vec::new(),
+            volumes: Vec::new(),
+            volume_cursor: 0,
+            last_op: None,
+            settings: Settings::default(),
+            settings_home: None,
             quit: false,
         };
         let entries = fs.list_dir(root_path)?;

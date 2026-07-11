@@ -2991,8 +2991,18 @@ transfer, landed in increments:
   code the `Run` binary drives (wm + session tests); a click-driven QEMU
   screendump of the live toggle rides the app-window/pointer vertical work,
   which needs the runner's pointer-button injection and a second verified
-  dump. Then: wire the two default apps to live VFS/shell channels +
-  WM-presented windows.
+  dump (staged as `plans/APPWIN.md` AW3). Then: wire the two default apps
+  to live VFS/shell channels + WM-presented windows — staged in
+  `plans/APPWIN.md` (binding). **AW1 is done:** the shared
+  `rustos_abi::fs::DirEntries` stream walker (unit-tested, fuzzed in
+  `fuzz_decode`), the one `lib/rt` directory-listing call
+  (`read_all_growing` + `read_dir_all`, host-tested; `ls` refactored onto
+  it), and the files app's production `VfsDirectorySource` engine
+  (validated path spelling — one spelling shared with `Browser::path` —
+  plus stream→`Entry` mapping, host-proven end to end over encoded
+  streams). Remaining: AW2 window protocol + engine, AW3 session window
+  server + files `Run` bundle + vertical, AW4 terminal (stream wait
+  source + pipe/spawn `ShellSource`), AW5 CU6 picker descriptors.
 - The platform-RNG `EntropySource` that seeds the reserve — **DONE**
   (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `rustos_arch_api::entropy`
   slice (x86_64 `RDSEED`/`RDRAND`, aarch64 `RNDR` `Supported`; riscv64 `Zkr` /
@@ -3949,6 +3959,18 @@ I/O vocabulary. See `.junie/PREREQUISITES2.md` for the full P0–P6 status.
   regex dialect (with catastrophic backtracking) would be a separate engine if
   a consumer ever needs one. Unit tests, rustdoc, and the `fuzz_glob` harness
   ship with it.
+- Filename completion as a shared library: **done.** `lib/complete`
+  (`rustos-complete`) is the one path-candidate policy interactive completion
+  applies — the directory-part/leaf split, the dotfile rule, the leaf-prefix
+  filter, and the longest-common-prefix Tab discipline — imported by the
+  shell's Tab completion and `fstree`'s destination prompts (§2.2, extracted
+  when the second consumer arrived with `.junie/fstree-next-plan.md` S10).
+  Presentation stays per consumer (the shell escapes inserts and merges its
+  command/resource candidate classes; `fstree` inserts verbatim). It is
+  `no_std`+`alloc`, `#![forbid(unsafe_code)]`, read-only by construction
+  (the injected `DirLister` seam only lists), and fail-closed (a refused
+  listing completes to nothing). Unit tests, rustdoc, and a docs page ship
+  with it.
 - P4 (path parser) — shared filesystem path-spelling parser as a `lib/*` crate:
   **done.** `lib/path` (`rustos-path`) is the one definition of how a RustOS
   path string is lexed and normalised into a typed `Root` + components, so the

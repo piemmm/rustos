@@ -294,12 +294,12 @@ impl<'a> Fixture<'a> {
     }
 }
 
-/// A [`crate::complete::WordLister`] with no filesystem: every listing is
+/// A [`crate::complete::DirLister`] with no filesystem: every listing is
 /// refused, so completion degrades to the non-filesystem candidates. The
 /// default lister for tests that do not exercise completion.
 pub(crate) struct EmptyLister;
 
-impl crate::complete::WordLister for EmptyLister {
+impl crate::complete::DirLister for EmptyLister {
     fn list_dir(&self, _dir: &str) -> Result<Vec<crate::complete::DirEntryInfo>, Errno> {
         Err(Errno::NotImplemented)
     }

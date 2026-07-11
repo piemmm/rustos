@@ -43,6 +43,7 @@
   - [`rustos-binfmt`](./lib/binfmt.md)
   - [`rustos-caps`](./lib/caps.md)
   - [`rustos-collections`](./lib/collections.md)
+  - [`rustos-complete`](./lib/complete.md)
   - [`rustos-crypto`](./lib/crypto.md)
   - [`rustos-curses`](./lib/curses.md)
   - [`rustos-devmatch`](./lib/devmatch.md)

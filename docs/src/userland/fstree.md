@@ -317,3 +317,67 @@ executable never happens and a hostile file's blast radius is one
 disposable worker. Reply validation is the seam's caller-side
 fail-closed decoding; the viewer trusts nothing the worker says beyond
 it.
+
+## The completeness pass (S10)
+
+The stage rounds the tool out with the storage-forest surface and the
+remaining conveniences; every piece runs through the same seams and is
+host-tested end to end.
+
+- **The volume list (`V`).** `Fs::list_volumes` reports the published
+  storage roots (`VolumeInfo`: mount target, filesystem type, optional
+  free/total bytes); the production seam walks the same System
+  Information API `MOUNT_LIST` pages the status line's free-space figure
+  uses (`rustos_procinfo::for_each_mount`). The overlay lists one row
+  per volume (an unreported size renders `-`, never a zero-byte disk),
+  Enter re-roots the whole session at the chosen target, and a refused
+  root listing keeps the session and the list with the errno on the
+  message line. An empty report is a message, never an empty screen.
+- **Destination completion (Tab).** The copy/move/batch-destination
+  prompts complete the typed path through the shared `lib/complete`
+  engine ([`rustos-complete`](../lib/complete.md)) — the same
+  directory-part/leaf, dotfile, and common-prefix policy the shell's Tab
+  uses — over a read-only adapter on the `Fs` seam that resolves
+  relative spellings against the same base the submit resolves onto. A
+  unique candidate replaces the word (a directory staying open with its
+  `/`); several extend to the longest common prefix or are listed,
+  bounded, on the message line. Prompts that ask for a *new* name or a
+  pattern do not complete.
+- **Range tagging.** The `T` prompt accepts `size:MIN..MAX` (binary
+  `K`/`M`/`G`/`T` suffixes, either bound open) and
+  `date:YYYY-MM-DD..YYYY-MM-DD` (end date inclusive; dates validated by
+  round-trip through the shared `lib/fsmeta` calendar) beside the glob
+  form (`tag::TagRange`). An entry whose backing stores no stamp (the
+  epoch marker) never date-matches — an unknown date is not a date — and
+  a malformed range is a typed refusal that tags nothing.
+- **Repeat (`.`).** The last completed copy/move destination directory
+  or delete is remembered (`model::RepeatOp`) and re-applied to the
+  focused selection through the ordinary planning path — same refusals,
+  same overwrite questions. The hidden-entries toggle moved to `H`.
+- **Persisted confirmations (`S`).** `settings::Settings` carries the
+  single- and batch-delete confirmation toggles, stored as a two-line
+  `key=value` file under the user's own `Settings/fstree/` through the
+  `Fs` seam (`HOME` names the tree; without one, changes are
+  session-only and the menu says so). Parsing fails safe: garbage,
+  unknown keys, and bad values leave the confirmations **on**. A
+  disabled confirmation makes `d` act immediately; the per-file
+  overwrite questions are never configurable away.
+- **The Standard Information Stream.** When the file pane omits hidden
+  entries the session emits one `fs.hidden_entries_omitted` advisory
+  record per omission-state change on fd 3 through the injected `Info`
+  seam (`info::note_hidden_entries`); the production seam writes
+  best-effort via `lib/rt`'s fd-3 wrapper. Directory names are
+  JSON-escaped so a hostile name cannot break the framing, and a record
+  that cannot frame is dropped whole.
+
+Tests cover the volume list (open/navigate/re-root, the refused root
+keeping the session, the empty report, the rendered rows), settings
+(fail-safe parse, encode round-trip, toggle persistence and reload
+through the seam, the no-home session-only path, both confirm-off
+delete paths), range tagging (parse matrix with malformed refusals,
+size and date tagging over the pane, the epoch exclusion), repeat
+(copy re-applied to a new selection, the empty-history message, a
+repeated delete still asking), completion (unique with the open
+directory, common-prefix extension then candidate listing, the
+no-match and non-path-prompt cases), the once-per-change omission
+records, and a scripted session across the new surfaces.

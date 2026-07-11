@@ -19,15 +19,16 @@ use rustos_glob::Pattern;
 use rustos_sandbox::decode::{Isa, RegionKind, MAX_INPUT};
 
 use crate::fs::Fs;
+use crate::info::{note_hidden_entries, Info};
 use crate::model::{
     child_dirs_of, join, merge_child_dirs, BatchPrompt, ConfirmPrompt, DirNode, InputOp,
     InputPrompt, IsaPrompt, IsaPurpose, ModePrompt, Model, NameFilter, OpenAsPrompt, Overlay,
-    OverwritePrompt, Pane, Prompt, SortKey, View, Viewer, ViewerKind,
+    OverwritePrompt, Pane, Prompt, RepeatOp, SortKey, View, Viewer, ViewerKind,
 };
 use crate::ops::{parent_of, plan_target, resolve_destination, Decision, FileOp, OpProgress};
 use crate::render::render;
 use crate::search::{ContentScan, Needle};
-use crate::tag::{Batch, BatchProgress, TagEntry};
+use crate::tag::{Batch, BatchProgress, TagEntry, TagRange};
 use crate::view_disasm::{describe, is_manifest_head, Decode, DisasmBody, DisasmPane, DisasmView};
 use crate::view_hex::{parse_offset, HexView};
 use crate::view_text::{JobOutcome, TextView};
@@ -94,9 +95,14 @@ pub fn run<T: Tty>(
     fs: &mut dyn Fs,
     decode: &mut dyn Decode,
     screen: &mut Screen<T>,
+    info: &mut dyn Info,
 ) -> Result<i32, FstreeError> {
     let mut window = Window::new(Pos::new(0, 0), screen.size());
+    // The omission state already reported on fd 3, so a record goes out
+    // once per change, not per keystroke.
+    let mut noted_hidden = None;
     loop {
+        note_hidden_entries(model, info, &mut noted_hidden);
         clamp_scroll(model, body_rows(screen.size().rows));
         refresh_viewer(
             model,
@@ -166,6 +172,14 @@ pub fn handle_event(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode,
             handle_sort_menu(model, event);
             return;
         }
+        Overlay::Volumes => {
+            handle_volumes_overlay(model, fs, event);
+            return;
+        }
+        Overlay::Settings => {
+            handle_settings_overlay(model, fs, event);
+            return;
+        }
         Overlay::None => {}
     }
     if model.view == View::Viewer {
@@ -176,6 +190,12 @@ pub fn handle_event(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode,
         handle_flat_key(model, fs, event);
         return;
     }
+    handle_panes_key(model, fs, decode, event);
+}
+
+/// Apply one key in the plain panes view (no prompt, overlay, or
+/// covering view is open).
+fn handle_panes_key(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode, event: &Event) {
     match event {
         Event::Char('q') => model.quit = true,
         Event::Char('?') => model.overlay = Overlay::Help,
@@ -184,7 +204,7 @@ pub fn handle_event(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode,
         Event::Char('c') => open_copy_move(model, false),
         Event::Char('m') => open_copy_move(model, true),
         Event::Char('r') => open_rename_prompt(model),
-        Event::Char('d') => open_delete(model),
+        Event::Char('d') => open_delete(model, fs),
         Event::Char('M') => {
             model.prompt = Some(Prompt::Input(InputPrompt {
                 op: InputOp::MkdirName,
@@ -204,8 +224,11 @@ pub fn handle_event(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode,
         Event::Char('f') => open_filter_prompt(model),
         Event::Char('/') => open_search_prompt(model),
         Event::Char('F') => open_content_prompt(model),
+        Event::Char('V') => open_volumes(model, fs),
+        Event::Char('S') => model.overlay = Overlay::Settings,
         Event::Esc => cancel_usage_walk(model),
-        Event::Char('.') => {
+        Event::Char('.') => repeat_last_op(model, fs),
+        Event::Char('H') => {
             model.show_hidden = !model.show_hidden;
             clamp_cursors(model);
         }
@@ -292,11 +315,16 @@ fn open_copy_move(model: &mut Model, moving: bool) {
     }));
 }
 
-/// The `d` key: the batch delete confirmation when entries are tagged,
-/// the single-selection confirmation otherwise.
-fn open_delete(model: &mut Model) {
+/// The `d` key: the batch delete when entries are tagged, the
+/// single-selection delete otherwise. Each asks first unless its
+/// persisted confirmation toggle is off.
+fn open_delete(model: &mut Model, fs: &mut dyn Fs) {
     if model.tags.is_empty() {
-        open_delete_prompt(model);
+        open_delete_prompt(model, fs);
+        return;
+    }
+    if !model.settings.confirm_batch_delete {
+        batch_delete_now(model, fs);
         return;
     }
     model.prompt = Some(Prompt::ConfirmBatchDelete {
@@ -343,9 +371,10 @@ fn open_rename_prompt(model: &mut Model) {
     }));
 }
 
-/// Open the delete (`d`) confirmation on the focused selection. Deleting
-/// the session root is refused.
-fn open_delete_prompt(model: &mut Model) {
+/// Open the delete (`d`) confirmation on the focused selection — or,
+/// when the persisted toggle turned the question off, delete straight
+/// away. Deleting the session root is refused either way.
+fn open_delete_prompt(model: &mut Model, fs: &mut dyn Fs) {
     let Some((path, name, kind)) = focused_selection(model) else {
         return;
     };
@@ -353,7 +382,164 @@ fn open_delete_prompt(model: &mut Model) {
         model.message = Some(String::from("cannot delete the session root"));
         return;
     }
+    if !model.settings.confirm_delete {
+        delete_now(model, fs, &path, kind);
+        return;
+    }
     model.prompt = Some(Prompt::ConfirmDelete(ConfirmPrompt { path, name, kind }));
+}
+
+/// Delete `path` now: the confirmed (or unconfirmed-by-setting) single
+/// delete, remembered for the repeat key.
+fn delete_now(model: &mut Model, fs: &mut dyn Fs, path: &str, kind: FileKind) {
+    model.last_op = Some(RepeatOp::Delete);
+    let refresh = alloc::vec![String::from(parent_of(path))];
+    run_op(model, fs, FileOp::delete(path, kind), refresh);
+    prune_tag_if_gone(model, fs, path);
+}
+
+/// Run the batch delete of the tagged set now (the confirmed — or
+/// unconfirmed-by-setting — batch), remembered for the repeat key.
+fn batch_delete_now(model: &mut Model, fs: &mut dyn Fs) {
+    model.last_op = Some(RepeatOp::Delete);
+    let items = model.tags.entries().to_vec();
+    let refresh: Vec<String> = items
+        .iter()
+        .map(|item| String::from(parent_of(&item.path)))
+        .collect();
+    run_batch(model, fs, Batch::delete(&items), refresh);
+}
+
+/// The `.` key: re-apply the last completed file operation to the
+/// focused selection — a copy or move into the remembered destination
+/// directory, or a delete (which still asks per the confirmation
+/// setting).
+fn repeat_last_op(model: &mut Model, fs: &mut dyn Fs) {
+    let Some(op) = model.last_op.clone() else {
+        model.message = Some(String::from("nothing to repeat"));
+        return;
+    };
+    match op {
+        RepeatOp::CopyInto(dest) => repeat_transfer(model, fs, &dest, false),
+        RepeatOp::MoveInto(dest) => repeat_transfer(model, fs, &dest, true),
+        RepeatOp::Delete => open_delete(model, fs),
+    }
+}
+
+/// Repeat a copy/move of the focused selection into `dest` — the same
+/// planning, refusals, and overwrite questions as a typed destination.
+fn repeat_transfer(model: &mut Model, fs: &mut dyn Fs, dest: &str, moving: bool) {
+    let Some((src, _, kind)) = focused_selection(model) else {
+        return;
+    };
+    if moving && src == model.root.path {
+        model.message = Some(String::from("cannot move the session root"));
+        return;
+    }
+    submit_transfer(model, fs, &src, kind, dest, moving);
+}
+
+/// The `V` key: fetch the published storage roots and open the volume
+/// list. An empty report is a message, not an empty screen.
+fn open_volumes(model: &mut Model, fs: &mut dyn Fs) {
+    let volumes = fs.list_volumes();
+    if volumes.is_empty() {
+        model.message = Some(String::from("no volumes reported"));
+        return;
+    }
+    model.volumes = volumes;
+    model.volume_cursor = 0;
+    model.overlay = Overlay::Volumes;
+}
+
+/// Apply one key to the volume list: arrows/`j`/`k` move, Enter opens
+/// the chosen root, Esc/`q`/`V` closes the list.
+fn handle_volumes_overlay(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
+    match event {
+        Event::Esc | Event::Char('q' | 'V') => model.overlay = Overlay::None,
+        Event::Up | Event::Char('k') => {
+            model.volume_cursor = step(model.volume_cursor, -1, model.volumes.len());
+        }
+        Event::Down | Event::Char('j') => {
+            model.volume_cursor = step(model.volume_cursor, 1, model.volumes.len());
+        }
+        Event::Enter => {
+            let Some(volume) = model.volumes.get(model.volume_cursor) else {
+                return;
+            };
+            let target = volume.target.clone();
+            open_volume_root(model, fs, &target);
+        }
+        _ => {}
+    }
+}
+
+/// Re-root the session at `target` (a chosen volume's mount point): the
+/// tree, file pane, cursors, and space figure all restart there. A
+/// refused listing keeps the session where it stands — the list stays
+/// open and the errno lands on the message line.
+fn open_volume_root(model: &mut Model, fs: &mut dyn Fs, target: &str) {
+    match fs.list_dir(target) {
+        Ok(entries) => {
+            model.root = DirNode {
+                name: String::from(target),
+                path: String::from(target),
+                expanded: true,
+                children: Some(child_dirs_of(target, &entries)),
+            };
+            model.files_dir = String::from(target);
+            model.files = entries;
+            model.sort_files();
+            model.pane = Pane::Tree;
+            model.tree_cursor = 0;
+            model.tree_scroll = 0;
+            model.file_cursor = 0;
+            model.file_scroll = 0;
+            model.filter = None;
+            model.space = fs.volume_space(target);
+            model.overlay = Overlay::None;
+            model.message = Some(format!("opened {target}"));
+        }
+        Err(errno) => model.report(target, errno),
+    }
+}
+
+/// Apply one key to the settings menu: `1`/`2` toggle a confirmation
+/// (persisted immediately), Esc/`q`/`S` closes.
+fn handle_settings_overlay(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
+    match event {
+        Event::Esc | Event::Char('q' | 'S') => model.overlay = Overlay::None,
+        Event::Char('1') => {
+            model.settings.confirm_delete = !model.settings.confirm_delete;
+            persist_settings(model, fs);
+        }
+        Event::Char('2') => {
+            model.settings.confirm_batch_delete = !model.settings.confirm_batch_delete;
+            persist_settings(model, fs);
+        }
+        _ => {}
+    }
+}
+
+/// Write the settings to the user's `Settings/fstree/` through the seam.
+/// A failure (or an unknown home) keeps the change for this session and
+/// says so — the toggle the user made is never silently reverted.
+fn persist_settings(model: &mut Model, fs: &mut dyn Fs) {
+    match model.settings_home.clone() {
+        Some(home) => match model.settings.store(fs, &home) {
+            Ok(()) => model.message = Some(String::from("settings saved")),
+            Err(errno) => {
+                model.message = Some(format!(
+                    "settings not saved ({errno:?}) — in effect this session"
+                ));
+            }
+        },
+        None => {
+            model.message = Some(String::from(
+                "no home directory — settings apply to this session only",
+            ));
+        }
+    }
 }
 
 /// Apply one key to the open mode prompt: octal digits and Backspace
@@ -418,8 +604,103 @@ fn handle_input_prompt(model: &mut Model, fs: &mut dyn Fs, mut prompt: InputProm
             live_apply_filter(model, &prompt);
             model.prompt = Some(Prompt::Input(prompt));
         }
+        Event::Tab => {
+            complete_destination(model, fs, &mut prompt);
+            model.prompt = Some(Prompt::Input(prompt));
+        }
         Event::Enter => submit_input(model, fs, prompt),
         _ => model.prompt = Some(Prompt::Input(prompt)),
+    }
+}
+
+/// The shared completion engine's directory seam over the app's [`Fs`]:
+/// the engine lists through a shared reference, the seam mutates through
+/// its one-slot caches, so a `RefCell` bridges the two — borrowed only
+/// inside `list_dir`, never held across calls. A relative directory is
+/// joined onto the prompt's base, exactly as the submit path resolves
+/// the typed destination.
+struct SeamLister<'a> {
+    fs: core::cell::RefCell<&'a mut dyn Fs>,
+    base: &'a str,
+}
+
+impl rustos_complete::DirLister for SeamLister<'_> {
+    fn list_dir(&self, dir: &str) -> Result<Vec<rustos_complete::DirEntryInfo>, Errno> {
+        let resolved = if dir.starts_with('/') {
+            String::from(dir)
+        } else {
+            join(self.base, dir)
+        };
+        let entries = self.fs.borrow_mut().list_dir(&resolved)?;
+        Ok(entries
+            .into_iter()
+            .map(|entry| rustos_complete::DirEntryInfo {
+                is_dir: entry.kind == FileKind::Directory,
+                name: entry.name,
+            })
+            .collect())
+    }
+}
+
+/// How many candidate names the message line lists before eliding the
+/// rest — a display bound, not a completion bound.
+const COMPLETION_LISTED_MAX: usize = 6;
+
+/// Tab in a destination prompt: complete the typed path against the
+/// directory it names (relative spellings against the same base the
+/// submit resolves onto). A unique candidate replaces the word (a
+/// directory staying open with its `/`); several extend to their longest
+/// common prefix or are listed on the message line; none is said plainly.
+/// Prompts asking for something other than an existing path (a new name,
+/// a pattern, a needle) do not complete.
+fn complete_destination(model: &mut Model, fs: &mut dyn Fs, prompt: &mut InputPrompt) {
+    let base = match &prompt.op {
+        InputOp::CopyDest { .. } | InputOp::MoveDest { .. } => model.files_dir.clone(),
+        InputOp::BatchDest { .. } => current_base(model),
+        _ => return,
+    };
+    let lister = SeamLister {
+        fs: core::cell::RefCell::new(fs),
+        base: &base,
+    };
+    let matches = rustos_complete::path_matches(&prompt.input, &base, &lister);
+    let (dir_part, _) = rustos_complete::split_path_word(&prompt.input);
+    let completed = |name: &str, is_dir: bool| {
+        let mut text = String::from(dir_part);
+        text.push_str(name);
+        if is_dir {
+            text.push('/');
+        }
+        text
+    };
+    match matches.as_slice() {
+        [] => model.message = Some(String::from("no completion")),
+        [only] => {
+            let text = completed(&only.name, only.is_dir);
+            if text.len() <= INPUT_MAX {
+                prompt.input = text;
+            }
+        }
+        many => {
+            let common = rustos_complete::common_prefix(many.iter().map(|e| e.name.as_str()));
+            let extended = format!("{dir_part}{common}");
+            if extended.len() > prompt.input.len() && extended.len() <= INPUT_MAX {
+                prompt.input = extended;
+                return;
+            }
+            let mut shown: Vec<&str> = many
+                .iter()
+                .take(COMPLETION_LISTED_MAX)
+                .map(|e| e.name.as_str())
+                .collect();
+            let more = many.len() - shown.len();
+            let mut text = shown.join("  ");
+            if more > 0 {
+                shown.pop();
+                text = format!("{} (+{more} more)", shown.join("  "));
+            }
+            model.message = Some(text);
+        }
     }
 }
 
@@ -517,10 +798,14 @@ fn submit_transfer(
             return;
         }
     };
-    let refresh = alloc::vec![
-        String::from(parent_of(src)),
-        String::from(parent_of(&target))
-    ];
+    // The repeat key re-applies the operation into the same directory.
+    let dest_dir = String::from(parent_of(&target));
+    model.last_op = Some(if moving {
+        RepeatOp::MoveInto(dest_dir.clone())
+    } else {
+        RepeatOp::CopyInto(dest_dir.clone())
+    });
+    let refresh = alloc::vec![String::from(parent_of(src)), dest_dir];
     let op = if moving {
         FileOp::move_to(src, kind, &target)
     } else {
@@ -541,16 +826,7 @@ fn handle_confirm_prompt(
     event: &Event,
 ) {
     match event {
-        Event::Char('y' | 'Y') => {
-            let refresh = alloc::vec![String::from(parent_of(&prompt.path))];
-            run_op(
-                model,
-                fs,
-                FileOp::delete(&prompt.path, prompt.kind),
-                refresh,
-            );
-            prune_tag_if_gone(model, fs, &prompt.path);
-        }
+        Event::Char('y' | 'Y') => delete_now(model, fs, &prompt.path, prompt.kind),
         _ => model.message = Some(format!("{} not deleted", prompt.name)),
     }
 }
@@ -560,14 +836,7 @@ fn handle_confirm_prompt(
 /// nothing changed — never an assumed yes.
 fn handle_confirm_batch_delete(model: &mut Model, fs: &mut dyn Fs, count: usize, event: &Event) {
     match event {
-        Event::Char('y' | 'Y') => {
-            let items = model.tags.entries().to_vec();
-            let refresh: Vec<String> = items
-                .iter()
-                .map(|item| String::from(parent_of(&item.path)))
-                .collect();
-            run_batch(model, fs, Batch::delete(&items), refresh);
-        }
+        Event::Char('y' | 'Y') => batch_delete_now(model, fs),
         _ => model.message = Some(format!("{count} tagged entries not deleted")),
     }
 }
@@ -705,9 +974,22 @@ fn invert_tags(model: &mut Model) {
 }
 
 /// A submitted tag-by-pattern answer: tag every visible entry whose name
-/// (panes) or branch-relative path (flattened view) matches the glob. A
-/// malformed pattern is reported and tags nothing.
+/// (panes) or branch-relative path (flattened view) matches the glob —
+/// or, for a `size:`/`date:` range spelling, whose listed figures fall
+/// inside the range. A malformed pattern or range is reported and tags
+/// nothing.
 fn submit_tag_glob(model: &mut Model, typed: &str) {
+    match TagRange::parse(typed) {
+        Ok(Some(range)) => {
+            tag_by_range(model, &range);
+            return;
+        }
+        Ok(None) => {}
+        Err(reason) => {
+            model.message = Some(reason);
+            return;
+        }
+    }
     let pattern = match Pattern::new(typed) {
         Ok(pattern) => pattern,
         Err(error) => {
@@ -750,6 +1032,45 @@ fn submit_tag_glob(model: &mut Model, typed: &str) {
     ));
 }
 
+/// Tag every visible entry (panes) or listed row (flattened view) whose
+/// listed size and modification stamp fall inside `range` — the same
+/// scope the glob form tags over.
+fn tag_by_range(model: &mut Model, range: &TagRange) {
+    let items: Vec<TagEntry> = if model.view == View::Flat {
+        let Some(walk) = &model.walk else {
+            return;
+        };
+        walk.entries
+            .iter()
+            .filter(|entry| range.matches(entry.size, entry.modified))
+            .map(|entry| TagEntry {
+                path: entry.path.clone(),
+                kind: entry.kind,
+                size: entry.size,
+            })
+            .collect()
+    } else {
+        model
+            .visible_files()
+            .iter()
+            .filter(|entry| range.matches(entry.size, entry.modified))
+            .map(|entry| TagEntry {
+                path: join(&model.files_dir, &entry.name),
+                kind: entry.kind,
+                size: entry.size,
+            })
+            .collect()
+    };
+    let matched = items.len();
+    for item in items {
+        model.tags.insert(item);
+    }
+    model.message = Some(format!(
+        "tagged {matched} in range, {} tagged in all",
+        model.tags.count()
+    ));
+}
+
 /// A submitted batch destination: the spelling is normalised through the
 /// shared path grammar, must name an existing directory (a batch lands
 /// its entries *inside* it), and the batch then runs over the tagged set
@@ -779,6 +1100,12 @@ fn submit_batch_dest(model: &mut Model, fs: &mut dyn Fs, moving: bool, typed: &s
             return;
         }
     }
+    // The repeat key re-applies the operation into the same directory.
+    model.last_op = Some(if moving {
+        RepeatOp::MoveInto(dst.clone())
+    } else {
+        RepeatOp::CopyInto(dst.clone())
+    });
     let items = model.tags.entries().to_vec();
     let mut refresh: Vec<String> = items
         .iter()
@@ -984,7 +1311,7 @@ fn handle_flat_key(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
         }
         Event::Char('c') => open_flat_batch(model, false),
         Event::Char('m') => open_flat_batch(model, true),
-        Event::Char('d') => open_flat_delete(model),
+        Event::Char('d') => open_flat_delete(model, fs),
         Event::Char('?') => model.overlay = Overlay::Help,
         _ => {}
     }
@@ -1124,9 +1451,13 @@ fn open_flat_batch(model: &mut Model, moving: bool) {
 
 /// The `d` key in the flattened view: the batch delete confirmation over
 /// the tagged set.
-fn open_flat_delete(model: &mut Model) {
+fn open_flat_delete(model: &mut Model, fs: &mut dyn Fs) {
     if model.tags.is_empty() {
         model.message = Some(String::from("no tagged entries"));
+        return;
+    }
+    if !model.settings.confirm_batch_delete {
+        batch_delete_now(model, fs);
         return;
     }
     model.prompt = Some(Prompt::ConfirmBatchDelete {

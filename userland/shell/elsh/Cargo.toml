@@ -36,6 +36,13 @@ rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # Spelling only: it performs no I/O and grants nothing.
 rustos-cmdres = { path = "../../../lib/cmdres", version = "=0.0.0" }
 
+# The single shared filename-completion engine: the path-candidate policy
+# (directory-part/leaf split, dotfile rule, prefix filter) and the
+# longest-common-prefix Tab discipline. The shell dresses its candidates in
+# shell escaping and merges them with its command and resource-reference
+# classes; the policy itself is never re-derived here (§2.2).
+rustos-complete = { path = "../../../lib/complete", version = "=0.0.0" }
+
 # The single shared resource-reference spelling parser. The shell classifies a
 # redirection target as a resource reference (`sys:null`) versus a filesystem
 # path through this one parser — it never embeds a second reference grammar.

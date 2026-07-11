@@ -24,12 +24,16 @@ use rustos_sandbox::loopback::LoopbackLauncher;
 use rustos_sandbox::ParserSandbox;
 
 use crate::app::{handle_event, refresh_viewer, viewer_tick, walk_tick};
-use crate::fs::{Fs, FsEntry, RenameOutcome, VolumeSpace};
-use crate::model::{join, ModePrompt, Model, Overlay, Pane, Prompt, SortKey, View, Viewer};
+use crate::fs::{Fs, FsEntry, RenameOutcome, VolumeInfo, VolumeSpace};
+use crate::info::{note_hidden_entries, Info};
+use crate::model::{
+    join, ModePrompt, Model, Overlay, Pane, Prompt, RepeatOp, SortKey, View, Viewer,
+};
 use crate::ops::{basename, is_inside, parent_of};
 use crate::render::render;
 use crate::search::{ContentScan, Needle};
-use crate::tag::TagEntry;
+use crate::settings::{config_path, Settings};
+use crate::tag::{TagEntry, TagRange};
 use crate::view_disasm::{Decode, DisasmPane, DisasmView};
 use crate::walk::{FlatEntry, WalkPurpose, WalkState, Walker};
 
@@ -54,6 +58,8 @@ struct FakeFs {
     write_fail: Option<(String, Errno)>,
     /// `rename` reports the cross-volume boundary for these prefixes.
     cross_volume: Vec<String>,
+    /// What `list_volumes` reports (empty by default).
+    volumes: Vec<VolumeInfo>,
 }
 
 impl FakeFs {
@@ -73,7 +79,14 @@ impl FakeFs {
             read_fail: None,
             write_fail: None,
             cross_volume: Vec::new(),
+            volumes: Vec::new(),
         }
+    }
+
+    /// Register the volumes `list_volumes` reports.
+    fn volumes(mut self, volumes: Vec<VolumeInfo>) -> Self {
+        self.volumes = volumes;
+        self
     }
 
     /// Register a directory listing; each regular entry also receives
@@ -168,6 +181,10 @@ impl Fs for FakeFs {
 
     fn volume_space(&mut self, _path: &str) -> Option<VolumeSpace> {
         self.space
+    }
+
+    fn list_volumes(&mut self) -> Vec<VolumeInfo> {
+        self.volumes.clone()
     }
 
     fn stat_mode(&mut self, path: &str) -> Result<u32, Errno> {
@@ -510,7 +527,7 @@ fn hidden_entries_are_filtered_and_the_toggle_shows_them() {
     let mut m = model(&mut fs);
     assert!(m.tree_rows().iter().all(|r| r.name != ".hidden"));
     assert_eq!(m.visible_files().len(), 5);
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('.'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('H'));
     assert!(m.tree_rows().iter().any(|r| r.name == ".hidden"));
     assert_eq!(m.visible_files().len(), 6);
 }
@@ -522,7 +539,7 @@ fn hiding_entries_clamps_the_file_cursor() {
     m.show_hidden = true;
     m.pane = Pane::Files;
     m.file_cursor = m.visible_files().len() - 1;
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('.'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('H'));
     assert!(m.file_cursor < m.visible_files().len());
 }
 
@@ -1192,7 +1209,7 @@ fn a_scripted_session_browses_sorts_and_quits() {
         Event::Down,      // move within /docs
         Event::Char('s'), // sort menu
         Event::Char('e'), // by extension
-        Event::Char('.'), // show hidden
+        Event::Char('H'), // show hidden
         Event::Char('?'), // help overlay
         Event::Esc,       // dismiss it
         Event::Char('q'), // quit
@@ -1876,6 +1893,10 @@ impl Fs for SparseFs {
 
     fn volume_space(&mut self, _path: &str) -> Option<VolumeSpace> {
         None
+    }
+
+    fn list_volumes(&mut self) -> Vec<VolumeInfo> {
+        Vec::new()
     }
 
     fn stat_mode(&mut self, _path: &str) -> Result<u32, Errno> {
@@ -2710,4 +2731,444 @@ fn the_disasm_pages_render_inside_the_frame() {
     let status = row_text(&window, 10);
     assert!(status.contains("aarch64"), "got {status}");
     assert!(status.contains("address 0x1000"), "got {status}");
+}
+
+// --- S10: volumes, settings, range tagging, repeat, completion, stdinfo --
+
+/// A two-volume report: the fixture root plus a second mounted volume.
+fn volumed_fixture() -> FakeFs {
+    fixture()
+        .dir("/data", vec![file("d.log", 7, 5_000)])
+        .volumes(vec![
+            VolumeInfo {
+                target: String::from("/"),
+                fstype: String::from("rustfs"),
+                space: Some(VolumeSpace {
+                    free_bytes: 500,
+                    total_bytes: 1000,
+                }),
+            },
+            VolumeInfo {
+                target: String::from("/data"),
+                fstype: String::from("ext4"),
+                space: None,
+            },
+        ])
+}
+
+#[test]
+fn the_volume_list_opens_navigates_and_reroots_the_session() {
+    let mut fs = volumed_fixture();
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('V'));
+    assert_eq!(m.overlay, Overlay::Volumes);
+    assert_eq!(m.volumes.len(), 2);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Down);
+    assert_eq!(m.volume_cursor, 1);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    assert_eq!(m.overlay, Overlay::None);
+    assert_eq!(m.root.path, "/data");
+    assert_eq!(m.files_dir, "/data");
+    assert_eq!(m.files.len(), 1);
+    assert_eq!(m.tree_cursor, 0);
+}
+
+#[test]
+fn a_refused_volume_root_keeps_the_session_and_the_list() {
+    let mut fs = volumed_fixture();
+    fs.volumes[1].target = String::from("/locked");
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('V'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Down);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    assert_eq!(m.overlay, Overlay::Volumes, "the list stays open");
+    assert_eq!(m.root.path, "/", "the session keeps its root");
+    assert!(m.message.as_deref().unwrap_or("").contains("/locked"));
+}
+
+#[test]
+fn an_empty_volume_report_is_a_message_not_a_screen() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('V'));
+    assert_eq!(m.overlay, Overlay::None);
+    assert_eq!(m.message.as_deref(), Some("no volumes reported"));
+}
+
+#[test]
+fn the_volume_list_renders_targets_types_and_space() {
+    let mut fs = volumed_fixture();
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('V'));
+    let mut window = Window::new(Pos::new(0, 0), Size::new(12, 60));
+    render(&m, &mut window);
+    assert!(row_text(&window, 0).contains("Volumes"));
+    assert!(row_text(&window, 1).contains("rustfs"));
+    assert!(row_text(&window, 1).contains("free 500/1000"));
+    let second = row_text(&window, 2);
+    assert!(second.contains("/data") && second.contains("free -"));
+}
+
+// --- Settings -------------------------------------------------------------
+
+/// A fixture with a user home whose fixed `Settings/` shape exists.
+fn homed_fixture() -> FakeFs {
+    fixture()
+        .dir("/Users", vec![dir("ada")])
+        .dir("/Users/ada", vec![dir("Settings")])
+        .dir("/Users/ada/Settings", vec![])
+}
+
+#[test]
+fn settings_parse_fails_safe_and_encodes_round_trip() {
+    // Defaults keep every confirmation on.
+    assert_eq!(Settings::parse(""), Settings::default());
+    // Garbage, unknown keys, and bad values leave the defaults standing.
+    let garbled = Settings::parse("nonsense\nconfirm-delete=maybe\nyes=off\n");
+    assert_eq!(garbled, Settings::default());
+    // An explicit off turns exactly that confirmation off, and the
+    // encoded form parses back to the same settings.
+    let settings = Settings::parse("confirm-delete=off\nconfirm-batch-delete=on\n");
+    assert!(!settings.confirm_delete && settings.confirm_batch_delete);
+    assert_eq!(Settings::parse(&settings.encode()), settings);
+}
+
+#[test]
+fn settings_toggle_persists_and_reloads() {
+    let mut fs = homed_fixture();
+    let mut m = model(&mut fs);
+    m.settings_home = Some(String::from("/Users/ada"));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('S'));
+    assert_eq!(m.overlay, Overlay::Settings);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('1'));
+    assert!(!m.settings.confirm_delete);
+    assert_eq!(m.message.as_deref(), Some("settings saved"));
+    let stored = fs
+        .contents(&config_path("/Users/ada"))
+        .expect("the config file was written");
+    let reloaded = Settings::parse(core::str::from_utf8(&stored).expect("utf-8"));
+    assert!(!reloaded.confirm_delete && reloaded.confirm_batch_delete);
+    assert_eq!(Settings::load(&mut fs, "/Users/ada"), reloaded);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Esc);
+    assert_eq!(m.overlay, Overlay::None);
+}
+
+#[test]
+fn a_toggle_without_a_home_stays_session_only_and_says_so() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('S'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('2'));
+    assert!(!m.settings.confirm_batch_delete, "the change applies");
+    assert!(m.message.as_deref().unwrap_or("").contains("session only"));
+}
+
+#[test]
+fn confirm_delete_off_deletes_without_a_question() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.settings.confirm_delete = false;
+    m.pane = Pane::Files;
+    m.file_cursor = 2; // a.rs
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('d'));
+    assert_eq!(m.prompt, None, "no question was asked");
+    assert!(fs.contents("/a.rs").is_none(), "the file is gone");
+}
+
+#[test]
+fn confirm_batch_delete_off_runs_the_batch_without_a_question() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.settings.confirm_batch_delete = false;
+    tag(&mut m, "/a.rs", FileKind::Regular, 30);
+    tag(&mut m, "/b.txt", FileKind::Regular, 10);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('d'));
+    assert_eq!(m.prompt, None, "no question was asked");
+    assert!(fs.contents("/a.rs").is_none() && fs.contents("/b.txt").is_none());
+}
+
+#[test]
+fn the_settings_menu_renders_the_toggles() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.settings_home = Some(String::from("/Users/ada"));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('S'));
+    let mut window = Window::new(Pos::new(0, 0), Size::new(12, 60));
+    render(&m, &mut window);
+    assert!(row_text(&window, 0).contains("Settings"));
+    assert!(row_text(&window, 1).contains("confirm delete") && row_text(&window, 1).contains("on"));
+    assert!(row_text(&window, 2).contains("confirm batch delete"));
+    assert!(row_text(&window, 4).contains("/Users/ada/Settings/fstree/"));
+}
+
+// --- Range tagging ---------------------------------------------------------
+
+#[test]
+fn range_parse_covers_sizes_dates_and_refusals() {
+    // Not a range at all: the glob path handles it.
+    assert_eq!(TagRange::parse("*.rs"), Ok(None));
+    // Size bounds with binary suffixes, either side open.
+    let range = TagRange::parse("size:1K..2M")
+        .expect("parses")
+        .expect("is a range");
+    assert!(range.matches(1024, Time64::UNIX_EPOCH));
+    assert!(range.matches(2 * 1024 * 1024, Time64::UNIX_EPOCH));
+    assert!(!range.matches(1023, Time64::UNIX_EPOCH));
+    assert!(!range.matches(2 * 1024 * 1024 + 1, Time64::UNIX_EPOCH));
+    let open = TagRange::parse("size:..500")
+        .expect("parses")
+        .expect("is a range");
+    assert!(open.matches(0, Time64::UNIX_EPOCH) && !open.matches(501, Time64::UNIX_EPOCH));
+    // Malformed ranges are typed refusals, never globs.
+    assert!(TagRange::parse("size:abc..").is_err());
+    assert!(TagRange::parse("size:..").is_err());
+    assert!(TagRange::parse("size:9..1").is_err());
+    assert!(TagRange::parse("date:2024-02-30..").is_err());
+    assert!(TagRange::parse("date:2024-06-02..2024-06-01").is_err());
+    // A date range includes its end date and never matches the epoch
+    // "no stamp" marker.
+    let june = TagRange::parse("date:2024-06-01..2024-06-02")
+        .expect("parses")
+        .expect("is a range");
+    let first = Time64::from_secs(19_875 * 86_400 + 60); // 2024-06-01 00:01
+    let second_end = Time64::from_secs(19_877 * 86_400 - 1); // 2024-06-02 23:59:59
+    let third = Time64::from_secs(19_877 * 86_400); // 2024-06-03 00:00
+    assert!(june.matches(0, first));
+    assert!(june.matches(0, second_end));
+    assert!(!june.matches(0, third));
+    assert!(!june.matches(0, Time64::UNIX_EPOCH));
+}
+
+#[test]
+fn size_range_tagging_tags_matching_visible_entries() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('T'));
+    type_text(&mut m, &mut fs, "size:20..");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    // a.rs (30) and big (999) qualify; b.txt (10) does not.
+    assert!(m.tags.contains("/a.rs") && m.tags.contains("/big"));
+    assert!(!m.tags.contains("/b.txt"));
+    assert_eq!(m.tags.count(), 2);
+}
+
+#[test]
+fn date_range_tagging_tags_by_stamp_and_skips_the_epoch_marker() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.show_hidden = true;
+    m.pane = Pane::Files;
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('T'));
+    // Every fixture stamp (1000..4000 secs) is on 1970-01-01; the
+    // `.hidden` listing rides the tree, not the file pane, and directory
+    // rows carry the epoch marker so they never date-match.
+    type_text(&mut m, &mut fs, "date:1970-01-01..1970-01-01");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    assert_eq!(m.tags.count(), 3, "a.rs, b.txt, big");
+    assert!(!m.tags.contains("/docs"), "no fabricated dates for dirs");
+}
+
+#[test]
+fn a_malformed_range_reports_and_tags_nothing() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('T'));
+    type_text(&mut m, &mut fs, "size:1G..1K");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    assert!(m.tags.is_empty());
+    assert!(m.message.as_deref().unwrap_or("").contains("wrong order"));
+}
+
+// --- Repeat (`.`) -----------------------------------------------------------
+
+#[test]
+fn dot_repeats_the_last_copy_on_the_new_selection() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2; // a.rs
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
+    type_text(&mut m, &mut fs, "/docs");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    assert!(fs.contents("/docs/a.rs").is_some());
+    assert_eq!(m.last_op, Some(RepeatOp::CopyInto(String::from("/docs"))));
+    // `.` on the next file repeats the copy into the same directory.
+    m.file_cursor = 3; // b.txt
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('.'));
+    assert!(fs.contents("/docs/b.txt").is_some());
+}
+
+#[test]
+fn dot_with_no_history_says_so() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('.'));
+    assert_eq!(m.message.as_deref(), Some("nothing to repeat"));
+}
+
+#[test]
+fn dot_repeats_a_delete_and_still_asks() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2; // a.rs
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('d'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('y'));
+    assert!(fs.contents("/a.rs").is_none());
+    assert_eq!(m.last_op, Some(RepeatOp::Delete));
+    // The repeat still asks: the confirmation setting is on.
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('.'));
+    assert!(matches!(m.prompt, Some(Prompt::ConfirmDelete(_))));
+}
+
+// --- Prompt-line completion --------------------------------------------------
+
+#[test]
+fn tab_completes_a_unique_destination_and_keeps_directories_open() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2; // a.rs
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
+    type_text(&mut m, &mut fs, "do");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Tab);
+    match &m.prompt {
+        Some(Prompt::Input(prompt)) => assert_eq!(prompt.input, "docs/"),
+        other => panic!("prompt should stay open, got {other:?}"),
+    }
+    // The completed directory stays open for further typing; a second
+    // Tab inside it completes its file.
+    type_text(&mut m, &mut fs, "gui");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Tab);
+    match &m.prompt {
+        Some(Prompt::Input(prompt)) => assert_eq!(prompt.input, "docs/guide.md"),
+        other => panic!("prompt should stay open, got {other:?}"),
+    }
+}
+
+#[test]
+fn tab_extends_to_the_common_prefix_then_lists() {
+    let mut fs = fixture().dir(
+        "/notes",
+        vec![file("notes.txt", 1, 0), file("notebook", 1, 0)],
+    );
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2;
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
+    type_text(&mut m, &mut fs, "/notes/n");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Tab);
+    match &m.prompt {
+        Some(Prompt::Input(prompt)) => assert_eq!(prompt.input, "/notes/note"),
+        other => panic!("prompt should stay open, got {other:?}"),
+    }
+    // Nothing further extends: the candidates are listed instead.
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Tab);
+    let listed = m.message.clone().unwrap_or_default();
+    assert!(listed.contains("notebook") && listed.contains("notes.txt"));
+}
+
+#[test]
+fn tab_without_a_match_or_in_a_non_path_prompt_completes_nothing() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2;
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
+    type_text(&mut m, &mut fs, "zzz");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Tab);
+    assert_eq!(m.message.as_deref(), Some("no completion"));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Esc);
+    // A rename prompt asks for a new name, not an existing path: Tab
+    // changes nothing.
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('r'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Tab);
+    match &m.prompt {
+        Some(Prompt::Input(prompt)) => assert_eq!(prompt.input, "a.rs"),
+        other => panic!("prompt should stay open, got {other:?}"),
+    }
+}
+
+// --- The Standard Information Stream (fd 3) ---------------------------------
+
+/// An [`Info`] capturing every record for assertion.
+struct CapturedInfo {
+    records: Vec<String>,
+}
+
+impl Info for CapturedInfo {
+    fn info(&mut self, record: &[u8]) {
+        self.records
+            .push(String::from_utf8_lossy(record).into_owned());
+    }
+}
+
+#[test]
+fn hidden_omissions_are_reported_once_per_change() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    let mut info = CapturedInfo {
+        records: Vec::new(),
+    };
+    let mut last = None;
+    // The fixture root hides `.hidden`: one omission record.
+    note_hidden_entries(&m, &mut info, &mut last);
+    note_hidden_entries(&m, &mut info, &mut last);
+    assert_eq!(
+        info.records.len(),
+        1,
+        "one record per change, not per frame"
+    );
+    let record = &info.records[0];
+    assert!(record.contains("\"kind\":\"omission\""));
+    assert!(record.contains("fs.hidden_entries_omitted"));
+    assert!(record.contains("\"omitted_count\":1"));
+    assert!(record.ends_with('\n'));
+    // Showing hidden entries omits nothing (and emits nothing new).
+    m.show_hidden = true;
+    note_hidden_entries(&m, &mut info, &mut last);
+    assert_eq!(info.records.len(), 1);
+    // Hiding them again is a change: reported once more.
+    m.show_hidden = false;
+    note_hidden_entries(&m, &mut info, &mut last);
+    assert_eq!(info.records.len(), 2);
+}
+
+// --- The S10 end-to-end session ---------------------------------------------
+
+/// One scripted session across the stage's surface: tag two files, batch
+/// copy them, verify through the volume list, adjust a setting, and quit
+/// — every step through the ordinary key loop.
+#[test]
+fn a_scripted_session_tags_copies_and_visits_the_new_surfaces() {
+    let mut fs = volumed_fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2; // a.rs
+    let script = [
+        Event::Char('t'), // tag a.rs (cursor steps to b.txt)
+        Event::Char('t'), // tag b.txt
+        Event::Char('c'), // batch copy prompt
+    ];
+    for event in &script {
+        handle_event(&mut m, &mut fs, &mut decode(), event);
+    }
+    type_text(&mut m, &mut fs, "/docs");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    assert!(fs.contents("/docs/a.rs").is_some() && fs.contents("/docs/b.txt").is_some());
+    let rest = [
+        Event::Char('V'), // the volume list
+        Event::Esc,       // close it
+        Event::Char('S'), // the settings menu
+        Event::Char('1'), // confirm-delete off (no home: session only)
+        Event::Esc,       // close it
+        Event::Char('q'), // quit
+    ];
+    for event in &rest {
+        handle_event(&mut m, &mut fs, &mut decode(), event);
+    }
+    assert!(m.quit);
+    assert!(!m.settings.confirm_delete);
+    assert_eq!(m.overlay, Overlay::None);
 }

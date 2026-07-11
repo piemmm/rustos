@@ -62,12 +62,14 @@ pub mod entry;
 pub mod error;
 pub mod render;
 pub mod source;
+pub mod vfs;
 
 pub use browser::Browser;
 pub use entry::{Entry, EntryKind};
 pub use error::BrowseError;
 pub use render::render;
 pub use source::DirectorySource;
+pub use vfs::VfsDirectorySource;
 
 #[cfg(test)]
 mod tests;

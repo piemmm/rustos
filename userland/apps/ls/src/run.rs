@@ -37,21 +37,12 @@ mod program {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use rustos_abi::fs::{DirEntry, OpenFlags, FS_IO_MAX};
+    use rustos_abi::fs::{DirEntries, OpenFlags};
     use rustos_abi::Errno;
     use rustos_help::BundleHelp;
     use rustos_ls::{parse, run, Entry, Listing, Metadata, Output, USAGE};
     use rustos_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
     use rustos_rt::File;
-
-    /// Initial byte size of the directory-listing buffer: one page covers a
-    /// typical directory; `BufferTooSmall` grows it (below).
-    const DIR_BUF_INITIAL: usize = 4096;
-
-    /// Ceiling for the directory-listing buffer: the kernel's own per-call
-    /// staging cap ([`FS_IO_MAX`]), so the buffer grows exactly as far as
-    /// one `fs_readdir` transfer can ever fill and no further.
-    const DIR_BUF_MAX: usize = FS_IO_MAX;
 
     /// The production [`Listing`]: the kernel-authorised `fs_*` view of the
     /// filesystem. It adds no authority — every path resolution, per-inode
@@ -78,24 +69,14 @@ mod program {
         }
 
         fn read_dir(&self, path: &str) -> Result<Vec<Entry>, Errno> {
-            let dir = rustos_rt::open_dir(path.as_bytes()).map_err(Errno::from_syscall)?;
-            let mut buf = alloc::vec![0u8; DIR_BUF_INITIAL];
-            let used = loop {
-                match dir.read(&mut buf) {
-                    Ok(used) => break used,
-                    Err(ret) => match Errno::from_syscall(ret) {
-                        Errno::BufferTooSmall if buf.len() < DIR_BUF_MAX => {
-                            buf.resize((buf.len() * 2).min(DIR_BUF_MAX), 0);
-                        }
-                        other => return Err(other),
-                    },
-                }
-            };
+            // The one shared listing call and stream walker (`lib/rt`'s
+            // grow-to-`FS_IO_MAX` read, `lib/abi`'s `DirEntries`), so the
+            // transfer policy and the record bookkeeping are never
+            // re-derived here.
+            let stream = rustos_rt::read_dir_all(path.as_bytes()).map_err(Errno::from_syscall)?;
             let mut entries = Vec::new();
-            let mut rest = &buf[..used];
-            while !rest.is_empty() {
-                let (entry, consumed) = DirEntry::decode(rest)?;
-                rest = &rest[consumed..];
+            for item in DirEntries::new(&stream) {
+                let entry = item?;
                 // The ABI contract makes every entry name UTF-8; a name
                 // that is not is a corrupt or hostile stream, refused whole
                 // rather than silently dropped from the listing —
