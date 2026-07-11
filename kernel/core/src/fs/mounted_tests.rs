@@ -229,6 +229,110 @@ fn rebased_submounts_route_to_their_backing_subtree_and_handle() {
     );
 }
 
+/// Listing a driver-backed directory merges the mount points of its
+/// direct-child mounts — the `Storage:` catalog enumeration: a runtime
+/// mount with no node of its name on the parent volume appears as a
+/// structural directory entry, a name the parent volume already holds is
+/// not repeated, and the merged name resolves through to the mounted
+/// volume's own content.
+#[test]
+fn readdir_merges_direct_child_mounts_into_the_parent_listing() {
+    use crate::fs::perm::Metadata;
+    use rustos_abi::time::Time64;
+
+    let h_parent = DriverHandle::from_raw(9).expect("handle");
+    let h_usb = DriverHandle::from_raw(10).expect("handle");
+    let h_dup = DriverHandle::from_raw(11).expect("handle");
+
+    // The parent volume holds one plain directory and one whose name
+    // collides with a child mount point.
+    let mut parent = dir_driver();
+    let proot = parent.root();
+    parent
+        .create(proot, b"existing", NodeKind::Directory)
+        .expect("existing dir");
+    parent
+        .create(proot, b"dup", NodeKind::Directory)
+        .expect("dup dir");
+
+    // The hotplug volume carries one file, so resolution through the
+    // merged name is provable end to end.
+    let mut usb = driver();
+    let uroot = usb.root();
+    usb.create(uroot, b"note", NodeKind::RegularFile)
+        .expect("note file");
+
+    let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
+    vfs.mounts_write()
+        .set_backing(
+            &Path::parse("/Storage").expect("path"),
+            h_parent,
+            Vec::new(),
+        )
+        .expect("back /Storage");
+    let template = Metadata::new(UserId(TEST_UID), GroupId(TEST_GID), Mode::from_bits(0o775));
+    vfs.mounts_write()
+        .mount_with_template(
+            Path::parse("/Storage/usb1").expect("path"),
+            MountFlags::NOSUID,
+            h_usb,
+            template.clone(),
+        )
+        .expect("runtime mount");
+    vfs.mounts_write()
+        .mount_with_template(
+            Path::parse("/Storage/dup").expect("path"),
+            MountFlags::NOSUID,
+            h_dup,
+            template,
+        )
+        .expect("colliding runtime mount");
+
+    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    cell.install_vfs(vfs).expect("install vfs");
+    cell.register(h_parent, parent, "root", "memfs")
+        .expect("register parent");
+    cell.register(h_usb, usb, "usb1", "memfs")
+        .expect("register usb");
+    cell.register(h_dup, driver(), "dup", "memfs")
+        .expect("register dup");
+    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    identity.install(identity_table()).expect("identity");
+    let svc = MountedFilesystemService::new(cell, identity);
+    let caps = caps();
+
+    let entries = svc
+        .readdir(TEST_UID, &caps, "/Storage")
+        .expect("listing succeeds");
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+    assert!(
+        names.contains(&"existing"),
+        "parent content listed: {names:?}"
+    );
+    assert!(names.contains(&"usb1"), "child mount merged: {names:?}");
+    // The colliding name appears exactly once (the parent volume's own
+    // node; the mount is not repeated behind it).
+    assert_eq!(
+        names.iter().filter(|n| **n == "dup").count(),
+        1,
+        "colliding mount name deduplicated: {names:?}"
+    );
+    let usb1 = entries
+        .iter()
+        .find(|e| e.name == "usb1")
+        .expect("merged entry");
+    assert_eq!(usb1.kind, FileKind::Directory);
+    assert_eq!((usb1.size, usb1.allocated), (0, 0));
+    assert_eq!(usb1.modified, Time64::UNIX_EPOCH);
+
+    // The merged name is not a phantom: it resolves through to the mounted
+    // volume's own content.
+    let inside = svc
+        .readdir(TEST_UID, &caps, "/Storage/usb1")
+        .expect("child volume lists");
+    assert!(inside.iter().any(|e| e.name == "note"), "{inside:?}");
+}
+
 /// Build a service over freshly leaked mount + identity cells. `mount` and
 /// `identity` select whether each cell is installed, so a test can exercise
 /// the fail-closed pre-install paths.

@@ -46,6 +46,7 @@ use rustos_sync::OnceCell;
 
 use crate::kernel_fs::KernelFs;
 use crate::system_mount::{cached, publish_volume_identity, LATE_FILESYSTEM, VOLUME_FOREST};
+use crate::volume_policy::{GroupMappedFs, LATE_STORAGE_GID};
 
 /// Audit event: a runtime volume was attached, mounted, and its root
 /// published (drives.md `fs.hotplug.root_added`).
@@ -198,10 +199,17 @@ struct OpenedVolume {
 
 /// Open the requested filesystem over the extent window, honouring the
 /// device's write policy.
+///
+/// `map_gid` is the storage-group identity map an **ownerless** format is
+/// mounted under (`plans/DEVICES.md` D3d): a FAT32 volume is wrapped so
+/// every node appears system-owned under that group with group
+/// read/write. `None` (the gid cell not yet installed, or a format with
+/// a real owner model) leaves the driver unwrapped.
 fn open_filesystem(
     window: PartitionBlock<BlkClient>,
     fstype: VolumeFsType,
     read_only: bool,
+    map_gid: Option<GroupId>,
     wiring: &Wiring,
     volume_handle: u64,
 ) -> Result<OpenedVolume, Errno> {
@@ -238,8 +246,20 @@ fn open_filesystem(
         VolumeFsType::Fat32 => {
             let fs = Fat32::open(window).map_err(DriverError::as_errno)?;
             let identity = fs.volume_identity();
+            // FAT32 stores no owner model; mount it under the storage-group
+            // identity map when the group is provisioned, else keep the
+            // driver's own restrictive system-owned posture (fail closed).
+            let driver = match map_gid {
+                Some(gid) => cached(
+                    GroupMappedFs::new(fs, gid),
+                    volume_handle,
+                    wiring.pressure,
+                    wiring.audit,
+                ),
+                None => cached(fs, volume_handle, wiring.pressure, wiring.audit),
+            };
             Ok(OpenedVolume {
-                driver: cached(fs, volume_handle, wiring.pressure, wiring.audit),
+                driver,
                 identity,
                 fstype: "fat32",
             })
@@ -293,10 +313,24 @@ impl VolumeService for RuntimeVolumeService {
         let window = PartitionBlock::new(client, request.first_lba, request.blocks)
             .map_err(|err| refused("window_invalid", err.as_errno()))?;
 
-        // Open the matched filesystem and take its stable identity.
+        // Open the matched filesystem and take its stable identity. An
+        // ownerless format (FAT32) is mounted under the storage-group
+        // identity map when the unlock has resolved that group; formats
+        // with a real owner model keep their on-disk records.
+        let map_gid = match request.fstype {
+            VolumeFsType::Fat32 => LATE_STORAGE_GID.get(),
+            VolumeFsType::RustFs | VolumeFsType::Ext4 => None,
+        };
         let handle_raw = self.next_handle.fetch_add(1, Ordering::Relaxed);
-        let opened = open_filesystem(window, request.fstype, read_only, wiring, handle_raw)
-            .map_err(|err| refused("filesystem_unmountable", err))?;
+        let opened = open_filesystem(
+            window,
+            request.fstype,
+            read_only,
+            map_gid,
+            wiring,
+            handle_raw,
+        )
+        .map_err(|err| refused("filesystem_unmountable", err))?;
         let handle = DriverHandle::from_raw(handle_raw)
             .map_err(|_| refused("handle_invalid", Errno::OutOfRange))?;
 
@@ -311,11 +345,16 @@ impl VolumeService for RuntimeVolumeService {
             flags = flags.union(MountFlags::READ_ONLY);
         }
         // The mount carries its own permission template (a runtime mount
-        // point has no node in the boot layout tree): system-owned,
-        // world-traversable, writes gated per inode by the volume's own
-        // records. The volume manager's mount policy (the storage-group
-        // identity map) refines this when it lands.
-        let template = Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755));
+        // point has no node in the boot layout tree). An identity-mapped
+        // volume's template matches the map — system-owned under the
+        // storage group, group-writable — so the mount point itself is as
+        // reachable as its content; every other volume gets the
+        // system-owned world-traversable default, writes gated per inode
+        // by the volume's own records.
+        let template = match map_gid {
+            Some(gid) => Metadata::new(UserId(0), gid, Mode::from_bits(0o775)),
+            None => Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755)),
+        };
         vfs.mounts_write()
             .mount_with_template(path.clone(), flags, handle, template)
             .map_err(|_| refused("name_in_use", Errno::AlreadyExists))?;

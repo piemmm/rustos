@@ -273,6 +273,15 @@ pub mod user_admin_backing;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
 pub mod volume_service;
 
+// The removable-volume mount policy (`plans/DEVICES.md` D3d): the
+// storage-group identity map an ownerless filesystem (FAT32) is mounted
+// under, and the set-once gid cell the root unlock resolves the
+// well-known `storage` group into. Architecture-neutral (abi/sec/sync
+// seams only) because the unlock path that installs the gid compiles on
+// every port even where the attach path does not; its unit tests run on
+// the CI host.
+pub mod volume_policy;
+
 // The kernel-resident `/System` driver-store IPC *server* (Design D
 // D2b-2c): the arch-neutral request→reply translation that drains a
 // `rustos_kernel_ipc::CallEndpoint` and serves each

@@ -65,6 +65,7 @@ use rustos_partition::mbr::{self, MbrError};
 use rustos_partition::{Partition, PartitionType};
 use rustos_users::{
     AccountState, Gid, GroupRecord, GroupsDb, Identity, Salt, Uid, UserRecord, UsersDb,
+    STORAGE_GID, STORAGE_GROUP,
 };
 
 /// First sector of the FAT32 boot partition (1 MiB alignment, the
@@ -293,7 +294,7 @@ fn debug_users_db(entropy: &mut dyn EntropySource) -> Result<String, MkimageErro
             username: DEBUG_USERNAME,
             uid: Uid(0),
             primary_gid: DEBUG_PRIMARY_GID,
-            supplementary_gids: &[],
+            supplementary_gids: &[STORAGE_GID],
             display_name: "System Administrator",
             home: &rustos_users::default_home(DEBUG_USERNAME),
             shell: rustos_users::DEFAULT_SHELL,
@@ -310,16 +311,24 @@ fn debug_users_db(entropy: &mut dyn EntropySource) -> Result<String, MkimageErro
     Ok(db.serialise())
 }
 
-/// Build the debug-profile `/System/Security/Groups` text: the single
+/// Build the debug-profile `/System/Security/Groups` text: the
 /// [`DEBUG_GROUP`] group (gid [`DEBUG_PRIMARY_GID`]) the seeded `root`
-/// account's primary gid references, so the kernel's boot-time identity-table
-/// build resolves that reference against a real registry rather than failing
-/// closed on a dangling group. Membership is not stored here — it lives in the
-/// user records; this is only the authoritative name↔gid set.
+/// account's primary gid references — so the kernel's boot-time
+/// identity-table build resolves that reference against a real registry
+/// rather than failing closed on a dangling group — plus the well-known
+/// removable-storage group ([`STORAGE_GROUP`]) the account is a member
+/// of, which the unlock resolves by name to arm the hotplug-volume
+/// identity map (`plans/DEVICES.md` D3d). Membership is not stored here —
+/// it lives in the user records; this is only the authoritative name↔gid
+/// set.
 fn debug_groups_db() -> Result<String, MkimageError> {
-    let record = GroupRecord::new(DEBUG_GROUP, DEBUG_PRIMARY_GID)
-        .map_err(|e| MkimageError::GroupsDb(format!("debug group record: {e}")))?;
-    let db = GroupsDb::new(vec![record])
+    let records = vec![
+        GroupRecord::new(DEBUG_GROUP, DEBUG_PRIMARY_GID)
+            .map_err(|e| MkimageError::GroupsDb(format!("debug group record: {e}")))?,
+        GroupRecord::new(STORAGE_GROUP, STORAGE_GID)
+            .map_err(|e| MkimageError::GroupsDb(format!("storage group record: {e}")))?,
+    ];
+    let db = GroupsDb::new(records)
         .map_err(|e| MkimageError::GroupsDb(format!("debug registry: {e}")))?;
     Ok(db.serialise())
 }
@@ -944,6 +953,12 @@ mod tests {
         assert_eq!(
             db.lookup(DEBUG_GROUP).map(GroupRecord::gid),
             Some(DEBUG_PRIMARY_GID)
+        );
+        // The well-known removable-storage group ships too, so the unlock
+        // resolves it by name and arms the hotplug-volume identity map.
+        assert_eq!(
+            db.lookup(STORAGE_GROUP).map(GroupRecord::gid),
+            Some(STORAGE_GID)
         );
     }
 

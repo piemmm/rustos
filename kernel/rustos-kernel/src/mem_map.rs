@@ -61,7 +61,10 @@ const STACK_ARENA_MIN_BYTES: u64 = GUARD_ARENA_ALIGN;
 /// stacks (a workable headroom for both desktop and
 /// server without waste). Growth past this on genuine exhaustion is the
 /// staged follow-on (the growable/chained arena, `plans/PI.md`/PLAN L3b).
-const STACK_ARENA_MAX_BYTES: u64 = 64 * 1024 * 1024;
+/// `pub(crate)`: the aarch64 boot pool sizes itself for the worst-case
+/// re-expression of exactly this ceiling
+/// (`rustos_arch_aarch64::paging::guard_arena_pool_capacity`).
+pub(crate) const STACK_ARENA_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Headroom policy: reserve roughly 1/64 of the discovered RAM window for
 /// kthread kernel stacks (a capacity derived from

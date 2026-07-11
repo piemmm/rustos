@@ -20,6 +20,7 @@ use rustos_drv_storage_virtio_blk::{register as virtio_blk_register, VirtioBlk};
 use rustos_kernel::root_mount::{
     unlock_root_disk_interactively, NoWritableRootSink, UnlockInstall, UnlockOutcome,
 };
+use rustos_kernel::volume_policy::LateStorageGid;
 use rustos_kernel_core::{ConsoleRead, LateIdentity, LateUsersDb, NullConsole, UsersDbSource};
 use rustos_test_encrypted_root_image as disk_image;
 use rustos_test_virtio_qemu_support::{
@@ -128,6 +129,9 @@ fn root_unlock_login(
             // account-administration engine is wired.
             writable: &NoWritableRootSink,
             admin: None,
+            // A fresh gid cell stands in for the boot-wired storage-group
+            // policy cell, exactly like the users/identity cells above.
+            storage_gid: &LateStorageGid::new(),
         },
         env.audit_sink(),
         // The fixture passphrase is correct on the first try, so the

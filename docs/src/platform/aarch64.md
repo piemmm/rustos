@@ -2410,6 +2410,13 @@ it is idempotent and fails closed (`Misaligned` / `NotMapped` /
 `PoolExhausted`). `boot_aarch64` keeps the live boot `AddressSpace`
 (`enable_mmu_and_vectors` returns it) and prepares the arena after the RAM
 window is discovered, recording a `guard_arena_prepared` audit field. The
+boot page-table pool is sized for this worst case
+(`guard_arena_pool_capacity` over the kernel's arena policy ceiling: the
+identity root, up to two L2 splits for a boundary-straddling arena, and one
+L3 table per 2 MiB block), never a fixed default — a 16-frame default
+passed QEMU `virt`'s small arena but exhausted mid-split on a real 8 GiB
+Pi 4, silently reporting `guard_arena_prepared=false` and degrading the
+kthread stacks to their software-canary form. The
 crucial property is that the arena is its own 2 MiB block, **distinct from
 the block holding the running code and stack** — so unmapping a guard page
 in it later (G3) never touches the running region.

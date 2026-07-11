@@ -1083,7 +1083,13 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     a too-small window degrades to no arena, fail closed). `boot_aarch64` now
     keeps the live boot `AddressSpace` (`enable_mmu_and_vectors` returns it),
     fine-maps the arena over the *active* tables after discovery, and logs a
-    `guard_arena_prepared` audit field. The per-arch conformance vertical
+    `guard_arena_prepared` audit field. The boot page-table pool is sized by
+    `guard_arena_pool_capacity` over the arena policy ceiling (identity root
+    + two boundary L2 splits + one L3 per 2 MiB block), never a fixed
+    default: the former 16-frame default exhausted mid-split on a real
+    8 GiB Pi 4 (64 MiB arena) and silently degraded to the software canary
+    while QEMU `virt`'s small arena passed — host regression tests pin both
+    sides (`paging_tests.rs`). The per-arch conformance vertical
     `tests/integration/stack_arena_qemu_aarch64` (ids 4300-range 4303–4305)
     builds an identity space, prepares a 2 MiB-aligned arena that is its own L2
     block, enables the MMU, write+read-back-verifies a guard page, `unmap`s it

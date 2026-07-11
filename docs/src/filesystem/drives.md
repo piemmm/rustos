@@ -228,6 +228,14 @@ more than a rendering of `Backup:/`, and `Backup:/file` must open even when the
 `Storage:` catalog or the `/` view is absent (§4 invariant 3). `Storage:` is
 never a parent volume that other volumes live *inside*.
 
+**Enumeration is landed** (`plans/DEVICES.md` D3d): listing a directory
+merges the driver-backed mounts sitting directly beneath it into the
+listing (`MountTable::direct_children`, consumed by the `fs_readdir`
+service), so a runtime `/Storage/<name>` mount appears in `/Storage` even
+though the parent volume holds no node of that name — deduplicated against
+any same-named real node, rendered as a structural directory entry with the
+same `UNIX_EPOCH` stamp any stampless backing reports.
+
 ## 11. Fail-closed rules
 
 A path operation fails closed when: an alias is missing or ambiguous; a
@@ -367,6 +375,18 @@ capabilities, its root publication applies a policy wrapper and defaults to
 restrictive flags. Narrowing a `Time64` to a foreign field is checked and fails
 with `TimestampOutOfRange` rather than silently truncating (§22).
 
+**The ownerless-format policy wrapper is landed** (`plans/DEVICES.md` D3d):
+a runtime-attached FAT32 volume is mounted under the kernel's storage-group
+identity map (`rustos_kernel::volume_policy::GroupMappedFs`) — every node
+appears owned by the system user and the well-known `storage` group
+(`rustos_users::STORAGE_GROUP`, resolved **by name** from the loaded group
+registry at root unlock), directories `rwxrwxr-x` and files `rw-rw-r--`, so
+any logged-in member reads and writes the medium while security-record
+stores stay refused (the format cannot hold one). A registry without the
+group, or a format with a real owner model (RustFS, ext4), gets no wrapper:
+the former stays restrictively system-owned, the latter keeps its on-disk
+owners/modes/ACLs.
+
 ## 21. ABI and crate ownership
 
 | Home | Owns |
@@ -403,11 +423,15 @@ syscalls attach a filesystem driver to a hot-pluggable block source (the
 kernel blkio client over a served block-service endpoint + shared window),
 mount its root at `/Storage/<name>` with the removable-media flags, and
 publish/withdraw its `id::` root through the same forest — a detach flushes
-first and fails closed rather than discarding uncommitted data. The catalog
-*projection* (`Storage:/` enumeration, alias policy) and the `fs::` resolver
-remain future increments (`plans/DEVICES.md` D3c); machine aliases then
-rebind from the single root's subtrees to independent `id::` volume roots
-without changing the resolver contract.
+first and fails closed rather than discarding uncommitted data. **Automount
+policy, catalog enumeration, and the mount-policy identity map are landed**
+(`plans/DEVICES.md` D3c/D3d): the `volmgr` policy driver probes and attaches
+recognised volumes with deterministic names, `/Storage` listings enumerate
+the published runtime mounts (§10), and an ownerless foreign format mounts
+under the storage-group identity map (§20). Alias policy and the `fs::`
+resolver remain future increments; machine aliases then rebind from the
+single root's subtrees to independent `id::` volume roots without changing
+the resolver contract.
 
 ## 22. Error model
 

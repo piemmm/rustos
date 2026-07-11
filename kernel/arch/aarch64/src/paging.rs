@@ -688,18 +688,39 @@ impl Table {
     }
 }
 
-/// Maximum number of page-table pages the memory-isolation test needs:
-/// two [`AddressSpace`]s, each a root plus a 3-level walk for the extra
-/// 4 KiB mapping, with spares.
+/// Default pool capacity: what the memory-isolation test and the small
+/// bootstrap spaces need — two [`AddressSpace`]s, each a root plus a
+/// 3-level walk for the extra 4 KiB mapping, with spares. A consumer with
+/// a larger, *derived* demand (the boot pool that also re-expresses the
+/// kthread-stack guard arena at 4 KiB granularity) instantiates
+/// [`PageTablePool`] with its own capacity instead of growing this
+/// default for everyone.
 const POOL_SIZE: usize = 16;
+
+/// Page-table frames a boot pool must hold to build the gigapage identity
+/// map *and* re-express a guard arena of `arena_bytes` at 4 KiB granularity
+/// ([`AddressSpace::prepare_guard_arena`]): one L1 root, up to two L2
+/// replacement tables (an arena can straddle a 1 GiB boundary, splitting
+/// two gigapage blocks), and one L3 replacement table per 2 MiB block the
+/// arena spans.
+///
+/// The capacity is derived from the arena the caller intends to prepare,
+/// never a hand-picked literal: a fixed default-sized boot pool passed
+/// QEMU `virt` (whose small RAM window sizes a small arena) but exhausted
+/// mid-split on a real 8 GiB Pi 4 (64 MiB arena = 33+ tables), silently
+/// degrading the kthread stacks to their software-canary form.
+#[must_use]
+pub const fn guard_arena_pool_capacity(arena_bytes: u64) -> usize {
+    1 + 2 + (arena_bytes / BLOCK_2MIB) as usize
+}
 
 /// A statically-allocated pool of zero-initialised page-table pages.
 ///
 /// Allocation is monotonic — frames are never freed — which matches the
 /// set-up → run → exit lifecycle of the isolation test. A real allocator
 /// lives in `kernel/mem` and is wired in by a later stage.
-pub struct PageTablePool {
-    storage: [UnsafeCell<Table>; POOL_SIZE],
+pub struct PageTablePool<const CAPACITY: usize = POOL_SIZE> {
+    storage: [UnsafeCell<Table>; CAPACITY],
     used: AtomicUsize,
 }
 
@@ -708,22 +729,22 @@ pub struct PageTablePool {
 // advanced by `fetch_add` whenever translation is live, and by the
 // single-threaded pre-SMP boot CPU alone when it is not
 // ([`PageTablePool::alloc_with`]) — so distinct allocations never alias.
-unsafe impl Sync for PageTablePool {}
+unsafe impl<const CAPACITY: usize> Sync for PageTablePool<CAPACITY> {}
 
-impl Default for PageTablePool {
+impl<const CAPACITY: usize> Default for PageTablePool<CAPACITY> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl PageTablePool {
+impl<const CAPACITY: usize> PageTablePool<CAPACITY> {
     /// Construct an empty pool. `const`, so the pool lives in `.bss`.
     #[must_use]
     pub const fn new() -> Self {
         #[allow(clippy::declare_interior_mutable_const)]
         const ZERO: UnsafeCell<Table> = UnsafeCell::new(Table::new());
         #[allow(clippy::large_stack_arrays)]
-        let storage = [ZERO; POOL_SIZE];
+        let storage = [ZERO; CAPACITY];
         Self {
             storage,
             used: AtomicUsize::new(0),
@@ -757,20 +778,20 @@ impl PageTablePool {
     fn alloc_with(&self, translation_live: bool) -> Option<&'static mut [u64; ENTRIES_PER_TABLE]> {
         let idx = if translation_live {
             let idx = self.used.fetch_add(1, Ordering::SeqCst);
-            if idx >= POOL_SIZE {
+            if idx >= CAPACITY {
                 // Park the counter at the cap so a pathological number
                 // of post-exhaustion calls cannot wrap it.
-                self.used.store(POOL_SIZE, Ordering::SeqCst);
+                self.used.store(CAPACITY, Ordering::SeqCst);
             }
             idx
         } else {
             let idx = self.used.load(Ordering::SeqCst);
-            if idx < POOL_SIZE {
+            if idx < CAPACITY {
                 self.used.store(idx + 1, Ordering::SeqCst);
             }
             idx
         };
-        if idx >= POOL_SIZE {
+        if idx >= CAPACITY {
             return None;
         }
         // SAFETY: the monotonic counter means this index is owned by
@@ -836,7 +857,7 @@ impl PageTablePool {
     pub fn clean_invalidate_to_poc(&self) {}
 }
 
-impl PageTableFrames for PageTablePool {
+impl<const CAPACITY: usize> PageTableFrames for PageTablePool<CAPACITY> {
     fn alloc_table(&self) -> Option<TableFrame> {
         let entries = self.alloc()?;
         // The kernel's own memory is identity-mapped (MMU-off boot then a

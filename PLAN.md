@@ -2957,7 +2957,18 @@ transfer, landed in increments:
   (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `rustos_arch_api::entropy`
   slice (x86_64 `RDSEED`/`RDRAND`, aarch64 `RNDR` `Supported`; riscv64 `Zkr` /
   wasm32 host-import honest `Pending`) seeds the kernel reserve at boot via
-  `KernelArch::platform_entropy`. The seed is never the hardware RNG alone
+  `KernelArch::platform_entropy`.
+  - **Open gap — Pi 4 metal boots unseeded.** The aarch64 source is
+    `FEAT_RNG`/`RNDR` only, and the Pi 4's Cortex-A72 (ARMv8.0) has no
+    `FEAT_RNG`: on metal the seed draw fails closed (`id=4061
+    entropy reserve unseeded cause=draw_failed`, then `id=4063 per-boot id
+    unavailable`) and `random_get` keeps returning `EntropyNotReady` — honest,
+    never weakened, but the flagship board has no cryptographic randomness.
+    Staged work: a BCM2711 RNG200 (`brcm,bcm2711-rng200`) entropy source —
+    discovered from the device tree, MMIO-mapped by the aarch64 port, health-
+    tested, and mixed through the same `MixedPair` seam (never trusted alone,
+    §22) — so the Pi seeds at boot like the QEMU/x86_64 paths.
+  The seed is never the hardware RNG alone
   (§22): it is XOR-mixed with two independent software sources — a CPU
   timing-jitter source and the asynchronous interrupt-arrival-timing pool
   (`lib/rng::interrupt`, fed wait-free from `IrqTable::fire` via a set-once
@@ -3889,12 +3900,13 @@ I/O vocabulary. See `.junie/PREREQUISITES2.md` for the full P0–P6 status.
   fail-closed for an unpublished id. **Runtime attach/unpublish is landed**
   (`plans/DEVICES.md` D3b): the `volume_attach`/`volume_detach` syscalls
   mount a hot-pluggable volume under `/Storage/<name>` and publish/withdraw
-  its `id::` root through the same forest. **Still open under P4** (tracked,
-  not stubbed — not a shell blocker): the catalog/alias projection
-  (`plans/DEVICES.md` D3c) and the `fs::` resolver `Root` variant, at which
-  point machine aliases rebind to independent `id::` roots without changing
-  the resolver contract. Remaining prerequisites (P5) are tracked in
-  `.junie/PREREQUISITES2.md`.
+  its `id::` root through the same forest. **Automount, catalog
+  enumeration, and the mount-policy identity map are landed**
+  (`plans/DEVICES.md` D3c/D3d). **Still open under P4** (tracked, not
+  stubbed — not a shell blocker): alias policy for runtime volumes and the
+  `fs::` resolver `Root` variant, at which point machine aliases rebind to
+  independent `id::` roots without changing the resolver contract.
+  Remaining prerequisites (P5) are tracked in `.junie/PREREQUISITES2.md`.
 - P5 (reference parser) — shared resource-reference parser as a `lib/*` crate:
   **done.** `lib/resref` (`rustos-resref`) is the one definition of how a RustOS
   resource reference is lexed and validated into a typed `ResourceRef`, so the
@@ -4417,11 +4429,17 @@ themselves), derives the deterministic catalog name (sanitised label →
 `<fstype><n>` → identity-fingerprint suffix on collision), and issues the
 audited `volume_attach` per volume, exiting 0 run-to-completion — the
 `mbr::encode` silently-drops-`Other`-partitions defect was fixed en route
-with a regression test. D3d–D4 remain: the mount-policy permission
-identity map (`storage` group) + `Storage:` catalog enumeration, plus the
-surprise-removal state machine (retained uncommitted writes, syslog
-events, force-unmount, and verified re-insert replay). See
-`plans/DEVICES.md` for the binding design and staging.
+with a regression test. D3d (done) landed the user-facing mount policy:
+the well-known `storage` group (`rustos_users::STORAGE_GROUP`, resolved by
+name from the loaded group registry at root unlock into the set-once
+`volume_policy::LATE_STORAGE_GID` cell), the `GroupMappedFs` identity map
+an ownerless FAT32 attach mounts under (system-owned, group `0o775`/`0o664`,
+`set_security` refused; owner-model volumes untouched, no gid → fail-closed
+restrictive default), and `Storage:` catalog enumeration (`MountTable::
+direct_children` merged into `fs_readdir`, deduplicated, structural
+entries). D4 remains: the surprise-removal state machine (retained
+uncommitted writes, syslog events, force-unmount, and verified re-insert
+replay). See `plans/DEVICES.md` for the binding design and staging.
 
 ---
 

@@ -250,10 +250,12 @@ pub fn service_caps() -> CapabilitySet {
 /// consumers call it through; [`CapabilityId::HW_EMIT`] and
 /// [`CapabilityId::MAILBOX`] for the user-space USB bus drivers (`pcie_brcm`,
 /// `vl805`) that publish enumerated devices and reload controller firmware;
-/// and [`CapabilityId::SHM`] / [`CapabilityId::IPC_ENDPOINT`] for the
+/// [`CapabilityId::SHM`] / [`CapabilityId::IPC_ENDPOINT`] for the
 /// USB host-controller driver and its HID class driver to stand up and submit
-/// on the per-interface URB transport. A storage or other driver — whose
-/// manifest does not request them — receives nothing extra (the per-driver
+/// on the per-interface URB transport; and [`CapabilityId::FS_MOUNT`] for the
+/// `volmgr` storage-policy driver to request the audited kernel attach of
+/// each recognised volume. A driver whose
+/// manifest does not request them receives nothing extra (the per-driver
 /// intersection still binds — no ambient authority).
 /// The driver never receives `CAP_DRV_LOAD`: it is the *caller's* key to the
 /// gate, not a capability any driver's manifest requests.
@@ -312,6 +314,14 @@ pub fn autoload_caps() -> CapabilitySet {
     // binds, so no ambient authority).
     caps.insert(CapabilityId::SHM);
     caps.insert(CapabilityId::IPC_ENDPOINT);
+    // The `volmgr` storage-policy driver probes its bound block-service node
+    // read-only and asks the kernel to attach each recognised volume through
+    // `volume_attach`, which the kernel gates on `CAP_FS_MOUNT` (and
+    // re-validates grants/extent/name before any mount). The delegatable set
+    // carries it so such a signed driver can be granted it; a driver that
+    // does not request it receives nothing extra (the per-driver manifest
+    // intersection still binds, so no ambient authority).
+    caps.insert(CapabilityId::FS_MOUNT);
     caps
 }
 
@@ -837,6 +847,17 @@ mod tests {
             // itself (no ambient authority).
             CapabilityId::SHM,
             CapabilityId::IPC_ENDPOINT,
+            // An autoloaded user-space driver emits its structured
+            // diagnostics through `log_emit` (`CAP_LOG_EMIT`) — delegatable
+            // to a signed manifest that requests it, never held by the
+            // kthread itself (no ambient authority).
+            CapabilityId::LOG_EMIT,
+            // The `volmgr` storage-policy driver requests the audited kernel
+            // attach of each volume it recognises on its bound block-service
+            // node (`volume_attach`, gated on `CAP_FS_MOUNT`) — delegatable
+            // to a signed manifest that requests it, never held by the
+            // kthread itself (no ambient authority).
+            CapabilityId::FS_MOUNT,
         ] {
             assert!(!service.contains(cap));
             assert!(autoload.contains(cap));

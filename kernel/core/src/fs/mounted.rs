@@ -46,6 +46,7 @@ use rustos_abi::driver::filesystem::{
 };
 use rustos_abi::driver::DriverHandle;
 use rustos_abi::sysinfo::MountRecord;
+use rustos_abi::time::Time64;
 use rustos_abi::{
     CapabilityQuery, Errno, FileKind, FileStat, OpenFlags, UnlinkFlags, FS_MODE_MASK,
 };
@@ -640,7 +641,7 @@ where
             // wrong volume and fail the whole listing closed, and each
             // re-resolution would repeat the child's full walk.
             let entries = vfs.list_via_secured(cred, path, fs)?;
-            Ok(entries
+            let mut out: Vec<ReaddirEntry> = entries
                 .into_iter()
                 .map(|(info, modified, name)| ReaddirEntry {
                     kind: file_kind(info.kind),
@@ -649,7 +650,33 @@ where
                     modified,
                     name,
                 })
-                .collect())
+                .collect();
+            // A covered mount point is part of its parent's listing even
+            // when the parent volume holds no node of that name — the
+            // runtime `/Storage/<name>` mounts, i.e. the `Storage:` catalog
+            // enumeration (drives.md §15). A same-named node the parent
+            // volume *does* hold already listed above and is not repeated.
+            // The merged entry is structural: a mount point is a directory
+            // by construction, and no per-node stamp is reachable through
+            // the parent volume, so it carries the same `UNIX_EPOCH` stamp
+            // any stampless backing reports.
+            let mounts = vfs.mounts();
+            for mount in mounts.direct_children(path) {
+                let Some(name) = mount.path().components().last() else {
+                    continue;
+                };
+                if out.iter().any(|entry| entry.name == *name) {
+                    continue;
+                }
+                out.push(ReaddirEntry {
+                    kind: FileKind::Directory,
+                    size: 0,
+                    allocated: 0,
+                    modified: Time64::UNIX_EPOCH,
+                    name: name.clone(),
+                });
+            }
+            Ok(out)
         })
     }
 

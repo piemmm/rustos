@@ -361,7 +361,8 @@ the device up, **binds its granted interrupt line and parks on `irq_wait`**
 is decoded and delivered to the input-focus arbiter, and the run passes on the
 one-shot `AuditEvent::InputDelivered` witness (`EventId(4050)`, `AGENTS.md`
 §20). The load presents `unlock_service::autoload_caps` (the kthread's minimal
-`service_caps` plus `CAP_INPUT_INJECT` and `CAP_IRQ_BIND`), so the input
+`service_caps` plus the delegatable per-class resource capabilities its
+rustdoc enumerates — the one authoritative definition), so the input
 driver's manifest∩caller intersection grants exactly the injection authority
 `key_inject` requires and the `irq_bind`/`irq_wait` authority its
 interrupt-driven event loop parks on — and nothing the kthread holds ambiently

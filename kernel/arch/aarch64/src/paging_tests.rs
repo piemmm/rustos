@@ -833,6 +833,52 @@ fn prepare_guard_arena_fails_closed() {
     );
 }
 
+/// A maximal 64 MiB arena, the worst case the kernel's sizing policy
+/// produces (an 8 GiB Pi 4 clamps to exactly this), laid out straddling a
+/// 1 GiB boundary so *two* gigapage blocks need an L2 split.
+const MAX_POLICY_ARENA_BYTES: u64 = 64 * 1024 * 1024;
+
+#[test]
+fn a_pool_sized_by_guard_arena_pool_capacity_prepares_that_arena() {
+    // The derived capacity covers the worst case: identity root + two L2
+    // splits + one L3 table per 2 MiB block. Every covering block ends up
+    // a 4 KiB-leaf table with identity translation preserved.
+    static POOL: PageTablePool<{ guard_arena_pool_capacity(MAX_POLICY_ARENA_BYTES) }> =
+        PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 3).expect("identity map");
+    let base = (2u64 << 30) - MAX_POLICY_ARENA_BYTES / 2;
+    space
+        .prepare_guard_arena(base, MAX_POLICY_ARENA_BYTES)
+        .expect("the derived capacity covers the maximal arena");
+    for va in [
+        base,
+        (2u64 << 30) - BLOCK_2MIB,
+        2u64 << 30,
+        base + MAX_POLICY_ARENA_BYTES - PAGE_SIZE as u64,
+    ] {
+        let leaf = host_leaf_descriptor(space.root_phys(), va).expect("page maps va");
+        assert!(!is_block(leaf), "arena page {va:#x} is now a 4 KiB leaf");
+        assert_eq!(phys_from_descriptor(leaf), va, "identity preserved");
+    }
+}
+
+#[test]
+fn a_default_sized_pool_cannot_prepare_a_maximal_arena() {
+    // The fail-before proof of the Pi 4 metal defect: a boot pool left at
+    // the small default exhausts mid-split on the maximal policy arena
+    // (`guard_arena_prepared=false` on an 8 GiB board), while QEMU
+    // `virt`'s small window sizes a small arena that fits — the silent
+    // scaling cliff the derived capacity forecloses.
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 3).expect("identity map");
+    let base = (2u64 << 30) - MAX_POLICY_ARENA_BYTES / 2;
+    assert_eq!(
+        space.prepare_guard_arena(base, MAX_POLICY_ARENA_BYTES),
+        Err(MapError::PoolExhausted),
+        "the fixed default cannot cover the maximal arena"
+    );
+}
+
 #[test]
 fn passes_mmu_conformance() {
     use rustos_arch_api::mmu;

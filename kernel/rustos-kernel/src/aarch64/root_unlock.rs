@@ -1015,6 +1015,7 @@ fn finish_unlock<B: Block + 'static>(
                     identity: &crate::root_mount::LATE_IDENTITY,
                     audit,
                 }),
+                storage_gid: &crate::volume_policy::LATE_STORAGE_GID,
             },
             audit,
             &retry_delay,

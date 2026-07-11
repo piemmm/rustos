@@ -2,13 +2,15 @@
 //!
 //! The lifecycle test drives the whole D3b path in-process against the
 //! real global boot statics (`LATE_FILESYSTEM`, `VOLUME_FOREST`,
-//! `VOLUME_SERVICE`, the recorded shared-memory facility): a FAT32 image
-//! is served over a genuine call endpoint from another thread (the shape
-//! a user-space block driver has), attached, read through the production
-//! `fs_*` service, and detached. It is the **only** test in this crate
-//! that touches those statics (the system-mount tests deliberately avoid
-//! them), and it runs as one sequential test function so the set-once
-//! cells are installed exactly once.
+//! `VOLUME_SERVICE`, `LATE_IDENTITY`, `LATE_STORAGE_GID`, the recorded
+//! shared-memory facility): a FAT32 image is served over a genuine call
+//! endpoint from another thread (the shape a user-space block driver
+//! has), attached under the storage-group identity map (D3d), read and
+//! written through the production `fs_*` service as a group member —
+//! with a non-member's write refused — and detached. It is the **only**
+//! test in this crate that touches those statics (the system-mount tests
+//! deliberately avoid them), and it runs as one sequential test function
+//! so the set-once cells are installed exactly once.
 
 extern crate std;
 
@@ -36,10 +38,12 @@ use rustos_kernel_core::{sharedreg, Vfs};
 use rustos_kernel_ipc::{CallEndpoint, CallEndpointLimits, EndpointId, RecvCall};
 use rustos_kernel_mem::{FreeMemorySource, MemoryPressure};
 use rustos_kernel_sec::captable::TaskCapabilities;
-use rustos_kernel_sec::{GroupId, TaskId, UserId};
+use rustos_kernel_sec::{GroupId, GroupRecord, IdentityTableBuilder, TaskId, UserId, UserRecord};
 use rustos_log::Sink;
 
+use crate::root_mount::LATE_IDENTITY;
 use crate::system_mount::{FS_SERVICE, LATE_FILESYSTEM, VOLUME_FOREST};
+use crate::volume_policy::LATE_STORAGE_GID;
 use crate::volume_service::{RuntimeVolumeService, VOLUME_SERVICE};
 use rustos_kernel_core::VolumeService as _;
 
@@ -70,6 +74,13 @@ impl CapabilityQuery for NoCaps {
         false
     }
 }
+
+/// The storage group's gid on this test system, and the two ordinary
+/// principals the identity-map assertions run as: a member of the group
+/// and a non-member.
+const STORAGE_GID: u32 = 100;
+const MEMBER_UID: u32 = 1000;
+const OUTSIDER_UID: u32 = 2000;
 
 const BLOCK_SIZE: usize = 512;
 /// `BLOCK_SIZE` as the wire-width type the geometry carries.
@@ -270,12 +281,96 @@ fn an_unwired_service_fails_closed() {
     );
 }
 
+/// The identity table the lifecycle test installs: the system principal,
+/// a member of the storage group, and a non-member.
+fn identity_with_storage_member() -> rustos_kernel_sec::IdentityTable {
+    let mut identity = IdentityTableBuilder::new();
+    for gid in [0, STORAGE_GID, OUTSIDER_UID] {
+        identity.push_group(GroupRecord { gid: GroupId(gid) });
+    }
+    for (uid, gid) in [
+        (0, 0),
+        (MEMBER_UID, STORAGE_GID),
+        (OUTSIDER_UID, OUTSIDER_UID),
+    ] {
+        identity.push_user(UserRecord {
+            uid: UserId(uid),
+            primary_gid: GroupId(gid),
+            supplementary_gids: Vec::new(),
+            capability_grants: CapabilitySet::empty(),
+        });
+    }
+    identity.verify(&SINK).expect("identity table")
+}
+
+/// The storage-group identity map governs ordinary users on the attached
+/// volume: every node appears system-owned under the storage group, files
+/// `rw-rw-r--`, so a member reads and writes, a non-member reads but is
+/// refused a write — and the on-disk FAT volume never stores any of it.
+fn assert_identity_mapped_access() {
+    let mut buf = [0u8; 64];
+    let stat = FS_SERVICE
+        .stat(MEMBER_UID, &NoCaps, "/Storage/usb1/hello.txt")
+        .expect("member stats the file");
+    assert_eq!(
+        (stat.mode, stat.uid, stat.gid),
+        (0o664, 0, STORAGE_GID),
+        "the identity map presents system ownership under the storage group"
+    );
+    let n = FS_SERVICE
+        .read(MEMBER_UID, &NoCaps, "/Storage/usb1/hello.txt", 0, &mut buf)
+        .expect("member reads");
+    assert_eq!(&buf[..n], b"runtime volume payload");
+    FS_SERVICE
+        .write(
+            MEMBER_UID,
+            &NoCaps,
+            "/Storage/usb1/hello.txt",
+            0,
+            false,
+            b"R",
+        )
+        .expect("member writes through the group grant");
+    assert_eq!(
+        FS_SERVICE
+            .write(
+                OUTSIDER_UID,
+                &NoCaps,
+                "/Storage/usb1/hello.txt",
+                0,
+                false,
+                b"X"
+            )
+            .err(),
+        Some(Errno::PermissionDenied),
+        "a non-member's write is refused"
+    );
+    let n = FS_SERVICE
+        .read(
+            OUTSIDER_UID,
+            &NoCaps,
+            "/Storage/usb1/hello.txt",
+            0,
+            &mut buf,
+        )
+        .expect("a non-member still reads (other class)");
+    assert_eq!(&buf[..1], b"R", "the member's write landed");
+    assert!(n >= 1);
+}
+
 #[test]
 fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
     // --- One-time global wiring (this is the only test that touches the
     // boot statics). ---
     let pressure: &'static MemoryPressure = Box::leak(Box::new(MemoryPressure::over(&AMPLE)));
     VOLUME_SERVICE.install(&SINK, pressure);
+    // Arm the storage-group identity map (production: the root unlock
+    // resolves the group by name and installs its gid) and install the
+    // identity table the `fs_*` group resolution reads.
+    LATE_STORAGE_GID.install(GroupId(STORAGE_GID));
+    LATE_IDENTITY
+        .install(identity_with_storage_member())
+        .expect("install identity once");
     let window: &'static mut [u8] = Box::leak(vec![0u8; BLK_DATA_LEN].into_boxed_slice());
     let window_ptr = window.as_mut_ptr();
     let facility: &'static TestFacility = Box::leak(Box::new(TestFacility { window: window_ptr }));
@@ -351,6 +446,8 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
         .read(0, &NoCaps, "/Storage/usb1/hello.txt", 0, &mut buf)
         .expect("read through the mounted volume");
     assert_eq!(&buf[..n], b"runtime volume payload");
+
+    assert_identity_mapped_access();
 
     // --- Detach. ---
     let detach = VolumeDetachRequest {

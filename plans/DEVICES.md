@@ -599,31 +599,54 @@ volume-policy service.
   bit-coverage). Live path: Pi 4 metal acceptance (QEMU models no Pi
   USB — the D2/U4 precedent); the bundle ships in the Pi image
   (`Drivers/storage/volmgr/Run`, signed, least-privilege manifest).
+  The autoload gate's delegatable superset
+  (`unlock_service::autoload_caps`) carries `CAP_FS_MOUNT` so the signed
+  manifest is admissible through the store gate — the first metal boot
+  exposed its absence as an `id=7006` capability-escalation refusal
+  (the vcmailbox `CAP_IPC_BIND_PRIVILEGED` precedent); the per-driver
+  manifest∩superset intersection still binds. Metal re-verification of
+  the end-to-end automount is the outstanding live check.
 
-#### 2.4.4 D3d — mount-policy permissions and the catalog view
+#### 2.4.4 D3d — mount-policy permissions and the catalog view. **Done.**
 
-The user-facing half D3c deliberately did not touch (it needs the
-`storage` group and kernel view work, each with its own enforcement
-point):
-
-- **Permissions so logged-in users can use the data (§5.3, §16.3):**
-  removable volumes mount `nosuid,nodev,noexec` (landed); relaxation
-  requires `CAP_FS_MOUNT_RELAX` and is audit-logged. Foreign filesystems
-  with no owner model (FAT32) get a mount-policy identity map: files
-  appear owned by the `storage` group with group read/write, so any
-  logged-in member (the installer adds interactive users to it) can read
-  and write without ambient authority; volumes with a real owner model
-  (ext4, RustFS) keep their on-disk owners/modes/ACLs. The kernel attach
-  path's mount template is the seam (`mount_with_template` — today the
-  restrictive system-owned default, with the identity map called out as
-  this work).
-- **Catalog enumeration:** listing `/Storage` (the `Storage:` catalog
-  *view*) enumerates the published runtime roots (`Storage:/<Name>` →
-  `<Name>:/`, drives.md §15); D3b/D3c deliver resolution of a published
-  root, not enumeration of the set.
-- Host unit tests over the policy maps and the catalog view; QEMU
-  vertical: attach a disk image → assert the root, alias, catalog entry,
-  and a user-scoped read/write through `fs_open`.
+- **The storage-group identity map** (§5.3, §16.3): the well-known
+  `storage` group is defined once (`rustos_users::STORAGE_GROUP`, seed gid
+  `STORAGE_GID` = 100) and resolved **by name** from the loaded
+  `/System/Security/Groups` registry by the trusted root-unlock step
+  (`UnlockInstall::storage_gid` → the set-once
+  `rustos_kernel::volume_policy::LATE_STORAGE_GID` cell). A runtime-attached
+  ownerless filesystem (FAT32) is wrapped in `GroupMappedFs`: every node
+  reports system ownership under that group — directories `0o775`, files
+  `0o664`, `set_security` refused (the format cannot hold a record) — and
+  the mount template matches, so any logged-in member reads and writes the
+  medium without ambient authority while non-members read only. No
+  installed gid (or a registry without the group) leaves the volume
+  restrictively system-owned (fail closed, never an invented gid); volumes
+  with a real owner model (ext4, RustFS) are never wrapped. Removable
+  mounts keep `nosuid,nodev,noexec` (landed in D3b); `CAP_FS_MOUNT_RELAX`
+  relaxation stays future work with its own enforcement point.
+- **Catalog enumeration:** listing a driver-backed directory merges the
+  backed mounts sitting directly beneath it (`MountTable::direct_children`
+  → the `fs_readdir` service), so `/Storage` enumerates the published
+  runtime roots even though the parent volume has no node of those names —
+  deduplicated against a same-named real node, rendered as a structural
+  directory entry with the `UNIX_EPOCH` stamp any stampless backing
+  reports (drives.md §10).
+- **Provisioning:** the mkimage debug profile and the encrypted-root test
+  fixtures seed `storage:100` and the seeded `root` account's membership;
+  `useradd` keeps its coreutils `-G` surface (no hidden default), and the
+  staged installer's account-creation step is where interactive users are
+  added to the group.
+- Host-proven end to end: the volume-service lifecycle test attaches a
+  served FAT32 volume under the armed identity map and drives the
+  production `fs_*` service as a member (mapped stat `0o664`/uid 0/gid
+  100, read + write) and a non-member (write refused, other-class read
+  allowed); the readdir merge, dedupe, and merged-name resolution are
+  covered over the mock-backed mount service, `direct_children` and
+  `GroupMappedFs` by unit tests, and the unlock test asserts the gid cell
+  arms from the on-disk registry. The live path rides the Pi 4 metal
+  acceptance with the D2/D3c precedent (no emulated fixture publishes USB
+  nodes).
 
 ### 2.5 D4 — surprise removal, force-unmount, verified re-insert
 
@@ -680,7 +703,7 @@ point):
 - **D3c** `volmgr` — the per-node automount policy driver + `lib/fsprobe`
   + deterministic naming. **Done** (§2.4.3).
 - **D3d** mount-policy permissions (`storage` group identity map) + the
-  `Storage:` catalog enumeration (§2.4.4).
+  `Storage:` catalog enumeration. **Done** (§2.4.4).
 - **D4** surprise-removal state machine, force-unmount, verified
   re-insert.
 

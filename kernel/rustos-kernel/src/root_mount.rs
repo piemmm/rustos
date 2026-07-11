@@ -78,13 +78,14 @@ use rustos_kernel_core::{
     GroupsLoadError, HeldUsersDbSource, LateIdentity, LateUsersAdmin, LateUsersDb, SleepLock,
     UserAdminEngine, UsersDbSource, UsersLoadError,
 };
-use rustos_kernel_sec::IdentityTable;
+use rustos_kernel_sec::{GroupId, IdentityTable};
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 use rustos_partition::{parse_partition_table, PartitionBlock, PartitionError, PartitionType};
 use rustos_users::{GroupsDb, UsersDb};
 
 use crate::kernel_fs::KernelFs;
 use crate::user_admin_backing::RootAdminBacking;
+use crate::volume_policy::LateStorageGid;
 use zeroize::Zeroizing;
 
 /// A mounted root volume, viewed as the read + security surface the
@@ -310,9 +311,10 @@ impl WritableRootSink for NoWritableRootSink {
 /// The set-once destinations a successful unlock publishes into.
 ///
 /// Bundled so the unlock policy carries one "install targets" reference
-/// rather than three parallel parameters: the validated users database, the
-/// verified identity table, and the writable-state sink. All three are
-/// published together on a successful unlock.
+/// rather than a row of parallel parameters: the validated users database,
+/// the verified identity table, the writable-state sink, and the
+/// storage-group gid cell. All are published together on a successful
+/// unlock.
 pub struct UnlockInstall<'a> {
     /// The set-once cell the validated `users-v1` text is published into.
     pub users: &'a LateUsersDb,
@@ -327,6 +329,12 @@ pub struct UnlockInstall<'a> {
     /// `None` (host tests, ports without a writable root) leaves the
     /// `users_admin` syscall failing closed.
     pub admin: Option<AdminInstall>,
+    /// The set-once cell the well-known `storage` group's gid is resolved
+    /// into from the loaded group registry (`plans/DEVICES.md` D3d — the
+    /// removable-volume identity map's policy input). A registry without
+    /// that group installs nothing, leaving foreign volumes system-owned
+    /// (fail closed, never an invented gid).
+    pub storage_gid: &'a LateStorageGid,
 }
 
 /// The `'static` targets the account-administration engine is built over
@@ -868,6 +876,14 @@ fn finish_install(
     if install.users.install(users).is_err() {
         gave_up(audit, "already_installed");
         return UnlockOutcome::GaveUp;
+    }
+    // Resolve the well-known removable-storage group **by name** from the
+    // just-loaded registry and arm the ownerless-volume identity map
+    // (`plans/DEVICES.md` D3d). A registry without the group installs
+    // nothing: foreign volumes then stay system-owned rather than mounted
+    // under an invented gid.
+    if let Some(group) = groups_db.lookup(rustos_users::STORAGE_GROUP) {
+        install.storage_gid.install(GroupId(group.gid().0));
     }
     // With both live cells installed, build and publish the
     // `CAP_USER_ADMIN` engine over the same verified state
@@ -2048,6 +2064,7 @@ mod tests {
         let input = ScriptInput::new(script(&[PASSPHRASE]));
         let late = LateUsersDb::new();
         let late_identity = LateIdentity::new();
+        let storage_gid = LateStorageGid::new();
         let sink = RecordingSink::new();
 
         let outcome = unlock_root_disk_interactively(
@@ -2059,6 +2076,7 @@ mod tests {
                 identity: &late_identity,
                 writable: &NoWritableRootSink,
                 admin: None,
+                storage_gid: &storage_gid,
             },
             &sink,
             &|| {},
@@ -2067,6 +2085,14 @@ mod tests {
 
         assert_eq!(outcome, UnlockOutcome::Installed);
         assert!(late.is_installed(), "the database is published");
+        // The fixture registry carries the well-known removable-storage
+        // group; the unlock resolves it by name and arms the identity-map
+        // policy cell with its gid.
+        assert_eq!(
+            storage_gid.get(),
+            Some(GroupId(rustos_users::STORAGE_GID.0)),
+            "the storage-group gid is resolved and installed"
+        );
         let text = late
             .text()
             .expect("the cell now serves the loaded database");
@@ -2114,6 +2140,7 @@ mod tests {
                 identity: &late_identity,
                 writable: &NoWritableRootSink,
                 admin: None,
+                storage_gid: &LateStorageGid::new(),
             },
             &sink,
             &|| {},
@@ -2167,6 +2194,7 @@ mod tests {
                 identity: &late_identity,
                 writable: &NoWritableRootSink,
                 admin: None,
+                storage_gid: &LateStorageGid::new(),
             },
             &sink,
             &|| {
@@ -2226,6 +2254,7 @@ mod tests {
                 identity: &late_identity,
                 writable: &NoWritableRootSink,
                 admin: None,
+                storage_gid: &LateStorageGid::new(),
             },
             &sink,
             &|| {
@@ -2272,6 +2301,7 @@ mod tests {
                 identity: &late_identity,
                 writable: &NoWritableRootSink,
                 admin: None,
+                storage_gid: &LateStorageGid::new(),
             },
             &sink,
             &|| {},
@@ -2312,6 +2342,7 @@ mod tests {
                 identity: &LateIdentity::new(),
                 writable: &NoWritableRootSink,
                 admin: None,
+                storage_gid: &LateStorageGid::new(),
             },
             &RecordingSink::new(),
             &|| {},
@@ -2335,6 +2366,7 @@ mod tests {
                 identity: &LateIdentity::new(),
                 writable: &NoWritableRootSink,
                 admin: None,
+                storage_gid: &LateStorageGid::new(),
             },
             &RecordingSink::new(),
             &|| {},
@@ -2367,6 +2399,7 @@ mod tests {
                 identity: &late_identity,
                 writable: &NoWritableRootSink,
                 admin: None,
+                storage_gid: &LateStorageGid::new(),
             },
             &sink,
             &|| {},
@@ -2403,6 +2436,7 @@ mod tests {
                 identity: &late_identity,
                 writable: &NoWritableRootSink,
                 admin: None,
+                storage_gid: &LateStorageGid::new(),
             },
             &sink,
             &|| {},

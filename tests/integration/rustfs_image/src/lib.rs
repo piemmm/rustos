@@ -127,7 +127,7 @@ pub fn users_db_text() -> Result<String, ParseError> {
             username: USERS_FIXTURE_USERNAME,
             uid: Uid(0),
             primary_gid: Gid(0),
-            supplementary_gids: &[],
+            supplementary_gids: &[rustos_users::STORAGE_GID],
             display_name: "System Administrator",
             home: "/Users/root",
             shell: "/System/Apps/elsh.app/Run",
@@ -142,11 +142,14 @@ pub fn users_db_text() -> Result<String, ParseError> {
 }
 
 /// Serialise the users-root volume's `/System/Security/Groups` registry:
-/// the single `wheel` group (gid 0) the planted [`USERS_FIXTURE_USERNAME`]
-/// account names as its primary group, so the kernel's boot-time identity
+/// the `wheel` group (gid 0) the planted [`USERS_FIXTURE_USERNAME`]
+/// account names as its primary group — so the kernel's boot-time identity
 /// table build (`rustos_kernel_core::build_identity_table`) resolves the
 /// account's gid against a real registry rather than failing closed on a
-/// dangling reference.
+/// dangling reference — plus the well-known removable-storage group
+/// ([`rustos_users::STORAGE_GROUP`]) the account is a member of, exactly
+/// as `tools/mkimage::debug_groups_db` seeds the shipped debug profile,
+/// so the unlock's storage-gid resolution is exercised end to end.
 ///
 /// # Errors
 ///
@@ -154,8 +157,11 @@ pub fn users_db_text() -> Result<String, ParseError> {
 /// `groups-v1` bounds — a programming error in this fixture, surfaced
 /// rather than panicked.
 pub fn groups_db_text() -> Result<String, ParseError> {
-    let record = GroupRecord::new("wheel", Gid(0))?;
-    Ok(GroupsDb::new(alloc::vec![record])?.serialise())
+    let records = alloc::vec![
+        GroupRecord::new("wheel", Gid(0))?,
+        GroupRecord::new(rustos_users::STORAGE_GROUP, rustos_users::STORAGE_GID)?,
+    ];
+    Ok(GroupsDb::new(records)?.serialise())
 }
 
 /// In-memory [`Block`] device backing the fixture build and the host

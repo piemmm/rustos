@@ -84,6 +84,17 @@ ambient power (`AGENTS.md` §5.1): every per-inode owner/mode/ACL and
 mount-flag check still applies, non-zero uids stay strictly fail-closed,
 and a spawn-as-user *switch* always requires the installed table.
 
+One group name is **well-known**: `STORAGE_GROUP` (`"storage"`, seeded as
+gid `STORAGE_GID` = 100 by the image builder and the installer). At root
+unlock the kernel resolves it **by name** from the loaded registry and
+arms the removable-volume identity map with its gid
+(`rustos_kernel::volume_policy`, `plans/DEVICES.md` D3d): a hotplug volume
+whose filesystem stores no owner model (FAT32) then appears system-owned
+under this group with group read/write, so any member uses the medium
+without ambient authority. A registry without the group simply leaves
+foreign volumes restrictively system-owned — the kernel never invents a
+gid.
+
 `GroupsDb::parse` is held to the identical fail-closed discipline as the
 user database — it bounds the file (64 KiB), each line (128 bytes), and the
 record count (1024) before reading anything, validates every field,

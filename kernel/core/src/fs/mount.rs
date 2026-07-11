@@ -295,6 +295,22 @@ impl MountTable {
         self.resolve(path).is_read_only()
     }
 
+    /// The driver-backed mounts whose mount point is a **direct child** of
+    /// `path`, in insertion order.
+    ///
+    /// These are the entries a directory listing merges into `path`'s own
+    /// listing so a covered mount point appears in its parent directory
+    /// even when the parent volume holds no node of that name — the
+    /// runtime `/Storage/<name>` mounts are exactly that shape, and this
+    /// is what enumerates the `Storage:` catalog view. A backing-less
+    /// mount (a policy-only entry of the boot layout) is not listed: it
+    /// projects no content of its own.
+    pub fn direct_children<'a>(&'a self, path: &'a Path) -> impl Iterator<Item = &'a MountPoint> {
+        self.mounts.iter().filter(move |m| {
+            m.backing.is_some() && m.path.depth() == path.depth() + 1 && path.is_prefix_of(&m.path)
+        })
+    }
+
     /// Every mount in the table, in insertion order (the permanent root
     /// mount first).
     ///
@@ -462,6 +478,38 @@ mod tests {
             Err(VfsError::AlreadyExists)
         );
         table.unmount(&p("/Storage/usb1")).expect("unmount");
+    }
+
+    #[test]
+    fn direct_children_lists_backed_child_mounts_only() {
+        let mut table = MountTable::new(MountFlags::default());
+        let backed = DriverHandle::from_raw(0x5704).expect("non-zero handle");
+        table
+            .mount(p("/Storage/usb1"), MountFlags::NOSUID, Some(backed))
+            .expect("backed child");
+        // A backing-less policy mount projects no content and is not listed.
+        table
+            .mount(p("/Storage/policy"), MountFlags::NOSUID, None)
+            .expect("policy child");
+        // A deeper mount is not a *direct* child of /Storage.
+        table
+            .mount(p("/Storage/usb1/nested"), MountFlags::NOSUID, Some(backed))
+            .expect("grandchild");
+        // An unrelated sibling subtree is not listed either.
+        table
+            .mount(p("/Users/vol"), MountFlags::NOSUID, Some(backed))
+            .expect("unrelated");
+
+        let storage = p("/Storage");
+        let children: Vec<_> = table
+            .direct_children(&storage)
+            .map(MountPoint::path)
+            .collect();
+        assert_eq!(children, [&p("/Storage/usb1")]);
+        // Every mount here sits two levels deep, so the root itself has no
+        // direct-child mounts.
+        let root = Path::root();
+        assert_eq!(table.direct_children(&root).count(), 0);
     }
 
     #[test]

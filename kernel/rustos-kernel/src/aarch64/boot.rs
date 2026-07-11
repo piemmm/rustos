@@ -53,8 +53,8 @@ use alloc::vec::Vec;
 use rustos_abi::HwNode;
 use rustos_arch_aarch64::kernel_arch::{read_cntfrq, timer_frequency_hz};
 use rustos_arch_aarch64::paging::{
-    configure_device_gigapages, configure_ram_gigapages, identity_device_mask, identity_ram_mask,
-    ram_gigapages, AddressSpace, PageTablePool,
+    configure_device_gigapages, configure_ram_gigapages, guard_arena_pool_capacity,
+    identity_device_mask, identity_ram_mask, ram_gigapages, AddressSpace, PageTablePool,
 };
 use rustos_arch_aarch64::{
     console, enable_fp_el1, exceptions, fdt, gic, halt_current_cpu, platform, serial,
@@ -93,16 +93,26 @@ include!(concat!(env!("OUT_DIR"), "/build_id.rs"));
 /// mask [`boot`] derives before enabling the MMU.
 const IDENTITY_GIGABYTES: usize = 512;
 
-/// Boot-time page-table frame source for the stage-1 identity map.
+/// Boot-time page-table frame source for the stage-1 identity map *and*
+/// the guard-arena re-expression over the live boot tables.
 ///
-/// A single root L1 table holds all 512 gigapage block descriptors, so
-/// the pool only ever hands out one frame here. It lives in `.bss` for
-/// the lifetime of the kernel image, so `TTBR0_EL1` keeps pointing at a
-/// valid table after [`enable_mmu_and_vectors`] returns even though the
-/// transient [`AddressSpace`] handle is dropped (the
-/// pool is monotonic and never freed). The real per-process page tables
-/// are built over the `kernel/mem` frame allocator at a later stage.
-static BOOT_PAGE_TABLES: PageTablePool = PageTablePool::new();
+/// The identity map takes one frame (a single root L1 table holds all 512
+/// gigapage block descriptors); [`AddressSpace::prepare_guard_arena`] then
+/// draws the replacement L2/L3 tables that re-express the carved arena at
+/// 4 KiB granularity, so the pool is sized for that worst case
+/// ([`guard_arena_pool_capacity`] over the arena policy ceiling
+/// [`crate::mem_map::STACK_ARENA_MAX_BYTES`] — a fixed default here
+/// exhausted on a real 8 GiB Pi 4
+/// and silently degraded the kthread stacks to software canaries). It
+/// lives in `.bss` for the lifetime of the kernel image, so `TTBR0_EL1`
+/// keeps pointing at a valid table after [`enable_mmu_and_vectors`]
+/// returns even though the transient [`AddressSpace`] handle is dropped
+/// (the pool is monotonic and never freed). The real per-process page
+/// tables are built over the `kernel/mem` frame allocator at a later
+/// stage.
+static BOOT_PAGE_TABLES: PageTablePool<
+    { guard_arena_pool_capacity(crate::mem_map::STACK_ARENA_MAX_BYTES) },
+> = PageTablePool::new();
 
 /// The boot CPU's logical id. The boot trampoline parks every other CPU
 /// (`MPIDR_EL1` affinity ≠ 0) until the SMP bring-up (`plans/PI.md` P5)

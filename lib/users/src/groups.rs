@@ -52,6 +52,24 @@ pub const MAX_GROUP_LINE_LEN: usize = 128;
 /// Most records one group database may hold.
 pub const MAX_GROUPS: usize = 1024;
 
+/// Name of the well-known removable-storage access group.
+///
+/// A hotplug volume whose filesystem stores no owner model (FAT32) is
+/// mounted with a kernel-side identity map: every node appears owned by
+/// the system user and this group, group read/write, so any logged-in
+/// member can use the medium without ambient authority. The kernel
+/// resolves the group **by this name** from the loaded registry at boot;
+/// a registry without it simply leaves foreign volumes system-owned
+/// (fail closed, never an invented gid).
+pub const STORAGE_GROUP: &str = "storage";
+
+/// The [`Gid`] provisioning seeds [`STORAGE_GROUP`] with (the image
+/// builder's debug profile and the test fixtures; the installer mints the
+/// production registry from the same constant). The kernel never assumes
+/// this value — it resolves the group by name — so an administrator
+/// renumbering the group only has to keep the registry consistent.
+pub const STORAGE_GID: Gid = Gid(100);
+
 /// One validated group: a name and its numeric [`Gid`].
 ///
 /// A group carries no member list (membership lives in the user records,
