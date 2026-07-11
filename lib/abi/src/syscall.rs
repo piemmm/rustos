@@ -39,9 +39,31 @@ impl SyscallNumber {
     pub const YIELD: Self = Self(0);
     /// Terminate the calling process with the supplied exit code.
     pub const EXIT: Self = Self(1);
-    /// Send a message to an IPC endpoint.
+    /// Send a message to an IPC message port (fire-and-forget).
+    ///
+    /// Arguments: `endpoint: u64` (a port bound via [`Self::PORT_BIND`]),
+    /// `payload: *const u8`, `len: usize`. The kernel copies the payload,
+    /// re-checks the port's required send capabilities against the caller's
+    /// effective set on every send, records the sender's kernel-attested
+    /// [`crate::Origin`] beside the bytes, and wakes the port's owner if it
+    /// is parked on a wait-set observing the port. The send never blocks: a
+    /// full mailbox is a typed refusal, never a wait — so a server can
+    /// deliver to an unresponsive client without ever being parked by it.
     pub const IPC_SEND: Self = Self(2);
-    /// Receive a message from an IPC endpoint.
+    /// Receive a message from an IPC message port the caller owns.
+    ///
+    /// Arguments: `endpoint: u64`, `buf: *mut u8`, `len: usize`,
+    /// `sender_out: *mut u8` (exactly [`crate::ORIGIN_WIRE_LEN`] bytes).
+    /// Only the port's owning task may receive (checked against the
+    /// kernel-trusted caller, alongside the port's required receive
+    /// capabilities). On success the payload is copied into `buf`, the
+    /// sending task's kernel-attested [`crate::Origin`] — snapshotted at
+    /// send time, never claimable by the sender — is written through
+    /// `sender_out`, and the payload length is returned, so a receiver can
+    /// fail closed on a message from an unexpected principal. An empty
+    /// mailbox is the retryable [`crate::Errno::WouldBlock`]; the caller
+    /// parks on a wait-set member of kind
+    /// [`crate::WaitSourceKind::Port`], never a poll loop.
     pub const IPC_RECV: Self = Self(3);
     /// Query whether the caller holds a given capability.
     pub const CAP_QUERY: Self = Self(4);
@@ -1609,6 +1631,25 @@ impl SyscallNumber {
     /// attribute storage.
     pub const FS_ATTR_REMOVE: Self = Self(87);
 
+    /// Bind an asynchronous IPC message port owned by the calling task.
+    ///
+    /// Arguments: `endpoint: u64` (the port id senders will name),
+    /// `max_payload: usize`, `capacity: usize` (both fail-closed bounds:
+    /// the payload cap is limited by the global ABI message ceiling and
+    /// the capacity bounds the kernel memory one port may pin). The port
+    /// accepts [`Self::IPC_SEND`]s from any capable sender — each message
+    /// carries its sender's kernel-attested [`crate::Origin`], so the
+    /// owner authenticates senders on receive — and is drained only by
+    /// its owner through [`Self::IPC_RECV`], parked via a wait-set member
+    /// of kind [`crate::WaitSourceKind::Port`]. A reserved well-known
+    /// endpoint id ([`crate::ipc::is_reserved_endpoint`]) additionally
+    /// requires `CAP_IPC_BIND_PRIVILEGED`, exactly as
+    /// [`Self::CALL_CREATE`] does, so a squatter cannot claim a service
+    /// rendezvous; an id already bound fails closed with
+    /// [`crate::Errno::AlreadyExists`]. The port is torn down when its
+    /// owner exits.
+    pub const PORT_BIND: Self = Self(88);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -1860,6 +1901,7 @@ mod tests {
         assert_eq!(SyscallNumber::RESOURCE_OPEN.as_u16(), 67);
         assert_eq!(SyscallNumber::SELF_ORIGIN.as_u16(), 68);
         assert_eq!(SyscallNumber::USERS_ADMIN.as_u16(), 69);
+        assert_eq!(SyscallNumber::PORT_BIND.as_u16(), 88);
     }
 
     #[test]

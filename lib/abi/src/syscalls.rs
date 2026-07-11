@@ -183,16 +183,22 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::IPC_RECV,
         name: "ipc_recv",
-        arg_count: 3,
+        arg_count: 4,
         args: [
+            // Port id, payload buffer ptr, payload buffer cap, and the
+            // sender-origin out pointer (exactly `ORIGIN_WIRE_LEN` bytes):
+            // the kernel-attested identity snapshotted at send time, so
+            // the owner authenticates each message's sender fail-closed.
             AbiType::IpcEndpoint,
             AbiType::UserPtr,
             AbiType::Len,
-            AbiType::Unit,
+            AbiType::UserPtr,
             AbiType::Unit,
             AbiType::Unit,
         ],
-        ret: AbiType::Errno,
+        // `U64` carries the payload-bytes-written-or-`-errno` register
+        // convention `call_recv` / `ipc_call` use.
+        ret: AbiType::U64,
         required_capability: None,
         audit: false,
     },
@@ -2153,6 +2159,31 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         ret: AbiType::Errno,
         required_capability: Some(CapabilityId::FS_ACCESS),
         // Rewrites persistent inode metadata; audited like fs_set_mode.
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::PORT_BIND,
+        name: "port_bind",
+        arg_count: 3,
+        args: [
+            // Port id, maximum payload bytes, mailbox capacity (both
+            // fail-closed bounds re-checked against the ABI ceilings in
+            // the handler).
+            AbiType::IpcEndpoint,
+            AbiType::Len,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // No flat dispatcher gate: an unrestricted port is an ordinary
+        // process resource (the app's window-event mailbox). Binding a
+        // reserved well-known id still requires CAP_IPC_BIND_PRIVILEGED,
+        // enforced in `Port::create` exactly as `call_create` does.
+        required_capability: None,
+        // Binding a rendezvous point is a security-relevant, low-volume
+        // decision, audited like `call_create`.
         audit: true,
     },
 ];

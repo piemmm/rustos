@@ -18,7 +18,7 @@ use rustos_abi::reply::decode_status_reply;
 use rustos_abi::window_ipc::{
     decode_create_reply, WindowEvent, WindowRequest, WindowTitle, WINDOW_CREATE_REPLY_LEN,
 };
-use rustos_abi::Errno;
+use rustos_abi::{Errno, ProcId};
 
 /// The one call the client issues: send one request frame, receive one
 /// reply frame — the `ipc_call` syscall behind a seam, so the client is
@@ -52,14 +52,19 @@ impl<T: WindowTransport> WindowClient<T> {
     /// `title`, with this window's events delivered to the app's own
     /// `event_endpoint`.
     ///
-    /// Returns the session-minted window id.
+    /// Returns the session-minted window id and the serving session's
+    /// [`ProcId`]: the identity the app then requires of every event's
+    /// kernel-attested sender, so no other process can feed it forged
+    /// input (the reply is trustworthy because the window rendezvous is
+    /// squat-protected).
     ///
     /// # Errors
     ///
     /// * [`Errno::LengthOutOfRange`] / [`Errno::OutOfRange`] — a title
     ///   or geometry the protocol refuses, caught before any call.
     /// * The session's typed refusal, a transport failure, or a corrupt
-    ///   reply (fail closed, never a guessed id).
+    ///   reply (fail closed, never a guessed id or an unauthenticatable
+    ///   event stream).
     pub fn create(
         &mut self,
         shm_handle: u64,
@@ -67,7 +72,7 @@ impl<T: WindowTransport> WindowClient<T> {
         frame_count: u32,
         surface: &DisplayMode,
         title: &str,
-    ) -> Result<u64, Errno> {
+    ) -> Result<(u64, ProcId), Errno> {
         let title = WindowTitle::new(title)?;
         let request = WindowRequest::Create {
             shm_handle,

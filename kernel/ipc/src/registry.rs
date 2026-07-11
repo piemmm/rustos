@@ -215,6 +215,33 @@ impl PortRegistry {
         Ok(())
     }
 
+    /// Tear down every port owned by `owner` — the task-exit reclamation
+    /// path (mirrors the call-endpoint registry's `teardown_owned_by`).
+    ///
+    /// Each owned port is [`unregistered`](Self::unregister) exactly as an
+    /// explicit unregister would be: its names are withdrawn first, the
+    /// port is destroyed (racing senders fail closed), and the audit
+    /// trail records every step. A task that exits, faults, or is killed
+    /// therefore never leaves a mailbox behind for a later task to
+    /// squat on or drain.
+    pub fn teardown_owned_by<S: Sink + ?Sized>(&mut self, owner: u64, audit: &S) {
+        // Collect first: removal mutates the map.
+        let reclaimed: Vec<EndpointId> = self
+            .ports
+            .iter()
+            .filter(|&(_, port)| port.owner() == owner)
+            .map(|(&id, _)| id)
+            .collect();
+        for id in reclaimed {
+            // The id was collected from the live map above and nothing
+            // else mutates it between (the registry is behind its lock),
+            // so the unregister cannot miss; a `NotFound` would be a
+            // registry bug and is deliberately not swallowed silently
+            // into a different behaviour — `unregister` audits each step.
+            let _ = self.unregister(id, audit);
+        }
+    }
+
     /// Publish the well-known `name` as resolving to the endpoint `id`.
     ///
     /// After this, [`Self::resolve`]`(name)` returns `id` and

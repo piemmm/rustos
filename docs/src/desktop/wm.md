@@ -195,8 +195,18 @@ Every decode fails closed (`rustos_abi::window_ipc`, enrolled in the
 `fuzz_decode` harness), and the loopback suite in `lib/window/src/tests.rs`
 proves both halves against one real server: ownership isolation,
 create/present bounds, the client cap, refused-open rollback, teardown,
-and event routing. The session-side serving loop and the first windowed
-apps land with `plans/APPWIN.md` AW3/AW4.
+and event routing. The desktop session serves the endpoint live (`plans/APPWIN.md` AW3): it
+binds `WINDOW_ENDPOINT` under the authority of its kernel-attested seat
+lease, dispatches its wait-set loop on the woken member's token (a
+`call_recv` with nothing pending blocks, so only a window-endpoint wake
+recvs), bridges served windows into the shell (composited window +
+taskbar task per client window), and routes input app-ward over the
+event sink — a dead client's kernel-reclaimed port tears its windows
+down. The first windowed app is the files browser
+(`userland/apps/files`), spawned from the start menu and proven end to
+end by the autoload QEMU vertical's click-through (three verified
+screendumps: desktop, served window, re-themed desktop). The terminal
+lands with AW4.
 
 ## Tests
 

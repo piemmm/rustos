@@ -154,6 +154,11 @@ struct WindowRecord<R> {
 /// The window-channel engine: one instance serves one desktop session.
 pub struct WindowServer<M: ShmMapper> {
     mapper: M,
+    /// The serving session's own kernel-attested identity, stamped into
+    /// every successful create reply so an app can authenticate the
+    /// sender of each later event against it (the reply channel is the
+    /// squat-protected rendezvous, so the stamp is trustworthy).
+    server: ProcId,
     windows: BTreeMap<u64, WindowRecord<M::Region>>,
     /// The next window id to mint. Ids start at 1 and are never reused,
     /// so a stale id held by an app can never name a newer window.
@@ -161,10 +166,13 @@ pub struct WindowServer<M: ShmMapper> {
 }
 
 impl<M: ShmMapper> WindowServer<M> {
-    /// An engine with no windows, mapping through `mapper`.
-    pub const fn new(mapper: M) -> Self {
+    /// An engine with no windows, mapping through `mapper`, replying as
+    /// `server` (the session's own kernel-attested `ProcId`, e.g. from
+    /// `self_origin`).
+    pub const fn new(mapper: M, server: ProcId) -> Self {
         Self {
             mapper,
+            server,
             windows: BTreeMap::new(),
             next_id: 1,
         }
@@ -174,6 +182,17 @@ impl<M: ShmMapper> WindowServer<M> {
     #[must_use]
     pub fn window_count(&self) -> usize {
         self.windows.len()
+    }
+
+    /// The attested owner of live window `window_id`, if any.
+    ///
+    /// The session uses this to turn a failed event delivery into the
+    /// owner's [`client_exited`](Self::client_exited) teardown: the
+    /// kernel reclaims a dead task's event port, so a delivery that
+    /// finds no port is the kernel-backed fact that the owner is gone.
+    #[must_use]
+    pub fn owner_of(&self, window_id: u64) -> Option<ProcId> {
+        self.windows.get(&window_id).map(|record| record.owner)
     }
 
     /// Handle one received request: decode `request`, attest the caller
@@ -198,7 +217,7 @@ impl<M: ShmMapper> WindowServer<M> {
             Ok(caller) => caller,
             Err(err) => {
                 return match decoded {
-                    WindowRequest::Create { .. } => create_reply(reply, Err(err)),
+                    WindowRequest::Create { .. } => create_reply(reply, Err(err), self.server),
                     _ => status(reply, Err(err)),
                 }
             }
@@ -226,7 +245,7 @@ impl<M: ShmMapper> WindowServer<M> {
                     },
                     title,
                 };
-                create_reply(reply, self.create(host, caller, spec))
+                create_reply(reply, self.create(host, caller, spec), self.server)
             }
             WindowRequest::Present {
                 window_id,
@@ -406,7 +425,11 @@ fn status(reply: &mut [u8; WINDOW_REPLY_MAX], result: Result<(), Errno>) -> usiz
 }
 
 /// Write a create reply into `reply`, returning its length.
-fn create_reply(reply: &mut [u8; WINDOW_REPLY_MAX], result: Result<u64, Errno>) -> usize {
-    reply[..WINDOW_CREATE_REPLY_LEN].copy_from_slice(&encode_create_reply(result));
+fn create_reply(
+    reply: &mut [u8; WINDOW_REPLY_MAX],
+    result: Result<u64, Errno>,
+    server: ProcId,
+) -> usize {
+    reply[..WINDOW_CREATE_REPLY_LEN].copy_from_slice(&encode_create_reply(result, server));
     WINDOW_CREATE_REPLY_LEN
 }

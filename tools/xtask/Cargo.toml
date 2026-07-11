@@ -148,3 +148,25 @@ rustos-drv-storage-volmgr = { path = "../../drivers/storage/volmgr", version = "
 # assert compares the dumped scan-out against the theme's own desktop
 # colour, so the expected pixels have one definition (never a literal).
 rustos-theme = { path = "../../lib/theme", version = "=0.0.0" }
+# The desktop-session, taskbar, file-manager, geometry, and fw_cfg crates: the
+# AW3 desktop vertical's pointer script reconstructs the production shell's
+# taskbar/start-menu layout (the same code the guest runs) to compute its
+# click coordinates, keys its screendumps on the session's witness messages,
+# and measures the files window and ramfb surface against the one shared
+# definition of each — never a hand-copied literal (plans/APPWIN.md AW3).
+rustos-desktop-session = { path = "../../userland/gui/session", version = "=0.0.0" }
+rustos-taskbar = { path = "../../userland/gui/taskbar", version = "=0.0.0" }
+rustos-files = { path = "../../userland/apps/files", version = "=0.0.0" }
+rustos-geometry = { path = "../../lib/geometry", version = "=0.0.0" }
+rustos-fwcfg = { path = "../../lib/fwcfg", version = "=0.0.0" }
+# The autoload desktop vertical's shared interaction contract (delivery
+# counts), defined once in the test crate's lib target beside the guest
+# PASS gate that also consumes it.
+rustos-test-autoload-input-qemu-aarch64 = { path = "../../tests/integration/autoload_input_qemu_aarch64", version = "=0.0.0" }
+# The kernel/ipc audit vocabulary: the AW3 vertical's markers key on the
+# `MessageDelivered` / `CallReplied` records the kernel emits for the
+# window channel — the shared definitions, never literals.
+rustos-kernel-ipc = { path = "../../kernel/ipc", version = "=0.0.0" }
+# `format_hex_u64` — the same renderer the kernel/ipc audit fields use, so
+# the endpoint marker compares the exact on-wire spelling.
+rustos-util = { path = "../../lib/util", version = "=0.0.0" }

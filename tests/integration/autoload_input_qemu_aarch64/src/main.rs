@@ -61,7 +61,7 @@
 //!    each device interrupt pumps decoded events into the arbiter — key
 //!    edges via `key_inject`, pointer records via `pointer_inject`.
 //!
-//! ## Why the PASS keys on four witnesses
+//! ## Why the PASS keys on five witnesses
 //!
 //! The audit sink reports PASS once it has seen all of:
 //!
@@ -85,6 +85,15 @@
 //!    `CAP_IPC_BIND_PRIVILEGED` (only the display service may bind a
 //!    reserved endpoint id, so the witness is unforgeable by any other
 //!    process in the image).
+//! 5. The kernel/ipc `MessageDelivered` count reaching the crate's
+//!    shared interaction contract ([`PASS_DELIVERIES`]): the desktop
+//!    session — logged in at the seat keyboard and driven by injected
+//!    pointer clicks — opened its start menu, spawned the files bundle
+//!    from the on-disk system app store, served its window over the
+//!    reserved window rendezvous, toggled the appearance, and routed
+//!    the scripted in-window clicks app-ward (`plans/APPWIN.md` AW3).
+//!
+//! [`PASS_DELIVERIES`]: rustos_test_autoload_input_qemu_aarch64::PASS_DELIVERIES
 //!
 //! Reaching them requires every preceding step to have succeeded: the
 //! `/System` volume mounted and served, the store listed, each signed
@@ -128,7 +137,7 @@
 #[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicBool, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     use rustos_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
     use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
@@ -158,18 +167,26 @@ mod kernel {
         unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     /// Sink that replays every event through [`SERIAL_SINK`] and reports PASS
-    /// to QEMU once all four witnesses have appeared: the per-kind
+    /// to QEMU once all five witnesses have appeared: the per-kind
     /// first-input-delivery one-shots (`kind=key` and `kind=pointer` — the
     /// autoloaded user-space virtio-input driver instances delivering), the
     /// users-database load (the passphrase typed at the virtio keyboard
-    /// unlocked the encrypted root end to end), and the reserved
+    /// unlocked the encrypted root end to end), the reserved
     /// `DISPLAY_ENDPOINT` bind (the autoloaded framebuffer display service
-    /// came up on its granted surface).
+    /// came up on its granted surface), and the kernel/ipc
+    /// `MessageDelivered` count reaching the scripted click-through's
+    /// final delivery (the crate's shared interaction contract): the
+    /// start-menu launch spawned the files app, it created a window over
+    /// the reserved window rendezvous, the desktop routed the in-window
+    /// clicks app-ward, and the post-theme-toggle click landed — so the
+    /// guest exits only after the host has everything it needs
+    /// (`plans/APPWIN.md` AW3).
     struct AutoloadInputSink {
         key_delivered: AtomicBool,
         pointer_delivered: AtomicBool,
         users_db_loaded: AtomicBool,
         display_endpoint_bound: AtomicBool,
+        window_events_delivered: AtomicU32,
     }
 
     impl AutoloadInputSink {
@@ -179,6 +196,7 @@ mod kernel {
                 pointer_delivered: AtomicBool::new(false),
                 users_db_loaded: AtomicBool::new(false),
                 display_endpoint_bound: AtomicBool::new(false),
+                window_events_delivered: AtomicU32::new(0),
             }
         }
 
@@ -236,6 +254,8 @@ mod kernel {
                 self.users_db_loaded.store(true, Ordering::Release);
             } else if event.id.0 == rustos_kernel_ipc::AuditEvent::CallEndpointCreated.id().0 {
                 self.note_endpoint_created(event);
+            } else if event.id.0 == rustos_kernel_ipc::AuditEvent::MessageDelivered.id().0 {
+                self.window_events_delivered.fetch_add(1, Ordering::AcqRel);
             } else {
                 return;
             }
@@ -243,6 +263,8 @@ mod kernel {
                 && self.pointer_delivered.load(Ordering::Acquire)
                 && self.users_db_loaded.load(Ordering::Acquire)
                 && self.display_endpoint_bound.load(Ordering::Acquire)
+                && self.window_events_delivered.load(Ordering::Acquire)
+                    >= rustos_test_autoload_input_qemu_aarch64::PASS_DELIVERIES
             {
                 qemu_exit::exit_success();
             }

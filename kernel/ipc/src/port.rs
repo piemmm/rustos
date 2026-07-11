@@ -27,7 +27,7 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use rustos_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN;
-use rustos_abi::Errno;
+use rustos_abi::{Errno, Origin};
 use rustos_caps::CapabilitySet;
 use rustos_kernel_sec::captable::TaskCapabilities;
 use rustos_log::{Field, Sink};
@@ -65,8 +65,14 @@ mod state {
 /// cannot mutate the buffer after the send has been accepted.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Message {
-    /// Sender task identifier filled in by the dispatcher (Stage 2.7).
+    /// Sender task identifier, taken from the kernel-trusted capability
+    /// record at enqueue time — never a caller-supplied value.
     pub sender: u64,
+    /// The sender's kernel-attested [`Origin`], snapshotted from its own
+    /// task state when the send was accepted, so a receiver can
+    /// authenticate each message's principal without trusting anything
+    /// the sender wrote into the payload.
+    pub origin: Origin,
     /// Payload bytes; length is always `<= max_payload` of the port.
     pub payload: Vec<u8>,
 }
@@ -78,6 +84,12 @@ pub struct Message {
 /// described in the module docs; receives use [`Port::recv`].
 pub struct Port {
     id: EndpointId,
+    /// Task that bound this port. Only this task may receive from it (or
+    /// observe it through a wait-set), and the exit path reclaims every
+    /// port by this owner so a dead task's mailbox never lingers. Never
+    /// caller-supplied: recorded from the kernel-trusted capability
+    /// record at create time.
+    owner: u64,
     required_send_caps: CapabilitySet,
     required_recv_caps: CapabilitySet,
     max_payload: u32,
@@ -99,7 +111,13 @@ impl Port {
     /// [`Self::send`]). The creator additionally must hold
     /// [`rustos_abi::CapabilityId::IPC_BIND_PRIVILEGED`] when
     /// `required_send_caps` is non-empty — i.e. a port that restricts
-    /// who may *send* into it is by definition a privileged endpoint.
+    /// who may *send* into it is by definition a privileged endpoint —
+    /// **or** when `id` is a reserved well-known service rendezvous
+    /// ([`rustos_abi::ipc::is_reserved_endpoint`]): an open bind on a
+    /// reserved id would let an unprivileged squatter claim traffic
+    /// meant for the service, exactly the refusal
+    /// [`crate::CallEndpoint::create`] makes. The creator becomes the
+    /// port's [`owner`](Self::owner).
     ///
     /// # Errors
     ///
@@ -139,9 +157,10 @@ impl Port {
             return Err(Errno::PermissionDenied);
         }
 
-        // A port that restricts who may send is privileged; binding it
-        // requires IPC_BIND_PRIVILEGED.
-        if !required_send_caps.is_empty()
+        // A port that restricts who may send is privileged, and so is a
+        // reserved well-known rendezvous id (a squatter must not claim a
+        // service's traffic); binding either requires IPC_BIND_PRIVILEGED.
+        if (!required_send_caps.is_empty() || rustos_abi::ipc::is_reserved_endpoint(id.0))
             && !creator.has(rustos_abi::CapabilityId::IPC_BIND_PRIVILEGED)
         {
             record(audit, AuditEvent::PortCreateDenied, &[id_field]);
@@ -152,6 +171,7 @@ impl Port {
 
         Ok(Self {
             id,
+            owner: creator.task().0,
             required_send_caps,
             required_recv_caps,
             max_payload,
@@ -165,6 +185,21 @@ impl Port {
     #[must_use]
     pub fn id(&self) -> EndpointId {
         self.id
+    }
+
+    /// The task that bound this port — the only task that may receive
+    /// from it or observe it through a wait-set.
+    #[must_use]
+    pub fn owner(&self) -> u64 {
+        self.owner
+    }
+
+    /// `true` when at least one delivered message is waiting to be
+    /// drained — the non-consuming readiness peek the wait-set scan
+    /// uses; the woken owner's `ipc_recv` performs the actual dequeue.
+    #[must_use]
+    pub fn has_pending(&self) -> bool {
+        !self.mailbox.lock().is_empty()
     }
 
     /// Maximum payload (bytes) this port will accept.
@@ -329,6 +364,7 @@ impl Port {
         }
         q.push_back(Message {
             sender: sender.task().0,
+            origin: sender.attest_origin(),
             payload: payload.to_vec(),
         });
         drop(q);

@@ -128,6 +128,7 @@
 extern crate alloc;
 
 pub mod assets;
+pub mod config;
 pub mod device;
 pub mod input;
 pub mod keyboard;
@@ -136,11 +137,13 @@ pub mod seat;
 pub mod session;
 pub mod shell;
 pub mod tasks;
+pub mod windows;
 
 #[cfg(test)]
 mod tests;
 
 pub use assets::{load_cursor_theme, load_icon_set, GraphicsAssetReader, GRAPHICS_DIR};
+pub use config::{APPEARANCE_LABEL, FILES_LABEL, FILES_LAUNCHER, FILES_RUN_PATH};
 pub use device::{DeviceInputSource, PointerInputChannel};
 pub use input::{SessionInputResponse, SessionInputRouter};
 pub use keyboard::{KeyInputChannel, KeyboardInputSource};
@@ -149,3 +152,4 @@ pub use seat::{SeatEventReader, SeatInputChannel};
 pub use session::{DesktopSession, SessionEvent};
 pub use shell::{DesktopShell, InputSource, ShellOutcome};
 pub use tasks::TaskBridge;
+pub use windows::{SessionWindows, ShellWindowHost};

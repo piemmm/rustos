@@ -61,15 +61,28 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
+    use alloc::collections::BTreeMap;
+
     use rustos_abi::display_ipc::DISPLAY_ENDPOINT;
+    use rustos_abi::input::KeyInput;
     use rustos_abi::seat::SEAT_PRIMARY;
-    use rustos_abi::{DriverError, Errno, WaitSetOp, WaitSourceKind};
+    use rustos_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST};
+    use rustos_abi::{
+        DriverError, Errno, Origin, ProcId, WaitFlags, WaitSetOp, WaitSourceKind, WaitStatus,
+        ORIGIN_WIRE_LEN, WAIT_PID_ANY,
+    };
+    use rustos_caps::CapabilitySet;
     use rustos_desktop_session::{
         DesktopShell, DeviceInputSource, KeyboardInputSource, SeatEventReader, SeatInputChannel,
+        SessionWindows, ShellWindowHost, APPEARANCE_LABEL, FILES_LABEL, FILES_LAUNCHER,
+        FILES_RUN_PATH,
     };
-    use rustos_display::{DisplayClient, DisplayTransport, RemoteDisplay};
-    use rustos_taskbar::TaskbarConfig;
-    use rustos_wm::{Compositor, Rect};
+    use rustos_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
+    use rustos_taskbar::{MenuAction, TaskbarConfig, TaskbarResponse};
+    use rustos_window::{CallerIdentity, EventSink, WindowServer, WINDOW_REPLY_MAX};
+    use rustos_wm::{Compositor, InputResponse, Rect};
+
+    extern crate alloc;
 
     /// Exit code when the boot seat's lease could not be acquired (held by
     /// another session, or the manifest lacks `CAP_DISPLAY`). A reserved,
@@ -113,15 +126,31 @@ mod program {
     /// fail-closed value.
     const EXIT_PRESENT_FAILED: i32 = 97;
 
+    /// Exit code when the reserved `WINDOW_ENDPOINT` could not be bound.
+    /// The kernel authorises the bind by this session's live seat lease
+    /// (no privileged-bind capability), so a refusal means the lease is
+    /// gone or another server already claimed the rendezvous — exit
+    /// fail-loud, never serve a desktop apps cannot reach.
+    const EXIT_NO_WINDOW_ENDPOINT: i32 = 98;
+
     /// Frames in the shared region: a double buffer, so the session renders
     /// into one frame while the service scans out the other.
     const FRAME_COUNT: u32 = 2;
 
-    /// The wait-set token of the session's single `SeatInput` member.
+    /// The wait-set token of the session's `SeatInput` member.
     const SEAT_TOKEN: u64 = 1;
 
-    /// The start menu's light/dark appearance entry label.
-    const APPEARANCE_LABEL: &str = "Toggle Light/Dark";
+    /// The wait-set token of the served `WINDOW_ENDPOINT` member.
+    const WINDOW_TOKEN: u64 = 2;
+
+    /// The wait-set token of the any-child member: a spawned app exiting
+    /// wakes the loop so its windows are torn down promptly.
+    const CHILD_TOKEN: u64 = 3;
+
+    /// Outstanding-call capacity of the window endpoint (a fail-closed
+    /// memory bound): every app calls synchronously, so a small queue
+    /// covers several concurrent clients.
+    const WINDOW_CAPACITY: usize = 8;
 
     /// Recover the [`Errno`] a syscall encoded as a negative register
     /// (`-ret`); an unrecognised code fails closed as
@@ -185,6 +214,61 @@ mod program {
             // A count the address width cannot hold is refused, never
             // truncated into a shorter, decodable-looking record.
             usize::try_from(ret).map_err(|_| Errno::LengthOutOfRange)
+        }
+    }
+
+    /// The production [`CallerIdentity`]: the kernel's `call_peer_origin`
+    /// on the served window endpoint, so every request is attributed to
+    /// the kernel-attested in-flight caller — never a claim the request
+    /// carried. Each attested caller's `(pid → ProcId)` pair is retained
+    /// so a reaped child pid resolves back to the client whose windows
+    /// must be torn down.
+    struct RtWindowIdentity {
+        peers: BTreeMap<u64, ProcId>,
+    }
+
+    impl RtWindowIdentity {
+        const fn new() -> Self {
+            Self {
+                peers: BTreeMap::new(),
+            }
+        }
+
+        /// Resolve (and forget) the client that ran as child `pid`.
+        fn take_by_pid(&mut self, pid: u64) -> Option<ProcId> {
+            self.peers.remove(&pid)
+        }
+    }
+
+    impl CallerIdentity for RtWindowIdentity {
+        fn caller(&mut self, ticket: u64) -> Result<ProcId, Errno> {
+            let mut buf = [0u8; ORIGIN_WIRE_LEN];
+            let len = rustos_rt::call_peer_origin(WINDOW_ENDPOINT, ticket, &mut buf)
+                .map_err(errno_from)?;
+            let origin = Origin::from_bytes(&buf[..len])?;
+            self.peers.insert(origin.pid(), origin.proc_id());
+            Ok(origin.proc_id())
+        }
+    }
+
+    /// The production [`EventSink`]: one non-blocking `ipc_send` to the
+    /// owning app's event port per event. The send never parks this
+    /// session (a full mailbox or a dead port is a typed refusal), so a
+    /// wedged app can never wedge the desktop.
+    struct RtEventSink;
+
+    impl EventSink for RtEventSink {
+        fn deliver(
+            &mut self,
+            endpoint: u64,
+            event: &[u8; WindowEvent::WIRE_LEN],
+        ) -> Result<(), Errno> {
+            let ret = rustos_rt::ipc_send(endpoint, event);
+            if ret == 0 {
+                Ok(())
+            } else {
+                Err(errno_from(ret))
+            }
         }
     }
 
@@ -294,6 +378,14 @@ mod program {
         };
         let mut keyboard = KeyboardInputSource::new(SeatInputChannel::new(KeyboardReader));
 
+        // The start menu's launcher entry for the file browser: selecting
+        // it is forwarded by the shell and spawns the bundle below.
+        let _ = shell
+            .session_mut()
+            .taskbar_mut()
+            .start_menu_mut()
+            .add_launcher(FILES_LAUNCHER, FILES_LABEL);
+
         // First frame: place the bar and push the whole surface once; every
         // later present carries only the composited damage.
         shell.present(&mut compositor);
@@ -301,10 +393,31 @@ mod program {
             return code;
         }
 
-        // Park on the seat: the member is owner-checked at add (only the
-        // live lease holder may observe its seat) and wakes on input
-        // delivery and on lease loss, so the session never polls and never
-        // sleeps through its own revocation.
+        // Bind the reserved window rendezvous. The kernel authorises the
+        // bind by this session's kernel-attested live seat lease (the one
+        // seat-scoped reserved id); the endpoint is unrestricted-sender —
+        // the engine attests every caller per request and keys each window
+        // to its creator, so an unentitled sender only ever reaches typed
+        // refusals.
+        let empty = CapabilitySet::empty();
+        if rustos_rt::call_create(
+            WINDOW_ENDPOINT,
+            &empty,
+            &empty,
+            WINDOW_MAX_REQUEST,
+            WINDOW_REPLY_MAX,
+            WINDOW_CAPACITY,
+        ) != 0
+        {
+            return fail(EXIT_NO_WINDOW_ENDPOINT, "window endpoint bind refused");
+        }
+
+        // Park on the wait-set: the seat member wakes on input delivery
+        // and on lease loss, the endpoint member on a posted window
+        // request, and the any-child member when a spawned app exits (so
+        // its windows are torn down promptly). Every member is
+        // owner-checked at add; the session never polls and never sleeps
+        // through its own revocation.
         let set = rustos_rt::waitset_create();
         if set < 0 {
             return fail(EXIT_WAIT_FAILED, "wait-set refused");
@@ -321,6 +434,42 @@ mod program {
         {
             return fail(EXIT_WAIT_FAILED, "seat wait refused");
         }
+        if rustos_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::Endpoint,
+            WINDOW_ENDPOINT,
+            WINDOW_TOKEN,
+        ) != 0
+        {
+            return fail(EXIT_WAIT_FAILED, "window endpoint wait refused");
+        }
+        if rustos_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::Child,
+            rustos_abi::WAITSET_CHILD_ANY,
+            CHILD_TOKEN,
+        ) != 0
+        {
+            return fail(EXIT_WAIT_FAILED, "child wait refused");
+        }
+
+        // The window channel's server state: the engine, the session-side
+        // window table, the kernel-attested caller identity, the app-ward
+        // event sink, and the focused served window the routing mirrors.
+        // The engine stamps this session's own kernel-attested identity
+        // into every create reply, so apps can authenticate the sender of
+        // each later event; a session that cannot learn its own identity
+        // must not serve windows apps cannot authenticate (fail closed).
+        let Ok(self_origin) = rustos_rt::self_origin() else {
+            return fail(EXIT_NO_WINDOW_ENDPOINT, "session identity unavailable");
+        };
+        let mut server = WindowServer::new(RtShmMapper, self_origin.proc_id());
+        let mut windows = SessionWindows::new();
+        let mut identity = RtWindowIdentity::new();
+        let mut sink = RtEventSink;
+        let mut focused: Option<u64> = None;
 
         let mut token = 0u64;
         loop {
@@ -329,20 +478,269 @@ mod program {
                 // exit fail-loud instead and let the supervisor decide.
                 return fail(EXIT_WAIT_FAILED, "seat wait failed");
             }
-            // Drain both channels through the shell; the events already
-            // applied stay applied (the desktop never rolls back what it
-            // has shown), and a faulting drain ends the session.
-            if let Err(err) = shell.pump(&mut pointer, &mut compositor) {
-                return drain_fault(err);
-            }
-            if let Err(err) = shell.pump(&mut keyboard, &mut compositor) {
-                return drain_fault(err);
+            // Dispatch on the woken member's token and handle only that
+            // source: `call_recv` *blocks* when nothing is pending, so a
+            // seat-input wake must never touch the window endpoint (and
+            // vice versa). Readiness is a non-consuming peek, so a member
+            // left pending re-reports on the very next wait — handling one
+            // source per wake starves nothing.
+            if token == WINDOW_TOKEN {
+                // Serve the pending window request: the wait-set peeked a
+                // queued call and only this task ever dequeues, so the
+                // recv returns promptly. Every outcome — including a
+                // malformed request — is a well-formed typed reply, so no
+                // caller is ever left parked; a transient recv error drops
+                // the wake and re-parks.
+                let mut request = [0u8; WINDOW_MAX_REQUEST];
+                let mut ticket = 0u64;
+                if let Ok(len) = rustos_rt::call_recv(WINDOW_ENDPOINT, &mut request, &mut ticket) {
+                    let mut reply = [0u8; WINDOW_REPLY_MAX];
+                    let n = {
+                        let mut bridge = ShellWindowHost {
+                            shell: &mut shell,
+                            compositor: &mut compositor,
+                            windows: &mut windows,
+                        };
+                        server.serve(
+                            &mut bridge,
+                            &mut identity,
+                            ticket,
+                            &request[..len],
+                            &mut reply,
+                        )
+                    };
+                    let _ = rustos_rt::call_reply(WINDOW_ENDPOINT, ticket, &reply[..n]);
+                }
+            } else if token == CHILD_TOKEN {
+                // Reap exited children and tear their windows down: the
+                // kernel already reclaimed a dead app's port and shm, and
+                // the reap resolves its pid back to the attested client
+                // whose windows must leave the desktop. Draining every
+                // reapable zombie here is safe — the non-blocking wait
+                // returns immediately when none remains.
+                loop {
+                    // Placeholder the kernel overwrites on a successful
+                    // reap; the loop only needs the pid.
+                    let mut status = WaitStatus::Exited(0);
+                    let pid = rustos_rt::wait(WAIT_PID_ANY, &mut status, WaitFlags::NONBLOCK);
+                    if pid <= 0 {
+                        break;
+                    }
+                    #[allow(clippy::cast_sign_loss)] // `pid > 0` checked above.
+                    if let Some(client) = identity.take_by_pid(pid as u64) {
+                        let mut bridge = ShellWindowHost {
+                            shell: &mut shell,
+                            compositor: &mut compositor,
+                            windows: &mut windows,
+                        };
+                        server.client_exited(&mut bridge, client);
+                        if focused.is_some_and(|id| server.owner_of(id).is_none()) {
+                            focused = None;
+                        }
+                    }
+                }
+            } else if token == SEAT_TOKEN {
+                // Drain both input channels through the shell, routing
+                // every outcome onward (to the focused app window, or the
+                // launcher spawn); the events already applied stay
+                // applied, and a faulting drain ends the session. The
+                // drains are genuinely non-blocking (`pointer_read` /
+                // `keyboard_read` return 0 when empty).
+                let outcomes = match shell.pump(&mut pointer, &mut compositor) {
+                    Ok(outcomes) => outcomes,
+                    Err(err) => return drain_fault(err),
+                };
+                for outcome in outcomes {
+                    route_outcome(
+                        outcome,
+                        None,
+                        &mut focused,
+                        &mut shell,
+                        &mut compositor,
+                        &mut windows,
+                        &mut server,
+                        &mut sink,
+                    );
+                }
+                loop {
+                    match keyboard.poll_record() {
+                        Ok(None) => break,
+                        Ok(Some((event, record))) => {
+                            let outcome = shell.handle(event, &mut compositor);
+                            route_outcome(
+                                outcome,
+                                Some(record),
+                                &mut focused,
+                                &mut shell,
+                                &mut compositor,
+                                &mut windows,
+                                &mut server,
+                                &mut sink,
+                            );
+                        }
+                        Err(err) => return drain_fault(err),
+                    }
+                }
             }
             // One present per wake: the compositor tracks the damage the
-            // pumped events produced and the ring copies only that region.
+            // pumped events and served presents produced and the ring
+            // copies only that region.
             if let Err(code) = present(&mut compositor, &mut display) {
                 return code;
             }
+        }
+    }
+
+    /// Route one shell outcome onward: mirror focus changes and pointer
+    /// presses to the owning app over the window channel, hand the raw
+    /// key record to the focused served window, and spawn the launcher
+    /// selection. Everything else is complete inside the shell.
+    #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
+    fn route_outcome(
+        outcome: rustos_desktop_session::ShellOutcome,
+        key: Option<KeyInput>,
+        focused: &mut Option<u64>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+    ) {
+        use rustos_desktop_session::{SessionEvent, ShellOutcome};
+        match outcome {
+            ShellOutcome::WindowManager(response) => match response {
+                InputResponse::Activated { window, local } => {
+                    let target = windows.ipc_id(window);
+                    // Mirror the focus change app-ward: the window that
+                    // lost focus (if served) learns first, then the
+                    // newly focused one.
+                    if *focused != target {
+                        if let Some(old) = focused.take() {
+                            deliver(
+                                server,
+                                sink,
+                                shell,
+                                compositor,
+                                windows,
+                                &WindowEvent::Focus {
+                                    window_id: old,
+                                    focused: false,
+                                },
+                            );
+                        }
+                        if let Some(id) = target {
+                            deliver(
+                                server,
+                                sink,
+                                shell,
+                                compositor,
+                                windows,
+                                &WindowEvent::Focus {
+                                    window_id: id,
+                                    focused: true,
+                                },
+                            );
+                        }
+                        *focused = target;
+                    }
+                    // The activating press itself, window-local. A
+                    // negative coordinate cannot occur for an in-window
+                    // press; refuse rather than wrap if it ever did.
+                    if let (Some(id), Ok(x), Ok(y)) =
+                        (target, u32::try_from(local.x), u32::try_from(local.y))
+                    {
+                        deliver(
+                            server,
+                            sink,
+                            shell,
+                            compositor,
+                            windows,
+                            &WindowEvent::Pointer {
+                                window_id: id,
+                                x,
+                                y,
+                                action: PointerAction::Pressed(
+                                    rustos_abi::input::PointerButtonCode::Primary,
+                                ),
+                            },
+                        );
+                    }
+                }
+                InputResponse::DesktopPressed => {
+                    if let Some(old) = focused.take() {
+                        deliver(
+                            server,
+                            sink,
+                            shell,
+                            compositor,
+                            windows,
+                            &WindowEvent::Focus {
+                                window_id: old,
+                                focused: false,
+                            },
+                        );
+                    }
+                }
+                InputResponse::Key { window, .. } => {
+                    if let (Some(id), Some(record)) = (windows.ipc_id(window), key) {
+                        deliver(
+                            server,
+                            sink,
+                            shell,
+                            compositor,
+                            windows,
+                            &WindowEvent::Key {
+                                window_id: id,
+                                key: record,
+                            },
+                        );
+                    }
+                }
+                InputResponse::Moved { .. }
+                | InputResponse::MoveEnded { .. }
+                | InputResponse::Ignored => {}
+            },
+            ShellOutcome::Session(SessionEvent::Forward(TaskbarResponse::MenuEntrySelected {
+                action: MenuAction::Launch(launcher),
+                ..
+            })) if launcher == FILES_LAUNCHER => {
+                // Spawn the file browser under the session's own identity
+                // and ceiling; a refusal (missing bundle, stripped spawn
+                // capability) is reported and the desktop carries on — a
+                // denied optional action never ends the session.
+                if rustos_rt::spawn(FILES_RUN_PATH) < 0 {
+                    let _ = rustos_rt::stderr(b"desktop: files launch refused\n");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Deliver one app-ward event, tearing the owner's windows down when
+    /// the kernel proves the owner is gone (its event port was reclaimed,
+    /// so the send finds nothing).
+    fn deliver(
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        event: &WindowEvent,
+    ) {
+        let Some(owner) = server.owner_of(event.window_id()) else {
+            return;
+        };
+        if let Err(Errno::NotFound) = server.deliver_event(sink, event) {
+            // `owner_of` proved the window exists, so the `NotFound` is
+            // the sink's: the owner's event port is gone — the kernel
+            // reclaimed it at exit — and its windows go with it. Any
+            // other refusal (a full mailbox) drops the event only.
+            let mut bridge = ShellWindowHost {
+                shell,
+                compositor,
+                windows,
+            };
+            server.client_exited(&mut bridge, owner);
         }
     }
 

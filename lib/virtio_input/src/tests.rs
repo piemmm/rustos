@@ -269,10 +269,14 @@ fn open_armed_arms_only_after_the_event_queue_is_live() {
         assert!(t.status().contains(Status::DRIVER_OK));
         // ...with every event buffer already posted and device-visible:
         // the device can deliver the pending keystroke (and complete the
-        // remaining posted buffers) right now.
+        // remaining posted buffers) right now. The posted count is the
+        // *negotiated* depth — the mock's advertised queue maximum,
+        // clamped by the pool ceiling — never a demand the device cannot
+        // honour.
+        let negotiated = t.queue_max_size().min(wire::EVENT_QUEUE_SIZE);
         assert_eq!(
             t.drain_queue(wire::EVENT_QUEUE).expect("posted buffers"),
-            usize::from(wire::EVENT_QUEUE_SIZE)
+            usize::from(negotiated)
         );
         Ok(())
     })

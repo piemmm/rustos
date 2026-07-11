@@ -73,23 +73,24 @@ struct QemuTest {
     /// passphrase and then the login + graphical-choice dialogue at the
     /// seat keyboard.
     typed_keys: &'static [(&'static str, u32, &'static str)],
-    /// When `Some((marker, occurrences))`, take one QEMU monitor
-    /// `screendump` of the guest display once `marker` has appeared
-    /// `occurrences` times on serial, hold the pointer injection back
-    /// until the dumped image parses completely, and after a PASS assert
-    /// the dump is dominated by the shared theme's desktop colour — the
-    /// host-side scan-out readback proving the composited frame reached
-    /// the surface (`plans/DISPLAY.md` D7d).
-    screendump: Option<(&'static str, u32)>,
-    /// When `Some((marker, dx, dy))`, additionally attach a
-    /// `virtio-mouse-device` after the keyboard — the
-    /// two-identical-virtio-input-nodes topology an interactive session
-    /// presents, proving per-node driver instances — and inject one
-    /// relative motion (`mouse_move dx dy`) once the guest prints
-    /// `marker` on the serial console. Used by the autoload vertical to
-    /// prove the pointer path (decode → `pointer_inject`) end to end
-    /// beside the keyboard's.
-    pointer_move: Option<(&'static str, i32, i32)>,
+    /// Ordered, marker-gated QEMU monitor `screendump`s of the guest
+    /// display — the host-side scan-out readbacks proving each composited
+    /// frame of interest reached the surface (`plans/DISPLAY.md` D7d,
+    /// `plans/APPWIN.md` AW3). Each dump is taken once its marker has
+    /// appeared the required number of times on serial, holds later dumps
+    /// and still-unsent pointer steps back until its image parses
+    /// completely, and is checked by its own assertion after a PASS.
+    screendumps: &'static [ScreendumpPlan],
+    /// When `Some`, attach a `virtio-mouse-device` after the keyboard —
+    /// the two-identical-virtio-input-nodes topology an interactive
+    /// session presents, proving per-node driver instances — and drive
+    /// the ordered, marker-gated pointer script the builder returns
+    /// (moves and button clicks) through the QEMU monitor. A builder
+    /// function rather than a static table because the click coordinates
+    /// are computed from the production desktop's own layout code at run
+    /// time — the same definition the guest renders with — never
+    /// hand-copied literals (`plans/APPWIN.md` AW3).
+    pointer_script: Option<PointerScriptBuilder>,
     /// Ordered serial-input script: for each `(marker, line)` step, pipe
     /// QEMU's stdin and write `line` to the guest's serial input once it
     /// prints `marker` on the serial console past the previous step's
@@ -98,6 +99,31 @@ struct QemuTest {
     /// aarch64 interactive-session vertical to hold a deterministic
     /// multi-exchange dialogue with the blocked login.
     serial: &'static [(&'static str, &'static str)],
+}
+
+/// Builds an enrolment's ordered pointer script at run time (the click
+/// coordinates come from the production desktop's own layout code), or
+/// describes why it cannot.
+type PointerScriptBuilder = fn() -> Result<Vec<rustos_qemu::PointerStep>, String>;
+
+/// The pixel assertion a [`ScreendumpPlan`] applies to its dumped image.
+type ScreendumpAssert = fn(&QemuTest, &Path) -> Result<(), String>;
+
+/// One marker-gated screendump a [`QemuTest`] takes, with the assertion
+/// its decoded pixels must satisfy after a PASS. Dumps run strictly in
+/// declaration order (the runner holds later dumps and still-unsent
+/// pointer steps back until the current dump's image parses completely).
+struct ScreendumpPlan {
+    /// Serial marker gating the dump — a guest-emitted witness that the
+    /// frame of interest reached the scan-out surface.
+    marker: &'static str,
+    /// How many times the marker must appear before the dump is taken.
+    occurrences: u32,
+    /// File-name suffix distinguishing this dump's `.ppm` beside the
+    /// kernel binary (`<binary>.<suffix>.screendump.ppm`).
+    suffix: &'static str,
+    /// The pixel assertion applied to the dumped image after a PASS.
+    assert: ScreendumpAssert,
 }
 
 /// Which filesystem volume (if any) the host harness plants on the
@@ -221,10 +247,33 @@ const AUTOLOAD_INPUT_KEY_MARKER: &str = "sc=irq_bind";
 /// keyboard's own arming — possibly the second — is never raced.
 const AUTOLOAD_INPUT_ARMED_OCCURRENCES: u32 = 2;
 
-/// The relative mouse motion the autoload-input vertical injects
-/// (`mouse_move dx dy`): an arbitrary non-zero displacement on both axes,
-/// so the driver decodes at least one `EV_REL` event per axis.
-const AUTOLOAD_INPUT_POINTER_MOVE: (i32, i32) = (15, 7);
+/// Serial marker of an app-ward window-event delivery: the kernel/ipc
+/// `MessageDelivered` audit record, emitted when a message lands in a
+/// bound port's mailbox. In this vertical the desktop session's window
+/// engine is the only port sender (window events to a served app), so
+/// each occurrence is one delivered window event, kernel-attested —
+/// imported from the kernel/ipc vocabulary, never a literal.
+const AUTOLOAD_WINDOW_EVENT_MARKER: &str =
+    rustos_kernel_ipc::AuditEvent::MessageDelivered.message();
+
+/// How many [`AUTOLOAD_WINDOW_EVENT_MARKER`] occurrences key the second
+/// screendump (the served files window on the dark desktop) — the
+/// vertical's shared interaction contract, defined once beside the guest
+/// PASS gate that also consumes it.
+const AUTOLOAD_WINDOW_DUMP_OCCURRENCES: u32 =
+    rustos_test_autoload_input_qemu_aarch64::WINDOW_DUMP_DELIVERIES;
+
+/// How many [`AUTOLOAD_WINDOW_EVENT_MARKER`] occurrences key the third
+/// screendump (the light-theme desktop with the window still composited)
+/// — the same shared contract (a wake boundary past the re-theme
+/// present, see the contract crate's rationale).
+const AUTOLOAD_APPEARANCE_DUMP_OCCURRENCES: u32 =
+    rustos_test_autoload_input_qemu_aarch64::APPEARANCE_DUMP_DELIVERIES;
+
+/// The post-toggle in-window click's own delivery count: the first
+/// handshake click is keyed on it, so it lands in a wake after the
+/// re-themed frame was presented.
+const AUTOLOAD_TOGGLE_CLICK_OCCURRENCES: u32 = 3;
 
 /// Serial marker after which the autoload vertical types the login +
 /// graphical-choice dialogue: the serial rendering of the kernel's
@@ -375,8 +424,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // Stage 3a (b) deliverable: AP bring-up + scheduler stress on real
@@ -396,8 +445,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // Stage 3a (c7-bin) deliverable: boot the production
@@ -425,8 +474,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // Stage 2.7 follow-up (f6) deliverable: boot the production
@@ -455,8 +504,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the per-native-
@@ -487,8 +536,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the riscv64
@@ -520,8 +569,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the aarch64
@@ -554,8 +603,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the x86_64
@@ -589,8 +638,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // x86_64 `syscall` register-preservation regression vertical
@@ -619,8 +668,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the riscv64
@@ -654,8 +703,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the aarch64
@@ -690,8 +739,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the x86_64
@@ -729,8 +778,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the riscv64
@@ -763,8 +812,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the aarch64
@@ -798,8 +847,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the x86_64
@@ -836,8 +885,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // Stage 4 deliverable: boot the production kernel pipeline,
@@ -858,8 +907,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // Stage 4 first-driver vertical: boot the production kernel
@@ -895,8 +944,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // Stage 4.D Item 2-tail.2 QEMU validation: boot the production
@@ -925,8 +974,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // Stage 4.D Item 4: `rustos-test-virtio-blk-pci-x86-64` performs a
@@ -957,8 +1006,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // Stage 5 end-to-end FAT32 vertical: `rustos-test-fat32-virtio-blk-
@@ -982,8 +1031,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::Fat32,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // Stage 5 end-to-end rustfs vertical: `rustos-test-rustfs-virtio-blk-
@@ -1008,8 +1057,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::Rustfs,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // Stage 4.D Item 4: `rustos-test-virtio-net-pci-x86-64` performs a
@@ -1037,8 +1086,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // Stage 4.D Item 4: `rustos-test-kernel-arch-boot-riscv64` boots
@@ -1061,8 +1110,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // PI Stage RV-P3 (`plans/PI.md`): `rustos-test-spawn-init-qemu-riscv64`
@@ -1094,8 +1143,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // Stage 3c: `rustos-test-timer-preempt-qemu-riscv64` is the riscv64
@@ -1122,8 +1171,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // Stage 3c: `rustos-test-ipi-smp-qemu-riscv64` is the riscv64
@@ -1151,8 +1200,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // WIRING Stage W6 (`plans/WIRING.md` §3): the aarch64 multi-core SMP
@@ -1179,8 +1228,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // Stage 3c: `rustos-test-sched-drive-qemu-riscv64` is the riscv64
@@ -1214,8 +1263,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // WIRING Stage W7 (`plans/WIRING.md` §3): the aarch64 "arch
@@ -1252,8 +1301,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // SPAWN Stage SP1 (`plans/SPAWN.md` §1): the `kernel/core` kthread
@@ -1284,8 +1333,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // SPAWN Stage SP1 (`plans/SPAWN.md` §1): the riscv64 sibling of the
@@ -1315,8 +1364,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // SPAWN Stage SP1 (`plans/SPAWN.md` §1): the x86_64 sibling of the
@@ -1346,8 +1395,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // WIRING Stage W6 (`plans/WIRING.md` §3): the cross-CPU TLB-shootdown
@@ -1370,8 +1419,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // WIRING Stage W6: the aarch64 cross-CPU TLB-shootdown vertical. The
@@ -1393,8 +1442,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // WIRING Stage W6: the x86_64 cross-CPU TLB-shootdown vertical — the
@@ -1418,8 +1467,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // Stage 3c: `rustos-test-memory-isolation-qemu-riscv64` is the riscv64
@@ -1447,8 +1496,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // `plans/PI.md` guard-page fault-form (riscv64 stage G1):
@@ -1480,8 +1529,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // `tests/SECURITY.md` §5 / `PLAN.md` Stage 7 item E — the per-port
@@ -1508,8 +1557,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     QemuTest {
@@ -1524,8 +1573,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // The x86_64 member boots the **production** `rustos-kernel` pipeline
@@ -1543,8 +1592,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // `plans/PI.md` guard-page fault-form (riscv64 stage G3c): the
@@ -1581,8 +1630,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // Stage 4.D Item 4: `rustos-test-virtio-blk-mmio-riscv64` is the
@@ -1609,8 +1658,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // Stage 4.D Item 4: `rustos-test-virtio-net-mmio-riscv64` is the
@@ -1635,8 +1684,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // Stage 4 first-driver vertical (display class):
@@ -1664,8 +1713,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // Stage 4 first-driver vertical (display class, x86_64 sibling of the
@@ -1694,8 +1743,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // PI Stage P6c-2 (`plans/PI.md`): `rustos-test-kernel-arch-boot-aarch64`
@@ -1728,8 +1777,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // PI Stage P6c-3 (`plans/PI.md`): `rustos-test-spawn-init-qemu-aarch64`
@@ -1760,8 +1809,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // SPAWN Stage SP3b (`plans/SPAWN.md`) + `plans/PI.md` P11:
@@ -1814,8 +1863,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[
             ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
             ("Username:", "root\n"),
@@ -1874,8 +1923,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // SPAWN Stage SP2c (`plans/SPAWN.md` §1): the aarch64 EL0↔EL0 timeshare
@@ -1906,8 +1955,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // PI Stage D2b-2b-A P-1 (`plans/PI.md`): the aarch64 involuntary-preemption
@@ -1943,8 +1992,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // PI Stage D2b-2b-A P-1b (`plans/PI.md`): the riscv64 involuntary-preemption
@@ -1983,8 +2032,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // PI Stage D2b-2b-A P-1c (`plans/PI.md`): the x86_64 involuntary-preemption
@@ -2028,8 +2077,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // PLAN.md P-5 (2026-06-23 amendment): the aarch64
@@ -2067,8 +2116,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // PLAN.md Stage 4.HW: the aarch64 driver-spawn handshake vertical — the
@@ -2106,8 +2155,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // plans/USB.md U1: the aarch64 driver-*unload* vertical — the symmetric
@@ -2138,8 +2187,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // SPAWN Stage SP5b-2 (`plans/SPAWN.md` §1): the aarch64 `mem_map`/
@@ -2172,8 +2221,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // M1 file-mapping remainder (`docs/src/architecture/memory.md` §7o): the
@@ -2208,8 +2257,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // The riscv64 twin of the file-map vertical above: the same four-role
@@ -2229,8 +2278,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // The SP11c demand-grown user-stack vertical
@@ -2267,8 +2316,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // The riscv64 twin of the stack-grow vertical above: the same
@@ -2288,8 +2337,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // The x86_64 twin of the stack-grow verticals above (SP11e): the same
@@ -2313,8 +2362,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // The S8b parser-sandbox vertical (`docs/src/security/sandbox.md`;
@@ -2348,8 +2397,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // PI Stage 5d-0-ii (b′)-2 (`plans/PI.md`): the aarch64 `mmio_map` vertical —
@@ -2387,8 +2436,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // SPAWN Stage SP5b-2 (`plans/SPAWN.md` §1): the riscv64 `mem_map`/
@@ -2424,8 +2473,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // PI Stage RV-X1 (`plans/PI.md` §X tail): the riscv64 single-resumable-
@@ -2462,8 +2511,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // PI Stage RV-X2 (`plans/PI.md` §X tail): the riscv64 two-task EL0
@@ -2501,8 +2550,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // PI Stage RV-X3 (`plans/PI.md` §X tail): the riscv64 runtime-`spawn`
@@ -2539,8 +2588,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // SPAWN Stage SP5b-2 (`plans/SPAWN.md` §1): the x86_64 `mem_map`/
@@ -2578,8 +2627,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // PI Stage G1/G2 (`plans/PI.md`): the x86_64 guard-page fault-form
@@ -2612,8 +2661,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // PI Stage G3c (`plans/PI.md`): the x86_64 production guard-page
@@ -2647,8 +2696,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // PI Stage X1 (`plans/PI.md` §X): the x86_64 single-resumable-user-kthread
@@ -2685,8 +2734,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // PI Stage X2 (`plans/PI.md` §X): the x86_64 two-task EL0 timeshare — the
@@ -2729,8 +2778,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // PI Stage X3a (`plans/PI.md` §X): the x86_64 PID 1 (`init`) ring-3
@@ -2765,8 +2814,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // PI Stage X3b + X4 follow-on (`plans/PI.md` §X): the x86_64 runtime
@@ -2809,8 +2858,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // PI Stage P6e-3b prerequisite (`plans/PI.md`): the aarch64 heap-allocator
@@ -2844,8 +2893,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // SPAWN Stage SP6b (`plans/SPAWN.md` §1): the aarch64 `wait` vertical —
@@ -2878,8 +2927,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // SPAWN Stage SP7b (`plans/SPAWN.md` §1): the aarch64 `signal` vertical —
@@ -2916,8 +2965,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // PI Stage X4 (`plans/PI.md`): the x86_64 `wait` vertical — the cross-port
@@ -2954,8 +3003,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // PI Stage RV-X4 (`plans/PI.md` §X tail): the riscv64 `wait` vertical —
@@ -2991,8 +3040,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // PI Stage P2 (`plans/PI.md`): `rustos-test-uart-console-qemu-aarch64`
@@ -3023,8 +3072,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // Stage W11 (`plans/WIRING.md` §3):
@@ -3053,8 +3102,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // `plans/PI.md` P11 (root-volume read path at boot):
@@ -3082,8 +3131,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::UsersRoot,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // `plans/PI.md` P11 Chunk B-2 (root-mount->login): the
@@ -3117,8 +3166,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // `plans/PI.md` P11 Chunk B-2 INCREMENT (2): the
@@ -3177,8 +3226,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[
             (
                 "Root filesystem passphrase: ",
@@ -3239,8 +3288,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[
             ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
             // The full-screen login view paints `Username:` once and the
@@ -3323,8 +3372,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::MemsoakRootDisk,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[
             ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
             ("Username:", SESSION_USERNAME_LINE),
@@ -3374,8 +3423,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[
             ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
             ("Username:", SESSION_USERNAME_LINE),
@@ -3445,24 +3494,41 @@ const TESTS: &[QemuTest] = &[
     // types the fixture account's `root`/`root` at login's video-console
     // prompt and answers the session choice with `g` — login offers the
     // choice only because its per-round probes found both the desktop
-    // bundle and the live display service. The spawned desktop session
-    // acquires the boot seat, configures the zero-copy frame region, and
-    // presents; the display service's one-shot `FIRST_PRESENT` record is
-    // the serial witness the runner keys the host-side scan-out readback
-    // on (a QEMU `screendump`, asserted after the run to be dominated by
-    // the theme's desktop colour) **and** the mouse injection, so the
-    // ordering is present → verified dump → pointer → `kind=pointer`
-    // witness → PASS: the guest cannot exit before the host holds the
-    // pixels, and the pointer witness now additionally proves the desktop
-    // was live. A 180-second budget covers the boot + bounded PBKDF2 +
-    // autoload + driver bring-up + the ~4 s passphrase + ~1 s login typing
-    // + session bring-up + video-console rendering on QEMU TCG.
+    // bundle and the live display service.
+    //
+    // AW3 (`plans/APPWIN.md`) grows the presented desktop into the full
+    // click-through: the display service's one-shot `FIRST_PRESENT`
+    // witness keys the first screendump (the dark composited desktop) and
+    // the whole start-menu → "Files" click sequence (the guest applies
+    // injected events strictly in device order, so the menu clicks need no
+    // extra gate); the spawned files bundle creates its window over the
+    // reserved window rendezvous, and the endpoint's first *reply* on
+    // serial gates the in-window click. From there every stage is keyed on
+    // the kernel/ipc `MessageDelivered` records the desktop's app-ward
+    // event deliveries emit — the shared interaction contract in the test
+    // crate's lib target: delivery 2 (Focus + Pressed from the window
+    // click) keys the second screendump (the served window on the dark
+    // desktop), the reopen-menu + appearance-toggle + window clicks follow,
+    // and delivery 4 (a handshake click processed in a wake strictly after
+    // the re-themed frame presented) keys the third screendump (the
+    // light-theme desktop, window still composited). A final handshake
+    // press — held until that dump verified — produces delivery 5, the
+    // guest PASS gate's threshold, so the guest can never exit under a
+    // pending dump and a run that never serves the app window cannot pass;
+    // the runner fails any run whose script or dumps did not complete.
+    // Every click coordinate is computed from the production shell's own
+    // layout code (`autoload_desktop_pointer_script`), and the pin move
+    // also delivers the `kind=pointer` witness, so the pointer decode path
+    // stays separately proven. A 240-second budget covers the boot +
+    // bounded PBKDF2 + autoload + driver bring-up + the ~4 s passphrase +
+    // ~1 s login typing + session bring-up + the paced click script +
+    // app spawn on QEMU TCG.
     QemuTest {
         package: "rustos-test-autoload-input-qemu-aarch64",
         binary: "rustos-test-autoload-input-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
-        timeout: Duration::from_secs(180),
+        timeout: Duration::from_secs(240),
         disk_sectors: None,
         virtio_net: false,
         ramfb: true,
@@ -3476,12 +3542,27 @@ const TESTS: &[QemuTest] = &[
             ),
             (AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
         ],
-        screendump: Some((AUTOLOAD_FIRST_PRESENT_MARKER, 1)),
-        pointer_move: Some((
-            AUTOLOAD_FIRST_PRESENT_MARKER,
-            AUTOLOAD_INPUT_POINTER_MOVE.0,
-            AUTOLOAD_INPUT_POINTER_MOVE.1,
-        )),
+        screendumps: &[
+            ScreendumpPlan {
+                marker: AUTOLOAD_FIRST_PRESENT_MARKER,
+                occurrences: 1,
+                suffix: "desktop",
+                assert: assert_dark_desktop_screendump,
+            },
+            ScreendumpPlan {
+                marker: AUTOLOAD_WINDOW_EVENT_MARKER,
+                occurrences: AUTOLOAD_WINDOW_DUMP_OCCURRENCES,
+                suffix: "window",
+                assert: assert_files_window_dark_screendump,
+            },
+            ScreendumpPlan {
+                marker: AUTOLOAD_WINDOW_EVENT_MARKER,
+                occurrences: AUTOLOAD_APPEARANCE_DUMP_OCCURRENCES,
+                suffix: "light",
+                assert: assert_files_window_light_screendump,
+            },
+        ],
+        pointer_script: Some(autoload_desktop_pointer_script),
         serial: &[],
     },
     // Stage W11 (`plans/WIRING.md` §3):
@@ -3507,8 +3588,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // Stage W11-B (`plans/WIRING.md` §3): the aarch64 display vertical —
@@ -3538,8 +3619,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // Stage 3b: `rustos-test-timer-preempt-qemu-aarch64` is the aarch64
@@ -3562,8 +3643,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // Stage 3b: `rustos-test-memory-isolation-qemu-aarch64` is the
@@ -3590,8 +3671,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // `plans/PI.md` guard-page fault-form (stage G1):
@@ -3622,8 +3703,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // `plans/PI.md` guard-page fault-form (stage G2):
@@ -3656,8 +3737,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // `plans/PI.md` guard-page fault-form (stage G3c): the *production*
@@ -3693,8 +3774,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // WIRING Stage W3-B (`plans/WIRING.md` §3): the aarch64 device-IRQ
@@ -3725,8 +3806,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // P11 Chunk B-2 INCREMENT (1) (`plans/PI.md`): the aarch64 device-SPI
@@ -3763,8 +3844,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // Stage W11-B (`plans/WIRING.md` §3): the aarch64 input vertical —
@@ -3796,8 +3877,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: Some(("virtio-qemu: virtio-input eventq armed", "a")),
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
     // WIRING (`plans/WIRING.md` §1/§3): the riscv64 input vertical —
@@ -3830,8 +3911,8 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: Some(("virtio-qemu: virtio-input eventq armed", "a")),
         typed_keys: &[],
-        screendump: None,
-        pointer_move: None,
+        screendumps: &[],
+        pointer_script: None,
         serial: &[],
     },
 ];
@@ -4179,33 +4260,345 @@ fn run_one(
     finish_run(t, &kernel, spec)
 }
 
-/// Assert the dumped scan-out shows the composited desktop: the image is
-/// dominated by the shared theme's own desktop colour (the compositor's
-/// background), whatever the taskbar, cursor, or window chrome overlays.
-/// The expected colour is read from `rustos_theme` — the one definition
-/// the desktop session itself renders with — never a literal, so a theme
-/// change cannot silently diverge the test from the product.
-fn assert_desktop_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
-    // The desktop background covers everything but the taskbar and
-    // cursor, so a genuinely presented frame is far above this floor; a
-    // boot console left on screen (text on its own background) is far
-    // below it.
+/// Decode a dumped scan-out and assert it is dominated by `theme`'s own
+/// desktop colour (the compositor's background), whatever the taskbar,
+/// cursor, window chrome, or menu overlays. The expected colour is read
+/// from `rustos_theme` — the one definition the desktop session itself
+/// renders with — never a literal, so a theme change cannot silently
+/// diverge the test from the product.
+fn assert_desktop_screendump(
+    t: &QemuTest,
+    path: &Path,
+    theme: &rustos_theme::Theme,
+) -> Result<(), String> {
+    // The desktop background covers everything but the taskbar, cursor,
+    // and any window, so a genuinely presented frame is far above this
+    // floor; a boot console left on screen (text on its own background)
+    // is far below it.
     const MIN_SHARE: f64 = 0.5;
-    let bytes = std::fs::read(path)
-        .map_err(|e| format!("test --qemu ({}): read screendump: {e}", t.package))?;
-    let image = rustos_qemu::screendump::parse_ppm(&bytes)
-        .map_err(|e| format!("test --qemu ({}): decode screendump: {e}", t.package))?;
-    let desktop = rustos_theme::Theme::dark().palette().desktop;
+    let image = read_screendump(t, path)?;
+    let desktop = theme.palette().desktop;
     let expected = (desktop.r, desktop.g, desktop.b);
     let (dominant, share) = image.dominant_color();
     if dominant != expected || share < MIN_SHARE {
         return Err(format!(
-            "test --qemu ({}): screendump is not the composited desktop: dominant colour \
+            "test --qemu ({}): screendump {} is not the composited desktop: dominant colour \
              {dominant:?} at share {share:.3} (expected {expected:?} at >= {MIN_SHARE})",
-            t.package
+            t.package,
+            path.display(),
         ));
     }
     Ok(())
+}
+
+/// Read and fully decode a dumped scan-out image.
+fn read_screendump(t: &QemuTest, path: &Path) -> Result<rustos_qemu::screendump::Image, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| format!("test --qemu ({}): read screendump: {e}", t.package))?;
+    rustos_qemu::screendump::parse_ppm(&bytes)
+        .map_err(|e| format!("test --qemu ({}): decode screendump: {e}", t.package))
+}
+
+/// [`ScreendumpPlan`] assertion: the dark-theme composited desktop — the
+/// session boots with the shared dark theme active.
+fn assert_dark_desktop_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+    assert_desktop_screendump(t, path, &rustos_theme::Theme::dark())
+}
+
+/// [`ScreendumpPlan`] assertion: the served files window on the
+/// dark-theme desktop (see [`assert_files_window_screendump`]).
+fn assert_files_window_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+    assert_files_window_screendump(t, path, &rustos_theme::Theme::dark())
+}
+
+/// [`ScreendumpPlan`] assertion: the served files window on the
+/// light-theme desktop — taken after the start menu's appearance toggle
+/// was clicked, so the dumped frame must render the *other* palette with
+/// the window still composited.
+fn assert_files_window_light_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+    assert_files_window_screendump(t, path, &rustos_theme::Theme::light())
+}
+
+/// The served files window is on the desktop rendered with `theme`. The
+/// theme's desktop colour still dominates the frame (the window is far
+/// smaller than the screen), and the region where the session places the
+/// first served window — the cascade origin, sized by the files app's
+/// own window constants, inset to stay clear of the anti-aliased rounded
+/// corners and chrome — is overwhelmingly *not* the desktop colour: a
+/// composited window frame covers it.
+fn assert_files_window_screendump(
+    t: &QemuTest,
+    path: &Path,
+    theme: &rustos_theme::Theme,
+) -> Result<(), String> {
+    // Inside the window body — inset from every edge — effectively every
+    // pixel belongs to the window's frame; a sliver of tolerance covers
+    // the cursor and anti-aliasing if they straddle the inset boundary.
+    const MIN_WINDOW_SHARE: f64 = 0.95;
+    /// Pixels shaved off each window edge: clear of the rounded-corner
+    /// radius and any chrome the compositor draws at the boundary.
+    const INSET_PX: u32 = 16;
+    assert_desktop_screendump(t, path, theme)?;
+    let image = read_screendump(t, path)?;
+    let desktop = theme.palette().desktop;
+    let background = (desktop.r, desktop.g, desktop.b);
+    let origin = rustos_desktop_session::windows::CASCADE_ORIGIN;
+    #[allow(clippy::cast_sign_loss)] // The cascade origin is a positive screen offset.
+    let (left, top) = (origin as u32 + INSET_PX, origin as u32 + INSET_PX);
+    let right = left + rustos_files::WIN_WIDTH - 2 * INSET_PX;
+    let bottom = top + rustos_files::WIN_HEIGHT - 2 * INSET_PX;
+    let mut total = 0u64;
+    let mut covered = 0u64;
+    for y in top..bottom {
+        for x in left..right {
+            let pixel = image.pixel(x, y).map_err(|e| {
+                format!(
+                    "test --qemu ({}): screendump {} lacks the served window region: {e}",
+                    t.package,
+                    path.display(),
+                )
+            })?;
+            total += 1;
+            if pixel != background {
+                covered += 1;
+            }
+        }
+    }
+    #[allow(clippy::cast_precision_loss)] // Window pixel counts are far below 2^52.
+    let share = if total == 0 {
+        0.0
+    } else {
+        covered as f64 / total as f64
+    };
+    if share < MIN_WINDOW_SHARE {
+        return Err(format!(
+            "test --qemu ({}): screendump {} shows no served window at the cascade origin: \
+             only {share:.3} of the window body differs from the desktop colour \
+             (expected >= {MIN_WINDOW_SHARE})",
+            t.package,
+            path.display(),
+        ));
+    }
+    Ok(())
+}
+
+/// Build the AW3 desktop click script: pin the pointer to the top-left
+/// corner, click the taskbar's start button (the menu opens), click the
+/// menu's "Files" row (spawning the file manager), click the served
+/// window's body (delivering `Focus` + `Pressed` app-ward — the
+/// kernel-attested `MessageDelivered` witnesses the second screendump
+/// keys on), reopen the menu and click the appearance-toggle row, then
+/// click the window once more (the third delivery, keying the light-theme
+/// screendump). Every coordinate is computed by reconstructing the
+/// production desktop shell — the same `TaskbarConfig`, launcher
+/// registration, and layout code the guest session runs over the shared
+/// ramfb console geometry — so the script and the rendered desktop cannot
+/// drift.
+///
+/// Step gating: the guest processes injected events strictly in device
+/// order and the menu model updates synchronously on the press, so the
+/// whole start-menu → Files sequence keys on the display service's
+/// `FIRST_PRESENT` witness alone (the runner already held it back until
+/// the first dump verified). The in-window click waits for the reserved
+/// window endpoint's first *reply* (the create round-trip completed, so
+/// the window exists in the compositor and was presented by that wake).
+/// The reopen/toggle/final-click steps key on the first click's
+/// deliveries (and are additionally held while the second dump is
+/// pending), so each dump captures exactly the staged frame.
+#[allow(clippy::too_many_lines)] // One linear, ordered click-through script; splitting it would obscure the staging.
+fn autoload_desktop_pointer_script() -> Result<Vec<rustos_qemu::PointerStep>, String> {
+    use rustos_desktop_session::windows::CASCADE_ORIGIN;
+    use rustos_desktop_session::{DesktopShell, APPEARANCE_LABEL, FILES_LABEL, FILES_LAUNCHER};
+    use rustos_geometry::{Point, Rect, Scale};
+    use rustos_qemu::{MouseButton, PointerAction, PointerStep};
+    use rustos_taskbar::TaskbarConfig;
+
+    let width = rustos_fwcfg::RAMFB_CONSOLE_WIDTH_PX;
+    let height = rustos_fwcfg::RAMFB_CONSOLE_HEIGHT_PX;
+    let mut shell = DesktopShell::new(TaskbarConfig::bottom_bar(width, height), APPEARANCE_LABEL);
+    let _ = shell
+        .session_mut()
+        .taskbar_mut()
+        .start_menu_mut()
+        .add_launcher(FILES_LAUNCHER, FILES_LABEL);
+
+    let centre = |rect: Rect, what: &str| -> Result<Point, String> {
+        if rect.is_empty() {
+            return Err(format!("desktop pointer script: {what} region is empty"));
+        }
+        #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.
+        Ok(Point::new(
+            rect.left() + (rect.width / 2) as i32,
+            rect.top() + (rect.height / 2) as i32,
+        ))
+    };
+    let taskbar = shell.session().taskbar();
+    let start = centre(taskbar.layout(Scale::ONE).start_button, "start button")?;
+    let row = |label: &str| -> Result<Point, String> {
+        let index = taskbar
+            .start_menu()
+            .entries()
+            .iter()
+            .position(|entry| entry.label() == label)
+            .ok_or_else(|| format!("desktop pointer script: no menu entry labelled {label:?}"))?;
+        let rect = *taskbar
+            .menu_layout(Scale::ONE)
+            .entries
+            .get(index)
+            .ok_or_else(|| format!("desktop pointer script: no layout row for {label:?}"))?;
+        centre(rect, label)
+    };
+    let files_row = row(FILES_LABEL)?;
+    let toggle_row = row(APPEARANCE_LABEL)?;
+    // The centre of the served files window: the session cascades the
+    // first window from `CASCADE_ORIGIN`, sized by the app's own
+    // constants — the same values the dump assertion measures.
+    let window = centre(
+        Rect::new(
+            CASCADE_ORIGIN,
+            CASCADE_ORIGIN,
+            rustos_files::WIN_WIDTH,
+            rustos_files::WIN_HEIGHT,
+        ),
+        "files window",
+    )?;
+
+    // The reserved window endpoint's first reply on serial: the create
+    // round-trip completed, so the served window exists in the compositor
+    // (and the wake that created it presented the frame carrying it).
+    // Built from the kernel/ipc vocabulary and the shared endpoint id +
+    // hex renderer, never a literal.
+    let mut endpoint_hex = [0u8; 16];
+    let created = format!(
+        "{} endpoint={}",
+        rustos_kernel_ipc::AuditEvent::CallReplied.message(),
+        rustos_util::fmt::format_hex_u64(
+            rustos_abi::window_ipc::WINDOW_ENDPOINT,
+            &mut endpoint_hex
+        ),
+    );
+
+    // Relative-motion arithmetic: the pointer starts at an unknown
+    // position (the session centres it), so the first move overshoots
+    // both axes leftward/upward; the guest clamps at (0, 0), making every
+    // later displacement exact.
+    #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.
+    let pin = PointerAction::Move {
+        dx: -(2 * width as i32),
+        dy: -(2 * height as i32),
+    };
+    let move_by = |from: Point, to: Point| PointerAction::Move {
+        dx: to.x - from.x,
+        dy: to.y - from.y,
+    };
+    let press = PointerAction::Press(MouseButton::Primary);
+    let release = PointerAction::Release(MouseButton::Primary);
+    let step = |marker: &str, occurrences: u32, action: PointerAction| PointerStep {
+        ready_marker: marker.to_owned(),
+        ready_occurrences: occurrences,
+        action,
+    };
+    Ok(vec![
+        // Pin, then click the start button (the menu opens) and the
+        // menu's "Files" row (spawns the file manager and closes the
+        // menu). This first motion is also the run's `kind=pointer`
+        // delivery witness; the row click needs no extra gate — the
+        // guest applies the injected events strictly in order and the
+        // menu model updates synchronously on the press.
+        step(AUTOLOAD_FIRST_PRESENT_MARKER, 1, pin),
+        step(
+            AUTOLOAD_FIRST_PRESENT_MARKER,
+            1,
+            move_by(Point::ORIGIN, start),
+        ),
+        step(AUTOLOAD_FIRST_PRESENT_MARKER, 1, press),
+        step(AUTOLOAD_FIRST_PRESENT_MARKER, 1, release),
+        step(AUTOLOAD_FIRST_PRESENT_MARKER, 1, move_by(start, files_row)),
+        step(AUTOLOAD_FIRST_PRESENT_MARKER, 1, press),
+        step(AUTOLOAD_FIRST_PRESENT_MARKER, 1, release),
+        // The spawned app's window create has been replied: click the
+        // window body — the session delivers `Focus` + `Pressed` app-ward
+        // (`MessageDelivered` × 2, the second dump's key).
+        step(&created, 1, move_by(files_row, window)),
+        step(&created, 1, press),
+        step(&created, 1, release),
+        // Reopen the menu and click the appearance toggle (the light
+        // theme presents), then click the window once more — the third
+        // delivery, the light dump's key. These steps additionally wait
+        // behind the pending second dump, so it captures the dark frame.
+        step(
+            AUTOLOAD_WINDOW_EVENT_MARKER,
+            AUTOLOAD_WINDOW_DUMP_OCCURRENCES,
+            move_by(window, start),
+        ),
+        step(
+            AUTOLOAD_WINDOW_EVENT_MARKER,
+            AUTOLOAD_WINDOW_DUMP_OCCURRENCES,
+            press,
+        ),
+        step(
+            AUTOLOAD_WINDOW_EVENT_MARKER,
+            AUTOLOAD_WINDOW_DUMP_OCCURRENCES,
+            release,
+        ),
+        step(
+            AUTOLOAD_WINDOW_EVENT_MARKER,
+            AUTOLOAD_WINDOW_DUMP_OCCURRENCES,
+            move_by(start, toggle_row),
+        ),
+        step(
+            AUTOLOAD_WINDOW_EVENT_MARKER,
+            AUTOLOAD_WINDOW_DUMP_OCCURRENCES,
+            press,
+        ),
+        step(
+            AUTOLOAD_WINDOW_EVENT_MARKER,
+            AUTOLOAD_WINDOW_DUMP_OCCURRENCES,
+            release,
+        ),
+        step(
+            AUTOLOAD_WINDOW_EVENT_MARKER,
+            AUTOLOAD_WINDOW_DUMP_OCCURRENCES,
+            move_by(toggle_row, window),
+        ),
+        step(
+            AUTOLOAD_WINDOW_EVENT_MARKER,
+            AUTOLOAD_WINDOW_DUMP_OCCURRENCES,
+            press,
+        ),
+        step(
+            AUTOLOAD_WINDOW_EVENT_MARKER,
+            AUTOLOAD_WINDOW_DUMP_OCCURRENCES,
+            release,
+        ),
+        // The first handshake click, keyed on the post-toggle click's own
+        // delivery: it is injected only after that delivery appeared on
+        // serial, so the guest processes it in a later wake — strictly
+        // after the light-theme frame was presented — and its delivery
+        // keys the light dump.
+        step(
+            AUTOLOAD_WINDOW_EVENT_MARKER,
+            AUTOLOAD_TOGGLE_CLICK_OCCURRENCES,
+            press,
+        ),
+        step(
+            AUTOLOAD_WINDOW_EVENT_MARKER,
+            AUTOLOAD_TOGGLE_CLICK_OCCURRENCES,
+            release,
+        ),
+        // The second handshake, keyed on the first's delivery and held
+        // behind the pending light-theme dump: it fires only once the
+        // host has read that dump back, and its own delivery is the
+        // guest PASS gate's threshold — so the guest can never exit
+        // under a pending screendump. A press only: the guest exits the
+        // instant the delivery lands, so a trailing release could never
+        // be sent (and needs no cleanup in a guest that is gone).
+        step(
+            AUTOLOAD_WINDOW_EVENT_MARKER,
+            AUTOLOAD_APPEARANCE_DUMP_OCCURRENCES,
+            press,
+        ),
+    ])
 }
 
 /// A filesystem volume to plant on an enrolment's virtio-blk backing image.
@@ -4310,35 +4703,36 @@ fn finish_run(t: &QemuTest, kernel: &Path, mut spec: Spec) -> Result<(), String>
         spec = spec.with_typed_keys(*marker, *occurrences, *text);
     }
 
-    // Arm the marker-gated screendump: the host-side scan-out readback.
-    // Any stale dump from an earlier run is removed first, so the runner's
-    // completeness check (and the pixel assert below) can never read old
-    // bytes. The pointer injection is held until the dump verifies.
-    let screendump_path = if let Some((marker, occurrences)) = t.screendump {
-        let path = kernel.with_extension("screendump.ppm");
+    // Arm the ordered, marker-gated screendumps: the host-side scan-out
+    // readbacks. Any stale dump from an earlier run is removed first, so
+    // the runner's completeness check (and the pixel asserts below) can
+    // never read old bytes. Still-unsent pointer steps are held while the
+    // current dump is pending.
+    let mut screendump_paths: Vec<(PathBuf, ScreendumpAssert)> = Vec::new();
+    for plan in t.screendumps {
+        let path = kernel.with_extension(format!("{}.screendump.ppm", plan.suffix));
         std::fs::remove_file(&path)
             .or_else(|e| match e.kind() {
                 std::io::ErrorKind::NotFound => Ok(()),
                 _ => Err(e),
             })
             .map_err(|e| format!("test --qemu ({}): remove stale screendump: {e}", t.package))?;
-        spec = spec.with_screendump(marker, occurrences, &path);
-        Some(path)
-    } else {
-        None
-    };
+        spec = spec.with_screendump(plan.marker, plan.occurrences, &path);
+        screendump_paths.push((path, plan.assert));
+    }
 
     // Attach the pointer sibling after the keyboard — the interactive
     // session's two-identical-virtio-input-nodes topology — and let the
-    // runner inject the relative motion once its marker appears. Each
-    // driver instance arms and prints the readiness marker once, so the
-    // key injection waits for both markers: injecting on the first
-    // (possibly the mouse's) would race the keyboard's own arming and
-    // lose the press.
-    if let Some((marker, dx, dy)) = t.pointer_move {
-        spec = spec
-            .with_pointer_move(marker, dx, dy)
-            .with_keyboard_ready_occurrences(2);
+    // runner drive the computed script step by step, each once its own
+    // marker appears. Each driver instance arms and prints the readiness
+    // marker once, so the key injection waits for both markers: injecting
+    // on the first (possibly the mouse's) would race the keyboard's own
+    // arming and lose the press.
+    if let Some(build_script) = t.pointer_script {
+        for step in build_script().map_err(|e| format!("test --qemu ({}): {e}", t.package))? {
+            spec = spec.with_pointer_step(step.ready_marker, step.ready_occurrences, step.action);
+        }
+        spec = spec.with_keyboard_ready_occurrences(2);
     }
 
     // Pipe QEMU's stdin for the interactive-session vertical and let the
@@ -4350,8 +4744,8 @@ fn finish_run(t: &QemuTest, kernel: &Path, mut spec: Spec) -> Result<(), String>
 
     match Runner::run(&spec).map_err(|e| format!("test --qemu ({}): {e}", t.package))? {
         Outcome::Pass => {
-            if let Some(path) = screendump_path {
-                assert_desktop_screendump(t, &path)?;
+            for (path, assert) in &screendump_paths {
+                assert(t, path)?;
             }
             Ok(())
         }

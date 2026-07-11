@@ -3006,10 +3006,10 @@ transfer, landed in increments:
   loop's per-wake damage present carries the repaint over the display IPC;
   the one theme→render conversion (`From<Rgba> for Color`) also seeds the
   compositor at bring-up. Host-verified through the exact shell/compositor
-  code the `Run` binary drives (wm + session tests); a click-driven QEMU
-  screendump of the live toggle rides the app-window/pointer vertical work,
-  which needs the runner's pointer-button injection and a second verified
-  dump (staged as `plans/APPWIN.md` AW3). Then: wire the two default apps
+  code the `Run` binary drives (wm + session tests), and end to end in the
+  autoload QEMU vertical: the runner's ordered pointer-button script clicks
+  the live toggle and a third verified screendump asserts the re-themed
+  scan-out (`plans/APPWIN.md` AW3). Then: wire the two default apps
   to live VFS/shell channels + WM-presented windows — staged in
   `plans/APPWIN.md` (binding). **AW1 is done:** the shared
   `rustos_abi::fs::DirEntries` stream walker (unit-tested, fuzzed in
@@ -3027,9 +3027,15 @@ transfer, landed in increments:
   map-once shm regions, per-client cap, fail-closed teardown, validated
   event routing) and the `WindowClient`/`WindowEvents` an app links
   (typed calls + parked event wait) — host-proven through an in-process
-  loopback. Remaining: AW3 session window server + files `Run` bundle +
-  vertical, AW4 terminal (stream wait source + pipe/spawn
-  `ShellSource`), AW5 CU6 picker descriptors.
+  loopback. **AW3 is done:** the session serves `WINDOW_ENDPOINT` (bind
+  authorised by its live seat lease) from its token-dispatched wait-set
+  loop into `DesktopShell`; the files bundle (`CAP_FS_ACCESS` only) lives
+  in the system app store and is spawned from the start menu; the autoload
+  QEMU vertical click-drives the whole chain (menu → launch → served
+  window → appearance toggle) with three verified screendumps, gated on
+  kernel-attested serial records and the interaction contract in the test
+  crate's lib target. Remaining: AW4 terminal (stream wait source +
+  pipe/spawn `ShellSource`), AW5 CU6 picker descriptors.
 - The platform-RNG `EntropySource` that seeds the reserve — **DONE**
   (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `rustos_arch_api::entropy`
   slice (x86_64 `RDSEED`/`RDRAND`, aarch64 `RNDR` `Supported`; riscv64 `Zkr` /

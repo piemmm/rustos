@@ -644,10 +644,14 @@ mod tests {
         const PURE_TOOL_REQUEST: &[CapabilityId] =
             &[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS];
 
-        // The desktop graphical-session service (plans/DISPLAY.md D7c):
-        // the boot seat's revocable lease (CAP_DISPLAY), the owner-gated
-        // seat input drains (CAP_INPUT_READ), and the zero-copy frame
-        // region it creates and grants to the display service (CAP_SHM).
+        // The desktop graphical-session service (plans/DISPLAY.md D7c,
+        // plans/APPWIN.md AW3): the boot seat's revocable lease
+        // (CAP_DISPLAY), the owner-gated seat input drains
+        // (CAP_INPUT_READ), the zero-copy frame regions it creates for
+        // the display service and maps from each served app window
+        // (CAP_SHM), and the start menu's app launchers (CAP_PROC_SPAWN).
+        // Binding the seat-scoped window rendezvous needs no capability:
+        // the kernel authorises it by the session's live seat lease.
         // It ships purely as a discovered on-disk bundle — the boot floor
         // never grows — so no `spawn_layout` row or manifest constant
         // exists for it and its `AppInfo.toml` is pinned here directly.
@@ -655,6 +659,7 @@ mod tests {
             CapabilityId::DISPLAY,
             CapabilityId::INPUT_READ,
             CapabilityId::SHM,
+            CapabilityId::PROC_SPAWN,
         ];
 
         // The device-inventory listing tools `lspci` and `lsusb`
@@ -665,6 +670,17 @@ mod tests {
             CapabilityId::CONSOLE_WRITE,
             CapabilityId::FS_ACCESS,
             CapabilityId::SYSINFO_HW,
+        ];
+
+        // The windowed file browser `files` (plans/APPWIN.md AW3): console
+        // write for its fail-loud diagnostics, filesystem reach for the
+        // listings it browses, and CAP_SHM to create and grant the
+        // zero-copy window frame region the desktop session maps. Not an
+        // embedded spawn-floor program, so the list lives only in this pin.
+        const FILES_BROWSER_REQUEST: &[CapabilityId] = &[
+            CapabilityId::CONSOLE_WRITE,
+            CapabilityId::FS_ACCESS,
+            CapabilityId::SHM,
         ];
 
         // The volume-detach tool `unmount` (plans/DEVICES.md D4b): the
@@ -698,6 +714,7 @@ mod tests {
             ("edit", AppKind::Command, FILE_TOOL_REQUEST),
             ("elsh", AppKind::Command, SHELL_MANIFEST),
             ("false", AppKind::Command, PURE_TOOL_REQUEST),
+            ("files", AppKind::Command, FILES_BROWSER_REQUEST),
             ("fstree", AppKind::Command, SANDBOXED_FILE_TOOL_REQUEST),
             ("groupadd", AppKind::Command, ADMIN_TOOL_REQUEST),
             ("head", AppKind::Command, FILE_TOOL_REQUEST),

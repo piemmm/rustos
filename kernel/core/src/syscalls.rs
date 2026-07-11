@@ -1577,6 +1577,11 @@ where
         // single-slot protocol like the USB URB transport, wedge the
         // endpoint against the caller's replacement.
         crate::callreg::cancel_posted_by(task.0, self.audit);
+        // Tear down every asynchronous message port this task bound, so
+        // a dead task's mailbox is never left for a later task to squat
+        // on or a sender to fill (racing senders observe the closed port
+        // and fail typed).
+        self.ipc.write().teardown_owned_by(task.0, self.audit);
         // Release every shared-memory mapping this task held, dropping
         // each reference and zeroing + freeing any region whose last
         // reference this releases (zero-on-free). The registry scrubs a
@@ -2472,7 +2477,20 @@ where
         // against the caller's effective set and
         // re-checks the payload size, returning a stable `Errno` for
         // every refusal.
-        port.send(caller.caps, &payload, self.audit).map(|()| 0)
+        let owner = port.owner();
+        port.send(caller.caps, &payload, self.audit)?;
+        drop(ipc);
+        // Wake exactly the port's owner: a receiver parks off the run
+        // queue on a wait-set observing this port (registered on
+        // `SERVE_WAITQ`, like an IPC server between requests), so the
+        // delivery must unpark it or the message would sit until some
+        // unrelated wake. Waking one recorded task — never a broadcast —
+        // avoids the thundering herd; the woken owner re-scans its
+        // members, and the scheduler's wake-pending token closes the
+        // send/park race so a message delivered while the owner is
+        // mid-commit-to-park is never lost.
+        crate::waitq::serve_wake_task(owner);
+        Ok(0)
     }
 
     fn ipc_recv(
@@ -2481,6 +2499,7 @@ where
         endpoint: u64,
         ptr: u64,
         len: usize,
+        sender_out: u64,
     ) -> SyscallResult {
         // resolve the destination endpoint against the live
         // named-port registry. An endpoint that is not currently bound
@@ -2492,16 +2511,18 @@ where
         };
 
         // Gate the receiver against the port's required receive
-        // capabilities *before* any message is observed or dequeued — the
-        // same handler-side gate `call_recv` applies to a call endpoint.
-        // `Port::create` proves only that the *binder* held these
-        // capabilities; without this per-receive check any task that could
-        // name the endpoint id could drain another principal's messages
-        // (fail open). A denied receiver learns nothing about the mailbox,
-        // not even whether it is empty.
+        // capabilities *and* its recorded owner *before* any message is
+        // observed or dequeued — the same handler-side gate `call_recv`
+        // applies to a call endpoint. `Port::create` proves only that the
+        // *binder* held these capabilities; without the per-receive check
+        // any task that could name the endpoint id could drain another
+        // principal's messages (fail open), and the owner check keeps a
+        // mailbox private to the task that bound it. A denied receiver
+        // learns nothing about the mailbox, not even whether it is empty.
         if !port
             .required_recv_caps()
             .is_subset_of(caller.caps.effective())
+            || port.owner() != caller.caps.task().0
         {
             return Err(Errno::PermissionDenied);
         }
@@ -2528,10 +2549,16 @@ where
                 if payload.len() > len {
                     return Err(Errno::BufferTooSmall);
                 }
-                // Every `UaccessError` collapses onto the single
-                // `BadAddress` so a faulting pointer cannot be used as a
-                // memory-layout oracle. A fault leaves the
-                // message queued.
+                // Write the sender's kernel-attested origin first, then
+                // the payload; both are inside the peek-then-commit, so a
+                // fault on either leaves the message queued for a retry
+                // (a partially written buffer is overwritten by that
+                // retry, and nothing was committed). Every `UaccessError`
+                // collapses onto the single `BadAddress` so a faulting
+                // pointer cannot be used as a memory-layout oracle.
+                let origin_bytes = msg.origin.to_le_bytes();
+                copy_out(space, physmap, VirtAddr::new(sender_out), &origin_bytes)
+                    .map_err(copy_fault_errno)?;
                 copy_out(space, physmap, VirtAddr::new(ptr), payload)
                     .map(|()| payload.len())
                     .map_err(copy_fault_errno)
@@ -4886,18 +4913,48 @@ where
         // set *before* the endpoint exists: the
         // creator must hold every `recv` capability it requires, and must
         // hold `CAP_IPC_BIND_PRIVILEGED` to bind a restricted-sender endpoint.
-        let endpoint = CallEndpoint::create(
-            EndpointId(endpoint_id),
-            caller.caps,
-            send_set,
-            recv_set,
-            CallEndpointLimits {
-                max_request,
-                max_reply,
-                capacity,
-            },
-            self.audit,
-        )?;
+        //
+        // The window rendezvous is the one seat-scoped reserved id: the
+        // desktop session that holds a seat's live lease serves it, and a
+        // session is an ordinary user process whose account ceiling never
+        // carries the service-class privileged-bind capability. Binding
+        // `WINDOW_ENDPOINT` is therefore alternatively authorised by the
+        // kernel-attested seat-lease fact — resolved here from the seat
+        // registry against the kernel-trusted caller id, never a claim —
+        // and refused as usual for everyone else (fail closed): a squatter
+        // without the lease cannot claim app windows, and losing the seat
+        // ends the session, whose exit reclaims the endpoint.
+        let limits = CallEndpointLimits {
+            max_request,
+            max_reply,
+            capacity,
+        };
+        let seat_attested = endpoint_id == rustos_abi::window_ipc::WINDOW_ENDPOINT
+            && !caller
+                .caps
+                .has(rustos_abi::CapabilityId::IPC_BIND_PRIVILEGED)
+            && self
+                .seat_registry
+                .holds_live_lease(SeatOwner(caller.task_id.0));
+        let endpoint = if seat_attested {
+            CallEndpoint::create_seat_attested(
+                EndpointId(endpoint_id),
+                caller.caps,
+                send_set,
+                recv_set,
+                limits,
+                self.audit,
+            )?
+        } else {
+            CallEndpoint::create(
+                EndpointId(endpoint_id),
+                caller.caps,
+                send_set,
+                recv_set,
+                limits,
+                self.audit,
+            )?
+        };
         // Publish it so the `ipc_call` handler can resolve callers to it. A
         // live id is never silently re-pointed: a clash fails closed with
         // `AlreadyExists` (audited by the registry as the register-denied
@@ -5646,6 +5703,22 @@ where
                             return Err(Errno::NotFound);
                         }
                     }
+                    WaitSourceKind::Port => {
+                        // A wait-set may observe a message port only for
+                        // the task that bound it — the same owner gate
+                        // `ipc_recv` applies, so observing readiness can
+                        // never outreach draining. Unknown and foreign
+                        // ports collapse to the same `NotFound` (no
+                        // existence oracle).
+                        let owned = self
+                            .ipc
+                            .read()
+                            .lookup(EndpointId(id))
+                            .is_some_and(|port| port.owner() == caller.task_id.0);
+                        if !owned {
+                            return Err(Errno::NotFound);
+                        }
+                    }
                 }
                 crate::waitset::add(
                     caller.task_id.0,
@@ -5731,6 +5804,16 @@ where
                     WaitSourceKind::SeatInput => {
                         self.seat_registry.input_ready(m.id, SeatOwner(sched_task))
                     }
+                    // A non-consuming peek: a delivered message waiting in
+                    // the owner's mailbox — the woken owner's `ipc_recv`
+                    // performs the dequeue. Re-checked against the owner on
+                    // every scan, so a port torn down (or never owned)
+                    // simply is not ready.
+                    WaitSourceKind::Port => self
+                        .ipc
+                        .read()
+                        .lookup(EndpointId(m.id))
+                        .is_some_and(|port| port.owner() == sched_task && port.has_pending()),
                 };
                 if is_ready {
                     ready = Some((m.kind, m.id, m.token));
@@ -6326,6 +6409,51 @@ where
         match self.ipc.read().resolve(&port_name) {
             Some(id) => Ok(id.0),
             None => Err(Errno::NotFound),
+        }
+    }
+
+    fn port_bind(
+        &self,
+        caller: &CallerContext<'_>,
+        endpoint: u64,
+        max_payload: usize,
+        capacity: usize,
+    ) -> SyscallResult {
+        // Bound the payload cap to the ABI register width before touching
+        // anything else (cheap reject; `Port::create` re-bounds it against
+        // `IPC_MESSAGE_MAX_PAYLOAD_LEN` and refuses a zero capacity). The
+        // `usize` → `u32` conversion is the only narrowing; a payload cap
+        // beyond `u32` is malformed — exactly the `call_create` shape.
+        let Ok(max_payload) = u32::try_from(max_payload) else {
+            return Err(Errno::LengthOutOfRange);
+        };
+
+        // Build the port owned by the kernel-trusted calling task.
+        // `Port::create` runs the bind-time authority checks against the
+        // caller's effective set before the port exists: an unrestricted
+        // port needs no capability, while a reserved well-known id
+        // requires `CAP_IPC_BIND_PRIVILEGED` (squat protection, the
+        // `call_create` rule). The port carries empty send/recv capability
+        // sets: sender authentication is the receiver's job over each
+        // message's kernel-attested origin, and the mailbox is already
+        // private to its owner (`ipc_recv` owner-gates every drain).
+        let port = rustos_kernel_ipc::Port::create(
+            EndpointId(endpoint),
+            caller.caps,
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            max_payload,
+            capacity,
+            self.audit,
+        )?;
+
+        // Publish it so `ipc_send` / `ipc_recv` can resolve it. A live id
+        // is never silently re-pointed: a clash fails closed with
+        // `AlreadyExists` (audited by the registry as the register-denied
+        // decision) and the freshly built, never-visible port is dropped.
+        match self.ipc.write().register(port, self.audit) {
+            Ok(_) => Ok(0),
+            Err((_port, err)) => Err(err),
         }
     }
 
@@ -7658,7 +7786,19 @@ mod tests {
     /// test cares about; the per-send capability check lives on
     /// `Port::send` and is exercised by `kernel/ipc`'s own tests.
     fn register_port(registry: &RwLock<PortRegistry>, endpoint: u64, sink: &(dyn Sink + Sync)) {
-        let creator = make_caps_record(0xB1, &[], sink);
+        register_port_for(registry, endpoint, 0xB1, sink);
+    }
+
+    /// Bind an unrestricted test port owned by `owner` — the task whose
+    /// context the receive-side tests call `ipc_recv` under (receives are
+    /// owner-gated).
+    fn register_port_for(
+        registry: &RwLock<PortRegistry>,
+        endpoint: u64,
+        owner: u64,
+        sink: &(dyn Sink + Sync),
+    ) {
+        let creator = make_caps_record(owner, &[], sink);
         let port = Port::create(
             EndpointId(endpoint),
             &creator,
@@ -8369,7 +8509,7 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
         sink.clear();
-        assert_eq!(h.ipc_recv(&ctx, 1, 0x2000, 8), Err(Errno::NotFound));
+        assert_eq!(h.ipc_recv(&ctx, 1, 0x2000, 8, 0x1800), Err(Errno::NotFound));
         assert!(sink.event_ids().is_empty());
     }
 
@@ -8415,33 +8555,46 @@ mod tests {
             caps: &caps,
         };
 
-        register_port(&ipc, 1, sink);
+        register_port_for(&ipc, 1, 3, sink);
         let payload = [0xDEu8, 0xAD, 0xBE, 0xEF];
         enqueue(&ipc, 1, &payload, sink);
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
 
-        assert_eq!(h.ipc_recv(&ctx, 1, 0x1000, 64), Ok(payload.len() as u64));
+        assert_eq!(
+            h.ipc_recv(&ctx, 1, 0x1000, 64, 0x1800),
+            Ok(payload.len() as u64)
+        );
         // The dequeue committed: the mailbox is now empty.
         assert!(ipc.read().lookup(EndpointId(1)).expect("bound").is_empty());
-        // The bytes landed at the caller's pointer.
-        let read_back = h
+        // The bytes landed at the caller's pointer, and the sender's
+        // kernel-attested origin — snapshotted at send time from the
+        // sender's own task state, never its claim — landed at the
+        // origin out-pointer: `enqueue` sends as task `0xB1` under uid
+        // 1000, and that is exactly what the receiver observes.
+        let (read_back, origin_bytes) = h
             .with_caller_aspace(&ctx, |space, physmap| {
                 let mut buf = [0u8; 4];
                 copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
-                buf
+                let mut origin = [0u8; rustos_abi::ORIGIN_WIRE_LEN];
+                copy_in(space, physmap, VirtAddr::new(0x1800), &mut origin).expect("readable");
+                (buf, origin)
             })
             .expect("caller has a registered space");
         assert_eq!(read_back, payload);
+        let origin = rustos_abi::Origin::from_bytes(&origin_bytes).expect("well-formed origin");
+        assert_eq!(origin.pid(), 0xB1);
+        assert_eq!(origin.uid(), 1000);
     }
 
-    /// Regression — the fail-open receive path: `ipc_recv` on a port
-    /// whose `required_recv_caps` the caller does not hold is refused with
-    /// `PermissionDenied` **before** any message is observed or dequeued,
-    /// and the queued message stays put for the authorised receiver.
-    /// Before the fix the recv path never consulted `required_recv_caps`
-    /// (they were proven only against the *binder* at `Port::create`), so
+    /// Regression — the fail-open receive path: `ipc_recv` on a port is
+    /// refused with `PermissionDenied` **before** any message is observed
+    /// or dequeued for a caller that lacks the port's
+    /// `required_recv_caps` *or* is not the port's owner, and the queued
+    /// message stays put for the owner. Before the fix the recv path
+    /// never consulted `required_recv_caps` (they were proven only
+    /// against the *binder* at `Port::create`) and had no owner gate, so
     /// any task that could name the endpoint id could drain another
     /// principal's messages.
     #[test]
@@ -8462,9 +8615,10 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
 
-        // A port that requires `CAP_INPUT_READ` of its receivers, bound by
-        // a creator that holds it (the bind-time half of the gate).
-        let creator = make_caps_record(0xB2, &[CapabilityId::INPUT_READ], sink);
+        // A port that requires `CAP_INPUT_READ` of its receivers, bound
+        // (and therefore owned) by task 4, which holds it — the bind-time
+        // half of the gate.
+        let creator = make_caps_record(4, &[CapabilityId::INPUT_READ], sink);
         let port = Port::create(
             EndpointId(9),
             &creator,
@@ -8491,19 +8645,33 @@ mod tests {
             caps: &intruder_caps,
         };
         assert_eq!(
-            h.ipc_recv(&intruder, 9, 0x1000, 64),
+            h.ipc_recv(&intruder, 9, 0x1000, 64, 0x1800),
             Err(Errno::PermissionDenied)
         );
         // The message was not consumed by the denied receiver.
         assert_eq!(ipc.read().lookup(EndpointId(9)).expect("bound").len(), 1);
 
-        // The authorised receiver drains it.
+        // A caller that *does* hold the capability but did not bind the
+        // port is denied too: a mailbox is private to its owner, so
+        // capability reach alone can never drain another task's messages.
+        let capable_stranger_caps = make_caps_record(5, &[CapabilityId::INPUT_READ], sink);
+        let capable_stranger = CallerContext {
+            task_id: SecTaskId(5),
+            caps: &capable_stranger_caps,
+        };
+        assert_eq!(
+            h.ipc_recv(&capable_stranger, 9, 0x1000, 64, 0x1800),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(ipc.read().lookup(EndpointId(9)).expect("bound").len(), 1);
+
+        // The owner — holding the required capability — drains it.
         let reader_caps = make_caps_record(4, &[CapabilityId::INPUT_READ], sink);
         let reader = CallerContext {
             task_id: SecTaskId(4),
             caps: &reader_caps,
         };
-        assert_eq!(h.ipc_recv(&reader, 9, 0x1000, 64), Ok(4));
+        assert_eq!(h.ipc_recv(&reader, 9, 0x1000, 64, 0x1800), Ok(4));
         assert!(ipc.read().lookup(EndpointId(9)).expect("bound").is_empty());
     }
 
@@ -8533,11 +8701,14 @@ mod tests {
             caps: &caps,
         };
 
-        register_port(&ipc, 1, sink);
+        register_port_for(&ipc, 1, 3, sink);
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
-        assert_eq!(h.ipc_recv(&ctx, 1, 0x1000, 64), Err(Errno::WouldBlock));
+        assert_eq!(
+            h.ipc_recv(&ctx, 1, 0x1000, 64, 0x1800),
+            Err(Errno::WouldBlock)
+        );
     }
 
     /// `ipc_recv` into a buffer smaller than the queued message fails
@@ -8567,14 +8738,17 @@ mod tests {
             caps: &caps,
         };
 
-        register_port(&ipc, 1, sink);
+        register_port_for(&ipc, 1, 3, sink);
         enqueue(&ipc, 1, &[1, 2, 3, 4], sink);
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
 
         // A 2-byte buffer cannot hold the 4-byte message.
-        assert_eq!(h.ipc_recv(&ctx, 1, 0x1000, 2), Err(Errno::BufferTooSmall));
+        assert_eq!(
+            h.ipc_recv(&ctx, 1, 0x1000, 2, 0x1800),
+            Err(Errno::BufferTooSmall)
+        );
         // Nothing was dropped: the message is still queued.
         assert_eq!(ipc.read().lookup(EndpointId(1)).expect("bound").len(), 1);
     }
@@ -8605,14 +8779,19 @@ mod tests {
             caps: &caps,
         };
 
-        register_port(&ipc, 1, sink);
+        register_port_for(&ipc, 1, 3, sink);
         enqueue(&ipc, 1, &[1, 2, 3, 4], sink);
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
 
-        // Page 2 (`0x2000`) is unmapped in the caller's space.
-        assert_eq!(h.ipc_recv(&ctx, 1, 0x2000, 64), Err(Errno::BadAddress));
+        // Page 2 (`0x2000`) is unmapped in the caller's space; the origin
+        // pointer is fine, so the fault is the payload copy's — inside
+        // the peek-then-commit, so nothing is dropped.
+        assert_eq!(
+            h.ipc_recv(&ctx, 1, 0x2000, 64, 0x1800),
+            Err(Errno::BadAddress)
+        );
         assert_eq!(ipc.read().lookup(EndpointId(1)).expect("bound").len(), 1);
     }
 
@@ -8638,12 +8817,15 @@ mod tests {
             caps: &caps,
         };
 
-        register_port(&ipc, 1, sink);
+        register_port_for(&ipc, 1, 3, sink);
         enqueue(&ipc, 1, &[1, 2, 3, 4], sink);
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
-        assert_eq!(h.ipc_recv(&ctx, 1, 0x1000, 64), Err(Errno::BadAddress));
+        assert_eq!(
+            h.ipc_recv(&ctx, 1, 0x1000, 64, 0x1800),
+            Err(Errno::BadAddress)
+        );
         assert_eq!(ipc.read().lookup(EndpointId(1)).expect("bound").len(), 1);
     }
 
@@ -20241,6 +20423,68 @@ mod tests {
         crate::callreg::unregister(EndpointId(id));
     }
 
+    /// Binding the seat-scoped window rendezvous (`WINDOW_ENDPOINT`) is
+    /// authorised by the kernel-attested live seat lease and nothing else
+    /// for an unprivileged caller: refused before the lease exists, allowed
+    /// while the caller holds it, and refused again once the lease is
+    /// released (fail closed on loss). The attestation is resolved from the
+    /// seat registry against the kernel-trusted caller id, never a claim.
+    #[test]
+    fn call_create_window_endpoint_binds_only_for_the_live_seat_lease_holder() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // Pages 1 and 2 are the (empty) send/recv `CapabilitySet` wire images.
+        let (space, physmap) = call_aspace(&[0u8; CapabilitySet::WIRE_LEN]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(0x5709), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        // An ordinary session process: no `CAP_IPC_BIND_PRIVILEGED`.
+        let caps = make_caps_record(0x5709, &[CapabilityId::DISPLAY], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x5709),
+            caps: &caps,
+        };
+        let queue: &'static crate::console::ConsoleInputQueue =
+            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
+        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_seat_registry(seat);
+
+        let id = rustos_abi::window_ipc::WINDOW_ENDPOINT;
+        // No lease yet: the reserved id stays privileged and the bind is
+        // refused with nothing registered.
+        assert_eq!(
+            h.call_create(&ctx, id, 0x1000, 0x2000, 64, 64, 4),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(!crate::callreg::contains(EndpointId(id)));
+
+        // Holding the boot seat's live lease authorises the bind.
+        assert!(h.display_acquire(&ctx, SEAT_PRIMARY).is_ok());
+        assert_eq!(h.call_create(&ctx, id, 0x1000, 0x2000, 64, 64, 4), Ok(0));
+        assert!(crate::callreg::contains(EndpointId(id)));
+        crate::callreg::unregister(EndpointId(id));
+
+        // A released lease withdraws the authority (fail closed on loss).
+        assert!(h.display_release(&ctx, SEAT_PRIMARY).is_ok());
+        assert_eq!(
+            h.call_create(&ctx, id, 0x1000, 0x2000, 64, 64, 4),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(!crate::callreg::contains(EndpointId(id)));
+    }
+
     /// Wire image of a one-capability send set, for seeding a `call_create`
     /// request page.
     fn one_cap_image(cap: CapabilityId) -> [u8; CapabilitySet::WIRE_LEN] {
@@ -20873,6 +21117,7 @@ mod tests {
     const WS_KIND_ENDPOINT: u32 = rustos_abi::WaitSourceKind::Endpoint as u32;
     const WS_KIND_IRQ: u32 = rustos_abi::WaitSourceKind::Irq as u32;
     const WS_KIND_CHILD: u32 = rustos_abi::WaitSourceKind::Child as u32;
+    const WS_KIND_PORT: u32 = rustos_abi::WaitSourceKind::Port as u32;
 
     /// A [`ProcessWait`] test double over the real [`ProcessTable`]
     /// bookkeeping, so the wait-set `Child` tests exercise the same matcher
@@ -21163,6 +21408,221 @@ mod tests {
 
         crate::callreg::unregister(EndpointId(id));
         assert_eq!(crate::waitset::release_owned_by(0x5702), 1);
+    }
+
+    /// `port_bind` binds a port owned by the kernel-trusted caller, refuses
+    /// a clashing id (`AlreadyExists`, never a silent re-point), and
+    /// re-applies the fail-closed bounds: a zero capacity and a payload cap
+    /// beyond the ABI ceiling are both `LengthOutOfRange`.
+    #[test]
+    fn port_bind_binds_an_owned_port_and_refuses_clash_and_bad_bounds() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(0x5704, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x5704),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        let id = 0x5EAD_0001u64;
+        assert_eq!(h.port_bind(&ctx, id, 64, 4), Ok(0));
+        // The port exists and is owned by the caller (the receive gate's
+        // and the wait-set's owner fact).
+        assert_eq!(
+            ipc.read()
+                .lookup(EndpointId(id))
+                .map(rustos_kernel_ipc::Port::owner),
+            Some(0x5704)
+        );
+        // A live id is never silently re-pointed — not even by its owner.
+        assert_eq!(h.port_bind(&ctx, id, 64, 4), Err(Errno::AlreadyExists));
+        // Fail-closed bounds: zero capacity, oversize payload cap, and a
+        // payload cap that does not fit the ABI register width.
+        assert_eq!(
+            h.port_bind(&ctx, 0x5EAD_0002, 64, 0),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            h.port_bind(
+                &ctx,
+                0x5EAD_0003,
+                rustos_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN as usize + 1,
+                4
+            ),
+            Err(Errno::LengthOutOfRange)
+        );
+        ipc.write().teardown_owned_by(0x5704, sink);
+    }
+
+    /// Binding a **reserved** well-known endpoint id as a port requires
+    /// `CAP_IPC_BIND_PRIVILEGED`, exactly as `call_create` does: an
+    /// unprivileged squatter is refused and the id stays unbound; a
+    /// privileged binder succeeds.
+    #[test]
+    fn port_bind_reserved_id_requires_privileged_bind() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let reserved = rustos_abi::sysinfo::SYSINFO_ENDPOINT;
+
+        let squatter_caps = make_caps_record(0x5705, &[], sink);
+        let squatter = CallerContext {
+            task_id: SecTaskId(0x5705),
+            caps: &squatter_caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.port_bind(&squatter, reserved, 64, 4),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(ipc.read().lookup(EndpointId(reserved)).is_none());
+
+        let privileged_caps = make_caps_record(0x5706, &[CapabilityId::IPC_BIND_PRIVILEGED], sink);
+        let privileged = CallerContext {
+            task_id: SecTaskId(0x5706),
+            caps: &privileged_caps,
+        };
+        assert_eq!(h.port_bind(&privileged, reserved, 64, 4), Ok(0));
+        ipc.write().teardown_owned_by(0x5706, sink);
+    }
+
+    /// A delivered message on a member port makes `waitset_wait` report
+    /// that member's token (a non-consuming peek), `ipc_recv` is what
+    /// drains it, and a foreign port can never be added as a member: the
+    /// full park-free slice of the app event-channel loop
+    /// (`plans/APPWIN.md` AW3).
+    #[test]
+    fn waitset_wait_reports_a_pending_port_member_drained_by_ipc_recv() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(0x5707), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(0x5707, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x5707),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        // The caller's own event port plus a foreign task's port.
+        let id = 0x5EAD_0011u64;
+        assert_eq!(h.port_bind(&ctx, id, 64, 4), Ok(0));
+        register_port_for(&ipc, 0x5EAD_0012, 0xF0F0, sink);
+
+        let set = h.waitset_create(&ctx).expect("create");
+        // Observing another task's mailbox is refused with the same
+        // `NotFound` an unknown id produces (no existence oracle).
+        assert_eq!(
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_PORT, 0x5EAD_0012, 0x31),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_PORT, 0xDEAD_0000, 0x32),
+            Err(Errno::NotFound)
+        );
+        h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_PORT, id, 0x33)
+            .expect("add own port member");
+
+        // Nothing delivered yet: a zero-timeout wait expires.
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+
+        // A delivered message makes the member ready and reports its token.
+        enqueue(&ipc, id, &[0xEE; 4], sink);
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+        let token_bytes = read_reply_page(
+            aspaces
+                .read()
+                .resolve(SecTaskId(0x5707))
+                .expect("registered")
+                .1,
+            8,
+        );
+        assert_eq!(
+            u64::from_le_bytes(token_bytes.try_into().expect("8 bytes")),
+            0x33
+        );
+
+        // The wait only peeked; `ipc_recv` drains, after which a second
+        // wait times out again.
+        assert_eq!(h.ipc_recv(&ctx, id, 0x1000, 64, 0x1800), Ok(4));
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+
+        ipc.write().teardown_owned_by(0x5707, sink);
+        ipc.write().teardown_owned_by(0xF0F0, sink);
+        assert_eq!(crate::waitset::release_owned_by(0x5707), 1);
+    }
+
+    /// Task-exit reclamation tears down every port the dead task bound:
+    /// the id resolves to nothing afterwards (so a later task can never
+    /// squat on a dead task's mailbox) and a racing sender observes the
+    /// typed `NotFound`.
+    #[test]
+    fn reclaim_task_resources_tears_down_owned_ports() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(0x5708, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x5708),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        let id = 0x5EAD_0021u64;
+        assert_eq!(h.port_bind(&ctx, id, 64, 4), Ok(0));
+        // Another task's port survives the reclaim untouched.
+        register_port_for(&ipc, 0x5EAD_0022, 0xF0F1, sink);
+
+        h.reclaim_task_resources(SecTaskId(0x5708));
+        assert!(ipc.read().lookup(EndpointId(id)).is_none());
+        assert!(ipc.read().lookup(EndpointId(0x5EAD_0022)).is_some());
+
+        // A racing sender fails typed, never delivers into a dead mailbox.
+        assert_eq!(h.ipc_send(&ctx, id, 0x1000, 4), Err(Errno::NotFound));
+
+        ipc.write().teardown_owned_by(0xF0F1, sink);
     }
 
     /// `waitset_ctl(Add)` owner-checks a `Child` member: before a producer

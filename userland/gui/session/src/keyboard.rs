@@ -149,12 +149,33 @@ fn to_input_event(record: KeyInput) -> InputEvent {
     }
 }
 
-impl<C: KeyInputChannel> InputSource for KeyboardInputSource<C> {
-    fn poll(&mut self) -> Result<Option<InputEvent>, Errno> {
+impl<C: KeyInputChannel> KeyboardInputSource<C> {
+    /// Poll one keyboard record, returning the decoded routing event
+    /// **and** the validated wire [`KeyInput`] it came from.
+    ///
+    /// The window server routes the original record to a focused app
+    /// window (`WindowEvent::Key` embeds the one `KeyInput` codec), so
+    /// the serve loop drains through this form and hands the decoded
+    /// event to the shell — one drain, both consumers, no re-encoding.
+    ///
+    /// # Errors
+    ///
+    /// A channel fault, or the fail-closed refusal of a malformed record
+    /// (exactly as [`InputSource::poll`]).
+    pub fn poll_record(&mut self) -> Result<Option<(InputEvent, KeyInput)>, Errno> {
         match self.channel.next_record()? {
             None => Ok(None),
-            Some(bytes) => Ok(Some(to_input_event(KeyInput::from_bytes(&bytes)?))),
+            Some(bytes) => {
+                let record = KeyInput::from_bytes(&bytes)?;
+                Ok(Some((to_input_event(record), record)))
+            }
         }
+    }
+}
+
+impl<C: KeyInputChannel> InputSource for KeyboardInputSource<C> {
+    fn poll(&mut self) -> Result<Option<InputEvent>, Errno> {
+        Ok(self.poll_record()?.map(|(event, _)| event))
     }
 }
 

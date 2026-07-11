@@ -228,40 +228,89 @@ pub struct KeyTyping {
     pub text: String,
 }
 
-/// A deterministic pointer-motion injection request for an input vertical
-/// — the mouse analogue of [`KeyInjection`].
+/// One step of a deterministic, ordered pointer-injection script — the
+/// mouse analogue of [`KeyTyping`].
 ///
-/// The runner waits for [`ready_marker`](Self::ready_marker) on the serial
-/// console, then sends one `mouse_move <dx> <dy>` through the QEMU monitor.
-/// QEMU delivers the relative motion to the attached `virtio-mouse-device`
-/// (`EV_REL` events), so the guest's pointer driver decodes and injects a
-/// real device-originated motion. Requires [`Spec::with_virtio_mouse`].
+/// Steps run strictly in order, at most one per poll tick: a step fires
+/// only after every earlier step has been sent, its own
+/// [`ready_marker`](Self::ready_marker) has appeared the required number
+/// of times on the serial console, and no earlier-requested screendump is
+/// pending unverified (so a dump of the frame *before* a click can never
+/// race the click). QEMU delivers each action to the attached
+/// `virtio-mouse-device` in send order (`EV_REL` motions and `EV_KEY`
+/// button edges share the device's one event queue), so the guest decodes
+/// a real device-originated stream in the scripted order. Requires
+/// [`Spec::with_virtio_mouse`] (implied by the builder).
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PointerInjection {
-    /// Serial-console substring the runner waits for before injecting —
-    /// typically a marker proving the keyboard's own injection already
-    /// landed, so the two injections are ordered and separately
-    /// witnessed.
+pub struct PointerStep {
+    /// Serial-console substring the runner waits for before this step —
+    /// a guest-emitted witness proving the state the step targets (a
+    /// presented frame, an opened menu) is really established.
     pub ready_marker: String,
-    /// Relative x motion in device counts (positive rightward).
-    pub dx: i32,
-    /// Relative y motion in device counts (positive downward).
-    pub dy: i32,
+    /// How many times [`ready_marker`](Self::ready_marker) must appear
+    /// before the step fires (minimum 1).
+    pub ready_occurrences: u32,
+    /// The pointer action this step injects.
+    pub action: PointerAction,
+}
+
+/// The pointer action one [`PointerStep`] injects through the QEMU
+/// monitor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PointerAction {
+    /// One relative motion: `mouse_move <dx> <dy>` (device counts,
+    /// positive rightward/downward).
+    Move {
+        /// Relative x motion in device counts (positive rightward).
+        dx: i32,
+        /// Relative y motion in device counts (positive downward).
+        dy: i32,
+    },
+    /// Press the button (its bit joins the tracked button-state mask the
+    /// monitor `mouse_button` command sets).
+    Press(MouseButton),
+    /// Release the button (its bit leaves the tracked mask).
+    Release(MouseButton),
+}
+
+/// A pointer button a [`PointerAction`] presses or releases, named by
+/// role exactly as the guest's closed pointer-button set is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MouseButton {
+    /// The primary (left) button.
+    Primary,
+    /// The middle button.
+    Middle,
+    /// The secondary (right) button.
+    Secondary,
+}
+
+impl MouseButton {
+    /// The button's bit in the HMP `mouse_button` state mask
+    /// (1 = left, 2 = middle, 4 = right).
+    const fn mask_bit(self) -> u32 {
+        match self {
+            MouseButton::Primary => 1,
+            MouseButton::Middle => 2,
+            MouseButton::Secondary => 4,
+        }
+    }
 }
 
 /// A deterministic, marker-gated screendump request — the host-side
-/// scan-out readback of a display vertical.
+/// scan-out readback of a display vertical. Multiple requests run
+/// strictly in declaration order.
 ///
 /// A guest cannot observe its own scan-out after a present (the frame
 /// left its address space), so the *host* takes the evidence: once
 /// [`ready_marker`](Self::ready_marker) has appeared the runner sends one
 /// `screendump <path>` through the QEMU monitor, which writes the current
 /// display surface as a binary PPM ([`screendump::parse_ppm`]). The dump
-/// is then read back and fully parsed before any requested pointer
-/// injection is allowed to fire, so a PASS chain that ends on the pointer
-/// witness cannot outrun the dump and the file can never be truncated by
-/// the guest exiting first. The caller asserts the decoded pixels after
-/// the run.
+/// is then read back and fully parsed before the next dump — or any
+/// still-unsent pointer step — is allowed to fire, so a PASS chain that
+/// ends on a pointer witness cannot outrun the dump and the file can
+/// never be truncated by the guest exiting first. The caller asserts the
+/// decoded pixels after the run.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Screendump {
     /// Serial-console substring the runner waits for before dumping —
@@ -410,23 +459,25 @@ pub struct Spec {
     /// driven when a pointer sibling is enumerated beside it. Only the
     /// aarch64 argv honours it today.
     pub input_mouse: bool,
-    /// When `Some`, inject the described relative mouse motion through
-    /// the QEMU monitor once its readiness marker appears on the serial
-    /// console. Meaningful only with [`Spec::input_mouse`]; `None`
-    /// injects no motion.
-    pub input_pointer_move: Option<PointerInjection>,
+    /// When non-empty, inject the described pointer actions through the
+    /// QEMU monitor strictly in order, each once its readiness marker has
+    /// appeared on the serial console and every earlier-requested
+    /// screendump has verified. Meaningful only with
+    /// [`Spec::input_mouse`]; empty injects nothing.
+    pub pointer_script: Vec<PointerStep>,
     /// When non-empty, pipe QEMU's stdin and replay the steps in order:
     /// each waits for its readiness marker on the serial console (past
     /// the previous step's match) before writing its line. Empty leaves
     /// stdin closed (`null`). Used by the interactive-session verticals.
     pub serial_input: Vec<SerialInjection>,
-    /// When `Some`, take one QEMU monitor `screendump` of the guest's
-    /// display once the readiness marker appears, and hold any requested
-    /// pointer injection back until the dumped image has been read back
-    /// and fully parsed — so a witness chain "present → dump → injection
-    /// → guest PASS" is strictly ordered and the dump can never be
-    /// truncated by the guest exiting. `None` takes no dump.
-    pub screendump: Option<Screendump>,
+    /// When non-empty, take the QEMU monitor `screendump`s of the guest's
+    /// display strictly in order, each once its readiness marker appears,
+    /// holding later dumps and any still-unsent pointer steps back until
+    /// the current dumped image has been read back and fully parsed — so
+    /// a witness chain "present → dump → injection → guest PASS" is
+    /// strictly ordered and no dump can be truncated by the guest
+    /// exiting. Empty takes no dump.
+    pub screendumps: Vec<Screendump>,
     /// How the session presents itself to a human. Only the aarch64
     /// argv honours it today.
     pub session: SessionKind,
@@ -464,9 +515,9 @@ impl Spec {
             input_keyboard: None,
             input_typing: Vec::new(),
             input_mouse: false,
-            input_pointer_move: None,
+            pointer_script: Vec::new(),
             serial_input: Vec::new(),
-            screendump: None,
+            screendumps: Vec::new(),
             session: SessionKind::HeadlessTest,
         }
     }
@@ -503,9 +554,9 @@ impl Spec {
             input_keyboard: None,
             input_typing: Vec::new(),
             input_mouse: false,
-            input_pointer_move: None,
+            pointer_script: Vec::new(),
             serial_input: Vec::new(),
-            screendump: None,
+            screendumps: Vec::new(),
             session: SessionKind::HeadlessTest,
         }
     }
@@ -527,9 +578,9 @@ impl Spec {
             input_keyboard: None,
             input_typing: Vec::new(),
             input_mouse: false,
-            input_pointer_move: None,
+            pointer_script: Vec::new(),
             serial_input: Vec::new(),
-            screendump: None,
+            screendumps: Vec::new(),
             session: SessionKind::HeadlessTest,
         }
     }
@@ -635,11 +686,12 @@ impl Spec {
         self
     }
 
-    /// Take one monitor `screendump` of the guest display into `path`
-    /// once `ready_marker` has appeared `occurrences` times (clamped at
-    /// `>= 1`) on the serial console. Any requested pointer injection is
-    /// held back until the dumped image parses completely, so a PASS
-    /// chain ending on the pointer witness cannot outrun the dump.
+    /// Append one monitor `screendump` of the guest display into `path`,
+    /// taken once `ready_marker` has appeared `occurrences` times
+    /// (clamped at `>= 1`) on the serial console. Dumps run strictly in
+    /// declaration order; later dumps and still-unsent pointer steps are
+    /// held back until the current dumped image parses completely, so a
+    /// PASS chain ending on a pointer witness cannot outrun any dump.
     #[must_use]
     pub fn with_screendump(
         mut self,
@@ -647,7 +699,7 @@ impl Spec {
         occurrences: u32,
         path: impl Into<PathBuf>,
     ) -> Self {
-        self.screendump = Some(Screendump {
+        self.screendumps.push(Screendump {
             ready_marker: ready_marker.into(),
             ready_occurrences: occurrences.max(1),
             path: path.into(),
@@ -666,17 +718,23 @@ impl Spec {
         self
     }
 
-    /// Inject one relative mouse motion (`mouse_move dx dy`) through the
-    /// QEMU monitor once `ready_marker` appears on the serial console.
-    /// Also attaches the `virtio-mouse-device` the motion targets, so a
-    /// spec cannot ask for motion with no device to deliver it to.
+    /// Append one step to the ordered pointer-injection script, fired
+    /// once `ready_marker` has appeared `occurrences` times (clamped at
+    /// `>= 1`) on the serial console, after every earlier step. Also
+    /// attaches the `virtio-mouse-device` the actions target, so a spec
+    /// cannot ask for pointer input with no device to deliver it to.
     #[must_use]
-    pub fn with_pointer_move(mut self, ready_marker: impl Into<String>, dx: i32, dy: i32) -> Self {
+    pub fn with_pointer_step(
+        mut self,
+        ready_marker: impl Into<String>,
+        occurrences: u32,
+        action: PointerAction,
+    ) -> Self {
         self.input_mouse = true;
-        self.input_pointer_move = Some(PointerInjection {
+        self.pointer_script.push(PointerStep {
             ready_marker: ready_marker.into(),
-            dx,
-            dy,
+            ready_occurrences: occurrences.max(1),
+            action,
         });
         self
     }
@@ -755,8 +813,8 @@ impl Runner {
         // readiness marker) and the runner connects as a client.
         let monitor = (spec.input_keyboard.is_some()
             || !spec.input_typing.is_empty()
-            || spec.input_pointer_move.is_some()
-            || spec.screendump.is_some())
+            || !spec.pointer_script.is_empty()
+            || !spec.screendumps.is_empty())
         .then(MonitorSocket::reserve);
         if let Some(mon) = &monitor {
             cmd.arg("-chardev");
@@ -868,8 +926,8 @@ fn supervise(
         captured,
         marker_seen,
         typing_markers_seen,
-        pointer_marker_seen,
-        screendump_marker_seen,
+        pointer_markers_seen,
+        screendump_markers_seen,
         reader,
     } = spawn_serial_drain(&mut child, spec);
 
@@ -910,9 +968,9 @@ fn supervise(
             break 'run exit_reason(
                 spec,
                 serial_step,
-                injections.pointer_sent,
+                injections.pointer_done(spec),
                 injections.typing_done(spec),
-                injections.screendump_verified(),
+                injections.screendumps_verified(spec),
                 status,
             );
         }
@@ -921,8 +979,8 @@ fn supervise(
             monitor,
             &marker_seen,
             &typing_markers_seen,
-            &pointer_marker_seen,
-            &screendump_marker_seen,
+            &pointer_markers_seen,
+            &screendump_markers_seen,
         ) {
             let _ = child.kill();
             let _ = child.wait();
@@ -1113,11 +1171,14 @@ struct SerialDrain {
     /// marker has appeared the required number of times. Index-aligned
     /// with [`Spec::input_typing`].
     typing_markers_seen: Vec<Arc<AtomicBool>>,
-    /// Set once the pointer injection's readiness marker has appeared.
-    pointer_marker_seen: Arc<AtomicBool>,
-    /// Set once the screendump's readiness marker has appeared the
-    /// required number of times.
-    screendump_marker_seen: Arc<AtomicBool>,
+    /// One flag per pointer-script step, set once that step's readiness
+    /// marker has appeared the required number of times. Index-aligned
+    /// with [`Spec::pointer_script`].
+    pointer_markers_seen: Vec<Arc<AtomicBool>>,
+    /// One flag per screendump, set once that dump's readiness marker
+    /// has appeared the required number of times. Index-aligned with
+    /// [`Spec::screendumps`].
+    screendump_markers_seen: Vec<Arc<AtomicBool>>,
     /// The drain thread, joined once the child has exited.
     reader: std::thread::JoinHandle<()>,
 }
@@ -1141,8 +1202,16 @@ fn spawn_serial_drain(child: &mut Child, spec: &Spec) -> SerialDrain {
         .iter()
         .map(|_| Arc::new(AtomicBool::new(false)))
         .collect();
-    let pointer_marker_seen = Arc::new(AtomicBool::new(false));
-    let screendump_marker_seen = Arc::new(AtomicBool::new(false));
+    let pointer_markers_seen: Vec<Arc<AtomicBool>> = spec
+        .pointer_script
+        .iter()
+        .map(|_| Arc::new(AtomicBool::new(false)))
+        .collect();
+    let screendump_markers_seen: Vec<Arc<AtomicBool>> = spec
+        .screendumps
+        .iter()
+        .map(|_| Arc::new(AtomicBool::new(false)))
+        .collect();
     let reader = {
         let captured = Arc::clone(&captured);
         let stdout = child.stdout.take();
@@ -1161,14 +1230,18 @@ fn spawn_serial_drain(child: &mut Child, spec: &Spec) -> SerialDrain {
                 Arc::clone(seen),
             ));
         }
-        if let Some(p) = &spec.input_pointer_move {
-            markers.push((p.ready_marker.clone(), 1, Arc::clone(&pointer_marker_seen)));
+        for (p, seen) in spec.pointer_script.iter().zip(&pointer_markers_seen) {
+            markers.push((
+                p.ready_marker.clone(),
+                p.ready_occurrences.max(1),
+                Arc::clone(seen),
+            ));
         }
-        if let Some(d) = &spec.screendump {
+        for (d, seen) in spec.screendumps.iter().zip(&screendump_markers_seen) {
             markers.push((
                 d.ready_marker.clone(),
                 d.ready_occurrences.max(1),
-                Arc::clone(&screendump_marker_seen),
+                Arc::clone(seen),
             ));
         }
         std::thread::spawn(move || {
@@ -1179,8 +1252,8 @@ fn spawn_serial_drain(child: &mut Child, spec: &Spec) -> SerialDrain {
         captured,
         marker_seen,
         typing_markers_seen,
-        pointer_marker_seen,
-        screendump_marker_seen,
+        pointer_markers_seen,
+        screendump_markers_seen,
         reader,
     }
 }
@@ -1289,7 +1362,13 @@ fn qkeycode_for(c: char) -> Result<String, String> {
 /// stream is opened on the first send and held for the rest of the run.
 struct InjectionState {
     key_sent: bool,
-    pointer_sent: bool,
+    /// The pointer-script step to send next (`pointer_script.len()` once
+    /// every step was sent, or when no script was requested).
+    pointer_step: usize,
+    /// The pointer buttons currently held down, as the HMP `mouse_button`
+    /// state mask — tracked so a press adds its bit and a release removes
+    /// only its own, exactly as a physical mouse would report.
+    pointer_button_mask: u32,
     /// The typed-text step currently being typed (`input_typing.len()`
     /// once every step finished, or when no typing was requested).
     typed_step: usize,
@@ -1298,20 +1377,23 @@ struct InjectionState {
     /// The earliest instant the next typed key may be sent — the pacing
     /// that keeps every press/release pair distinct on the device.
     next_typed_key_at: Instant,
-    /// Progress of the requested screendump.
-    screendump: DumpState,
+    /// The screendump to take next (`screendumps.len()` once every dump
+    /// verified, or when none was requested).
+    dump_step: usize,
+    /// Progress of the current ([`Self::dump_step`]) screendump.
+    dump_state: DumpState,
     conn: Option<UnixStream>,
 }
 
-/// Progress of a requested screendump, in order: the command has not been
+/// Progress of the current screendump, in order: the command has not been
 /// sent, it has been sent but the file has not yet parsed completely, and
-/// the dumped image has been read back and fully parsed — the state a
-/// requested pointer injection waits for.
+/// the dumped image has been read back and fully parsed — at which point
+/// the cursor advances to the next requested dump. A pending (sent but
+/// unverified) dump holds every still-unsent pointer step back.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum DumpState {
     NotSent,
     Sent,
-    Verified,
 }
 
 /// Milliseconds a typed key is held down (`sendkey <key> <hold>`).
@@ -1324,25 +1406,32 @@ const TYPED_KEY_HOLD_MS: u32 = 40;
 const TYPED_KEY_INTERVAL: Duration = Duration::from_millis(80);
 
 impl InjectionState {
-    /// Each `*_sent` flag starts "done" when its injection was not
-    /// requested, so [`Self::drive`] only ever acts on requested ones.
+    /// Each cursor starts "done" only through its list being empty, so
+    /// [`Self::drive`] only ever acts on requested injections.
     fn new(spec: &Spec) -> Self {
         Self {
             key_sent: spec.input_keyboard.is_none(),
-            pointer_sent: spec.input_pointer_move.is_none(),
+            pointer_step: 0,
+            pointer_button_mask: 0,
             typed_step: 0,
             typed_in_step: 0,
             next_typed_key_at: Instant::now(),
-            screendump: DumpState::NotSent,
+            dump_step: 0,
+            dump_state: DumpState::NotSent,
             conn: None,
         }
     }
 
-    /// `true` once the requested screendump has been read back and fully
-    /// parsed — the fact [`exit_reason`] requires for a spec that asked
-    /// for one.
-    fn screendump_verified(&self) -> bool {
-        self.screendump == DumpState::Verified
+    /// `true` once every requested screendump has been read back and
+    /// fully parsed — the fact [`exit_reason`] requires of a spec that
+    /// asked for any.
+    fn screendumps_verified(&self, spec: &Spec) -> bool {
+        self.dump_step >= spec.screendumps.len()
+    }
+
+    /// `true` once every requested pointer step has been sent.
+    fn pointer_done(&self, spec: &Spec) -> bool {
+        self.pointer_step >= spec.pointer_script.len()
     }
 
     /// `true` once every requested typed-text step has been fully sent.
@@ -1362,8 +1451,8 @@ impl InjectionState {
         monitor: Option<&MonitorSocket>,
         key_seen: &AtomicBool,
         typing_seen: &[Arc<AtomicBool>],
-        pointer_seen: &AtomicBool,
-        screendump_seen: &AtomicBool,
+        pointer_seen: &[Arc<AtomicBool>],
+        screendump_seen: &[Arc<AtomicBool>],
     ) -> Result<(), String> {
         // Safe to unwrap inside the closures: each `*_sent` flag is only
         // `false` when its injection request and `monitor` are both `Some`.
@@ -1407,36 +1496,64 @@ impl InjectionState {
                 }
             }
         }
-        if let Some(dump) = &spec.screendump {
-            if self.screendump == DumpState::NotSent && screendump_seen.load(Ordering::Acquire) {
+        if let Some(dump) = spec.screendumps.get(self.dump_step) {
+            let dump_seen = screendump_seen
+                .get(self.dump_step)
+                .is_some_and(|seen| seen.load(Ordering::Acquire));
+            if self.dump_state == DumpState::NotSent && dump_seen {
                 self.send(
                     monitor,
                     "screendump",
                     &format!("screendump {}", dump.path.display()),
                 )?;
-                self.screendump = DumpState::Sent;
+                self.dump_state = DumpState::Sent;
             }
             // QEMU writes the PPM inside the monitor command, but the
             // write races this poll loop: the dump is trusted only once
             // the file on disk parses as a complete image. Until then any
-            // requested pointer injection stays held back.
-            if self.screendump == DumpState::Sent {
+            // still-unsent pointer step — and every later dump — stays
+            // held back, so a dump can never capture a frame its script
+            // position has already moved past.
+            if self.dump_state == DumpState::Sent {
                 if let Ok(bytes) = std::fs::read(&dump.path) {
                     if screendump::parse_ppm(&bytes).is_ok() {
-                        self.screendump = DumpState::Verified;
+                        self.dump_step += 1;
+                        self.dump_state = DumpState::NotSent;
                     }
                 }
             }
         }
-        let dump_ready = spec.screendump.is_none() || self.screendump == DumpState::Verified;
-        if !self.pointer_sent && dump_ready && pointer_seen.load(Ordering::Acquire) {
-            let mv = spec.input_pointer_move.as_ref().expect("motion present");
-            self.send(
-                monitor,
-                "pointer",
-                &format!("mouse_move {} {}", mv.dx, mv.dy),
-            )?;
-            self.pointer_sent = true;
+        // A pointer step fires strictly in script order, once its own
+        // marker was seen and no earlier-requested dump is pending: a dump
+        // whose marker has appeared must hold the pixels it was keyed on
+        // before any further injection can change the screen. At most one
+        // step per poll tick, so consecutive actions arrive as distinct
+        // device events.
+        let dump_pending = spec.screendumps.get(self.dump_step).is_some_and(|_| {
+            self.dump_state == DumpState::Sent
+                || screendump_seen
+                    .get(self.dump_step)
+                    .is_some_and(|seen| seen.load(Ordering::Acquire))
+        });
+        if let Some(step) = spec.pointer_script.get(self.pointer_step) {
+            let step_seen = pointer_seen
+                .get(self.pointer_step)
+                .is_some_and(|seen| seen.load(Ordering::Acquire));
+            if step_seen && !dump_pending {
+                let command = match step.action {
+                    PointerAction::Move { dx, dy } => format!("mouse_move {dx} {dy}"),
+                    PointerAction::Press(button) => {
+                        self.pointer_button_mask |= button.mask_bit();
+                        format!("mouse_button {}", self.pointer_button_mask)
+                    }
+                    PointerAction::Release(button) => {
+                        self.pointer_button_mask &= !button.mask_bit();
+                        format!("mouse_button {}", self.pointer_button_mask)
+                    }
+                };
+                self.send(monitor, "pointer", &command)?;
+                self.pointer_step += 1;
+            }
         }
         Ok(())
     }
@@ -1471,8 +1588,8 @@ impl InjectionState {
 }
 
 /// Classify a child exit observed by [`supervise`]: an exit before the
-/// serial-input script completed, before a requested pointer motion was
-/// ever sent, before a requested typed-text script finished, or before a
+/// serial-input script completed, before every requested pointer step was
+/// sent, before a requested typed-text script finished, or before every
 /// requested screendump was taken and verified, means the exchange the
 /// vertical was meant to prove never happened — the run fails even when
 /// the guest itself reported success. Otherwise the guest's own exit
@@ -1480,9 +1597,9 @@ impl InjectionState {
 fn exit_reason(
     spec: &Spec,
     serial_step: usize,
-    pointer_injected: bool,
+    pointer_done: bool,
     typing_done: bool,
-    screendump_verified: bool,
+    screendumps_verified: bool,
     status: std::process::ExitStatus,
 ) -> DoneReason {
     if serial_step < spec.serial_input.len() {
@@ -1493,9 +1610,11 @@ fn exit_reason(
             spec.serial_input[serial_step].ready_marker,
         ));
     }
-    if !pointer_injected {
+    if !pointer_done {
         return DoneReason::InjectionFailed(
-            "pointer injection never sent: its readiness marker was not seen before exit".into(),
+            "pointer script incomplete: a step's readiness marker was not seen (or a dump it \
+             waited on never verified) before exit"
+                .into(),
         );
     }
     if !typing_done {
@@ -1505,10 +1624,10 @@ fn exit_reason(
                 .into(),
         );
     }
-    if spec.screendump.is_some() && !screendump_verified {
+    if !spec.screendumps.is_empty() && !screendumps_verified {
         return DoneReason::InjectionFailed(
-            "screendump never taken and verified: its readiness marker was not seen, or the \
-             guest exited before the dumped image parsed completely"
+            "screendumps incomplete: a dump's readiness marker was not seen, or the guest \
+             exited before its dumped image parsed completely"
                 .into(),
         );
     }
@@ -1711,12 +1830,64 @@ mod tests {
     }
 
     #[test]
-    fn with_screendump_records_the_request_and_clamps_occurrences() {
-        let s = Spec::for_aarch64_kernel("/tmp/k").with_screendump("presented", 0, "/tmp/d.ppm");
-        let d = s.screendump.expect("screendump recorded");
+    fn with_screendump_records_ordered_requests_and_clamps_occurrences() {
+        let s = Spec::for_aarch64_kernel("/tmp/k")
+            .with_screendump("presented", 0, "/tmp/d1.ppm")
+            .with_screendump("window served", 2, "/tmp/d2.ppm");
+        assert_eq!(s.screendumps.len(), 2, "dumps append in order");
+        let d = &s.screendumps[0];
         assert_eq!(d.ready_marker, "presented");
         assert_eq!(d.ready_occurrences, 1, "occurrences clamp at >= 1");
-        assert_eq!(d.path, PathBuf::from("/tmp/d.ppm"));
+        assert_eq!(d.path, PathBuf::from("/tmp/d1.ppm"));
+        let d = &s.screendumps[1];
+        assert_eq!(d.ready_marker, "window served");
+        assert_eq!(d.ready_occurrences, 2);
+        assert_eq!(d.path, PathBuf::from("/tmp/d2.ppm"));
+    }
+
+    #[test]
+    fn with_pointer_step_records_the_ordered_script_and_attaches_the_mouse() {
+        let s = Spec::for_aarch64_kernel("/tmp/k")
+            .with_pointer_step(
+                "presented",
+                0,
+                PointerAction::Move {
+                    dx: -9999,
+                    dy: -9999,
+                },
+            )
+            .with_pointer_step("presented", 1, PointerAction::Press(MouseButton::Primary))
+            .with_pointer_step("menu open", 1, PointerAction::Release(MouseButton::Primary));
+        assert!(s.input_mouse, "a pointer script implies the mouse device");
+        assert_eq!(s.pointer_script.len(), 3, "steps append in order");
+        let p = &s.pointer_script[0];
+        assert_eq!(p.ready_marker, "presented");
+        assert_eq!(p.ready_occurrences, 1, "occurrences clamp at >= 1");
+        assert_eq!(
+            p.action,
+            PointerAction::Move {
+                dx: -9999,
+                dy: -9999
+            }
+        );
+        assert_eq!(
+            s.pointer_script[1].action,
+            PointerAction::Press(MouseButton::Primary)
+        );
+        assert_eq!(
+            s.pointer_script[2].action,
+            PointerAction::Release(MouseButton::Primary)
+        );
+    }
+
+    #[test]
+    fn mouse_button_mask_bits_are_the_hmp_state_bits() {
+        // The HMP `mouse_button` state mask: 1 = left, 2 = middle,
+        // 4 = right — a press ORs its bit in, a release clears only its
+        // own, so overlapping holds report faithfully.
+        assert_eq!(MouseButton::Primary.mask_bit(), 1);
+        assert_eq!(MouseButton::Middle.mask_bit(), 2);
+        assert_eq!(MouseButton::Secondary.mask_bit(), 4);
     }
 
     #[test]
@@ -1805,9 +1976,9 @@ mod tests {
             input_keyboard: None,
             input_typing: Vec::new(),
             input_mouse: false,
-            input_pointer_move: None,
+            pointer_script: Vec::new(),
             serial_input: Vec::new(),
-            screendump: None,
+            screendumps: Vec::new(),
             session: SessionKind::HeadlessTest,
         };
         let err = Runner::run(&s).expect_err("missing backing image should fail");

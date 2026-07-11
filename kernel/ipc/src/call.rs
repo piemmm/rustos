@@ -257,6 +257,68 @@ impl CallEndpoint {
         limits: CallEndpointLimits,
         audit: &S,
     ) -> Result<Self, Errno> {
+        Self::create_gated(
+            id,
+            creator,
+            required_send_caps,
+            required_recv_caps,
+            limits,
+            false,
+            audit,
+        )
+    }
+
+    /// Create a call endpoint on a **reserved** id whose bind authority is
+    /// a fact the *syscall handler* kernel-attested instead of
+    /// `CAP_IPC_BIND_PRIVILEGED` — today exactly one such fact exists: the
+    /// creator holds a live seat lease, which entitles it to the
+    /// seat-scoped window rendezvous (`rustos_abi::window_ipc`,
+    /// `plans/APPWIN.md` AW3). The attestation must come from kernel
+    /// state the handler resolved itself (the seat registry), never from
+    /// anything the caller supplied.
+    ///
+    /// Everything else is [`Self::create`]: the limits are re-bounded, the
+    /// creator must hold every required receive capability, and a
+    /// restricted-**sender** endpoint still demands
+    /// `CAP_IPC_BIND_PRIVILEGED` — the attestation substitutes only for
+    /// the reserved-id half of the gate.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::create`].
+    pub fn create_seat_attested<S: Sink + ?Sized>(
+        id: EndpointId,
+        creator: &TaskCapabilities,
+        required_send_caps: CapabilitySet,
+        required_recv_caps: CapabilitySet,
+        limits: CallEndpointLimits,
+        audit: &S,
+    ) -> Result<Self, Errno> {
+        Self::create_gated(
+            id,
+            creator,
+            required_send_caps,
+            required_recv_caps,
+            limits,
+            true,
+            audit,
+        )
+    }
+
+    /// The one create path both public constructors share.
+    /// `reserved_bind_attested` is the handler's kernel-attested
+    /// alternative authority for a reserved id (see
+    /// [`Self::create_seat_attested`]); it never relaxes the
+    /// restricted-sender gate.
+    fn create_gated<S: Sink + ?Sized>(
+        id: EndpointId,
+        creator: &TaskCapabilities,
+        required_send_caps: CapabilitySet,
+        required_recv_caps: CapabilitySet,
+        limits: CallEndpointLimits,
+        reserved_bind_attested: bool,
+        audit: &S,
+    ) -> Result<Self, Errno> {
         let CallEndpointLimits {
             max_request,
             max_reply,
@@ -281,14 +343,35 @@ impl CallEndpoint {
             return Err(Errno::PermissionDenied);
         }
 
-        if (!required_send_caps.is_empty() || rustos_abi::ipc::is_reserved_endpoint(id.0))
+        // A restricted-sender endpoint is privileged unconditionally; a
+        // reserved id is privileged unless the handler kernel-attested the
+        // alternative bind authority (the live seat lease).
+        let reserved_unauthorized =
+            rustos_abi::ipc::is_reserved_endpoint(id.0) && !reserved_bind_attested;
+        if (!required_send_caps.is_empty() || reserved_unauthorized)
             && !creator.has(rustos_abi::CapabilityId::IPC_BIND_PRIVILEGED)
         {
             record(audit, AuditEvent::CallEndpointCreateDenied, &[id_field]);
             return Err(Errno::PermissionDenied);
         }
 
-        record(audit, AuditEvent::CallEndpointCreated, &[id_field]);
+        if reserved_bind_attested {
+            // The seat-attested bind is a distinct security decision:
+            // record it distinguishably from a capability-authorised bind.
+            record(
+                audit,
+                AuditEvent::CallEndpointCreated,
+                &[
+                    id_field,
+                    Field {
+                        key: "bind",
+                        value: rustos_log::FieldValue::Str("seat-lease"),
+                    },
+                ],
+            );
+        } else {
+            record(audit, AuditEvent::CallEndpointCreated, &[id_field]);
+        }
 
         Ok(Self {
             id,

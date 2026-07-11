@@ -167,13 +167,20 @@ pub trait SyscallHandlers {
         ptr: u64,
         len: usize,
     ) -> SyscallResult;
-    /// Receive a message from an IPC endpoint.
+    /// Receive a message from an IPC message port the caller owns.
+    ///
+    /// `sender_out` names a caller buffer of exactly
+    /// `rustos_abi::ORIGIN_WIRE_LEN` bytes; the implementation writes the
+    /// sending task's kernel-attested `Origin` (snapshotted at send time)
+    /// through it alongside the payload copy, so the receiver can
+    /// authenticate each message's principal fail-closed.
     fn ipc_recv(
         &self,
         caller: &CallerContext<'_>,
         endpoint: u64,
         ptr: u64,
         len: usize,
+        sender_out: u64,
     ) -> SyscallResult;
     /// Query whether the caller holds `cap`.
     fn cap_query(&self, caller: &CallerContext<'_>, cap: CapabilityId) -> SyscallResult;
@@ -1951,6 +1958,28 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Bind an asynchronous IPC message port owned by the calling task
+    /// (the receive half of `ipc_send`/`ipc_recv`).
+    ///
+    /// The implementation bounds `max_payload` and `capacity` against the
+    /// ABI message ceilings, requires `CAP_IPC_BIND_PRIVILEGED` for a
+    /// reserved well-known id (squat protection, exactly as `call_create`),
+    /// refuses an id that is already bound (`Errno::AlreadyExists`),
+    /// records the kernel-trusted caller as the port's owner — the only
+    /// task that may receive from it or observe it through a wait-set —
+    /// and tears the port down when that owner exits.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn port_bind(
+        &self,
+        _caller: &CallerContext<'_>,
+        _endpoint: u64,
+        _max_payload: usize,
+        _capacity: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Map `len` bytes of open file `fd`, starting at the page-aligned
     /// file byte `offset`, into the caller's own address space as a
     /// demand-paged, read-only private mapping, returning its base
@@ -2151,7 +2180,8 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             }
             SyscallNumber::IPC_RECV => {
                 let len = decode_len(args.0[2])?;
-                self.handlers.ipc_recv(caller, args.0[0], args.0[1], len)
+                self.handlers
+                    .ipc_recv(caller, args.0[0], args.0[1], len, args.0[3])
             }
             SyscallNumber::CAP_QUERY => {
                 let cap = decode_capability(args.0[0])?;
@@ -2623,6 +2653,12 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers
                     .fs_attr_remove(caller, args.0[0], path_len, args.0[2], key_len)
             }
+            SyscallNumber::PORT_BIND => {
+                let max_payload = decode_len(args.0[1])?;
+                let capacity = decode_len(args.0[2])?;
+                self.handlers
+                    .port_bind(caller, args.0[0], max_payload, capacity)
+            }
             SyscallNumber::PORT_RESOLVE => {
                 // args[0] is the non-null name `UserPtr`
                 // (dispatcher-checked); args[1] is the name length in
@@ -3030,7 +3066,14 @@ mod tests {
                 Ok(len as u64)
             }
         }
-        fn ipc_recv(&self, _c: &CallerContext<'_>, _e: u64, _p: u64, len: usize) -> SyscallResult {
+        fn ipc_recv(
+            &self,
+            _c: &CallerContext<'_>,
+            _e: u64,
+            _p: u64,
+            len: usize,
+            _sender_out: u64,
+        ) -> SyscallResult {
             self.record("ipc_recv");
             Ok(len as u64)
         }
@@ -3789,6 +3832,17 @@ mod tests {
             _name_len: usize,
         ) -> SyscallResult {
             self.record("port_resolve");
+            Ok(0)
+        }
+
+        fn port_bind(
+            &self,
+            _c: &CallerContext<'_>,
+            _endpoint: u64,
+            _max_payload: usize,
+            _capacity: usize,
+        ) -> SyscallResult {
+            self.record("port_bind");
             Ok(0)
         }
 

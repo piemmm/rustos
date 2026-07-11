@@ -31,14 +31,18 @@ use crate::driver::display::{DamageRect, DisplayFormat};
 use crate::input::KeyInput;
 use crate::input::PointerButtonCode;
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
-use crate::Errno;
+use crate::{Errno, ProcId};
 
 /// Reserved well-known call-endpoint id of the desktop session's window
 /// service (`"WI"` ASCII hex-spelled prefix, mirroring
-/// [`crate::seat::SEATMGR_ENDPOINT`]'s convention). Binding it requires
-/// `CAP_IPC_BIND_PRIVILEGED` ([`crate::ipc::is_reserved_endpoint`]): a
-/// squatter claiming the rendezvous first would receive every app's
-/// shared-surface grants and could feed apps fabricated input events.
+/// [`crate::seat::SEATMGR_ENDPOINT`]'s convention). It is the one
+/// **seat-scoped** reserved id ([`crate::ipc::is_reserved_endpoint`]):
+/// the kernel authorises its bind either by `CAP_IPC_BIND_PRIVILEGED`
+/// or by the caller's kernel-attested **live seat lease** — the desktop
+/// session that owns the seat serves the windows shown on it, and
+/// nothing else may. A squatter claiming the rendezvous first would
+/// receive every app's shared-surface grants and could feed apps
+/// fabricated input events, so an unentitled bind fails closed.
 pub const WINDOW_ENDPOINT: u64 = 0x5749_1001;
 
 /// Magic number identifying a window-channel request (`"WIN1"`
@@ -365,20 +369,28 @@ fn nonzero_window_id(id: u64) -> Result<u64, Errno> {
     Ok(id)
 }
 
-/// Reply length, in bytes, of a `Create`: the status word followed by the
-/// assigned window id.
-pub const WINDOW_CREATE_REPLY_LEN: usize = 12;
+/// Reply length, in bytes, of a `Create`: the status word, the assigned
+/// window id, and the serving session's [`ProcId`].
+pub const WINDOW_CREATE_REPLY_LEN: usize = 12 + crate::PROC_ID_LEN;
 
-/// Encode a `Create` outcome: the assigned (non-zero) window id on
-/// success, the shared status frame (a negative [`Errno`] discriminant,
-/// zero-padded to the same length) on refusal, so a client always issues
-/// one fixed-size receive.
+/// Encode a `Create` outcome: on success the assigned (non-zero) window
+/// id followed by the serving session's own [`ProcId`] — the identity an
+/// app then requires of every event's kernel-attested sender, closing
+/// the event channel against forged input from any other process (the
+/// reply itself is trustworthy because the window rendezvous is
+/// squat-protected). On refusal, the shared status frame (a negative
+/// [`Errno`] discriminant), zero-padded to the same length, so a client
+/// always issues one fixed-size receive.
 #[must_use]
-pub fn encode_create_reply(result: Result<u64, Errno>) -> [u8; WINDOW_CREATE_REPLY_LEN] {
+pub fn encode_create_reply(
+    result: Result<u64, Errno>,
+    server: ProcId,
+) -> [u8; WINDOW_CREATE_REPLY_LEN] {
     let mut out = [0u8; WINDOW_CREATE_REPLY_LEN];
     match result {
         Ok(window_id) => {
             put_u64(&mut out, 4, window_id);
+            out[12..].copy_from_slice(server.as_bytes());
         }
         Err(err) => {
             out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err)));
@@ -387,20 +399,28 @@ pub fn encode_create_reply(result: Result<u64, Errno>) -> [u8; WINDOW_CREATE_REP
     out
 }
 
-/// Decode a `Create` reply frame into the assigned window id.
+/// Decode a `Create` reply frame into the assigned window id and the
+/// serving session's [`ProcId`].
 ///
 /// # Errors
 ///
 /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole reply.
-/// * [`Errno::OutOfRange`] — a corrupt status word, or a successful reply
-///   carrying the never-minted zero window id (fail closed).
+/// * [`Errno::OutOfRange`] — a corrupt status word, a successful reply
+///   carrying the never-minted zero window id, or the kernel-reserved
+///   all-zero server identity (fail closed: an app must never accept an
+///   event stream it cannot authenticate).
 /// * The decoded [`Errno`] itself, when the session refused the request.
-pub fn decode_create_reply(bytes: &[u8]) -> Result<u64, Errno> {
+pub fn decode_create_reply(bytes: &[u8]) -> Result<(u64, ProcId), Errno> {
     if bytes.len() < WINDOW_CREATE_REPLY_LEN {
         return Err(Errno::BufferTooSmall);
     }
     crate::reply::decode_status_reply(&bytes[..4])?;
-    nonzero_window_id(read_u64(bytes, 4))
+    let window_id = nonzero_window_id(read_u64(bytes, 4))?;
+    let server = ProcId::from_bytes(&bytes[12..WINDOW_CREATE_REPLY_LEN])?;
+    if server.is_kernel() {
+        return Err(Errno::OutOfRange);
+    }
+    Ok((window_id, server))
 }
 
 /// Wire event discriminant of [`WindowEvent::Focus`].
@@ -620,6 +640,7 @@ mod tests {
     use crate::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
     use crate::seat::SEATMGR_ENDPOINT;
     use crate::Errno;
+    use crate::ProcId;
 
     fn sample_create() -> WindowRequest {
         WindowRequest::Create {
@@ -807,22 +828,30 @@ mod tests {
         );
     }
 
+    /// The serving session identity the reply tests stamp.
+    fn server() -> ProcId {
+        ProcId::from_raw([0x5A; 16])
+    }
+
     #[test]
     fn create_replies_round_trip_ok_and_error() {
-        assert_eq!(decode_create_reply(&encode_create_reply(Ok(42))), Ok(42));
         assert_eq!(
-            decode_create_reply(&encode_create_reply(Err(Errno::NoSpace))),
+            decode_create_reply(&encode_create_reply(Ok(42), server())),
+            Ok((42, server()))
+        );
+        assert_eq!(
+            decode_create_reply(&encode_create_reply(Err(Errno::NoSpace), server())),
             Err(Errno::NoSpace)
         );
         assert_eq!(
-            decode_create_reply(&encode_create_reply(Err(Errno::PermissionDenied))),
+            decode_create_reply(&encode_create_reply(Err(Errno::PermissionDenied), server())),
             Err(Errno::PermissionDenied)
         );
     }
 
     #[test]
     fn create_reply_decode_fails_closed() {
-        let good = encode_create_reply(Ok(42));
+        let good = encode_create_reply(Ok(42), server());
         assert_eq!(
             decode_create_reply(&good[..WINDOW_CREATE_REPLY_LEN - 1]),
             Err(Errno::BufferTooSmall)
@@ -833,7 +862,14 @@ mod tests {
         assert_eq!(decode_create_reply(&bad_status), Err(Errno::OutOfRange));
         // A "successful" reply carrying the never-minted zero id.
         assert_eq!(
-            decode_create_reply(&encode_create_reply(Ok(0))),
+            decode_create_reply(&encode_create_reply(Ok(0), server())),
+            Err(Errno::OutOfRange)
+        );
+        // A "successful" reply carrying the kernel-reserved all-zero
+        // server identity: an app must never accept an event stream it
+        // cannot authenticate.
+        assert_eq!(
+            decode_create_reply(&encode_create_reply(Ok(42), ProcId::KERNEL)),
             Err(Errno::OutOfRange)
         );
     }

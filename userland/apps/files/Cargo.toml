@@ -30,5 +30,29 @@ rustos-raster = { path = "../../../lib/raster", version = "=0.0.0" }
 # names without depending on the window manager (§17.4).
 rustos-font = { path = "../../../lib/font", version = "=0.0.0" }
 
+# The package is both the browser engine library (above) and the `Run`
+# entry-point binary of the on-disk `files.app` bundle (plans/APPWIN.md
+# AW3): the windowed file browser the desktop session's start menu
+# spawns. The binary is a freestanding pure-Rust program on the native
+# Tier-1 targets and an inert host stub elsewhere (see `src/run.rs` /
+# `build.rs`).
+[[bin]]
+name = "rustos-files-run"
+path = "src/run.rs"
+
+# Everything only the freestanding `Run` binary links is pulled in for
+# the bare-metal targets it is actually built for; on the host the
+# binary is an inert stub with no extra dependencies.
+[target.'cfg(target_os = "none")'.dependencies]
+# The app half of the window channel: `WindowClient` (create / present /
+# close over the `WindowTransport` seam) and `WindowEvents` (the typed,
+# parked event wait over the `EventSource` seam).
+rustos-window = { path = "../../../lib/window", version = "=0.0.0" }
+# The pure-Rust userland runtime: `_start`, the stack canary, the panic
+# handler, the allocator, and the syscall wrappers (`shm_create` /
+# `shm_grant`, `port_bind` / `ipc_recv`, `ipc_call`, `waitset_*`,
+# `read_dir_all`).
+rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+
 [lints]
 workspace = true

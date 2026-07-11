@@ -10,6 +10,13 @@ publish.workspace = true
 
 [dependencies]
 rustos-abi = { path = "../abi", version = "=0.0.0" }
+rustos-rt = { path = "../rt", version = "=0.0.0", optional = true }
+
+[features]
+# The production, syscall-backed `ShmMapper` (`rt` module): pulled in only
+# by consumers that run on the RustOS runtime (the framebuffer display
+# service, the desktop session's window server).
+rt = ["dep:rustos-rt"]
 
 [lints]
 workspace = true

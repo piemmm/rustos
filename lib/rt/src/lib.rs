@@ -294,6 +294,10 @@ const NUM_FS_ATTR_GET: u64 = SyscallNumber::FS_ATTR_GET.as_u16() as u64;
 const NUM_FS_ATTR_SET: u64 = SyscallNumber::FS_ATTR_SET.as_u16() as u64;
 const NUM_FS_ATTR_LIST: u64 = SyscallNumber::FS_ATTR_LIST.as_u16() as u64;
 const NUM_FS_ATTR_REMOVE: u64 = SyscallNumber::FS_ATTR_REMOVE.as_u16() as u64;
+/// `port_bind` syscall number (as above).
+const NUM_PORT_BIND: u64 = SyscallNumber::PORT_BIND.as_u16() as u64;
+/// `ipc_recv` syscall number (as above).
+const NUM_IPC_RECV: u64 = SyscallNumber::IPC_RECV.as_u16() as u64;
 
 /// `call_peer_origin` syscall number (as above).
 const NUM_CALL_PEER_ORIGIN: u64 = SyscallNumber::CALL_PEER_ORIGIN.as_u16() as u64;
@@ -1921,6 +1925,80 @@ pub fn ipc_send(endpoint: u64, payload: &[u8]) -> i64 {
     // the duration of the call, so the pair denotes readable memory.
     let ret = unsafe { raw_syscall(NUM_IPC_SEND, [endpoint, ptr, payload.len() as u64, 0, 0, 0]) };
     ret as i64
+}
+
+/// Bind an asynchronous IPC message port owned by the calling task
+/// (`SyscallNumber::PORT_BIND`) — the receive half of
+/// [`ipc_send`]/[`ipc_recv`]: an app binds its window-event mailbox here,
+/// then parks on it through a wait-set member of kind
+/// [`rustos_abi::WaitSourceKind::Port`].
+///
+/// The kernel bounds `max_payload` and `capacity` (fail-closed memory
+/// bounds), requires `CAP_IPC_BIND_PRIVILEGED` for a reserved well-known
+/// id (squat protection), refuses an id that is already bound
+/// (`AlreadyExists`), records the kernel-trusted caller as the port's
+/// owner — the only task that may receive from it — and tears the port
+/// down when that owner exits. The wrapper adds no authority.
+///
+/// Returns `0` on success or `-errno` (recover the [`rustos_abi::Errno`]
+/// discriminant as `-ret`), the standard `abi-v1` signed-result
+/// convention; the wrapper hides no error.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn port_bind(endpoint: u64, max_payload: usize, capacity: usize) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; every argument is a
+    // plain scalar the kernel validates — no user memory is named.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_PORT_BIND,
+            [endpoint, max_payload as u64, capacity as u64, 0, 0, 0],
+        )
+    };
+    ret as i64
+}
+
+/// Receive the oldest delivered message from a port this task bound
+/// (`SyscallNumber::IPC_RECV`), copying the payload into `buf` and the
+/// sender's kernel-attested [`rustos_abi::Origin`] wire image —
+/// snapshotted at send time, never the sender's claim — into
+/// `sender_out`, so the caller authenticates each message's principal
+/// fail-closed (decode with [`rustos_abi::Origin::from_bytes`]).
+///
+/// Only the port's owner may receive; the kernel owner-gates every drain.
+/// Returns the payload length on success. An empty mailbox is the
+/// retryable `WouldBlock` — the caller parks on its wait-set, never a
+/// poll loop — and a buffer smaller than the queued message is refused
+/// with `BufferTooSmall`, leaving the message queued for a retry.
+///
+/// # Errors
+///
+/// Returns the raw negative kernel result (`-errno`) on failure; the
+/// wrapper hides no error.
+pub fn ipc_recv(
+    endpoint: u64,
+    buf: &mut [u8],
+    sender_out: &mut [u8; rustos_abi::ORIGIN_WIRE_LEN],
+) -> Result<usize, i64> {
+    let ptr = buf.as_mut_ptr() as usize as u64;
+    let sender_ptr = sender_out.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // both `(ptr, len)` pairs against the caller's address space before
+    // writing. `buf` and `sender_out` are live exclusive borrows for the
+    // duration of the call, so both pairs denote writable memory.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_IPC_RECV,
+            [endpoint, ptr, buf.len() as u64, sender_ptr, 0, 0],
+        )
+    };
+    #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 signed-result encoding.
+    let signed = ret as i64;
+    if signed < 0 {
+        return Err(signed);
+    }
+    // A count the address width cannot hold is refused, never truncated
+    // into a shorter, decodable-looking record.
+    usize::try_from(signed).map_err(|_| -i64::from(rustos_abi::Errno::LengthOutOfRange as i32))
 }
 
 /// Resolve a published port name to its live IPC endpoint id
@@ -3850,6 +3928,59 @@ mod tests {
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(ipc_send(7, &payload), want);
+        });
+    }
+
+    #[test]
+    fn port_bind_marshals_endpoint_and_bounds() {
+        let (number, args) = capture(0, || {
+            assert_eq!(port_bind(0x5EAD_0001, 40, 8), 0);
+        });
+        assert_eq!(number, NUM_PORT_BIND);
+        assert_eq!(args[0], 0x5EAD_0001);
+        assert_eq!(args[1], 40);
+        assert_eq!(args[2], 8);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn port_bind_surfaces_negative_errno_encoding() {
+        // `AlreadyExists` (a clashing id) is encoded as the two's-complement
+        // negation; the wrapper hands that signed value back unchanged.
+        let want = -i64::from(rustos_abi::Errno::AlreadyExists.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(port_bind(0x5EAD_0001, 40, 8), want);
+        });
+    }
+
+    #[test]
+    fn ipc_recv_marshals_endpoint_buffers_and_sender_out() {
+        let mut buf = [0u8; 40];
+        let mut sender = [0u8; rustos_abi::ORIGIN_WIRE_LEN];
+        let buf_ptr = buf.as_mut_ptr() as usize as u64;
+        let sender_ptr = sender.as_mut_ptr() as usize as u64;
+        let (number, args) = capture(12, || {
+            assert_eq!(ipc_recv(0x5EAD_0001, &mut buf, &mut sender), Ok(12));
+        });
+        assert_eq!(number, NUM_IPC_RECV);
+        assert_eq!(args[0], 0x5EAD_0001);
+        assert_eq!(args[1], buf_ptr);
+        assert_eq!(args[2], 40);
+        assert_eq!(args[3], sender_ptr);
+        assert_eq!(&args[4..], &[0, 0]);
+    }
+
+    #[test]
+    fn ipc_recv_surfaces_negative_errno_encoding() {
+        // `WouldBlock` (an empty mailbox) is the retryable signal the
+        // caller parks on; the wrapper hands the signed value back.
+        let mut buf = [0u8; 8];
+        let mut sender = [0u8; rustos_abi::ORIGIN_WIRE_LEN];
+        let want = -i64::from(rustos_abi::Errno::WouldBlock.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(ipc_recv(9, &mut buf, &mut sender), Err(want));
         });
     }
 

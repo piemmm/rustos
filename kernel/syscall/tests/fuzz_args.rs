@@ -77,7 +77,14 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
-    fn ipc_recv(&self, _c: &CallerContext<'_>, _e: u64, _p: u64, _l: usize) -> SyscallResult {
+    fn ipc_recv(
+        &self,
+        _c: &CallerContext<'_>,
+        _e: u64,
+        _p: u64,
+        _l: usize,
+        _sender_out: u64,
+    ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
@@ -645,6 +652,10 @@ impl SyscallHandlers for AcceptingHandlers {
         Ok(0)
     }
     fn port_resolve(&self, _c: &CallerContext<'_>, _name: u64, _name_len: usize) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn port_bind(&self, _c: &CallerContext<'_>, _e: u64, _mp: usize, _cap: usize) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }

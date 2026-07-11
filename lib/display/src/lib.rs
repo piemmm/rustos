@@ -25,15 +25,23 @@
 //! the surface blit has exactly one definition.
 
 #![no_std]
-#![forbid(unsafe_code)]
+// The engine is unsafe-free by construction; only the feature-gated `rt`
+// module's single audited mapping view (its `SAFETY` block) is exempt, so
+// the crate keeps the outright forbid whenever that module is not built.
+#![cfg_attr(not(feature = "rt"), forbid(unsafe_code))]
+#![deny(unsafe_code)]
 #![deny(missing_docs)]
 
 pub mod client;
 pub mod framebuffer;
+#[cfg(feature = "rt")]
+pub mod rt;
 pub mod server;
 
 pub use client::{DisplayClient, DisplayTransport, RemoteDisplay};
 pub use framebuffer::{Framebuffer, FramebufferConfig};
+#[cfg(feature = "rt")]
+pub use rt::{RtShmMapper, RtShmRegion};
 pub use server::{DisplayServer, FrameRegion, SeatCheck, ShmMapper, DISPLAY_REPLY_MAX};
 
 use rustos_abi::{DriverError, Errno};

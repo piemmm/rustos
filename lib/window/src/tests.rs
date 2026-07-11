@@ -49,6 +49,10 @@ const EVENTS_A: u64 = 0xA000;
 /// The event endpoint client B names in its creates.
 const EVENTS_B: u64 = 0xB000;
 
+/// The serving session identity the loopback server stamps into every
+/// successful create reply.
+const SERVER: ProcId = ProcId::from_raw([0x5D; PROC_ID_LEN]);
+
 /// A mapped region backed by a `Vec` with deterministic per-handle
 /// content, so a presented frame slice is checkable byte for byte.
 struct MockRegion(Vec<u8>);
@@ -174,7 +178,7 @@ struct Loopback {
 impl Loopback {
     fn with_regions(regions: &[(u64, usize)]) -> Rc<RefCell<Self>> {
         Rc::new(RefCell::new(Self {
-            server: WindowServer::new(MockMapper::with_regions(regions)),
+            server: WindowServer::new(MockMapper::with_regions(regions), SERVER),
             host: RecordingHost::default(),
             identity: MockIdentity,
             ticket: TICKET_A,
@@ -220,15 +224,33 @@ fn full_damage() -> DamageRect {
     DamageRect::full(&SURFACE)
 }
 
+/// Create through `client`, returning just the minted window id (the
+/// server stamp is asserted once in the loopback round trip).
+fn create_id(
+    client: &mut WindowClient<Rc<RefCell<Loopback>>>,
+    shm: u64,
+    events: u64,
+    frames: u32,
+    title: &str,
+) -> Result<u64, Errno> {
+    client
+        .create(shm, events, frames, &SURFACE, title)
+        .map(|(id, _)| id)
+}
+
 #[test]
 fn create_present_close_round_trips_through_the_loopback() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
 
-    let window = client
+    let (window, server) = client
         .create(7, EVENTS_A, 2, &SURFACE, "Files")
         .expect("a valid create succeeds");
     assert_eq!(window, 1);
+    assert_eq!(
+        server, SERVER,
+        "the reply is stamped with the session identity apps authenticate events against"
+    );
     {
         let inner = loopback.borrow();
         assert_eq!(inner.server.window_count(), 1);
@@ -272,12 +294,10 @@ fn window_ids_are_minted_monotonically_and_never_reused() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
 
-    let first = client.create(7, EVENTS_A, 1, &SURFACE, "a").expect("first");
-    let second = client
-        .create(7, EVENTS_A, 1, &SURFACE, "b")
-        .expect("second");
+    let first = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("first");
+    let second = create_id(&mut client, 7, EVENTS_A, 1, "b").expect("second");
     client.close(first).expect("close");
-    let third = client.create(7, EVENTS_A, 1, &SURFACE, "c").expect("third");
+    let third = create_id(&mut client, 7, EVENTS_A, 1, "c").expect("third");
     assert_eq!((first, second, third), (1, 2, 3));
 }
 
@@ -286,9 +306,7 @@ fn a_caller_cannot_touch_another_clients_window() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
 
-    let window = client
-        .create(7, EVENTS_A, 1, &SURFACE, "A's")
-        .expect("A creates");
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "A's").expect("A creates");
 
     // B presents and closes A's window: refused exactly like a window
     // that does not exist, and A's window survives untouched.
@@ -318,16 +336,16 @@ fn create_is_refused_fail_closed() {
 
     // An unknown grant handle.
     assert_eq!(
-        client.create(99, EVENTS_A, 1, &SURFACE, "x"),
+        create_id(&mut client, 99, EVENTS_A, 1, "x"),
         Err(Errno::NotFound)
     );
     // A region too small for the frames it claims to hold.
     assert_eq!(
-        client.create(8, EVENTS_A, 1, &SURFACE, "x"),
+        create_id(&mut client, 8, EVENTS_A, 1, "x"),
         Err(Errno::LengthOutOfRange)
     );
     assert_eq!(
-        client.create(7, EVENTS_A, 3, &SURFACE, "x"),
+        create_id(&mut client, 7, EVENTS_A, 3, "x"),
         Err(Errno::LengthOutOfRange)
     );
     // A kernel-domain caller is not a window client.
@@ -354,19 +372,15 @@ fn a_client_is_bounded_to_its_window_cap() {
     let mut client = WindowClient::new(Rc::clone(&loopback));
 
     for _ in 0..WINDOWS_PER_CLIENT_MAX {
-        client
-            .create(7, EVENTS_A, 1, &SURFACE, "w")
-            .expect("in cap");
+        create_id(&mut client, 7, EVENTS_A, 1, "w").expect("in cap");
     }
     assert_eq!(
-        client.create(7, EVENTS_A, 1, &SURFACE, "w"),
+        create_id(&mut client, 7, EVENTS_A, 1, "w"),
         Err(Errno::NoSpace)
     );
     // Another client still has its own budget.
     loopback.borrow_mut().ticket = TICKET_B;
-    client
-        .create(7, EVENTS_B, 1, &SURFACE, "w")
-        .expect("B's own cap");
+    create_id(&mut client, 7, EVENTS_B, 1, "w").expect("B's own cap");
 }
 
 #[test]
@@ -381,7 +395,7 @@ fn a_refused_host_open_commits_nothing() {
     );
     loopback.borrow_mut().host.refuse_open = false;
     // The refused create consumed no id.
-    let window = client.create(7, EVENTS_A, 1, &SURFACE, "x").expect("retry");
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "x").expect("retry");
     assert_eq!(window, 1);
 }
 
@@ -389,9 +403,7 @@ fn a_refused_host_open_commits_nothing() {
 fn present_bounds_are_enforced() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
-    let window = client
-        .create(7, EVENTS_A, 2, &SURFACE, "x")
-        .expect("create");
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "x").expect("create");
 
     // A frame index past the created count.
     assert_eq!(
@@ -417,10 +429,10 @@ fn a_dead_clients_windows_are_torn_down_and_others_survive() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
 
-    let a1 = client.create(7, EVENTS_A, 1, &SURFACE, "a1").expect("a1");
-    let a2 = client.create(7, EVENTS_A, 1, &SURFACE, "a2").expect("a2");
+    let a1 = create_id(&mut client, 7, EVENTS_A, 1, "a1").expect("a1");
+    let a2 = create_id(&mut client, 7, EVENTS_A, 1, "a2").expect("a2");
     loopback.borrow_mut().ticket = TICKET_B;
-    let b1 = client.create(7, EVENTS_B, 1, &SURFACE, "b1").expect("b1");
+    let b1 = create_id(&mut client, 7, EVENTS_B, 1, "b1").expect("b1");
 
     {
         let inner = &mut *loopback.borrow_mut();
@@ -462,9 +474,9 @@ fn a_malformed_request_answers_a_typed_status_refusal() {
 fn events_reach_the_owning_endpoint_and_decode_through_the_client() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
-    let a = client.create(7, EVENTS_A, 1, &SURFACE, "a").expect("a");
+    let a = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     loopback.borrow_mut().ticket = TICKET_B;
-    let b = client.create(7, EVENTS_B, 1, &SURFACE, "b").expect("b");
+    let b = create_id(&mut client, 7, EVENTS_B, 1, "b").expect("b");
 
     let key = KeyInput::Pressed {
         key: KeyValue::Char('x'),
@@ -530,7 +542,7 @@ fn events_reach_the_owning_endpoint_and_decode_through_the_client() {
 fn event_routing_fails_closed() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
-    let window = client.create(7, EVENTS_A, 1, &SURFACE, "a").expect("a");
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
 
     let mut sink = QueueSink::default();
     let inner = loopback.borrow();

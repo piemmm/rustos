@@ -1,6 +1,7 @@
 //! Headless unit tests for the desktop session glue.
 
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use rustos_abi::driver::display::{DisplayFormat, DisplayMode};
@@ -1416,4 +1417,148 @@ fn syncing_focus_to_an_untracked_window_leaves_the_highlight() {
     // Clearing focus (a desktop press) does drop it.
     bridge.sync_focus(session.taskbar_mut(), None);
     assert_eq!(session.taskbar().tasks().focused(), None);
+}
+
+/// The AW3 QEMU vertical's full click-through, replayed on the host with
+/// the production shell construction and the ramfb console geometry: pin
+/// → start button (menu opens) → "Files" row (launch) → the served
+/// window (activate) → start button (menu reopens) → the appearance
+/// toggle (theme switches) → the window again (activate). Each staged
+/// outcome must appear exactly as the vertical's marker chain assumes,
+/// so a routing regression fails here in milliseconds, never as a QEMU
+/// timeout.
+#[test]
+#[allow(clippy::too_many_lines)] // One linear replay of the whole staged click-through.
+fn aw3_click_through_produces_the_staged_outcomes() {
+    const WIDTH: u32 = 1024;
+    const HEIGHT: u32 = 768;
+    let mut shell = DesktopShell::new(TaskbarConfig::bottom_bar(WIDTH, HEIGHT), LABEL);
+    let files_id = rustos_taskbar::LauncherId(1);
+    let _ = shell
+        .session_mut()
+        .taskbar_mut()
+        .start_menu_mut()
+        .add_launcher(files_id, "Files");
+    let mode = DisplayMode {
+        width_px: WIDTH,
+        height_px: HEIGHT,
+        stride_bytes: WIDTH * 4,
+        format: DisplayFormat::Rgba8888,
+    };
+    let mut comp = Compositor::new(mode, Color::rgb(0, 0, 0)).expect("compositor");
+
+    let centre = |rect: rustos_wm::Rect| -> Point {
+        assert!(!rect.is_empty());
+        #[allow(clippy::cast_possible_wrap)]
+        Point::new(
+            rect.left() + (rect.width / 2) as i32,
+            rect.top() + (rect.height / 2) as i32,
+        )
+    };
+    let start = centre(shell.session().taskbar().layout(Scale::ONE).start_button);
+    let row = |shell: &DesktopShell, label: &str| -> Point {
+        let index = shell
+            .session()
+            .taskbar()
+            .start_menu()
+            .entries()
+            .iter()
+            .position(|e| e.label() == label)
+            .expect("labelled row");
+        centre(shell.session().taskbar().menu_layout(Scale::ONE).entries[index])
+    };
+    let files_row = row(&shell, "Files");
+    let toggle_row = row(&shell, LABEL);
+
+    let click = |shell: &mut DesktopShell, comp: &mut Compositor, at: Point| -> Vec<ShellOutcome> {
+        vec![
+            shell.handle(moved(at.x, at.y), comp),
+            shell.handle(PRIMARY_PRESS, comp),
+            shell.handle(
+                InputEvent::PointerReleased {
+                    button: PointerButton::Primary,
+                },
+                comp,
+            ),
+        ]
+    };
+
+    // Start button: the menu opens.
+    let outcomes = click(&mut shell, &mut comp, start);
+    assert!(
+        outcomes.contains(&ShellOutcome::Session(SessionEvent::Forward(
+            TaskbarResponse::StartMenuToggled { open: true }
+        ))),
+        "start click must open the menu, got {outcomes:?}"
+    );
+
+    // The "Files" row: the launcher fires and the menu closes.
+    let outcomes = click(&mut shell, &mut comp, files_row);
+    assert!(
+        outcomes.iter().any(|o| matches!(
+            o,
+            ShellOutcome::Session(SessionEvent::Forward(TaskbarResponse::MenuEntrySelected {
+                action: MenuAction::Launch(id),
+                ..
+            })) if *id == files_id
+        )),
+        "files-row click must select the launcher, got {outcomes:?}"
+    );
+    assert!(!shell.session().taskbar().start_menu().is_open());
+
+    // The spawned app's window opens exactly as the production serve
+    // path opens it: through the shell (composited window + taskbar
+    // task + running-task bookkeeping), at the session's cascade
+    // origin, sized as the shipped file manager sizes itself.
+    let origin = Point::new(
+        crate::windows::CASCADE_ORIGIN,
+        crate::windows::CASCADE_ORIGIN,
+    );
+    let surface =
+        Surface::filled(480, 320, Color::rgb(0x20, 0x20, 0x24).premultiply()).expect("surface");
+    let window = shell
+        .open_window(&mut comp, origin, surface, "Files")
+        .expect("the served window opens");
+    let in_window = Point::new(origin.x + 240, origin.y + 160);
+
+    // Clicking the window activates it (the session delivers Focus +
+    // Pressed app-ward — the vertical's second and third witnesses).
+    let outcomes = click(&mut shell, &mut comp, in_window);
+    assert!(
+        outcomes.iter().any(|o| matches!(
+            o,
+            ShellOutcome::WindowManager(InputResponse::Activated { window: w, .. }) if *w == window
+        )),
+        "window click must activate the served window, got {outcomes:?}"
+    );
+
+    // Start button again: the menu reopens.
+    let outcomes = click(&mut shell, &mut comp, start);
+    assert!(
+        outcomes.contains(&ShellOutcome::Session(SessionEvent::Forward(
+            TaskbarResponse::StartMenuToggled { open: true }
+        ))),
+        "second start click must reopen the menu, got {outcomes:?}"
+    );
+
+    // The appearance toggle: the theme switches and the menu closes.
+    let outcomes = click(&mut shell, &mut comp, toggle_row);
+    assert!(
+        outcomes
+            .iter()
+            .any(|o| matches!(o, ShellOutcome::Session(SessionEvent::AppearanceChanged(_)))),
+        "toggle click must switch the appearance, got {outcomes:?}"
+    );
+    assert!(!shell.session().taskbar().start_menu().is_open());
+
+    // The window once more: activated again (the vertical's final
+    // delivery, keying the light-theme screendump and the guest PASS).
+    let outcomes = click(&mut shell, &mut comp, in_window);
+    assert!(
+        outcomes.iter().any(|o| matches!(
+            o,
+            ShellOutcome::WindowManager(InputResponse::Activated { window: w, .. }) if *w == window
+        )),
+        "post-toggle window click must activate the window, got {outcomes:?}"
+    );
 }

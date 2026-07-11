@@ -5,12 +5,16 @@
 # CAP_DISPLAY to acquire the boot seat's exclusive, revocable lease,
 # CAP_INPUT_READ to drain the owned seat's pointer/keyboard channels
 # (the kernel additionally owner-gates every drain against the live
-# lease), and CAP_SHM to create and grant the zero-copy frame region the
-# display service maps. No console pair: the session's surface is the
-# seat, not a text console; no CAP_IPC_BIND_PRIVILEGED: it calls the
-# display endpoint, it never binds one.
+# lease), CAP_SHM to create and grant the zero-copy frame region the
+# display service maps (and to map each served app window's granted
+# frames), and CAP_PROC_SPAWN for the start menu's app launchers
+# (plans/APPWIN.md AW3). No console pair: the session's surface is the
+# seat, not a text console; no CAP_IPC_BIND_PRIVILEGED: the display
+# endpoint is called, never bound, and binding the seat-scoped window
+# rendezvous is authorised by the session's kernel-attested live seat
+# lease, not a capability.
 id = "os.rustos.desktop"
 name = "desktop"
 version = "0.1.0"
 kind = "service"
-capabilities = ["CAP_DISPLAY", "CAP_INPUT_READ", "CAP_SHM"]
+capabilities = ["CAP_DISPLAY", "CAP_INPUT_READ", "CAP_SHM", "CAP_PROC_SPAWN"]

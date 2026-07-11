@@ -65,10 +65,19 @@ pub const VIRTIO_INPUT_DEVICE_ID: u32 = 18;
 mod wire {
     /// Event virtqueue index (device → driver), virtio 1.1 §5.8.2.
     pub const EVENT_QUEUE: u16 = 0;
-    /// Event-queue size (descriptors). Power-of-two per virtio §2.6;
-    /// eight outstanding single-event buffers is ample headroom for the
-    /// one-event-per-`poll` drain below.
-    pub const EVENT_QUEUE_SIZE: u16 = 8;
+    /// Event-queue depth ceiling (descriptors), power-of-two per virtio
+    /// §2.6; the programmed depth is the device's advertised
+    /// `queue_max_size` clamped to this (QEMU's virtio-input advertises
+    /// 64). The whole pool stays posted, and its depth is the loss
+    /// bound: the device **silently drops** events when no posted buffer
+    /// is free (virtio 1.1 §5.8.6.2), and the driver's drain can lag
+    /// whole bursts behind a saturated CPU (a busy desktop re-rendering
+    /// while a click arrives), so a shallow pool loses real input — a
+    /// click's press/release vanishing mid-burst, observed end to end
+    /// before this depth was raised from eight. Sixty-four single-event
+    /// buffers (512 bytes of bounce memory) absorb every realistic input
+    /// burst between two driver wakes.
+    pub const EVENT_QUEUE_SIZE: u16 = 64;
     /// Byte length of one `struct virtio_input_event`
     /// (`__le16 type`, `__le16 code`, `__le32 value`), virtio 1.1 §5.8.6.
     /// A `u32` so it feeds a descriptor `len` directly; widen to `usize`
@@ -157,15 +166,20 @@ pub struct VirtioInput<'h, T: Transport> {
     transport: T,
     eventq: SplitQueue,
     host: &'h dyn VirtioHost,
-    /// The pool of device-writable event buffers, indexed by the
-    /// descriptor head the queue assigned each one. The device fills a
-    /// buffer per `virtio_input_event` it delivers; the driver keeps the
-    /// whole pool posted so several events (e.g. an `EV_KEY` plus its
+    /// One shared device-writable region holding every event slot back
+    /// to back (`negotiated depth × EVENT_LEN` bytes — a fraction of a
+    /// page, never a page per 8-byte event). The device fills one slot
+    /// per `virtio_input_event` it delivers; the driver keeps every
+    /// slot posted so several events (e.g. an `EV_KEY` plus its
     /// `EV_SYN` frame separator) can be in flight at once — a single
     /// posted buffer is not enough, because the device needs a free
     /// buffer for *every* event of a report, including the `EV_SYN`
     /// (virtio 1.1 §5.8.6).
-    event_bufs: [Option<BounceBuffer>; wire::EVENT_QUEUE_SIZE as usize],
+    event_pool: BounceBuffer,
+    /// Descriptor head → pool slot index for every in-flight slot. The
+    /// queue assigns heads from its own free list, so the map is
+    /// re-recorded on every repost.
+    event_slots: [Option<u16>; wire::EVENT_QUEUE_SIZE as usize],
 }
 
 impl<'h, T: Transport> VirtioInput<'h, T> {
@@ -175,8 +189,9 @@ impl<'h, T: Transport> VirtioInput<'h, T> {
     /// ACKNOWLEDGE, DRIVER, feature negotiation (`VIRTIO_F_VERSION_1`
     /// only — the modern split-virtqueue layout, no device-specific
     /// features), `FEATURES_OK`, set up the event queue, `DRIVER_OK`,
-    /// then fill the eventq with `EVENT_QUEUE_SIZE` device-write
-    /// buffers and notify the device.
+    /// then fill the eventq with one device-write slot per negotiated
+    /// descriptor (all carved from one shared DMA region) and notify
+    /// the device.
     ///
     /// # Errors
     ///
@@ -202,20 +217,32 @@ impl<'h, T: Transport> VirtioInput<'h, T> {
         if !transport.status().contains(Status::FEATURES_OK) {
             return Err(VirtioError::FeaturesRejected.as_driver_error());
         }
-        let mut eventq = SplitQueue::new(
-            &mut transport,
-            host,
-            wire::EVENT_QUEUE,
-            wire::EVENT_QUEUE_SIZE,
-        )
-        .map_err(VirtioError::as_driver_error)?;
+        // Program the deepest event queue the device supports, up to the
+        // pool ceiling: depth is the input-loss bound (the device drops
+        // events with no posted buffer), so take everything offered. A
+        // device advertising a zero-sized queue is broken; refuse it
+        // rather than run a driver that can never receive an event.
+        transport
+            .queue_select(wire::EVENT_QUEUE)
+            .map_err(VirtioError::as_driver_error)?;
+        let queue_size = transport.queue_max_size().min(wire::EVENT_QUEUE_SIZE);
+        if queue_size == 0 {
+            return Err(DriverError::DeviceFault);
+        }
+        let mut eventq = SplitQueue::new(&mut transport, host, wire::EVENT_QUEUE, queue_size)
+            .map_err(VirtioError::as_driver_error)?;
         status = status.with(Status::DRIVER_OK);
         transport.set_status(status);
 
-        let mut event_bufs: [Option<BounceBuffer>; wire::EVENT_QUEUE_SIZE as usize] =
+        // One region carries every slot: the depth is bounded by the
+        // 64-entry ceiling, so the whole pool is 512 bytes — never a DMA
+        // page per 8-byte event.
+        let region = host.alloc_dma_zeroed(usize::from(queue_size) * wire::EVENT_LEN as usize)?;
+        let event_pool = BounceBuffer::new(region, BufferClass::NonSensitive);
+        let mut event_slots: [Option<u16>; wire::EVENT_QUEUE_SIZE as usize] =
             core::array::from_fn(|_| None);
-        for _ in 0..wire::EVENT_QUEUE_SIZE {
-            Self::post_buffer(&mut eventq, host, &mut event_bufs)?;
+        for slot in 0..queue_size {
+            Self::post_slot(&mut eventq, &event_pool, slot, &mut event_slots)?;
         }
         eventq.kick(&mut transport);
 
@@ -223,7 +250,8 @@ impl<'h, T: Transport> VirtioInput<'h, T> {
             transport,
             eventq,
             host,
-            event_bufs,
+            event_pool,
+            event_slots,
         })
     }
 
@@ -285,15 +313,15 @@ impl<'h, T: Transport> VirtioInput<'h, T> {
     /// eventq, and record it in `event_bufs` under the descriptor head
     /// the queue assigned. The caller is responsible for the single
     /// `kick` once a batch has been posted.
-    fn post_buffer(
+    fn post_slot(
         eventq: &mut SplitQueue,
-        host: &dyn VirtioHost,
-        event_bufs: &mut [Option<BounceBuffer>],
+        event_pool: &BounceBuffer,
+        slot: u16,
+        event_slots: &mut [Option<u16>],
     ) -> Result<(), DriverError> {
-        let region = host.alloc_dma_zeroed(wire::EVENT_LEN as usize)?;
-        let buf = BounceBuffer::new(region, BufferClass::NonSensitive);
+        let offset = u64::from(slot) * u64::from(wire::EVENT_LEN);
         let segments = [ChainSegment {
-            phys: buf.phys(),
+            phys: event_pool.phys() + offset,
             len: wire::EVENT_LEN,
             direction: Direction::DeviceWrite,
         }];
@@ -302,9 +330,9 @@ impl<'h, T: Transport> VirtioInput<'h, T> {
             .map_err(VirtioError::as_driver_error)?;
         // `head` is queue-assigned (the driver's own free list), so it is
         // always in range; guard anyway and fail closed.
-        *event_bufs
+        *event_slots
             .get_mut(head as usize)
-            .ok_or(DriverError::DeviceFault)? = Some(buf);
+            .ok_or(DriverError::DeviceFault)? = Some(slot);
         Ok(())
     }
 }
@@ -354,13 +382,18 @@ impl<T: Transport> VirtioInput<'_, T> {
                 Err(VirtioError::NoCompletion) => break,
                 Err(e) => return Err(e.as_driver_error()),
             };
-            let mut buf = self
-                .event_bufs
+            let slot = self
+                .event_slots
                 .get_mut(token.head as usize)
                 .and_then(Option::take)
                 .ok_or(DriverError::DeviceFault)?;
             if token.written >= wire::EVENT_LEN {
-                let bytes = buf.full_region_mut();
+                let offset = usize::from(slot) * wire::EVENT_LEN as usize;
+                let bytes = self
+                    .event_pool
+                    .full_region_mut()
+                    .get(offset..offset + wire::EVENT_LEN as usize)
+                    .ok_or(DriverError::DeviceFault)?;
                 let etype = u16::from_le_bytes([bytes[0], bytes[1]]);
                 let code = u16::from_le_bytes([bytes[2], bytes[3]]);
                 let value = i32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
@@ -369,19 +402,12 @@ impl<T: Transport> VirtioInput<'_, T> {
                     count += 1;
                 }
             }
-            let segments = [ChainSegment {
-                phys: buf.phys(),
-                len: wire::EVENT_LEN,
-                direction: Direction::DeviceWrite,
-            }];
-            let head = self
-                .eventq
-                .add_chain(&segments)
-                .map_err(VirtioError::as_driver_error)?;
-            *self
-                .event_bufs
-                .get_mut(head as usize)
-                .ok_or(DriverError::DeviceFault)? = Some(buf);
+            Self::post_slot(
+                &mut self.eventq,
+                &self.event_pool,
+                slot,
+                &mut self.event_slots,
+            )?;
             reposted = true;
         }
         if reposted {

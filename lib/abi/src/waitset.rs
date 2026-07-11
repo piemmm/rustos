@@ -95,6 +95,16 @@ pub enum WaitSourceKind {
     /// session tears down instead of parking forever
     /// (`plans/DISPLAY.md` D7a).
     SeatInput = 3,
+    /// An asynchronous IPC message port the caller bound via
+    /// [`crate::SyscallNumber::PORT_BIND`] (its `id` is the port's
+    /// endpoint id). Adding the member is owner-checked against the
+    /// port's owning task: only the binder may observe its own mailbox.
+    /// Ready when at least one delivered message is waiting to be
+    /// drained by [`crate::SyscallNumber::IPC_RECV`]; readiness is a
+    /// non-consuming peek, so the woken owner's drain — not the wait —
+    /// consumes the message (`plans/APPWIN.md` AW3: an app parks here
+    /// for its window events, never a poll loop).
+    Port = 4,
 }
 
 impl WaitSourceKind {
@@ -116,6 +126,7 @@ impl WaitSourceKind {
             1 => Ok(Self::Irq),
             2 => Ok(Self::Child),
             3 => Ok(Self::SeatInput),
+            4 => Ok(Self::Port),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -141,10 +152,11 @@ mod tests {
             WaitSourceKind::Irq,
             WaitSourceKind::Child,
             WaitSourceKind::SeatInput,
+            WaitSourceKind::Port,
         ] {
             assert_eq!(WaitSourceKind::from_u32(kind.as_u32()), Ok(kind));
         }
-        assert_eq!(WaitSourceKind::from_u32(4), Err(Errno::OutOfRange));
+        assert_eq!(WaitSourceKind::from_u32(5), Err(Errno::OutOfRange));
         assert_eq!(WaitSourceKind::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -156,6 +168,7 @@ mod tests {
         assert_eq!(WaitSourceKind::Irq.as_u32(), 1);
         assert_eq!(WaitSourceKind::Child.as_u32(), 2);
         assert_eq!(WaitSourceKind::SeatInput.as_u32(), 3);
+        assert_eq!(WaitSourceKind::Port.as_u32(), 4);
         assert_eq!(WAITSET_CHILD_ANY, u64::MAX);
     }
 }

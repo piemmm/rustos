@@ -550,9 +550,9 @@ mod tests {
             names,
             [
                 "basename", "cat", "chmod", "clear", "cp", "desktop", "devmgr", "df", "dirname",
-                "du", "edit", "elsh", "false", "fstree", "groupadd", "head", "login", "ls",
-                "lspci", "lsusb", "man", "mkdir", "mv", "printf", "ps", "reset", "rm", "rmdir",
-                "seatmgr", "seq", "sysinfo", "sysinfod", "tee", "top", "true", "unmount",
+                "du", "edit", "elsh", "false", "files", "fstree", "groupadd", "head", "login",
+                "ls", "lspci", "lsusb", "man", "mkdir", "mv", "printf", "ps", "reset", "rm",
+                "rmdir", "seatmgr", "seq", "sysinfo", "sysinfod", "tee", "top", "true", "unmount",
                 "useradd", "users", "vim", "wc", "whoami", "yes"
             ]
         );

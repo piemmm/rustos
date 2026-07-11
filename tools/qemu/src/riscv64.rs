@@ -230,9 +230,9 @@ mod tests {
             input_keyboard: None,
             input_typing: Vec::new(),
             input_mouse: false,
-            input_pointer_move: None,
+            pointer_script: Vec::new(),
             serial_input: Vec::new(),
-            screendump: None,
+            screendumps: Vec::new(),
             session: SessionKind::HeadlessTest,
         }
     }

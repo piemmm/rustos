@@ -305,6 +305,20 @@ fn find_selector(entries: &[u8], name: &str) -> Option<u16> {
     None
 }
 
+/// Scan-out width the RustOS boot path programs a QEMU `ramfb` boot
+/// console with. `ramfb` exposes no display to probe (there is no
+/// EDID): the guest chooses the geometry and QEMU sizes its window to
+/// match. A classic 4:3 mode is large enough for a useful boot log
+/// while keeping a statically-reserved surface modest (3 MiB). One
+/// definition, so the arch ports programming the console and a host
+/// consumer computing on-screen positions (the desktop QEMU vertical's
+/// pointer script) can never disagree about the surface.
+pub const RAMFB_CONSOLE_WIDTH_PX: u32 = 1024;
+
+/// Scan-out height of the RustOS `ramfb` boot console
+/// (see [`RAMFB_CONSOLE_WIDTH_PX`]).
+pub const RAMFB_CONSOLE_HEIGHT_PX: u32 = 768;
+
 /// Geometry handed to QEMU's `ramfb` device (`RAMFBCfg`).
 ///
 /// All fields are serialised big-endian by [`RamfbConfig::to_be_bytes`],

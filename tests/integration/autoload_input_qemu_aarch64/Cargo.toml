@@ -1,6 +1,6 @@
 [package]
 name = "rustos-test-autoload-input-qemu-aarch64"
-description = "plans/PI.md design B / B2 + plans/DISPLAY.md D7d (first stage) QEMU integration test: boot the production aarch64 rustos-kernel pipeline (boot_aarch64::boot) on the virt board as a display world — a ramfb display, a virtio keyboard, and a virtio mouse attached — with a planted three-partition disk whose read-only /System volume carries the kernel-signed virtio-input keyboard driver bundle and the framebuffer display-service bundle in its Drivers/ store. The production boot path binds the virtio-blk root, brings the framebuffer boot console up, publishes the scan-out surface as the boot display node, and the in-kernel unlock kthread's autoload hook scans the signed store BEFORE the passphrase prompt, verifies each bundle against the kernel's embedded driver trust anchor, matches each to its discovered node, and spawns each into its own user-space process. The runner types the fixture passphrase at the virtio keyboard and injects a mouse motion. PASS once four witnesses are observed: AuditEvent::InputDelivered for kind=key and kind=pointer (autoloaded user-space input drivers delivering), AuditEvent::UsersDbLoaded (the typed passphrase unlocked the encrypted root end to end), and the kernel/ipc CallEndpointCreated for the reserved DISPLAY_ENDPOINT (the autoloaded display service bound its rendezvous)."
+description = "plans/PI.md design B / B2 + plans/DISPLAY.md D7d (first stage) QEMU integration test: boot the production aarch64 rustos-kernel pipeline (boot_aarch64::boot) on the virt board as a display world — a ramfb display, a virtio keyboard, and a virtio mouse attached — with a planted three-partition disk whose read-only /System volume carries the kernel-signed virtio-input keyboard driver bundle and the framebuffer display-service bundle in its Drivers/ store. The production boot path binds the virtio-blk root, brings the framebuffer boot console up, publishes the scan-out surface as the boot display node, and the in-kernel unlock kthread's autoload hook scans the signed store BEFORE the passphrase prompt, verifies each bundle against the kernel's embedded driver trust anchor, matches each to its discovered node, and spawns each into its own user-space process. The runner types the fixture passphrase and the login dialogue at the virtio keyboard, then drives the plans/APPWIN.md AW3 click-through with injected mouse moves and button clicks (start menu, files launch, served-window clicks, appearance toggle) and takes three verified screendumps. PASS once five witnesses are observed: AuditEvent::InputDelivered for kind=key and kind=pointer (autoloaded user-space input drivers delivering), AuditEvent::UsersDbLoaded (the typed passphrase unlocked the encrypted root end to end), the kernel/ipc CallEndpointCreated for the reserved DISPLAY_ENDPOINT (the autoloaded display service bound its rendezvous), and the kernel/ipc MessageDelivered count reaching the crate's shared interaction contract (the desktop served the files app's window and routed the scripted clicks app-ward)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,12 @@ publish = false
 
 [lints]
 workspace = true
+
+# The vertical's shared interaction contract (src/lib.rs): the window-event
+# delivery counts the freestanding PASS gate and the host runner's
+# screendump keys both import. `no_std` consts only, host-buildable.
+[lib]
+path = "src/lib.rs"
 
 [[bin]]
 name = "rustos-test-autoload-input-qemu-aarch64"

@@ -138,6 +138,7 @@ const NUM_FS_ATTR_SET: u64 = SyscallNumber::FS_ATTR_SET.as_u16() as u64;
 const NUM_FS_ATTR_LIST: u64 = SyscallNumber::FS_ATTR_LIST.as_u16() as u64;
 const NUM_FS_ATTR_REMOVE: u64 = SyscallNumber::FS_ATTR_REMOVE.as_u16() as u64;
 const NUM_PORT_RESOLVE: u64 = SyscallNumber::PORT_RESOLVE.as_u16() as u64;
+const NUM_PORT_BIND: u64 = SyscallNumber::PORT_BIND.as_u16() as u64;
 const NUM_CALL_PEER_ORIGIN: u64 = SyscallNumber::CALL_PEER_ORIGIN.as_u16() as u64;
 const NUM_WALL_TIME_GET: u64 = SyscallNumber::WALL_TIME_GET.as_u16() as u64;
 const NUM_WALL_TIME_SET: u64 = SyscallNumber::WALL_TIME_SET.as_u16() as u64;
@@ -233,16 +234,57 @@ pub extern "C" fn sys_ipc_send(endpoint: u64, buf: *mut c_void, len: usize) -> i
     }
 }
 
-/// `ipc_recv`: receive up to `len` bytes from endpoint `endpoint` into `buf`
-/// (`SyscallNumber::IPC_RECV`). Returns a `ROS_E_*` code.
+/// `ipc_recv`: receive the oldest delivered message from the port
+/// `endpoint` this task bound (`SyscallNumber::IPC_RECV`): up to `len`
+/// payload bytes are copied into `buf` and the sender's kernel-attested
+/// origin record (exactly `ROS_ORIGIN_WIRE_LEN` bytes, snapshotted at
+/// send time — never the sender's claim) into `sender_out`, so the
+/// receiver authenticates each message's principal. Returns the payload
+/// length, or a negative `ROS_E_*` code reinterpreted into the result
+/// (the `ros_sys_stream_read` convention). Only the port's owner may
+/// receive; an empty mailbox is the retryable `ROS_E_WOULD_BLOCK`.
 #[must_use]
 #[export_name = "ros_sys_ipc_recv"]
-pub extern "C" fn sys_ipc_recv(endpoint: u64, buf: *mut c_void, len: usize) -> i32 {
-    // SAFETY: see `sys_ipc_send`.
+pub extern "C" fn sys_ipc_recv(
+    endpoint: u64,
+    buf: *mut c_void,
+    len: usize,
+    sender_out: *mut c_void,
+) -> u64 {
+    // SAFETY: see `sys_ipc_send`. The kernel validates both `(buf, len)`
+    // and the origin-sized `sender_out` against the caller's address
+    // space before writing.
+    unsafe {
+        raw_syscall(
+            NUM_IPC_RECV,
+            [
+                endpoint,
+                ptr_arg(buf),
+                len as u64,
+                ptr_arg(sender_out),
+                0,
+                0,
+            ],
+        )
+    }
+}
+
+/// `port_bind`: bind an asynchronous IPC message port owned by the
+/// calling task (`SyscallNumber::PORT_BIND`) — the receive half of
+/// `ros_sys_ipc_send`/`ros_sys_ipc_recv`. `max_payload` and `capacity`
+/// are fail-closed bounds the kernel re-checks; a reserved well-known id
+/// requires `ROS_CAP_IPC_BIND_PRIVILEGED`, and an id already bound is
+/// refused. The port is torn down when its owner exits. Returns a
+/// `ROS_E_*` code.
+#[must_use]
+#[export_name = "ros_sys_port_bind"]
+pub extern "C" fn sys_port_bind(endpoint: u64, max_payload: usize, capacity: usize) -> i32 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced; every
+    // argument is a plain scalar the kernel validates.
     unsafe {
         ret_i32(raw_syscall(
-            NUM_IPC_RECV,
-            [endpoint, ptr_arg(buf), len as u64, 0, 0, 0],
+            NUM_PORT_BIND,
+            [endpoint, max_payload as u64, capacity as u64, 0, 0, 0],
         ))
     }
 }
@@ -2124,7 +2166,7 @@ mod tests {
         (NUM_YIELD, "yield", 0),
         (NUM_EXIT, "exit", 1),
         (NUM_IPC_SEND, "ipc_send", 3),
-        (NUM_IPC_RECV, "ipc_recv", 3),
+        (NUM_IPC_RECV, "ipc_recv", 4),
         (NUM_CAP_QUERY, "cap_query", 1),
         (NUM_CAP_DELEGATE, "cap_delegate", 2),
         (NUM_CAP_REVOKE, "cap_revoke", 2),
@@ -2206,6 +2248,7 @@ mod tests {
         (NUM_FS_ATTR_SET, "fs_attr_set", 6),
         (NUM_FS_ATTR_LIST, "fs_attr_list", 5),
         (NUM_FS_ATTR_REMOVE, "fs_attr_remove", 4),
+        (NUM_PORT_BIND, "port_bind", 3),
         (NUM_PORT_RESOLVE, "port_resolve", 2),
         (NUM_POINTER_INJECT, "pointer_inject", 3),
         (NUM_POINTER_READ, "pointer_read", 3),
@@ -2265,16 +2308,31 @@ mod tests {
     }
 
     #[test]
-    fn ipc_recv_marshals_endpoint_pointer_and_len() {
+    fn ipc_recv_marshals_endpoint_pointer_len_and_sender_out() {
         let mut buffer = [0u8; 16];
+        let mut sender = [0u8; rustos_abi::ORIGIN_WIRE_LEN];
         let ptr = buffer.as_mut_ptr().cast::<c_void>();
+        let sender_ptr = sender.as_mut_ptr().cast::<c_void>();
         let (number, args) = capture(0, || {
-            let _ = sys_ipc_recv(0x1234, ptr, 16);
+            let _ = sys_ipc_recv(0x1234, ptr, 16, sender_ptr);
         });
         assert_eq!(number, NUM_IPC_RECV);
         assert_eq!(args[0], 0x1234);
         assert_eq!(args[1], ptr as usize as u64);
         assert_eq!(args[2], 16);
+        assert_eq!(args[3], sender_ptr as usize as u64);
+    }
+
+    #[test]
+    fn port_bind_marshals_endpoint_and_bounds() {
+        let (number, args) = capture(0, || {
+            let _ = sys_port_bind(0x5EAD_0001, 40, 8);
+        });
+        assert_eq!(number, NUM_PORT_BIND);
+        assert_eq!(args[0], 0x5EAD_0001);
+        assert_eq!(args[1], 40);
+        assert_eq!(args[2], 8);
+        assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]

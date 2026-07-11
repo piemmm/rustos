@@ -86,16 +86,13 @@ pub fn find_mailbox(fdt: &Fdt<'_>) -> Option<DiscoveredMailbox> {
 // keeps only the board-specific surface discovery below and threads its
 // firmware-confirmed extents into `Geometry::for_display`.
 
-/// Fixed scan-out width of the QEMU `virt` ramfb boot console.
-///
-/// `ramfb` exposes no display to probe (there is no EDID): the guest
-/// chooses the geometry and QEMU sizes its window to match. A classic
-/// 4:3 mode is large enough for a useful boot log while keeping the
-/// statically-reserved surface modest (3 MiB of kernel BSS).
-pub const RAMFB_WIDTH_PX: u32 = 1024;
+/// Fixed scan-out width of the QEMU `virt` ramfb boot console — the
+/// shared `rustos_fwcfg` console geometry, so the port programming the
+/// device and every other consumer read one definition.
+pub const RAMFB_WIDTH_PX: u32 = rustos_fwcfg::RAMFB_CONSOLE_WIDTH_PX;
 
 /// Fixed scan-out height of the QEMU `virt` ramfb boot console.
-pub const RAMFB_HEIGHT_PX: u32 = 768;
+pub const RAMFB_HEIGHT_PX: u32 = rustos_fwcfg::RAMFB_CONSOLE_HEIGHT_PX;
 
 /// Text geometry of the fixed-size ramfb surface.
 ///

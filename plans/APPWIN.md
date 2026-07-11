@@ -113,22 +113,43 @@ speculative:
   over `EventSource`). Host-proven against an in-process loopback; no
   kernel change.
 
-### AW3 — session window server + the files app goes live `[ ]`
+### AW3 — session window server + the files app goes live `[x]`
 
-- The desktop session binds the window endpoint (squat-protected, the
-  `DISPLAY_ENDPOINT` reservation precedent), serves it from its existing
-  waitset loop, and composes served windows into `DesktopShell`
-  (`open_window`/`close_window`, focus mirroring, taskbar task entries —
-  all already landed).
-- `userland/apps/files` gains its `Run` binary + signed `AppInfo` bundle
-  (manifest: `CAP_FS_ACCESS` + the window-channel class), wiring
-  `VfsDirectorySource` over `rustos_rt::read_dir_all` and presenting
-  through the AW2 client. Start-menu launch entry spawns it.
-- The QEMU autoload vertical grows pointer-**button** injection and a
-  second verified screendump: click the start menu, launch the browser,
-  assert the window's presence (and carry the staged theme-toggle
-  screendump from `plans/DISPLAY.md` D7's follow-on on the same runner
-  work).
+Done. What now holds:
+
+- The desktop session binds `WINDOW_ENDPOINT` authorised by its live,
+  kernel-attested seat lease (no privileged-bind capability, no ceiling
+  widening) and serves it from its wait-set loop via the `ShellWindowHost`
+  bridge into `DesktopShell` (`userland/gui/session/src/windows.rs` +
+  `run.rs`): served windows are composited, taskbar-tasked, and focused
+  like native windows; app-ward `Focus`/`Pointer`/`Key` events flow over
+  the AW2 `EventSink` (`ipc_send`), and a kernel-reclaimed event port
+  (dead app) tears the owner's windows down. The loop dispatches on the
+  woken member's token — `call_recv` blocks when nothing is pending, so a
+  seat wake never touches the window endpoint (the wedge the first
+  end-to-end run exposed); readiness is a non-consuming peek, so pending
+  members re-report on the next wait.
+- `userland/apps/files` ships its `Run` binary + signed `AppInfo`
+  (`CAP_FS_ACCESS` only) inside the bundle: `VfsDirectorySource` over
+  `rustos_rt::read_dir_all`, rendering through the shared theme, window
+  create/present over the AW2 client, parked event wait, redraw on
+  focus/theme-relevant events, clean exit on `CloseRequested`. The
+  session's start-menu "Files" entry spawns it
+  (`rustos_desktop_session::config` — the one production configuration
+  the QEMU harness also imports for its click coordinates).
+- The autoload QEMU vertical drives the full click-through with injected
+  pointer buttons (`tools/qemu` ordered `PointerStep` script + ordered
+  marker-gated screendumps): start menu → "Files" → served-window clicks →
+  appearance toggle, with three host-verified screendumps (dark desktop;
+  the served window at the cascade origin; the light-theme desktop). All
+  gates are kernel-attested serial records (the window endpoint's first
+  `CallReplied`, `MessageDelivered` counts per the interaction contract in
+  the test crate's lib target); the guest PASS additionally requires the
+  contract's final delivery, so the run cannot pass without the whole
+  chain. Uncovered and fixed along the way: the session's blocking-recv
+  loop wedge (above) and the virtio-input event queue's 8-descriptor
+  ceiling silently dropping bursts under a saturated CPU (now the
+  device's full 64, `lib/virtio_input`).
 
 ### AW4 — the terminal goes live `[ ]`
 

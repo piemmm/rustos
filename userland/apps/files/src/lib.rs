@@ -71,5 +71,15 @@ pub use render::render;
 pub use source::DirectorySource;
 pub use vfs::VfsDirectorySource;
 
+/// Window content width of the shipped file-manager window, in pixels —
+/// the one definition the `Run` binary sizes its window with and the
+/// QEMU vertical's host-side scan-out assertion measures against
+/// (`plans/APPWIN.md` AW3).
+pub const WIN_WIDTH: u32 = 480;
+
+/// Window content height of the shipped file-manager window, in pixels
+/// (see [`WIN_WIDTH`]).
+pub const WIN_HEIGHT: u32 = 320;
+
 #[cfg(test)]
 mod tests;

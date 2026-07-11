@@ -42,7 +42,7 @@ rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 # The display-service protocol engine (`DisplayServer` + the `SeatCheck` /
 # `ShmMapper` seams) and the linear-surface `Framebuffer` engine — the one
 # definition of both, hosted here.
-rustos-display = { path = "../../../lib/display", version = "=0.0.0" }
+rustos-display = { path = "../../../lib/display", version = "=0.0.0", features = ["rt"] }
 # The user-space driver runtime: turns the kernel-issued device-resource
 # grants into the `MmioMapper` the surface bring-up consumes; every
 # capability and bound is re-checked kernel-side on the far side of the trap.

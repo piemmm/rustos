@@ -723,6 +723,23 @@ impl SeatRegistry {
         lease.map_err(seat_errno)
     }
 
+    /// Whether `owner` holds the live lease of **any** registered seat —
+    /// the kernel-attested fact behind the seat-scoped reserved-endpoint
+    /// bind (`plans/APPWIN.md` AW3): the desktop session that owns a seat
+    /// may bind the window rendezvous without `CAP_IPC_BIND_PRIVILEGED`,
+    /// and nothing else may. A revoked or released lease answers `false`
+    /// (fail closed).
+    #[must_use]
+    pub fn holds_live_lease(&self, owner: SeatOwner) -> bool {
+        if self.primary.state.lock().access(owner).is_ok() {
+            return true;
+        }
+        self.hotplug
+            .lock()
+            .iter()
+            .any(|seat| seat.slot.state.lock().access(owner).is_ok())
+    }
+
     /// Whether a `SeatInput` wait-set member observing seat `seat_id` for
     /// `owner` is ready (`plans/DISPLAY.md` D7a). A non-consuming peek:
     ///
