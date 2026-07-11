@@ -21,6 +21,7 @@ use rustos_glob::Pattern;
 use crate::fs::{Fs, FsEntry, VolumeSpace};
 use crate::ops::FileOp;
 use crate::tag::{Batch, TagSet};
+use crate::view_disasm::DisasmView;
 use crate::view_hex::HexView;
 use crate::view_text::TextView;
 use crate::walk::WalkState;
@@ -62,15 +63,31 @@ pub enum View {
     Viewer,
 }
 
-/// The open file viewer: text paging or the hex dump. Entered with Enter
-/// on a regular file (the head sample picks the mode); `x`/`t` switch
-/// between the two at the same place.
+/// The open file viewer: text paging, the hex dump, or the disassembly
+/// viewer. Entered with Enter on a regular file (the head sample picks
+/// the mode) or through the `o` open-as chooser; `x`/`t`/`d` switch
+/// between them at the same place.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Viewer {
     /// The streaming text pager.
     Text(TextView),
     /// The offset/hex/ASCII dump.
     Hex(HexView),
+    /// The sandbox-decoded container summary / disassembly viewer.
+    Disasm(DisasmView),
+}
+
+/// Which viewer a prompt belongs to — the goto and search questions ask
+/// for different things per viewer.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ViewerKind {
+    /// The text pager (goto asks a line, search literal text).
+    Text,
+    /// The hex dump (goto asks an offset, search text or `0x…` bytes).
+    Hex,
+    /// The disassembly code pane (goto asks an address, search
+    /// mnemonic/operand text).
+    Disasm,
 }
 
 /// The column the file pane is ordered by.
@@ -132,6 +149,11 @@ pub enum Prompt {
     },
     /// A paused batch's per-file overwrite question.
     BatchOverwrite(BatchPrompt),
+    /// The open-as chooser (`o`): t)ext, he(x), or d)isassembly.
+    OpenAs(OpenAsPrompt),
+    /// The ISA chooser for a decode with no machine field: x)86-64,
+    /// a)arch64, r)iscv64, or w)asm.
+    IsaPick(IsaPrompt),
 }
 
 /// What the open [`InputPrompt`] asks for, carrying its subject.
@@ -178,18 +200,17 @@ pub enum InputOp {
     /// A filename-glob pattern searched for below the focused directory
     /// (`/`).
     SearchGlob,
-    /// The viewer's goto target: a 1-based line (text view) or a byte
-    /// offset, decimal or `0x`-hex (hex view).
+    /// The viewer's goto target: a 1-based line (text), a byte offset,
+    /// decimal or `0x`-hex (hex), or an address (disassembly).
     ViewerGoto {
-        /// Whether the open viewer is the hex dump (an offset is asked
-        /// for) rather than the text pager (a line number).
-        hex: bool,
+        /// Which open viewer asked.
+        kind: ViewerKind,
     },
-    /// The viewer's search subject: literal text (text view), or text /
-    /// `0x…` byte sequence (hex view).
+    /// The viewer's search subject: literal text (text), text / `0x…`
+    /// byte sequence (hex), or mnemonic/operand text (disassembly).
     ViewerSearch {
-        /// Whether the open viewer is the hex dump.
-        hex: bool,
+        /// Which open viewer asked.
+        kind: ViewerKind,
     },
     /// The text a content search looks for inside files (`F`).
     ContentNeedle {
@@ -252,6 +273,46 @@ pub struct BatchPrompt {
     /// The directories to refresh once the batch ends, carried across the
     /// pause.
     pub refresh: Vec<String>,
+}
+
+/// The open-as chooser (`o`): the file it opens once a viewer is picked.
+/// `t`/`x`/`d` choose, Esc cancels, any other key keeps asking.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenAsPrompt {
+    /// Full path of the file to open.
+    pub path: String,
+    /// The file's apparent size in bytes.
+    pub size: u64,
+}
+
+/// The ISA chooser: why it is asking, so the answer lands in the right
+/// place. `x`/`a`/`r`/`w` choose, Esc cancels, any other key keeps asking.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IsaPrompt {
+    /// What the chosen ISA is for.
+    pub purpose: IsaPurpose,
+}
+
+/// What an [`IsaPrompt`]'s answer drives.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum IsaPurpose {
+    /// Force-open an unrecognised file as raw code (`d`/`o`+`d`).
+    OpenRaw {
+        /// Full path of the file to open.
+        path: String,
+        /// The file's apparent size in bytes.
+        size: u64,
+        /// The byte offset the code pane starts at (the place a hex view
+        /// handed over; 0 from the panes).
+        offset: u64,
+    },
+    /// Enter a code region of a container that names no ISA (rxe).
+    EnterRegion {
+        /// The region's index in the open summary.
+        index: usize,
+    },
+    /// Override the open code pane's ISA (`I`).
+    Override,
 }
 
 /// The file pane's live filename filter (`f`): the pattern as typed and

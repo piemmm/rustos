@@ -1113,12 +1113,15 @@ name = "rustos-fstree"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-binfmt",
  "rustos-curses",
  "rustos-glob",
  "rustos-help",
+ "rustos-log",
  "rustos-path",
  "rustos-procinfo",
  "rustos-rt",
+ "rustos-sandbox",
  "rustos-termcap",
  "rustos-vt",
 ]

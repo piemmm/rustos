@@ -9,7 +9,7 @@ tree, discovered from disk like every other bundle. The staged plan for the
 whole tool lives in `.junie/fstree-next-plan.md`; this page describes what
 is built.
 
-## What is built (S1 model core, S2 file operations, S3 tagging/batches/walks, S4 search/filter, S5 viewers)
+## What is built (S1 model core, S2 file operations, S3 tagging/batches/walks, S4 search/filter, S5 viewers, S9 disassembly viewer)
 
 - **The tree pane.** A lazily populated directory tree: a directory is read
   through one `fs_readdir` call when it is first shown or expanded — never
@@ -124,10 +124,13 @@ is built.
   found so far stand and stay browsable); a second `Esc` leaves the
   view.
 - **The file viewers (Enter on a file).** A regular file opens read-only
-  in a full-screen viewer: the streaming **text pager** when the head
-  sample (the first 4 KiB) is NUL-free, valid UTF-8, the **hex dump**
-  otherwise; `x`/`t` switch between the two at the same place, `q`/`Esc`
-  return to the panes. Both page through the seam's `read` in bounded
+  in a full-screen viewer: the **disassembly viewer** when
+  `rustos_binfmt::detect` (or the `RXM1` manifest magic) recognises the
+  head sample, the streaming **text pager** when the head sample (the
+  first 4 KiB) is NUL-free, valid UTF-8, the **hex dump** otherwise; `o`
+  asks instead of auto-picking. `x`/`t`/`d` switch the open viewer at
+  the same place, `q`/`Esc` return to the panes. All page through the
+  seam's `read` in bounded
   windows — never the whole file in memory, offsets 64-bit throughout, so
   a file past 4 GiB pages correctly. Shared keys: arrows/`k`/`j` per row,
   `PageUp`/`PageDown`/`b`/`Space` per page, `Home`/`End`, `g` goto (a
@@ -146,6 +149,30 @@ is built.
   status line shows `searching…`, and `Esc` stops the scan in place. A
   read the kernel refuses mid-view closes the viewer with the error
   surfaced — stale content is never shown as live.
+- **The disassembly viewer (`src/view_disasm.rs`).** A recognised
+  container opens on a summary page — format, ISA, entry, the region
+  table (address, file extent, memory size, permissions), the symbol
+  count — and a standalone signed manifest lists its ABI version and
+  requested capabilities by their `CAP_*` names (an rxe image's summary
+  states the manifest travels beside the image, never inside it). Enter
+  on a code region opens the paged code pane: one instruction per row
+  (address, encoding bytes, mnemonic, operands), `<symbol>:` label
+  lines, and branch targets symbolised against the address-sorted symbol
+  table; a data region hex-switches to its file bytes. Every container
+  summary, manifest summary, and instruction window is decoded by the
+  sandboxed `lib/sandbox` decode service through the object-safe
+  `Decode` seam — the app's only in-process inspection is the bounded
+  magic-prefix routing. Windows are decoded per screenful from a bounded
+  region read; scrolling records `(address, depth)` resynchronisation
+  anchors and walks forward from the nearest one (fixed-length ISAs may
+  start from a short backscan; wasm threads its nesting depth through
+  the service's window hand-off), so memory never follows the binary.
+  Goto-address, instruction-text search, and `End` run as chunked
+  background walks on the shared tick. A container that names no ISA
+  (rxe) asks once (`x`/`a`/`r`/`w`); `I` re-decodes at another ISA; a
+  refused or oversize decode falls back to the hex dump with a one-line
+  notice, and a worker crash surfaces as a typed error — never a session
+  crash.
 - **Help.** `-h`/`-?` print the bundle's own Help document through the
   shared `lib/help` engine; the in-session `?` overlay shows the same
   document decoded to plain text through the one `lib/vt` parser. Nothing
@@ -208,11 +235,12 @@ the restore.
 
 ## Capabilities
 
-`CAP_CONSOLE_WRITE`, `CAP_CONSOLE_READ`, and `CAP_FS_ACCESS` — the ambient
-file authority of the launching user, nothing more. Every path the session
-touches is authorised per-inode by the kernel under the caller's attested
-identity; the tool holds no private channel and adds no authority of its
-own.
+`CAP_CONSOLE_WRITE`, `CAP_CONSOLE_READ`, `CAP_FS_ACCESS`, and
+`CAP_PROC_SPAWN` — the ambient file authority of the launching user plus
+the right to re-spawn its own binary as the parser-sandbox decode worker,
+nothing more. Every path the session touches is authorised per-inode by
+the kernel under the caller's attested identity; the tool holds no
+private channel and adds no authority of its own.
 
 ## Testing
 
@@ -262,17 +290,30 @@ byte-sequence and case-insensitive text searches across the window
 boundary (with the malformed-`0x` refusal), goto-offset in decimal and
 hex with end clamping, paging a sparse 5 GiB backing at full 64-bit
 offsets, in-place view switching, Esc stopping a live scan before
-leaving, and a mid-view read refusal closing the viewer.
+leaving, and a mid-view read refusal closing the viewer. The S9
+disassembly viewer runs over the same in-process loopback worker the
+`lib/sandbox` tests use — the genuine sandbox request/reply path with no
+kernel — covering: the rxe summary page (region rows, the
+manifest-beside-the-image note, the ISA chooser on Enter, a golden
+aarch64 `nop` window), the wasm module page (ISA known, golden op
+rows), the standalone-manifest capability listing, malformed and
+oversize containers falling back to hex with their notices, per-ISA raw
+fragments through the `o`/`d` choosers with `I` re-decode, paging and
+resynchronising scroll-back at region bounds with `End`'s background
+walk, instruction-text search with `n` and goto-address (including the
+no-region refusal), symbol labels and `<name+0xoff>` branch targets,
+and the framed render of both pages.
 
-## The disassembly viewer's foundation
+## The disassembly viewer's sandbox posture
 
-The third viewer — structural decode of `rxe`/ELF/wasm containers and
-instruction-level disassembly for the four Tier-1 ISAs — is staged as S9
-in `.junie/fstree-next-plan.md`. Its foundation is in place: the parser
-sandbox (the kernel sandbox spawn mode plus the `lib/sandbox` seam —
+Every container and instruction decode runs inside the parser sandbox
+(the kernel sandbox spawn mode plus the `lib/sandbox` seam —
 [the parser sandbox](../security/sandbox.md),
-[`rustos-sandbox`](../lib/sandbox.md)) already hosts the
-`lib/binfmt`/`lib/disasm` decode service, so the viewer performs every
-container and instruction decode inside a minimum-capability worker
-process from its first commit; in-process decode of an untrusted
-executable is banned.
+[`rustos-sandbox`](../lib/sandbox.md)): the production `Run` binary
+re-spawns **itself** in the worker role over the kernel's reserved
+self-token and serves the `lib/binfmt`/`lib/disasm` decode service over
+its wired standard streams, so in-process decode of an untrusted
+executable never happens and a hostile file's blast radius is one
+disposable worker. Reply validation is the seam's caller-side
+fail-closed decoding; the viewer trusts nothing the worker says beyond
+it.

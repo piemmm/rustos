@@ -18,7 +18,10 @@ use rustos_abi::time::Time64;
 use rustos_curses::{truncate_to_width, Pos, Window};
 use rustos_vt::{Attributes, BasicColor, Color};
 
-use crate::model::{InputOp, Model, Overlay, Pane, Prompt, SortKey, View, Viewer};
+use crate::model::{
+    InputOp, IsaPurpose, Model, Overlay, Pane, Prompt, SortKey, View, Viewer, ViewerKind,
+};
+use crate::view_disasm::{isa_name, DisasmPane, DisasmView};
 use crate::view_hex::{dump_row, offset_digits, HexView};
 use crate::view_text::TextView;
 use crate::walk::{relative_to, WalkPurpose};
@@ -294,14 +297,51 @@ fn render_flat(model: &Model, window: &mut Window, body: u16, cols: u16) {
     }
 }
 
-/// The viewer body: the text pager's decoded page, or the hex dump's
-/// offset/hex/ASCII rows. Pure drawing over the page the last refresh
-/// loaded.
+/// The viewer body: the text pager's decoded page, the hex dump's
+/// offset/hex/ASCII rows, or the disassembly viewer's summary/code page.
+/// Pure drawing over the page the last refresh loaded.
 fn render_viewer(model: &Model, window: &mut Window, body: u16, cols: u16) {
     match &model.viewer {
         Some(Viewer::Text(view)) => render_text_view(view, window, body, cols),
         Some(Viewer::Hex(view)) => render_hex_view(view, window, body, cols),
+        Some(Viewer::Disasm(view)) => render_disasm_view(view, window, body, cols),
         None => {}
+    }
+}
+
+/// The disassembly viewer's page inside its box: the summary page's
+/// header and region rows (selected region reversed), or the code pane's
+/// label and instruction rows (labels in the directory register so the
+/// eye finds function starts).
+fn render_disasm_view(view: &DisasmView, window: &mut Window, body: u16, cols: u16) {
+    let title = format!(" {} ", view.path);
+    draw_frame(window, body, cols, None, &[(2, &title, true)]);
+    let width = usize::from(cols - 2);
+    let mut reverse = Attributes::PLAIN;
+    reverse.reverse = true;
+    match view.pane {
+        DisasmPane::Summary => {
+            let rows = view.summary_rows();
+            let shown = rows.iter().skip(view.sum_scroll);
+            for (line, (text, region)) in (0..body - 2).zip(shown) {
+                let selected = *region == Some(view.sum_cursor);
+                if selected {
+                    window.set_attributes(reverse);
+                }
+                let _ = window.move_add_str(Pos::new(line + 1, 1), truncate_to_width(text, width));
+                window.set_attributes(Attributes::PLAIN);
+            }
+        }
+        DisasmPane::Code => {
+            for (line, row) in (0..body - 2).zip(view.rows.iter()) {
+                if row.is_label {
+                    window.set_attributes(dir_attrs());
+                }
+                let _ =
+                    window.move_add_str(Pos::new(line + 1, 1), truncate_to_width(&row.text, width));
+                window.set_attributes(Attributes::PLAIN);
+            }
+        }
     }
 }
 
@@ -447,6 +487,42 @@ fn render_viewer_status(model: &Model, window: &mut Window, rows: u16, cols: u16
                 view.path, view.size, view.top
             )
         }
+        Some(Viewer::Disasm(view)) => {
+            let isa = match view.isa() {
+                Some(isa) => isa_name(isa),
+                None => "isa?",
+            };
+            let scanning = if view.ticking() {
+                "  walking… Esc stops"
+            } else {
+                ""
+            };
+            match view.pane {
+                DisasmPane::Summary => format!(
+                    "{}  disasm  {}  {} regions{scanning}",
+                    view.path,
+                    isa,
+                    view.regions.len(),
+                ),
+                DisasmPane::Code => {
+                    let name = view
+                        .open_region()
+                        .map(|region| {
+                            if region.name.is_empty() {
+                                String::from("region")
+                            } else {
+                                region.name.clone()
+                            }
+                        })
+                        .unwrap_or_default();
+                    let end = if view.at_end { "  end" } else { "" };
+                    format!(
+                        "{}  disasm  {isa}  {name}  address {:#x}{end}{scanning}",
+                        view.path, view.place.top,
+                    )
+                }
+            }
+        }
         None => String::new(),
     };
     let mut padded = String::from(truncate_to_width(&status, usize::from(cols)));
@@ -484,11 +560,18 @@ fn render_message(model: &Model, window: &mut Window, rows: u16, cols: u16) {
             match &model.viewer {
                 Some(Viewer::Text(_)) => String::from(
                     "arrows scroll  Space/b page  Home/End  g line  / search  n next  w wrap  \
-                     x hex  q back",
+                     x hex  d disasm  q back",
+                ),
+                Some(Viewer::Disasm(view)) if view.pane == DisasmPane::Summary => {
+                    String::from("arrows move  Enter open region  x hex  t text  q back")
+                }
+                Some(Viewer::Disasm(_)) => String::from(
+                    "arrows scroll  Space/b page  Home/End  g address  / search  n next  \
+                     I isa  x hex  t text  Esc summary  q back",
                 ),
                 _ => String::from(
                     "arrows scroll  Space/b page  Home/End  g offset  / search (text or 0x…)  \
-                     n next  t text  q back",
+                     n next  t text  d disasm  q back",
                 ),
             }
         } else if model.view == View::Flat {
@@ -498,9 +581,9 @@ fn render_message(model: &Model, window: &mut Window, rows: u16, cols: u16) {
             )
         } else {
             String::from(
-                "arrows move  Enter open  Tab pane  t tag  T glob  i invert  c copy  m move  \
-                 r rename  d delete  M mkdir  a mode  f filter  / search  F contents  u usage  \
-                 v flatten  s sort  . hidden  ? help  q quit",
+                "arrows move  Enter open  o open as  Tab pane  t tag  T glob  i invert  c copy  \
+                 m move  r rename  d delete  M mkdir  a mode  f filter  / search  F contents  \
+                 u usage  v flatten  s sort  . hidden  ? help  q quit",
             )
         };
         (hint, hint_attrs())
@@ -523,6 +606,18 @@ fn prompt_line(prompt: &Prompt) -> String {
             mode.name, mode.current, mode.input
         ),
         Prompt::Input(input) => input_prompt_line(input),
+        Prompt::OpenAs(prompt) => format!(
+            "open {} as: t)ext  x) hex  d)isassembly  Esc cancels",
+            prompt.path
+        ),
+        Prompt::IsaPick(prompt) => {
+            let what = match &prompt.purpose {
+                IsaPurpose::OpenRaw { path, .. } => format!("isa for {path}"),
+                IsaPurpose::EnterRegion { .. } => String::from("isa for this region"),
+                IsaPurpose::Override => String::from("isa override"),
+            };
+            format!("{what}: x)86-64  a)arch64  r)iscv64  w)asm  Esc cancels")
+        }
         Prompt::ConfirmDelete(confirm) => {
             if confirm.kind.is_dir() {
                 format!("delete directory {} and its contents? y/N", confirm.name)
@@ -594,26 +689,32 @@ fn input_prompt_line(input: &crate::model::InputPrompt) -> String {
                 input.input
             )
         }
-        InputOp::ViewerGoto { hex } => {
-            if *hex {
-                format!(
-                    "goto offset: {}_  (decimal or 0x-hex, Enter jumps, Esc cancels)",
-                    input.input
-                )
-            } else {
+        InputOp::ViewerGoto { kind } => match kind {
+            ViewerKind::Hex => format!(
+                "goto offset: {}_  (decimal or 0x-hex, Enter jumps, Esc cancels)",
+                input.input
+            ),
+            ViewerKind::Text => {
                 format!("goto line: {}_  (Enter jumps, Esc cancels)", input.input)
             }
-        }
-        InputOp::ViewerSearch { hex } => {
-            if *hex {
-                format!(
-                    "find bytes: {}_  (text or 0x hex pairs, Enter searches, Esc cancels)",
-                    input.input
-                )
-            } else {
+            ViewerKind::Disasm => format!(
+                "goto address: {}_  (decimal or 0x-hex, Enter jumps, Esc cancels)",
+                input.input
+            ),
+        },
+        InputOp::ViewerSearch { kind } => match kind {
+            ViewerKind::Hex => format!(
+                "find bytes: {}_  (text or 0x hex pairs, Enter searches, Esc cancels)",
+                input.input
+            ),
+            ViewerKind::Text => {
                 format!("find text: {}_  (Enter searches, Esc cancels)", input.input)
             }
-        }
+            ViewerKind::Disasm => format!(
+                "find instruction text: {}_  (Enter searches, Esc cancels)",
+                input.input
+            ),
+        },
         InputOp::ContentNeedle { tagged } => {
             let scope = if *tagged {
                 "the tagged set"

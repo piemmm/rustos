@@ -12,8 +12,16 @@ use alloc::{format, vec};
 use core::cell::{Cell as CoreCell, RefCell};
 
 use rustos_abi::time::Time64;
-use rustos_abi::{Errno, FileKind};
+use rustos_abi::{
+    CapabilityId, Errno, FileKind, LoadHeader, ManifestHeader, RxePermission, Segment,
+    LOAD_FLAG_PIE, LOAD_MAGIC, MANIFEST_MAGIC, RXE_PAGE_SIZE,
+};
 use rustos_curses::{Event, Pos, Size, Window};
+
+use rustos_log::{Event as LogEvent, Sink};
+use rustos_sandbox::decode::{DecodeService, SymbolRecord, MAX_INPUT};
+use rustos_sandbox::loopback::LoopbackLauncher;
+use rustos_sandbox::ParserSandbox;
 
 use crate::app::{handle_event, refresh_viewer, viewer_tick, walk_tick};
 use crate::fs::{Fs, FsEntry, RenameOutcome, VolumeSpace};
@@ -22,6 +30,7 @@ use crate::ops::{basename, is_inside, parent_of};
 use crate::render::render;
 use crate::search::{ContentScan, Needle};
 use crate::tag::TagEntry;
+use crate::view_disasm::{Decode, DisasmPane, DisasmView};
 use crate::walk::{FlatEntry, WalkPurpose, WalkState, Walker};
 
 /// An in-memory filesystem: per-path listings, per-path file bytes,
@@ -438,12 +447,12 @@ fn expanding_a_node_reads_it_exactly_once() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
     m.tree_cursor = 1; // "docs"
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     // Root + the expansion read.
     assert_eq!(fs.reads.get(), 2);
     // Re-collapsing and re-expanding does not re-read.
-    handle_event(&mut m, &mut fs, &Event::Enter);
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(fs.reads.get(), 2);
 }
 
@@ -480,17 +489,17 @@ fn sort_orders_cover_every_key_and_direction() {
 fn the_sort_menu_selects_keys_and_reverses() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &Event::Char('s'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('s'));
     assert_eq!(m.overlay, Overlay::SortMenu);
-    handle_event(&mut m, &mut fs, &Event::Char('m'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('m'));
     assert_eq!(m.overlay, Overlay::None);
     assert_eq!(m.sort_key, SortKey::Modified);
-    handle_event(&mut m, &mut fs, &Event::Char('s'));
-    handle_event(&mut m, &mut fs, &Event::Char('r'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('s'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('r'));
     assert!(m.sort_desc);
     // Esc cancels without changing anything.
-    handle_event(&mut m, &mut fs, &Event::Char('s'));
-    handle_event(&mut m, &mut fs, &Event::Esc);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('s'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Esc);
     assert_eq!(m.sort_key, SortKey::Modified);
     assert!(m.sort_desc);
 }
@@ -501,7 +510,7 @@ fn hidden_entries_are_filtered_and_the_toggle_shows_them() {
     let mut m = model(&mut fs);
     assert!(m.tree_rows().iter().all(|r| r.name != ".hidden"));
     assert_eq!(m.visible_files().len(), 5);
-    handle_event(&mut m, &mut fs, &Event::Char('.'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('.'));
     assert!(m.tree_rows().iter().any(|r| r.name == ".hidden"));
     assert_eq!(m.visible_files().len(), 6);
 }
@@ -513,7 +522,7 @@ fn hiding_entries_clamps_the_file_cursor() {
     m.show_hidden = true;
     m.pane = Pane::Files;
     m.file_cursor = m.visible_files().len() - 1;
-    handle_event(&mut m, &mut fs, &Event::Char('.'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('.'));
     assert!(m.file_cursor < m.visible_files().len());
 }
 
@@ -522,10 +531,10 @@ fn a_denied_directory_keeps_the_selection_and_surfaces_the_error() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
     // Move down twice: onto "docs" (fine), then onto "locked" (denied).
-    handle_event(&mut m, &mut fs, &Event::Down);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Down);
     assert_eq!(m.tree_cursor, 1);
     assert_eq!(m.files_dir, "/docs");
-    handle_event(&mut m, &mut fs, &Event::Down);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Down);
     // The cursor snapped back and the previous listing survives.
     assert_eq!(m.tree_cursor, 1);
     assert_eq!(m.files_dir, "/docs");
@@ -534,7 +543,7 @@ fn a_denied_directory_keeps_the_selection_and_surfaces_the_error() {
     // Expanding the denied directory is refused the same way.
     m.tree_cursor = 2;
     m.tree_cursor = 1;
-    handle_event(&mut m, &mut fs, &Event::Tab); // pane switch is unaffected
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Tab); // pane switch is unaffected
     assert_eq!(m.pane, Pane::Files);
 }
 
@@ -544,11 +553,11 @@ fn file_pane_cursor_stays_within_bounds() {
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
     for _ in 0..20 {
-        handle_event(&mut m, &mut fs, &Event::Down);
+        handle_event(&mut m, &mut fs, &mut decode(), &Event::Down);
     }
     assert_eq!(m.file_cursor, m.visible_files().len() - 1);
     for _ in 0..20 {
-        handle_event(&mut m, &mut fs, &Event::Up);
+        handle_event(&mut m, &mut fs, &mut decode(), &Event::Up);
     }
     assert_eq!(m.file_cursor, 0);
 }
@@ -560,7 +569,7 @@ fn entering_a_directory_from_the_file_pane_descends_both_panes() {
     m.pane = Pane::Files;
     // The sorted file pane groups directories first: docs is index 0.
     m.file_cursor = 0;
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(m.files_dir, "/docs");
     let rows = m.tree_rows();
     assert_eq!(rows[m.tree_cursor].path, "/docs");
@@ -575,7 +584,7 @@ fn the_mode_prompt_opens_prefilled_edits_and_applies() {
     m.pane = Pane::Files;
     // Sorted visible files: docs, locked, a.rs, b.txt, big — a.rs is index 2.
     m.file_cursor = 2;
-    handle_event(&mut m, &mut fs, &Event::Char('a'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
     let prompt = mode_prompt(&m);
     assert_eq!(prompt.path, "/a.rs");
     assert_eq!(prompt.current, 0o644);
@@ -584,14 +593,14 @@ fn the_mode_prompt_opens_prefilled_edits_and_applies() {
     // fifth digit are refused at the prompt (the kernel could never
     // accept them).
     for _ in 0..3 {
-        handle_event(&mut m, &mut fs, &Event::Backspace);
+        handle_event(&mut m, &mut fs, &mut decode(), &Event::Backspace);
     }
     for key in ['9', '6', '0', '0', '7', '7'] {
-        handle_event(&mut m, &mut fs, &Event::Char(key));
+        handle_event(&mut m, &mut fs, &mut decode(), &Event::Char(key));
     }
     assert_eq!(mode_prompt(&m).input, "6007");
-    handle_event(&mut m, &mut fs, &Event::Backspace);
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Backspace);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(m.prompt, None);
     assert_eq!(
         fs.set_modes.borrow().as_slice(),
@@ -607,9 +616,9 @@ fn esc_cancels_the_mode_prompt_without_writing() {
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
     m.file_cursor = 2; // a.rs
-    handle_event(&mut m, &mut fs, &Event::Char('a'));
-    handle_event(&mut m, &mut fs, &Event::Char('0'));
-    handle_event(&mut m, &mut fs, &Event::Esc);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('0'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Esc);
     assert_eq!(m.prompt, None);
     assert!(fs.set_modes.borrow().is_empty());
 }
@@ -620,7 +629,7 @@ fn a_refused_stat_opens_no_prompt() {
     let mut m = model(&mut fs);
     // Tree pane, cursor onto the denied directory row.
     m.tree_cursor = 2; // "locked"
-    handle_event(&mut m, &mut fs, &Event::Char('a'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
     assert_eq!(m.prompt, None);
     let message = m.message.clone().expect("denial surfaced");
     assert!(message.contains("locked"), "{message}");
@@ -632,9 +641,9 @@ fn a_kernel_refusal_of_the_change_is_surfaced_and_nothing_applies() {
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
     m.file_cursor = 3; // b.txt — statable, but the change is denied
-    handle_event(&mut m, &mut fs, &Event::Char('a'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
     assert!(m.prompt.is_some());
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(m.prompt, None);
     assert!(fs.set_modes.borrow().is_empty());
     let message = m.message.clone().expect("denial surfaced");
@@ -647,11 +656,11 @@ fn an_emptied_prompt_applies_nothing() {
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
     m.file_cursor = 2; // a.rs
-    handle_event(&mut m, &mut fs, &Event::Char('a'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
     for _ in 0..4 {
-        handle_event(&mut m, &mut fs, &Event::Backspace);
+        handle_event(&mut m, &mut fs, &mut decode(), &Event::Backspace);
     }
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(m.prompt, None);
     assert!(fs.set_modes.borrow().is_empty());
     assert!(m.message.is_some(), "the empty apply is reported");
@@ -662,8 +671,8 @@ fn the_tree_pane_edits_the_selected_directory() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
     // Tree pane (the default), cursor onto "docs".
-    handle_event(&mut m, &mut fs, &Event::Down);
-    handle_event(&mut m, &mut fs, &Event::Char('a'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Down);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
     let prompt = mode_prompt(&m);
     assert_eq!(prompt.path, "/docs");
     assert_eq!(prompt.current, 0o755);
@@ -675,7 +684,7 @@ fn the_mode_prompt_appears_on_the_message_line() {
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
     m.file_cursor = 2; // a.rs
-    handle_event(&mut m, &mut fs, &Event::Char('a'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
     let mut window = Window::new(Pos::new(0, 0), Size::new(6, 70));
     render(&m, &mut window);
     let line = row_text(&window, 5);
@@ -753,13 +762,13 @@ fn the_epoch_stamp_renders_as_absent_and_real_stamps_as_dates() {
 fn the_help_overlay_replaces_the_panes() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &Event::Char('?'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('?'));
     assert_eq!(m.overlay, Overlay::Help);
     let mut window = Window::new(Pos::new(0, 0), Size::new(6, 40));
     render(&m, &mut window);
     assert!(row_text(&window, 1).starts_with("│keys: q quits"));
     // Any key dismisses it.
-    handle_event(&mut m, &mut fs, &Event::Char('x'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('x'));
     assert_eq!(m.overlay, Overlay::None);
 }
 
@@ -767,7 +776,7 @@ fn the_help_overlay_replaces_the_panes() {
 fn the_sort_menu_prompt_appears_on_the_message_line() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &Event::Char('s'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('s'));
     let mut window = Window::new(Pos::new(0, 0), Size::new(6, 70));
     render(&m, &mut window);
     assert!(row_text(&window, 5).starts_with("sort: n)ame"));
@@ -778,7 +787,7 @@ fn the_sort_menu_prompt_appears_on_the_message_line() {
 /// Type `text` into the open prompt, character by character.
 fn type_text(m: &mut Model, fs: &mut dyn Fs, text: &str) {
     for ch in text.chars() {
-        handle_event(m, fs, &Event::Char(ch));
+        handle_event(m, fs, &mut decode(), &Event::Char(ch));
     }
 }
 
@@ -786,9 +795,9 @@ fn type_text(m: &mut Model, fs: &mut dyn Fs, text: &str) {
 fn mkdir_creates_a_directory_in_the_listed_directory() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &Event::Char('M'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('M'));
     type_text(&mut m, &mut fs, "new");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(m.prompt, None);
     assert!(fs.has_dir("/new"));
     // The refreshed panes show the new directory.
@@ -800,15 +809,15 @@ fn mkdir_creates_a_directory_in_the_listed_directory() {
 fn mkdir_refuses_an_invalid_name_and_esc_cancels() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &Event::Char('M'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('M'));
     type_text(&mut m, &mut fs, "a/b");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert!(m.message.clone().expect("refused").contains("invalid name"));
     assert!(!fs.has_dir("/a/b"));
     // Esc cancels an open prompt with nothing created.
-    handle_event(&mut m, &mut fs, &Event::Char('M'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('M'));
     type_text(&mut m, &mut fs, "x");
-    handle_event(&mut m, &mut fs, &Event::Esc);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Esc);
     assert_eq!(m.prompt, None);
     assert!(!fs.has_dir("/x"));
 }
@@ -819,13 +828,13 @@ fn rename_moves_a_file_within_its_directory() {
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
     m.file_cursor = 2; // a.rs
-    handle_event(&mut m, &mut fs, &Event::Char('r'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('r'));
     // The prompt is prefilled with the current name; rub it out.
     for _ in 0.."a.rs".len() {
-        handle_event(&mut m, &mut fs, &Event::Backspace);
+        handle_event(&mut m, &mut fs, &mut decode(), &Event::Backspace);
     }
     type_text(&mut m, &mut fs, "z.rs");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(fs.contents("/a.rs"), None);
     assert_eq!(fs.contents("/z.rs"), Some(vec![b'x'; 30]));
     assert!(m.files.iter().any(|e| e.name == "z.rs"));
@@ -837,15 +846,15 @@ fn rename_onto_an_existing_file_asks_first() {
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
     m.file_cursor = 2; // a.rs
-    handle_event(&mut m, &mut fs, &Event::Char('r'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('r'));
     for _ in 0.."a.rs".len() {
-        handle_event(&mut m, &mut fs, &Event::Backspace);
+        handle_event(&mut m, &mut fs, &mut decode(), &Event::Backspace);
     }
     type_text(&mut m, &mut fs, "b.txt");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     // The rename paused on the existing target; skip leaves both intact.
     assert!(matches!(m.prompt, Some(Prompt::Overwrite(_))));
-    handle_event(&mut m, &mut fs, &Event::Char('s'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('s'));
     assert_eq!(fs.contents("/a.rs"), Some(vec![b'x'; 30]));
     assert_eq!(fs.contents("/b.txt"), Some(vec![b'x'; 10]));
 }
@@ -854,7 +863,7 @@ fn rename_onto_an_existing_file_asks_first() {
 fn renaming_the_session_root_is_refused() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &Event::Char('r'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('r'));
     assert_eq!(m.prompt, None);
     assert!(m.message.clone().expect("refused").contains("session root"));
 }
@@ -867,9 +876,9 @@ fn delete_removes_a_file_after_confirmation() {
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
     m.file_cursor = 2; // a.rs
-    handle_event(&mut m, &mut fs, &Event::Char('d'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('d'));
     assert!(matches!(m.prompt, Some(Prompt::ConfirmDelete(_))));
-    handle_event(&mut m, &mut fs, &Event::Char('y'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('y'));
     assert_eq!(fs.contents("/a.rs"), None);
     assert!(!m.files.iter().any(|e| e.name == "a.rs"));
 }
@@ -880,9 +889,9 @@ fn delete_declined_changes_nothing() {
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
     m.file_cursor = 2; // a.rs
-    handle_event(&mut m, &mut fs, &Event::Char('d'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('d'));
     // Any key but `y` declines — `n`, Esc, or anything else.
-    handle_event(&mut m, &mut fs, &Event::Char('n'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('n'));
     assert_eq!(m.prompt, None);
     assert_eq!(fs.contents("/a.rs"), Some(vec![b'x'; 30]));
 }
@@ -892,9 +901,9 @@ fn delete_removes_a_directory_and_its_contents() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
     // Tree pane, cursor onto "docs" (which holds guide.md).
-    handle_event(&mut m, &mut fs, &Event::Down);
-    handle_event(&mut m, &mut fs, &Event::Char('d'));
-    handle_event(&mut m, &mut fs, &Event::Char('y'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Down);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('d'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('y'));
     assert!(!fs.has_dir("/docs"));
     assert_eq!(fs.contents("/docs/guide.md"), None);
     // The file pane climbed to the nearest surviving ancestor.
@@ -906,7 +915,7 @@ fn delete_removes_a_directory_and_its_contents() {
 fn deleting_the_session_root_is_refused() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &Event::Char('d'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('d'));
     assert_eq!(m.prompt, None);
     assert!(m.message.clone().expect("refused").contains("session root"));
 }
@@ -919,9 +928,9 @@ fn copy_streams_a_file_to_a_new_absolute_destination() {
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
     m.file_cursor = 4; // big (999 bytes)
-    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
     type_text(&mut m, &mut fs, "/big2");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(fs.contents("/big2"), Some(vec![b'x'; 999]));
     assert_eq!(fs.contents("/big"), Some(vec![b'x'; 999]));
     assert!(m.files.iter().any(|e| e.name == "big2" && e.size == 999));
@@ -933,10 +942,10 @@ fn copy_into_an_existing_directory_lands_under_the_base_name() {
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
     m.file_cursor = 2; // a.rs
-    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
     // A relative destination is joined onto the listed directory.
     type_text(&mut m, &mut fs, "docs");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(fs.contents("/docs/a.rs"), Some(vec![b'x'; 30]));
 }
 
@@ -945,10 +954,10 @@ fn copy_reproduces_a_directory_tree() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
     // Tree pane, cursor onto "docs".
-    handle_event(&mut m, &mut fs, &Event::Down);
-    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Down);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
     type_text(&mut m, &mut fs, "/copy");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert!(fs.has_dir("/copy"));
     assert_eq!(fs.contents("/copy/guide.md"), Some(vec![b'x'; 5]));
     // The source is untouched.
@@ -961,16 +970,16 @@ fn copy_onto_itself_and_into_its_own_subtree_are_refused_before_io() {
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
     m.file_cursor = 2; // a.rs
-    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
     type_text(&mut m, &mut fs, "/a.rs");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert!(m.message.clone().expect("refused").contains("same entry"));
     // A directory into its own subtree.
     m.pane = Pane::Tree;
-    handle_event(&mut m, &mut fs, &Event::Down); // onto docs
-    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Down); // onto docs
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
     type_text(&mut m, &mut fs, "/docs/inner");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert!(m.message.clone().expect("refused").contains("into itself"));
     assert!(!fs.has_dir("/docs/inner"));
 }
@@ -981,10 +990,10 @@ fn a_bad_destination_spelling_is_refused_by_the_path_grammar() {
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
     m.file_cursor = 2; // a.rs
-    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
     // An interior empty component fails the shared grammar.
     type_text(&mut m, &mut fs, "/x//y");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert!(m.message.clone().expect("refused").contains("bad path"));
 }
 
@@ -996,13 +1005,13 @@ fn copy_over_an_existing_file_asks_and_overwrites_on_o() {
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
     m.file_cursor = 4; // big (999 bytes)
-    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
     type_text(&mut m, &mut fs, "/b.txt");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert!(matches!(m.prompt, Some(Prompt::Overwrite(_))));
     // Nothing was written while the question is open.
     assert_eq!(fs.contents("/b.txt"), Some(vec![b'x'; 10]));
-    handle_event(&mut m, &mut fs, &Event::Char('o'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('o'));
     assert_eq!(fs.contents("/b.txt"), Some(vec![b'x'; 999]));
 }
 
@@ -1012,18 +1021,18 @@ fn copy_over_an_existing_file_skips_on_s_and_cancels_on_c() {
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
     m.file_cursor = 4; // big
-    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
     type_text(&mut m, &mut fs, "/b.txt");
-    handle_event(&mut m, &mut fs, &Event::Enter);
-    handle_event(&mut m, &mut fs, &Event::Char('s'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('s'));
     assert_eq!(fs.contents("/b.txt"), Some(vec![b'x'; 10]));
     let message = m.message.clone().expect("summary");
     assert!(message.contains("skipped"), "{message}");
     // Cancel likewise leaves the target alone.
-    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
     type_text(&mut m, &mut fs, "/b.txt");
-    handle_event(&mut m, &mut fs, &Event::Enter);
-    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
     assert_eq!(fs.contents("/b.txt"), Some(vec![b'x'; 10]));
     let message = m.message.clone().expect("summary");
     assert!(message.contains("cancelled"), "{message}");
@@ -1039,14 +1048,14 @@ fn a_merging_directory_copy_asks_per_conflicting_file() {
         .dir("/dst", vec![dir("src")])
         .dir("/dst/src", vec![file("one.txt", 9, 0)]);
     let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &Event::Down); // onto dst
-    handle_event(&mut m, &mut fs, &Event::Down); // onto src
-    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Down); // onto dst
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Down); // onto src
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
     type_text(&mut m, &mut fs, "/dst");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     // Only the conflicting file pauses; skipping it still copies the rest.
     assert!(matches!(m.prompt, Some(Prompt::Overwrite(_))));
-    handle_event(&mut m, &mut fs, &Event::Char('s'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('s'));
     assert_eq!(m.prompt, None);
     assert_eq!(fs.contents("/dst/src/one.txt"), Some(vec![b'x'; 9]));
     assert_eq!(fs.contents("/dst/src/two.txt"), Some(vec![b'x'; 4]));
@@ -1060,9 +1069,9 @@ fn move_renames_within_one_volume() {
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
     m.file_cursor = 2; // a.rs
-    handle_event(&mut m, &mut fs, &Event::Char('m'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('m'));
     type_text(&mut m, &mut fs, "/docs");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(fs.contents("/a.rs"), None);
     assert_eq!(fs.contents("/docs/a.rs"), Some(vec![b'x'; 30]));
     assert!(!m.files.iter().any(|e| e.name == "a.rs"));
@@ -1078,10 +1087,10 @@ fn move_across_volumes_copies_then_removes_the_source() {
         .dir("/src", vec![file("data", 7, 0)])
         .cross("/vol");
     let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &Event::Down); // onto src
-    handle_event(&mut m, &mut fs, &Event::Char('m'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Down); // onto src
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('m'));
     type_text(&mut m, &mut fs, "/vol");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert!(fs.has_dir("/vol/src"));
     assert_eq!(fs.contents("/vol/src/data"), Some(vec![b'x'; 7]));
     assert!(!fs.has_dir("/src"));
@@ -1098,12 +1107,12 @@ fn a_cross_volume_move_skip_keeps_the_skipped_source() {
         .dir("/src", vec![file("data", 7, 0)])
         .cross("/vol");
     let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &Event::Down); // onto src
-    handle_event(&mut m, &mut fs, &Event::Char('m'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Down); // onto src
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('m'));
     type_text(&mut m, &mut fs, "/vol");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert!(matches!(m.prompt, Some(Prompt::Overwrite(_))));
-    handle_event(&mut m, &mut fs, &Event::Char('s'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('s'));
     // The target kept its bytes, the skipped source survives, and the
     // summary says one entry was skipped.
     assert_eq!(fs.contents("/vol/src/data"), Some(vec![b'x'; 9]));
@@ -1117,7 +1126,7 @@ fn a_cross_volume_move_skip_keeps_the_skipped_source() {
 fn moving_the_session_root_is_refused() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &Event::Char('m'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('m'));
     assert_eq!(m.prompt, None);
     assert!(m.message.clone().expect("refused").contains("session root"));
 }
@@ -1130,9 +1139,9 @@ fn a_read_failure_mid_copy_removes_the_partial_target() {
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
     m.file_cursor = 4; // big
-    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
     type_text(&mut m, &mut fs, "/copy");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     let message = m.message.clone().expect("failure surfaced");
     assert!(message.contains("PermissionDenied"), "{message}");
     // The half-written target was removed, and the pane shows no ghost.
@@ -1146,9 +1155,9 @@ fn a_write_failure_mid_copy_removes_the_partial_target() {
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
     m.file_cursor = 4; // big
-    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
     type_text(&mut m, &mut fs, "/copy");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     let message = m.message.clone().expect("failure surfaced");
     assert!(message.contains("NoSpace"), "{message}");
     assert_eq!(fs.contents("/copy"), None);
@@ -1160,9 +1169,9 @@ fn the_overwrite_question_appears_on_the_message_line() {
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
     m.file_cursor = 4; // big
-    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
     type_text(&mut m, &mut fs, "/b.txt");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     let mut window = Window::new(Pos::new(0, 0), Size::new(6, 70));
     render(&m, &mut window);
     let line = row_text(&window, 5);
@@ -1189,7 +1198,7 @@ fn a_scripted_session_browses_sorts_and_quits() {
         Event::Char('q'), // quit
     ];
     for event in &script {
-        handle_event(&mut m, &mut fs, event);
+        handle_event(&mut m, &mut fs, &mut decode(), event);
     }
     assert!(m.quit);
     assert_eq!(m.files_dir, "/docs");
@@ -1220,17 +1229,17 @@ fn tag_toggles_and_reports_figures() {
     m.pane = Pane::Files;
     // Visible, name-sorted, dirs first: docs locked a.rs b.txt big.
     m.file_cursor = 2;
-    handle_event(&mut m, &mut fs, &Event::Char('t'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('t'));
     assert!(m.tags.contains("/a.rs"));
     // The cursor stepped down so repeated presses mark a run.
     assert_eq!(m.file_cursor, 3);
-    handle_event(&mut m, &mut fs, &Event::Char('t'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('t'));
     assert!(m.tags.contains("/b.txt"));
     assert_eq!(m.tags.count(), 2);
     assert_eq!(m.tags.total_bytes(), 40);
     // Toggling a tagged entry untags it.
     m.file_cursor = 2;
-    handle_event(&mut m, &mut fs, &Event::Char('t'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('t'));
     assert!(!m.tags.contains("/a.rs"));
     assert_eq!(m.tags.count(), 1);
 }
@@ -1240,7 +1249,7 @@ fn tags_from_the_tree_pane_are_refused() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
     m.pane = Pane::Tree;
-    handle_event(&mut m, &mut fs, &Event::Char('t'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('t'));
     assert!(m.tags.is_empty());
     assert!(m.message.is_some());
 }
@@ -1250,11 +1259,11 @@ fn glob_tagging_tags_matching_visible_entries() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
-    handle_event(&mut m, &mut fs, &Event::Char('T'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('T'));
     for ch in "*.rs".chars() {
-        handle_event(&mut m, &mut fs, &Event::Char(ch));
+        handle_event(&mut m, &mut fs, &mut decode(), &Event::Char(ch));
     }
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert!(m.tags.contains("/a.rs"));
     assert_eq!(m.tags.count(), 1);
     let message = m.message.clone().expect("a tagging report");
@@ -1266,9 +1275,9 @@ fn malformed_glob_reports_and_tags_nothing() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
-    handle_event(&mut m, &mut fs, &Event::Char('T'));
-    handle_event(&mut m, &mut fs, &Event::Char('['));
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('T'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('['));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert!(m.tags.is_empty());
     let message = m.message.clone().expect("a refusal");
     assert!(message.starts_with("bad pattern"), "got {message}");
@@ -1280,8 +1289,8 @@ fn invert_swaps_the_tagged_set() {
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
     m.file_cursor = 2;
-    handle_event(&mut m, &mut fs, &Event::Char('t')); // tags a.rs
-    handle_event(&mut m, &mut fs, &Event::Char('i'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('t')); // tags a.rs
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('i'));
     assert!(!m.tags.contains("/a.rs"));
     assert!(m.tags.contains("/docs"));
     assert!(m.tags.contains("/locked"));
@@ -1296,8 +1305,8 @@ fn clear_drops_every_tag() {
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
     m.file_cursor = 2;
-    handle_event(&mut m, &mut fs, &Event::Char('t'));
-    handle_event(&mut m, &mut fs, &Event::Char('C'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('t'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('C'));
     assert!(m.tags.is_empty());
 }
 
@@ -1309,12 +1318,12 @@ fn batch_delete_continues_past_a_failure_and_reports_it_in_order() {
     tag(&mut m, "/b.txt", FileKind::Regular, 10);
     tag(&mut m, "/locked", FileKind::Directory, 0);
     tag(&mut m, "/a.rs", FileKind::Regular, 30);
-    handle_event(&mut m, &mut fs, &Event::Char('d'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('d'));
     assert!(matches!(
         m.prompt,
         Some(Prompt::ConfirmBatchDelete { count: 3 })
     ));
-    handle_event(&mut m, &mut fs, &Event::Char('y'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('y'));
     // The failed entry did not stop the later one.
     assert!(fs.contents("/b.txt").is_none());
     assert!(fs.contents("/a.rs").is_none());
@@ -1362,14 +1371,14 @@ fn batch_copy_skip_continues_with_the_rest() {
     let mut m = model(&mut fs);
     tag(&mut m, "/b.txt", FileKind::Regular, 10);
     tag(&mut m, "/big", FileKind::Regular, 999);
-    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
     for ch in "docs".chars() {
-        handle_event(&mut m, &mut fs, &Event::Char(ch));
+        handle_event(&mut m, &mut fs, &mut decode(), &Event::Char(ch));
     }
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     // The existing /docs/b.txt paused the batch on its question.
     assert!(matches!(m.prompt, Some(Prompt::BatchOverwrite(_))));
-    handle_event(&mut m, &mut fs, &Event::Char('s'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('s'));
     assert_eq!(
         m.message.as_deref(),
         Some("batch: copied 2 of 2 tagged, 1 skipped")
@@ -1387,13 +1396,13 @@ fn batch_cancel_drops_the_remaining_entries() {
     let mut m = model(&mut fs);
     tag(&mut m, "/b.txt", FileKind::Regular, 10);
     tag(&mut m, "/big", FileKind::Regular, 999);
-    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
     for ch in "docs".chars() {
-        handle_event(&mut m, &mut fs, &Event::Char(ch));
+        handle_event(&mut m, &mut fs, &mut decode(), &Event::Char(ch));
     }
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert!(matches!(m.prompt, Some(Prompt::BatchOverwrite(_))));
-    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
     let message = m.message.clone().expect("a batch report");
     assert!(message.ends_with("(cancelled)"), "got {message}");
     // The cancelled entry is reported; the remainder never ran.
@@ -1408,11 +1417,11 @@ fn batch_destination_must_be_an_existing_directory() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
     tag(&mut m, "/a.rs", FileKind::Regular, 30);
-    handle_event(&mut m, &mut fs, &Event::Char('c'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
     for ch in "b.txt".chars() {
-        handle_event(&mut m, &mut fs, &Event::Char(ch));
+        handle_event(&mut m, &mut fs, &mut decode(), &Event::Char(ch));
     }
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(
         m.message.as_deref(),
         Some("batch destination must be an existing directory")
@@ -1461,7 +1470,7 @@ fn usage_walk_ticks_bounded_and_esc_cancels() {
     let mut fs = wide_fixture();
     let mut m = model(&mut fs);
     let before = fs.reads.get();
-    handle_event(&mut m, &mut fs, &Event::Char('u'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('u'));
     assert!(matches!(
         m.walk,
         Some(WalkState {
@@ -1473,7 +1482,7 @@ fn usage_walk_ticks_bounded_and_esc_cancels() {
     // One tick reads at most its directory budget.
     assert_eq!(fs.reads.get() - before, 16);
     assert!(m.walk.is_some());
-    handle_event(&mut m, &mut fs, &Event::Esc);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Esc);
     assert!(m.walk.is_none());
     let message = m.message.clone().expect("a cancellation report");
     assert!(message.contains("cancelled"), "got {message}");
@@ -1483,7 +1492,7 @@ fn usage_walk_ticks_bounded_and_esc_cancels() {
 fn usage_walk_completes_with_figures_and_reports_unreadable() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &Event::Char('u'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('u'));
     let mut guard = 0;
     while m.walk.is_some() {
         walk_tick(&mut m, &mut fs);
@@ -1520,7 +1529,7 @@ fn flat_walk_paginates_and_resumes() {
 fn flat_view_tags_rows_and_esc_returns_to_the_panes() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &Event::Char('v'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('v'));
     assert_eq!(m.view, View::Flat);
     let mut guard = 0;
     while m.walk.as_ref().is_some_and(WalkState::ticking) {
@@ -1529,10 +1538,10 @@ fn flat_view_tags_rows_and_esc_returns_to_the_panes() {
         assert!(guard < 10, "the walk must finish");
     }
     // The first found file is the root's first regular entry.
-    handle_event(&mut m, &mut fs, &Event::Char('t'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('t'));
     assert!(m.tags.contains("/a.rs"));
     assert_eq!(m.flat_cursor, 1);
-    handle_event(&mut m, &mut fs, &Event::Esc);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Esc);
     assert_eq!(m.view, View::Panes);
     assert!(m.walk.is_none());
     // Tags survive leaving the view.
@@ -1545,8 +1554,8 @@ fn status_line_shows_the_tag_figures() {
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
     m.file_cursor = 2;
-    handle_event(&mut m, &mut fs, &Event::Char('t'));
-    handle_event(&mut m, &mut fs, &Event::Char('t'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('t'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('t'));
     let mut window = Window::new(Pos::new(0, 0), Size::new(10, 70));
     render(&m, &mut window);
     let status = row_text(&window, 8);
@@ -1564,12 +1573,12 @@ fn visible_names(m: &Model) -> Vec<String> {
 fn the_filter_narrows_the_pane_as_typed_and_esc_restores() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &Event::Char('f'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('f'));
     type_text(&mut m, &mut fs, "*.rs");
     // The narrowing is live while the prompt is still open.
     assert!(m.prompt.is_some());
     assert_eq!(visible_names(&m), ["a.rs"]);
-    handle_event(&mut m, &mut fs, &Event::Esc);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Esc);
     // Esc restores the filter held before the prompt opened: none.
     assert!(m.filter.is_none());
     assert_eq!(
@@ -1582,9 +1591,9 @@ fn the_filter_narrows_the_pane_as_typed_and_esc_restores() {
 fn enter_keeps_the_filter_and_the_status_line_shows_it() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &Event::Char('f'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('f'));
     type_text(&mut m, &mut fs, "*.txt");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert!(m.prompt.is_none());
     assert_eq!(visible_names(&m), ["b.txt"]);
     assert_eq!(m.message.as_deref(), Some("filter *.txt: 1 shown"));
@@ -1593,11 +1602,11 @@ fn enter_keeps_the_filter_and_the_status_line_shows_it() {
     let status = row_text(&window, 8);
     assert!(status.contains("filter *.txt"), "got {status}");
     // Reopening pre-fills the pattern for editing; emptying it clears.
-    handle_event(&mut m, &mut fs, &Event::Char('f'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('f'));
     for _ in 0.."*.txt".len() {
-        handle_event(&mut m, &mut fs, &Event::Backspace);
+        handle_event(&mut m, &mut fs, &mut decode(), &Event::Backspace);
     }
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert!(m.filter.is_none());
     assert_eq!(m.message.as_deref(), Some("filter cleared"));
 }
@@ -1606,14 +1615,14 @@ fn enter_keeps_the_filter_and_the_status_line_shows_it() {
 fn a_bad_filter_pattern_hides_nothing_and_says_so() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &Event::Char('f'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('f'));
     type_text(&mut m, &mut fs, "[a");
     // An uncompilable pattern filters nothing behind the user's back.
     assert_eq!(
         visible_names(&m),
         ["docs", "locked", "a.rs", "b.txt", "big"]
     );
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     let message = m.message.clone().expect("a bad-pattern report");
     assert!(message.contains("bad pattern"), "got {message}");
     let mut window = Window::new(Pos::new(0, 0), Size::new(10, 70));
@@ -1638,9 +1647,9 @@ fn finish_walk(m: &mut Model, fs: &mut FakeFs) {
 fn name_search_lists_matching_paths_below_the_branch() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &Event::Char('/'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('/'));
     type_text(&mut m, &mut fs, "*.md");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(m.view, View::Flat);
     finish_walk(&mut m, &mut fs);
     let walk = m.walk.as_ref().expect("the search walk");
@@ -1659,9 +1668,9 @@ fn name_search_lists_matching_paths_below_the_branch() {
 fn a_bad_search_pattern_is_refused_in_the_panes() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &Event::Char('/'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('/'));
     type_text(&mut m, &mut fs, "[x");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(m.view, View::Panes);
     assert!(m.walk.is_none());
     let message = m.message.clone().expect("a bad-pattern report");
@@ -1672,11 +1681,11 @@ fn a_bad_search_pattern_is_refused_in_the_panes() {
 fn flat_enter_jumps_to_the_hits_directory() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &Event::Char('/'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('/'));
     type_text(&mut m, &mut fs, "*.md");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     finish_walk(&mut m, &mut fs);
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(m.view, View::Panes);
     assert!(m.walk.is_none());
     assert_eq!(m.pane, Pane::Files);
@@ -1705,9 +1714,9 @@ fn content_search_finds_the_needle_case_insensitively() {
     fs.files
         .insert("/a.rs".to_owned(), b"say Hello, World".to_vec());
     let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &Event::Char('F'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('F'));
     type_text(&mut m, &mut fs, "hello");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(m.view, View::Flat);
     finish_walk(&mut m, &mut fs);
     let walk = m.walk.as_ref().expect("the search walk");
@@ -1753,9 +1762,9 @@ fn a_binary_file_is_reported_as_a_binary_match() {
     fs.files
         .insert("/big".to_owned(), b"\x00\x01key here, key there".to_vec());
     let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &Event::Char('F'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('F'));
     type_text(&mut m, &mut fs, "key");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     finish_walk(&mut m, &mut fs);
     let walk = m.walk.as_ref().expect("the search walk");
     let rows: Vec<(&str, Option<&str>)> = walk
@@ -1785,9 +1794,9 @@ fn content_search_over_the_tagged_set_scans_tagged_files_and_dirs() {
         kind: FileKind::Directory,
         size: 0,
     });
-    handle_event(&mut m, &mut fs, &Event::Char('F'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('F'));
     type_text(&mut m, &mut fs, "token");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     finish_walk(&mut m, &mut fs);
     let walk = m.walk.as_ref().expect("the search walk");
     let paths: Vec<&str> = walk.entries.iter().map(|e| e.path.as_str()).collect();
@@ -1801,9 +1810,9 @@ fn a_read_refusal_during_the_scan_is_recorded_not_dropped() {
     let mut fs = fixture().read_fails("/big", Errno::PermissionDenied);
     fs.files.insert("/a.rs".to_owned(), b"needle".to_vec());
     let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &Event::Char('F'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('F'));
     type_text(&mut m, &mut fs, "needle");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     finish_walk(&mut m, &mut fs);
     let walk = m.walk.as_ref().expect("the search walk");
     let paths: Vec<&str> = walk.entries.iter().map(|e| e.path.as_str()).collect();
@@ -1823,19 +1832,19 @@ fn esc_stops_a_live_search_keeping_results_and_esc_again_exits() {
     let mut fs = fixture();
     fs.files.insert("/a.rs".to_owned(), b"needle".to_vec());
     let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &Event::Char('F'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('F'));
     type_text(&mut m, &mut fs, "needle");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert!(m.walk.as_ref().is_some_and(WalkState::ticking));
     // Esc while the search runs stops it in place…
-    handle_event(&mut m, &mut fs, &Event::Esc);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Esc);
     let walk = m.walk.as_ref().expect("the stopped walk");
     assert!(walk.done);
     assert_eq!(m.view, View::Flat);
     let message = m.message.clone().expect("a stop report");
     assert!(message.contains("stopped"), "got {message}");
     // …and a second Esc leaves the view.
-    handle_event(&mut m, &mut fs, &Event::Esc);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Esc);
     assert_eq!(m.view, View::Panes);
     assert!(m.walk.is_none());
 }
@@ -1844,8 +1853,8 @@ fn esc_stops_a_live_search_keeping_results_and_esc_again_exits() {
 fn an_empty_needle_searches_nothing() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &Event::Char('F'));
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('F'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(m.view, View::Panes);
     assert!(m.walk.is_none());
     assert_eq!(m.message.as_deref(), Some("empty text — nothing searched"));
@@ -1947,6 +1956,104 @@ fn numbered_lines(count: usize) -> String {
     })
 }
 
+/// The open viewer, asserted to be the disassembly viewer.
+fn disasm_view(m: &Model) -> &DisasmView {
+    match &m.viewer {
+        Some(Viewer::Disasm(view)) => view,
+        other => panic!("expected the disassembly viewer, got {other:?}"),
+    }
+}
+
+/// A minimal valid rxe image whose code segment holds four aarch64 `nop`
+/// words placed after the tables, plus an 8-byte data segment.
+fn rxe_with_aarch64_nops() -> Vec<u8> {
+    let tables = (LoadHeader::WIRE_LEN + 2 * Segment::WIRE_LEN) as u64;
+    let code = Segment {
+        vaddr: RXE_PAGE_SIZE,
+        file_offset: tables,
+        file_size: 16,
+        mem_size: RXE_PAGE_SIZE,
+        permission: RxePermission::ReadExecute,
+    };
+    let data = Segment {
+        vaddr: RXE_PAGE_SIZE * 2,
+        file_offset: tables + 16,
+        file_size: 8,
+        mem_size: RXE_PAGE_SIZE,
+        permission: RxePermission::ReadWrite,
+    };
+    let header = LoadHeader {
+        magic: LOAD_MAGIC,
+        abi_version: rustos_abi::ABI_VERSION_CURRENT,
+        flags: LOAD_FLAG_PIE,
+        segment_count: 2,
+        needed_count: 0,
+        entry: RXE_PAGE_SIZE,
+        cfi_tag: [0xA5; 32],
+    };
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&header.to_le_bytes());
+    bytes.extend_from_slice(&code.to_le_bytes());
+    bytes.extend_from_slice(&data.to_le_bytes());
+    for _ in 0..4 {
+        bytes.extend_from_slice(&0xd503_201f_u32.to_le_bytes());
+    }
+    bytes.extend_from_slice(&[0u8; 8]);
+    bytes
+}
+
+/// A wasm module holding one code section with one function body:
+/// `i32.const 0`, `drop`, `end`.
+fn wasm_with_one_body() -> Vec<u8> {
+    let body = [0x00, 0x41, 0x00, 0x1A, 0x0B];
+    let body_len = u8::try_from(body.len()).expect("a tiny fixture body");
+    let mut bytes = b"\0asm\x01\0\0\0".to_vec();
+    bytes.push(10); // code section id
+    bytes.push(1 + 1 + body_len); // section size (LEB, small)
+    bytes.push(1); // one body
+    bytes.push(body_len); // body size
+    bytes.extend_from_slice(&body);
+    bytes
+}
+
+/// A signed manifest requesting the given capabilities.
+fn manifest_with(ids: &[CapabilityId]) -> Vec<u8> {
+    let header = ManifestHeader {
+        magic: MANIFEST_MAGIC,
+        abi_version: rustos_abi::ABI_VERSION_CURRENT,
+        flags: 0,
+        capability_count: u16::try_from(ids.len()).expect("test counts fit"),
+        reserved0: 0,
+        syscall_table_hash: [0x11; 32],
+        signer_pubkey: [0x22; 32],
+        signature: [0x33; 64],
+    };
+    let mut bytes = header.to_le_bytes().to_vec();
+    for id in ids {
+        bytes.extend_from_slice(&id.as_u16().to_le_bytes());
+    }
+    bytes
+}
+
+/// Open the focused file through the `o` open-as chooser, forcing the
+/// disassembly viewer with the given ISA key for a raw fragment.
+fn open_raw(m: &mut Model, fs: &mut FakeFs, name: &str, isa_key: char) {
+    m.pane = Pane::Files;
+    m.file_cursor = m
+        .visible_files()
+        .iter()
+        .position(|e| e.name == name)
+        .expect("the fixture lists the entry");
+    handle_event(m, fs, &mut decode(), &Event::Char('o'));
+    handle_event(m, fs, &mut decode(), &Event::Char('d'));
+    assert!(
+        matches!(m.prompt, Some(Prompt::IsaPick(_))),
+        "expected the ISA chooser, got {:?}",
+        m.prompt
+    );
+    handle_event(m, fs, &mut decode(), &Event::Char(isa_key));
+}
+
 /// Put the file-pane cursor on `name` and press Enter.
 fn open_file(m: &mut Model, fs: &mut FakeFs, name: &str) {
     m.pane = Pane::Files;
@@ -1955,7 +2062,7 @@ fn open_file(m: &mut Model, fs: &mut FakeFs, name: &str) {
         .iter()
         .position(|e| e.name == name)
         .expect("the fixture lists the entry");
-    handle_event(m, fs, &Event::Enter);
+    handle_event(m, fs, &mut decode(), &Event::Enter);
 }
 
 /// The open viewer, asserted to be the text pager.
@@ -1981,14 +2088,28 @@ fn run_viewer_job(m: &mut Model, fs: &mut dyn Fs) {
         let live = match &m.viewer {
             Some(Viewer::Text(view)) => view.ticking(),
             Some(Viewer::Hex(view)) => view.ticking(),
+            Some(Viewer::Disasm(view)) => view.ticking(),
             None => false,
         };
         if !live {
             return;
         }
-        viewer_tick(m, fs);
+        viewer_tick(m, fs, &mut decode());
     }
     panic!("the viewer scan did not finish");
+}
+
+/// Discards every event (the loopback happy path logs nothing).
+struct NullSink;
+
+impl Sink for NullSink {
+    fn write_event(&self, _event: &LogEvent<'_>) {}
+}
+
+/// A fresh sandboxed decode seam over the in-process loopback worker —
+/// the genuine parser-sandbox request/reply path, no kernel required.
+fn decode() -> impl Decode {
+    ParserSandbox::new(LoopbackLauncher::new(|| DecodeService), NullSink)
 }
 
 #[test]
@@ -2000,7 +2121,7 @@ fn enter_auto_picks_text_for_text_and_hex_for_binary() {
     open_file(&mut m, &mut fs, "a.rs");
     assert_eq!(m.view, View::Viewer);
     assert_eq!(text_view(&m).path, "/a.rs");
-    handle_event(&mut m, &mut fs, &Event::Char('q'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('q'));
     assert_eq!(m.view, View::Panes);
     assert!(m.viewer.is_none());
     open_file(&mut m, &mut fs, "big");
@@ -2024,7 +2145,7 @@ fn the_text_view_renders_pages_and_scrolls() {
     fs.set_bytes("/a.rs", b"alpha\nbravo\ncharlie\ndelta\necho\n");
     let mut m = model(&mut fs);
     open_file(&mut m, &mut fs, "a.rs");
-    refresh_viewer(&mut m, &mut fs, 3, 40);
+    refresh_viewer(&mut m, &mut fs, &mut decode(), 3, 40);
     let mut window = Window::new(Pos::new(0, 0), Size::new(7, 40));
     render(&m, &mut window);
     assert!(row_text(&window, 1).starts_with("│alpha"));
@@ -2035,20 +2156,20 @@ fn the_text_view_renders_pages_and_scrolls() {
     assert!(status.starts_with("/a.rs  text"), "got {status}");
     assert!(status.contains("line 1"), "got {status}");
     // One row down.
-    handle_event(&mut m, &mut fs, &Event::Down);
-    refresh_viewer(&mut m, &mut fs, 3, 40);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Down);
+    refresh_viewer(&mut m, &mut fs, &mut decode(), 3, 40);
     render(&m, &mut window);
     assert!(row_text(&window, 1).starts_with("│bravo"));
     assert_eq!(text_view(&m).top.line, Some(1));
     // A page down, then Home returns to the top.
-    handle_event(&mut m, &mut fs, &Event::PageDown);
-    refresh_viewer(&mut m, &mut fs, 3, 40);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::PageDown);
+    refresh_viewer(&mut m, &mut fs, &mut decode(), 3, 40);
     assert_eq!(text_view(&m).top.line, Some(4));
-    handle_event(&mut m, &mut fs, &Event::Home);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Home);
     assert_eq!(text_view(&m).top.line, Some(0));
     // End lands the last page.
-    handle_event(&mut m, &mut fs, &Event::End);
-    refresh_viewer(&mut m, &mut fs, 3, 40);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::End);
+    refresh_viewer(&mut m, &mut fs, &mut decode(), 3, 40);
     assert!(text_view(&m).at_end);
 }
 
@@ -2061,8 +2182,8 @@ fn control_bytes_and_invalid_utf8_render_visibly() {
     // the hex dump; `t` overrides to the text pager.
     open_file(&mut m, &mut fs, "a.rs");
     hex_view(&m);
-    handle_event(&mut m, &mut fs, &Event::Char('t'));
-    refresh_viewer(&mut m, &mut fs, 3, 40);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('t'));
+    refresh_viewer(&mut m, &mut fs, &mut decode(), 3, 40);
     let view = text_view(&m);
     // The escape byte is a visible dot, the invalid byte the replacement
     // character, the tab an 8-column stop, and the CR of CRLF dropped —
@@ -2076,14 +2197,14 @@ fn long_rows_wrap_and_the_toggle_truncates() {
     fs.set_bytes("/a.rs", b"0123456789ABCDEF0123\nshort\n");
     let mut m = model(&mut fs);
     open_file(&mut m, &mut fs, "a.rs");
-    refresh_viewer(&mut m, &mut fs, 4, 10);
+    refresh_viewer(&mut m, &mut fs, &mut decode(), 4, 10);
     let view = text_view(&m);
     assert_eq!(view.rows[0].text, "0123456789");
     assert_eq!(view.rows[1].text, "ABCDEF0123");
     assert_eq!(view.rows[2].text, "short");
     // Wrap off: one (truncated-at-render) row per file row.
-    handle_event(&mut m, &mut fs, &Event::Char('w'));
-    refresh_viewer(&mut m, &mut fs, 4, 10);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('w'));
+    refresh_viewer(&mut m, &mut fs, &mut decode(), 4, 10);
     let view = text_view(&m);
     assert_eq!(view.rows[0].text, "0123456789ABCDEF0123");
     assert_eq!(view.rows[1].text, "short");
@@ -2096,22 +2217,22 @@ fn goto_line_scans_to_the_target_and_past_end_lands_last() {
     fs.set_bytes("/a.rs", body.as_bytes());
     let mut m = model(&mut fs);
     open_file(&mut m, &mut fs, "a.rs");
-    handle_event(&mut m, &mut fs, &Event::Char('g'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('g'));
     type_text(&mut m, &mut fs, "42");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     run_viewer_job(&mut m, &mut fs);
     assert_eq!(text_view(&m).top.line, Some(41));
     assert_eq!(m.message.as_deref(), Some("line 42"));
     // A target past the last line lands on the last row instead.
-    handle_event(&mut m, &mut fs, &Event::Char('g'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('g'));
     type_text(&mut m, &mut fs, "999");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     run_viewer_job(&mut m, &mut fs);
     assert_eq!(text_view(&m).top.line, Some(49));
     // A non-number is refused with nothing moved.
-    handle_event(&mut m, &mut fs, &Event::Char('g'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('g'));
     type_text(&mut m, &mut fs, "abc");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(m.message.as_deref(), Some("goto: not a line number"));
 }
 
@@ -2128,17 +2249,17 @@ fn text_search_finds_across_the_read_boundary_and_repeats() {
     fs.set_bytes("/a.rs", &body);
     let mut m = model(&mut fs);
     open_file(&mut m, &mut fs, "a.rs");
-    handle_event(&mut m, &mut fs, &Event::Char('/'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('/'));
     type_text(&mut m, &mut fs, "needle");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     run_viewer_job(&mut m, &mut fs);
     assert_eq!(text_view(&m).last_hit, Some(4090), "case-insensitive hit");
     // `n` continues past the hit to the second occurrence.
-    handle_event(&mut m, &mut fs, &Event::Char('n'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('n'));
     run_viewer_job(&mut m, &mut fs);
     assert_eq!(text_view(&m).last_hit, Some(6001));
     // …and a further `n` reports not found, keeping the place.
-    handle_event(&mut m, &mut fs, &Event::Char('n'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('n'));
     run_viewer_job(&mut m, &mut fs);
     assert_eq!(m.message.as_deref(), Some("not found"));
     assert_eq!(text_view(&m).last_hit, Some(6001));
@@ -2152,7 +2273,7 @@ fn the_hex_view_renders_the_classic_dump() {
     fs.set_bytes("/big", &bytes);
     let mut m = model(&mut fs);
     open_file(&mut m, &mut fs, "big");
-    refresh_viewer(&mut m, &mut fs, 3, 80);
+    refresh_viewer(&mut m, &mut fs, &mut decode(), 3, 80);
     let mut window = Window::new(Pos::new(0, 0), Size::new(7, 80));
     render(&m, &mut window);
     let first = row_text(&window, 1);
@@ -2176,23 +2297,23 @@ fn hex_goto_accepts_decimal_and_hex_and_clamps() {
     fs.set_bytes("/big", &[0xAA; 100]);
     let mut m = model(&mut fs);
     open_file(&mut m, &mut fs, "big");
-    handle_event(&mut m, &mut fs, &Event::Char('g'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('g'));
     type_text(&mut m, &mut fs, "0x30");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(hex_view(&m).top, 0x30);
-    handle_event(&mut m, &mut fs, &Event::Char('g'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('g'));
     type_text(&mut m, &mut fs, "70");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(hex_view(&m).top, 64, "row containing byte 70");
     // Beyond the end clamps to the last row.
-    handle_event(&mut m, &mut fs, &Event::Char('g'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('g'));
     type_text(&mut m, &mut fs, "0xFFFF");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(hex_view(&m).top, 96);
     // Garbage is refused with nothing moved.
-    handle_event(&mut m, &mut fs, &Event::Char('g'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('g'));
     type_text(&mut m, &mut fs, "0xZZ");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(hex_view(&m).top, 96);
     assert_eq!(
         m.message.as_deref(),
@@ -2209,23 +2330,23 @@ fn hex_search_finds_bytes_and_text_across_the_window_boundary() {
     fs.set_bytes("/big", &bytes);
     let mut m = model(&mut fs);
     open_file(&mut m, &mut fs, "big");
-    handle_event(&mut m, &mut fs, &Event::Char('/'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('/'));
     type_text(&mut m, &mut fs, "0xdeadbeef");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     run_viewer_job(&mut m, &mut fs);
     assert_eq!(hex_view(&m).last_hit, Some(4094));
     assert_eq!(hex_view(&m).top, 4080, "the hit row is on screen");
     assert_eq!(m.message.as_deref(), Some("found at 0xffe"));
     // A text pattern matches case-insensitively.
-    handle_event(&mut m, &mut fs, &Event::Char('/'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('/'));
     type_text(&mut m, &mut fs, "tEXT");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     run_viewer_job(&mut m, &mut fs);
     assert_eq!(hex_view(&m).last_hit, Some(5000));
     // An odd-length 0x spelling is refused before anything runs.
-    handle_event(&mut m, &mut fs, &Event::Char('/'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('/'));
     type_text(&mut m, &mut fs, "0xabc");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(
         m.message.as_deref(),
         Some("search: text, or 0x followed by hex byte pairs")
@@ -2243,11 +2364,11 @@ fn a_file_past_4_gib_pages_with_full_64_bit_offsets() {
         5 * 1024 * 1024 * 1024,
     )));
     m.view = View::Viewer;
-    handle_event(&mut m, &mut fs, &Event::Char('g'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('g'));
     type_text(&mut m, &mut fs, "0x123456780");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(hex_view(&m).top, 0x1_2345_6780);
-    refresh_viewer(&mut m, &mut fs, 2, 80);
+    refresh_viewer(&mut m, &mut fs, &mut decode(), 2, 80);
     let mut window = Window::new(Pos::new(0, 0), Size::new(6, 80));
     render(&m, &mut window);
     // The offset column widens to the file's own 64-bit reach (nine hex
@@ -2255,7 +2376,7 @@ fn a_file_past_4_gib_pages_with_full_64_bit_offsets() {
     let first = row_text(&window, 1);
     assert!(first.starts_with("│123456780  "), "got {first}");
     // End lands the final row of the 5 GiB file.
-    handle_event(&mut m, &mut fs, &Event::End);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::End);
     let expected_top = (5 * 1024 * 1024 * 1024_u64 - 16) - 16;
     assert_eq!(
         hex_view(&m).top,
@@ -2273,18 +2394,18 @@ fn the_views_switch_in_place_and_esc_leaves() {
     open_file(&mut m, &mut fs, "a.rs");
     // Down to line 3 (offset 28), then to hex: the dump row containing
     // that offset (aligned down to 16).
-    handle_event(&mut m, &mut fs, &Event::Down);
-    handle_event(&mut m, &mut fs, &Event::Down);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Down);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Down);
     assert_eq!(text_view(&m).top.offset, 28);
-    handle_event(&mut m, &mut fs, &Event::Char('x'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('x'));
     assert_eq!(hex_view(&m).top, 16);
     // Back to text: snapped to the start of the row containing the hex
     // top (line 2 at offset 14); goto re-anchors the line number.
-    handle_event(&mut m, &mut fs, &Event::Char('t'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('t'));
     assert_eq!(text_view(&m).top.offset, 14);
     assert_eq!(text_view(&m).top.line, None, "unknown until re-anchored");
     // Esc leaves the viewer for the panes.
-    handle_event(&mut m, &mut fs, &Event::Esc);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Esc);
     assert_eq!(m.view, View::Panes);
     assert!(m.viewer.is_none());
 }
@@ -2295,14 +2416,14 @@ fn esc_stops_a_live_viewer_scan_before_leaving() {
     fs.set_bytes("/a.rs", &vec![b'a'; 4096]);
     let mut m = model(&mut fs);
     open_file(&mut m, &mut fs, "a.rs");
-    handle_event(&mut m, &mut fs, &Event::Char('/'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('/'));
     type_text(&mut m, &mut fs, "zzz");
-    handle_event(&mut m, &mut fs, &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert!(text_view(&m).ticking());
-    handle_event(&mut m, &mut fs, &Event::Esc);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Esc);
     assert!(!text_view(&m).ticking());
     assert_eq!(m.view, View::Viewer, "the first Esc only stops the scan");
-    handle_event(&mut m, &mut fs, &Event::Esc);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Esc);
     assert_eq!(m.view, View::Panes);
 }
 
@@ -2313,9 +2434,280 @@ fn a_read_refused_mid_view_closes_the_viewer() {
     let mut m = model(&mut fs);
     open_file(&mut m, &mut fs, "a.rs");
     fs.read_fail = Some((String::from("/a.rs"), Errno::PermissionDenied));
-    refresh_viewer(&mut m, &mut fs, 3, 40);
+    refresh_viewer(&mut m, &mut fs, &mut decode(), 3, 40);
     assert_eq!(m.view, View::Panes);
     assert!(m.viewer.is_none());
     let message = m.message.clone().expect("a report");
     assert!(message.contains("PermissionDenied"), "got {message}");
+}
+
+// --- The disassembly viewer (S9) -------------------------------------------
+
+#[test]
+fn an_rxe_opens_the_summary_and_disassembles_after_an_isa_choice() {
+    let mut fs = fixture();
+    fs.set_bytes("/prog", &rxe_with_aarch64_nops());
+    let mut m = model(&mut fs);
+    open_file(&mut m, &mut fs, "prog");
+    let view = disasm_view(&m);
+    assert_eq!(view.pane, DisasmPane::Summary);
+    let rows = view.summary_rows();
+    assert!(rows[0].0.starts_with("format rxe"), "got {}", rows[0].0);
+    assert!(
+        rows.iter()
+            .any(|(t, _)| t.contains("manifest: carried beside")),
+        "the rxe summary states the manifest travels beside the image"
+    );
+    assert!(
+        rows.iter().any(|(t, r)| r.is_some() && t.contains("code")),
+        "a selectable code region row"
+    );
+    // Enter asks for the ISA — an rxe image names none — and aarch64
+    // decodes the nop words.
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    assert!(matches!(m.prompt, Some(Prompt::IsaPick(_))));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
+    refresh_viewer(&mut m, &mut fs, &mut decode(), 6, 60);
+    let view = disasm_view(&m);
+    assert_eq!(view.pane, DisasmPane::Code);
+    assert!(view.rows[0].text.contains("nop"), "got {:?}", view.rows);
+    assert!(view.at_end, "four instructions fit one window");
+    // Esc returns to the summary page; a second Esc leaves the viewer.
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Esc);
+    assert_eq!(disasm_view(&m).pane, DisasmPane::Summary);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Esc);
+    assert_eq!(m.view, View::Panes);
+}
+
+#[test]
+fn the_code_pane_switches_to_hex_at_the_same_file_bytes() {
+    let mut fs = fixture();
+    fs.set_bytes("/prog", &rxe_with_aarch64_nops());
+    let mut m = model(&mut fs);
+    open_file(&mut m, &mut fs, "prog");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
+    let expected = LoadHeader::WIRE_LEN + 2 * Segment::WIRE_LEN;
+    assert_eq!(disasm_view(&m).switch_offset(), expected as u64);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('x'));
+    // The hex dump aligns its window down to its 16-byte rows.
+    assert_eq!(hex_view(&m).top, (expected as u64) & !0xF);
+}
+
+#[test]
+fn a_wasm_module_knows_its_isa_and_shows_its_ops() {
+    let mut fs = fixture();
+    fs.set_bytes("/mod.wasm", &wasm_with_one_body());
+    let mut m = model(&mut fs);
+    open_file(&mut m, &mut fs, "mod.wasm");
+    let view = disasm_view(&m);
+    let rows = view.summary_rows();
+    assert!(rows[0].0.contains("isa wasm"), "got {}", rows[0].0);
+    // The module names its ISA, so Enter opens the region directly.
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    refresh_viewer(&mut m, &mut fs, &mut decode(), 8, 60);
+    let view = disasm_view(&m);
+    assert_eq!(view.pane, DisasmPane::Code);
+    let text: Vec<&str> = view.rows.iter().map(|row| row.text.as_str()).collect();
+    assert!(
+        text.iter().any(|row| row.contains("i32.const")),
+        "got {text:?}"
+    );
+    assert!(text.iter().any(|row| row.contains("end")), "got {text:?}");
+}
+
+#[test]
+fn a_standalone_manifest_shows_its_requested_capabilities() {
+    let mut fs = fixture();
+    fs.set_bytes(
+        "/prog.manifest",
+        &manifest_with(&[CapabilityId::FS_ACCESS, CapabilityId::NET_RAW]),
+    );
+    let mut m = model(&mut fs);
+    open_file(&mut m, &mut fs, "prog.manifest");
+    let rows = disasm_view(&m).summary_rows();
+    assert_eq!(rows[0].0, "signed manifest (RXM1)");
+    assert!(
+        rows.iter().any(|(t, _)| t.contains("CAP_FS_ACCESS")),
+        "got {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|(t, _)| t.contains("CAP_NET_RAW")),
+        "got {rows:?}"
+    );
+}
+
+#[test]
+fn a_malformed_container_falls_back_to_hex_with_a_notice() {
+    let mut fs = fixture();
+    let mut bytes = LOAD_MAGIC.to_le_bytes().to_vec();
+    bytes.extend_from_slice(&[0xFF; 16]);
+    fs.set_bytes("/broken", &bytes);
+    let mut m = model(&mut fs);
+    open_file(&mut m, &mut fs, "broken");
+    assert_eq!(hex_view(&m).path, "/broken");
+    let message = m.message.clone().expect("a notice");
+    assert!(message.contains("showing hex"), "got {message}");
+}
+
+#[test]
+fn an_oversize_container_falls_back_to_hex_without_reading_it() {
+    let mut fs = fixture();
+    let mut bytes = vec![0u8; MAX_INPUT + 1];
+    bytes[0..4].copy_from_slice(&LOAD_MAGIC.to_le_bytes());
+    fs.set_bytes("/huge", &bytes);
+    let mut m = model(&mut fs);
+    open_file(&mut m, &mut fs, "huge");
+    assert_eq!(hex_view(&m).path, "/huge");
+    let message = m.message.clone().expect("a notice");
+    assert!(message.contains("too large"), "got {message}");
+}
+
+#[test]
+fn raw_fragments_disassemble_per_chosen_isa() {
+    let mut fs = fixture();
+    fs.set_bytes("/blob", &[0x90, 0x90, 0xCC, 0x90]);
+    let mut m = model(&mut fs);
+    open_raw(&mut m, &mut fs, "blob", 'x');
+    refresh_viewer(&mut m, &mut fs, &mut decode(), 8, 60);
+    let view = disasm_view(&m);
+    assert_eq!(view.pane, DisasmPane::Code);
+    assert!(view.rows[0].text.contains("nop"), "got {:?}", view.rows);
+    assert!(view.rows[2].text.contains("int3"), "got {:?}", view.rows);
+    // The same bytes at another ISA: `I` re-decodes in place.
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('I'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('r'));
+    refresh_viewer(&mut m, &mut fs, &mut decode(), 8, 60);
+    let view = disasm_view(&m);
+    assert!(
+        !view.rows.is_empty() && !view.rows[0].text.contains("int3"),
+        "got {:?}",
+        view.rows
+    );
+}
+
+#[test]
+fn paging_walks_region_bounds_and_scrolls_back() {
+    let mut fs = fixture();
+    fs.set_bytes("/blob", &[0x90; 64]);
+    let mut m = model(&mut fs);
+    open_raw(&mut m, &mut fs, "blob", 'x');
+    refresh_viewer(&mut m, &mut fs, &mut decode(), 8, 60);
+    assert_eq!(disasm_view(&m).place.top, 0);
+    // A page down advances exactly one screenful of instructions.
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::PageDown);
+    assert_eq!(disasm_view(&m).place.top, 8);
+    // One line up re-synchronises to the previous instruction.
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Up);
+    assert_eq!(disasm_view(&m).place.top, 7);
+    // Up at the region start stays put.
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Home);
+    assert_eq!(disasm_view(&m).place.top, 0);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Up);
+    assert_eq!(disasm_view(&m).place.top, 0);
+    // End walks (in the background) to the region's final page.
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::End);
+    run_viewer_job(&mut m, &mut fs);
+    refresh_viewer(&mut m, &mut fs, &mut decode(), 8, 60);
+    let view = disasm_view(&m);
+    assert_eq!(view.place.top, 56, "the final page starts a screen back");
+    assert!(view.at_end);
+    // A page down at the end cannot pass the last instruction.
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::PageDown);
+    assert_eq!(disasm_view(&m).place.top, 63);
+}
+
+#[test]
+fn the_code_pane_searches_instruction_text_and_jumps_to_addresses() {
+    let mut fs = fixture();
+    let mut bytes = vec![0x90u8; 32];
+    bytes[16] = 0xCC;
+    fs.set_bytes("/blob", &bytes);
+    let mut m = model(&mut fs);
+    open_raw(&mut m, &mut fs, "blob", 'x');
+    refresh_viewer(&mut m, &mut fs, &mut decode(), 8, 60);
+    // `/` asks for instruction text; the walk lands on the hit.
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('/'));
+    for key in "int3".chars() {
+        handle_event(&mut m, &mut fs, &mut decode(), &Event::Char(key));
+    }
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    run_viewer_job(&mut m, &mut fs);
+    let view = disasm_view(&m);
+    assert_eq!(view.place.top, 16);
+    assert_eq!(view.last_hit, Some(16));
+    // `n` finds no second hit and says so.
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('n'));
+    run_viewer_job(&mut m, &mut fs);
+    assert_eq!(m.message.as_deref(), Some("not found"));
+    // `g` jumps to a typed address.
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('g'));
+    for key in "0x8".chars() {
+        handle_event(&mut m, &mut fs, &mut decode(), &Event::Char(key));
+    }
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    run_viewer_job(&mut m, &mut fs);
+    assert_eq!(disasm_view(&m).place.top, 8);
+    // An address outside every code region is refused with a message.
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('g'));
+    for key in "0x999".chars() {
+        handle_event(&mut m, &mut fs, &mut decode(), &Event::Char(key));
+    }
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    let message = m.message.clone().expect("a refusal");
+    assert!(message.contains("no code region"), "got {message}");
+}
+
+#[test]
+fn symbols_label_rows_and_branch_targets() {
+    let mut fs = fixture();
+    // aarch64: `bl #+8` then three nops; `main` covers the region.
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&0x9400_0002_u32.to_le_bytes());
+    for _ in 0..3 {
+        bytes.extend_from_slice(&0xd503_201f_u32.to_le_bytes());
+    }
+    fs.set_bytes("/blob", &bytes);
+    let mut m = model(&mut fs);
+    open_raw(&mut m, &mut fs, "blob", 'a');
+    if let Some(Viewer::Disasm(view)) = &mut m.viewer {
+        view.symbols = vec![SymbolRecord {
+            name: String::from("main"),
+            addr: 0,
+            size: 16,
+        }];
+    }
+    refresh_viewer(&mut m, &mut fs, &mut decode(), 8, 60);
+    let view = disasm_view(&m);
+    assert!(view.rows[0].is_label, "got {:?}", view.rows);
+    assert!(view.rows[0].text.contains("<main>:"), "got {:?}", view.rows);
+    assert!(!view.rows[1].is_label);
+    assert!(
+        view.rows[1].text.contains("<main+0x8>"),
+        "the branch target symbolises: got {:?}",
+        view.rows
+    );
+}
+
+#[test]
+fn the_disasm_pages_render_inside_the_frame() {
+    let mut fs = fixture();
+    fs.set_bytes("/prog", &rxe_with_aarch64_nops());
+    let mut m = model(&mut fs);
+    open_file(&mut m, &mut fs, "prog");
+    refresh_viewer(&mut m, &mut fs, &mut decode(), 8, 60);
+    let mut window = Window::new(Pos::new(0, 0), Size::new(12, 60));
+    render(&m, &mut window);
+    assert!(row_text(&window, 1).contains("format rxe"));
+    let status = row_text(&window, 10);
+    assert!(status.contains("disasm"), "got {status}");
+    // Into the code pane: instruction rows and the code status line.
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
+    refresh_viewer(&mut m, &mut fs, &mut decode(), 8, 60);
+    render(&m, &mut window);
+    assert!(row_text(&window, 1).contains("nop"));
+    let status = row_text(&window, 10);
+    assert!(status.contains("aarch64"), "got {status}");
+    assert!(status.contains("address 0x1000"), "got {status}");
 }

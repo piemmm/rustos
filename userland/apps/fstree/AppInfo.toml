@@ -7,9 +7,12 @@
 # suppression). CAP_FS_ACCESS is the file manager's job — listing
 # directories and reading file metadata (and reading its own bundle's
 # Help/ documents) through the secured VFS, which still authorises every
-# path per-inode under the caller's attested identity.
+# path per-inode under the caller's attested identity. CAP_PROC_SPAWN
+# re-spawns this same binary as the parser-sandbox decode worker
+# (docs/src/security/sandbox.md): the disassembly viewer's container and
+# instruction decoding runs there, never in this process.
 id = "os.rustos.fstree"
 name = "fstree"
 version = "0.1.0"
 kind = "command"
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS"]
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS", "CAP_PROC_SPAWN"]

@@ -28,9 +28,12 @@ Keys:
   cursor.
 - `Enter` — in the tree, toggle expansion; in the file pane, descend
   into the selected directory (both panes follow), or open the
-  selected file in a full-screen viewer: the text pager when the
-  file's opening bytes read as text, the hex dump otherwise (the
-  viewers are described below).
+  selected file in a full-screen viewer: the disassembly viewer for a
+  recognised executable, the text pager when the file's opening bytes
+  read as text, the hex dump otherwise (the viewers are described
+  below).
+- `o` — open the selected file in a viewer of your choosing:
+  `t` text, `x` hex, or `d` disassembly.
 - `Tab` — switch the focused pane.
 - `s` — open the sort menu: `n` name, `e` extension, `s` size,
   `m` modification stamp, `r` reverse the direction, `Esc` cancels.
@@ -120,20 +123,26 @@ no modification stamp shows `-` in the stamp column.
 
 The viewers: `Enter` on a regular file opens it read-only in a
 full-screen viewer.
-A file whose opening bytes are NUL-free, valid UTF-8 opens in the
-**text pager**; anything else opens in the **hex dump**. `x` switches
-the text pager to the hex dump at the same place, and `t` switches
-the hex dump to the text pager (snapped to the start of the line
-containing the shown offset); `q` or `Esc` returns to the panes.
+A recognised executable — an `rxe` image, a 64-bit ELF, a wasm
+module, or a standalone signed manifest — opens in the
+**disassembly viewer**; a file whose opening bytes are NUL-free,
+valid UTF-8 opens in the **text pager**; anything else opens in the
+**hex dump**. `o` overrides the pick. `x` switches the open viewer
+to the hex dump at the same place, `t` to the text pager (snapped to
+the start of the line containing the shown offset), and `d` to the
+disassembly viewer (a file no container format claims asks for an
+instruction set and decodes as a raw fragment from the current
+place); `q` or `Esc` returns to the panes.
 
-Both viewers page through the file in bounded windows — the file is
+The viewers page through the file in bounded windows — the file is
 never held in memory whole, so a file of any size (well past 4 GiB)
 pages correctly — and share the keys:
 
 - `Up`/`Down` or `k`/`j` — one row; `PageUp`/`PageDown`, `b`/`Space`
   — one page; `Home`/`End` — the start / the last page.
 - `g` — go to a place: a 1-based line number in the text pager, a
-  byte offset (decimal or `0x`-hex) in the hex dump.
+  byte offset (decimal or `0x`-hex) in the hex dump, an address in
+  the disassembly viewer.
 - `/` — search forward from the current place; `n` repeats the last
   search past its previous hit. The scan runs in the background in
   bounded steps — the session stays responsive over a huge file, the
@@ -157,10 +166,36 @@ hex digits). `/` searches for literal text (case-insensitive) or,
 spelled `0x` followed by hex byte pairs (`0xdeadbeef`), for an exact
 byte sequence.
 
+The **disassembly viewer** opens on a summary page: the container's
+format, instruction set, and entry point, its regions (address, file
+extent, memory size, permissions), and its symbol count; a
+standalone signed manifest instead lists its ABI version and the
+capabilities it requests. An `rxe` image carries its manifest beside
+it, never embedded, so the summary says so. `Up`/`Down` move over
+the region rows and `Enter` opens the selected code region's
+disassembly (a data region shows as hex at its file bytes). A
+container that names no instruction set — an `rxe` image runs on
+whatever machine loads it — asks once: `x` x86-64, `a` aarch64,
+`r` riscv64, `w` wasm.
+
+The code pane shows one instruction per row — address, encoding
+bytes, mnemonic, operands — with `<symbol>:` label lines and
+symbolised branch targets (`<main+0x8>`) where the container names
+symbols. Instructions are decoded per screenful, never the whole
+binary up front. `g` jumps to an address, `/` searches the
+instruction text, `End` walks to the region's end in the background
+(`Esc` stops the walk), and `I` re-decodes at another instruction
+set. `Esc` steps back to the summary page.
+
+Every container and instruction decode runs in a locked-down helper
+process (the parser sandbox), never in the file manager itself: a
+malicious executable can crash the helper, not the session. A file
+the decoder refuses — malformed, or too large to hand to the sandbox
+— falls back to the hex dump with a one-line notice.
+
 A read the kernel refuses mid-view closes the viewer and surfaces
 the error on the message line — stale content is never shown as
-live. The disassembly viewer arrives in a later stage of the tool's
-plan.
+live.
 
 ## OPTIONS
 

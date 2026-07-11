@@ -21,7 +21,11 @@
 //! Information API's `MOUNT_LIST` query for the status line's volume free
 //! space (best-effort; an unreachable service simply omits the figure).
 //! The tool binds only to its inherited descriptors, never a console
-//! device, and holds no ambient authority.
+//! device, and holds no ambient authority. Invoked in the worker role
+//! (`--parser-sandbox-worker`), it instead serves the sandboxed decode
+//! service over its wired standard streams — the disassembly viewer's
+//! container and instruction decoding runs there, never in the manager's
+//! own address space.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy,
 //! and fmt still cover the file.
@@ -46,6 +50,10 @@ mod program {
     use rustos_procinfo::{for_each_mount, IpcTransport};
     use rustos_rt::io::{write_stderr_line, Stdout, Write};
     use rustos_rt::File;
+    use rustos_sandbox::decode::DecodeService;
+    use rustos_sandbox::host::ParserSandbox;
+    use rustos_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
+    use rustos_sandbox::worker::ServeEnd;
     use rustos_termcap::from_term;
     use rustos_vt::{Op, Parser};
 
@@ -431,6 +439,19 @@ mod program {
     }
 
     fn main() -> i32 {
+        // The worker role: this same binary, re-spawned by its own parent
+        // inside the kernel sandbox spawn mode, serves the container/
+        // disassembly decode service over its wired standard streams and
+        // exits. Decided before argument parsing — the role marker is the
+        // whole argument vector's meaning.
+        if worker_role() {
+            let mut service = DecodeService;
+            return match serve_stdio(&mut service) {
+                ServeEnd::Finished => 0,
+                ServeEnd::Failed(_) => 1,
+            };
+        }
+
         // A malformed (non-UTF-8) argument vector is a usage error,
         // reported rather than guessed at.
         let Some(arguments) = rustos_rt::args() else {
@@ -470,6 +491,12 @@ mod program {
         };
 
         let mut fs = RtFs::new();
+        // The parser sandbox the disassembly viewer decodes in: this
+        // binary re-spawned in the worker role through the kernel's
+        // reserved self token (the kernel substitutes the path it admitted
+        // this process from — argv is data, not authority), containment
+        // events routed to the system log.
+        let mut sandbox = ParserSandbox::new(RtLauncher::own_binary(), rustos_rt::LogSink);
         // The starting listing is read before the terminal is switched, so
         // a refused root fails loudly on a normal screen.
         let mut model = match Model::new(&mut fs, &root, help_text) {
@@ -498,7 +525,7 @@ mod program {
         // where the terminal has one (restoring the covered content on
         // exit), an in-place erase otherwise.
         let entered = screen.enter_full_screen();
-        let result = run(&mut model, &mut fs, &mut screen);
+        let result = run(&mut model, &mut fs, &mut sandbox, &mut screen);
         let left = screen.leave_full_screen();
 
         let _ = rustos_rt::set_input_mode(InputMode::Cooked);

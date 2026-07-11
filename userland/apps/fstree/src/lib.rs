@@ -19,8 +19,12 @@
 //! The S5 viewers open with Enter on a regular file: a streaming text
 //! pager and an offset/hex/ASCII dump, auto-picked from a head sample,
 //! each with paging, goto, and background literal search over the same
-//! seams. The disassembly viewer is staged in
-//! `.junie/fstree-next-plan.md` and lands with its stages.
+//! seams. The S9 disassembly viewer opens a recognised executable
+//! container (or a standalone signed manifest) into a summary page and
+//! per-region paged disassembly, every decode running behind the parser
+//! sandbox through the [`view_disasm::Decode`] seam; `o` force-picks a
+//! viewer, and an unrecognised file falls back to hex with a notice.
+//! The remaining stages are staged in `.junie/fstree-next-plan.md`.
 //!
 //! # What this crate is
 //!
@@ -46,6 +50,9 @@
 //! * [`view_text`] / [`view_hex`] — the Enter viewers: the streaming
 //!   text pager and the hex dump, paging and searching through the same
 //!   [`fs::Fs`] seam in bounded windows.
+//! * [`view_disasm`] — the disassembly viewer: container summaries and
+//!   per-region instruction windows, decoded only by the sandboxed
+//!   decode service through the [`view_disasm::Decode`] seam.
 //! * [`mod@render`] — the curses frame (panes, status, message, overlays).
 //! * [`app`] — the key grammar and the session loop (walk ticks run on a
 //!   timed input bound; every wait still parks in the kernel).
@@ -53,10 +60,12 @@
 //! # Layering & safety
 //!
 //! `no_std` (with `alloc`). It links only `lib/*` crates — the audited
-//! `rustos-abi` and the OS-provided `rustos-curses`/`rustos-termcap`/
-//! `rustos-vt`/`rustos-help` — never a kernel or driver crate. No `unsafe`,
-//! and no `unwrap`/`expect`/`panic!` in production paths; a refused listing
-//! fails closed onto the message line. Nothing writes to fd 3 (`stdinfo`).
+//! `rustos-abi`, the OS-provided `rustos-curses`/`rustos-termcap`/
+//! `rustos-vt`/`rustos-help`, and the sandbox seam `rustos-sandbox` (with
+//! `rustos-binfmt` solely for magic-prefix routing) — never a kernel or
+//! driver crate. No `unsafe`, and no `unwrap`/`expect`/`panic!` in
+//! production paths; a refused listing fails closed onto the message
+//! line. Nothing writes to fd 3 (`stdinfo`).
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -70,6 +79,7 @@ pub mod ops;
 pub mod render;
 pub mod search;
 pub mod tag;
+pub mod view_disasm;
 pub mod view_hex;
 pub mod view_text;
 pub mod walk;
@@ -83,6 +93,7 @@ pub use model::{Model, Pane, SortKey};
 pub use render::render;
 pub use search::{ContentScan, Needle};
 pub use tag::{Batch, BatchProgress, TagEntry, TagSet};
+pub use view_disasm::{Decode, DisasmView};
 pub use view_hex::{HexPattern, HexView};
 pub use view_text::{JobOutcome, TextView};
 pub use walk::{FlatEntry, Sieve, WalkPurpose, WalkState, Walker};

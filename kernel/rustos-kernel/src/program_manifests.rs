@@ -623,6 +623,17 @@ mod tests {
             CapabilityId::FS_ACCESS,
         ];
 
+        // A file tool that additionally re-spawns its own binary as its
+        // parser-sandbox worker (fstree's disassembly viewer decodes
+        // every container and instruction window there, never in-process):
+        // the file-tool request plus `CAP_PROC_SPAWN`.
+        const SANDBOXED_FILE_TOOL_REQUEST: &[CapabilityId] = &[
+            CapabilityId::CONSOLE_WRITE,
+            CapabilityId::CONSOLE_READ,
+            CapabilityId::FS_ACCESS,
+            CapabilityId::PROC_SPAWN,
+        ];
+
         // The store-only pure text tools' expected request: console write
         // for their output and the filesystem gate their short-help read
         // needs — they touch no operand path and never prompt. They ship
@@ -686,7 +697,7 @@ mod tests {
             ("edit", AppKind::Command, FILE_TOOL_REQUEST),
             ("elsh", AppKind::Command, SHELL_MANIFEST),
             ("false", AppKind::Command, PURE_TOOL_REQUEST),
-            ("fstree", AppKind::Command, FILE_TOOL_REQUEST),
+            ("fstree", AppKind::Command, SANDBOXED_FILE_TOOL_REQUEST),
             ("groupadd", AppKind::Command, ADMIN_TOOL_REQUEST),
             ("head", AppKind::Command, FILE_TOOL_REQUEST),
             ("login", AppKind::Service, LOGIN_MANIFEST),

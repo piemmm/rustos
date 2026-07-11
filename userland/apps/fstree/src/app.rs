@@ -16,17 +16,19 @@ use core::time::Duration;
 use rustos_abi::{Errno, FileKind};
 use rustos_curses::{Event, InputMode, Pos, Screen, Tty, Window};
 use rustos_glob::Pattern;
+use rustos_sandbox::decode::{Isa, RegionKind, MAX_INPUT};
 
 use crate::fs::Fs;
 use crate::model::{
     child_dirs_of, join, merge_child_dirs, BatchPrompt, ConfirmPrompt, DirNode, InputOp,
-    InputPrompt, ModePrompt, Model, NameFilter, Overlay, OverwritePrompt, Pane, Prompt, SortKey,
-    View, Viewer,
+    InputPrompt, IsaPrompt, IsaPurpose, ModePrompt, Model, NameFilter, OpenAsPrompt, Overlay,
+    OverwritePrompt, Pane, Prompt, SortKey, View, Viewer, ViewerKind,
 };
 use crate::ops::{parent_of, plan_target, resolve_destination, Decision, FileOp, OpProgress};
 use crate::render::render;
 use crate::search::{ContentScan, Needle};
 use crate::tag::{Batch, BatchProgress, TagEntry};
+use crate::view_disasm::{describe, is_manifest_head, Decode, DisasmBody, DisasmPane, DisasmView};
 use crate::view_hex::{parse_offset, HexView};
 use crate::view_text::{JobOutcome, TextView};
 use crate::walk::{relative_to, FlatEntry, WalkPurpose, WalkState, Walker};
@@ -90,6 +92,7 @@ fn body_rows(screen_rows: u16) -> usize {
 pub fn run<T: Tty>(
     model: &mut Model,
     fs: &mut dyn Fs,
+    decode: &mut dyn Decode,
     screen: &mut Screen<T>,
 ) -> Result<i32, FstreeError> {
     let mut window = Window::new(Pos::new(0, 0), screen.size());
@@ -98,6 +101,7 @@ pub fn run<T: Tty>(
         refresh_viewer(
             model,
             fs,
+            decode,
             body_rows(screen.size().rows),
             // The viewer wraps to the boxed interior, inside the side
             // borders.
@@ -123,11 +127,11 @@ pub fn run<T: Tty>(
                 walk_tick(model, fs);
             }
             if viewer_live {
-                viewer_tick(model, fs);
+                viewer_tick(model, fs, decode);
             }
             continue;
         };
-        handle_event(model, fs, &event);
+        handle_event(model, fs, decode, &event);
         if model.quit {
             return Ok(0);
         }
@@ -135,7 +139,7 @@ pub fn run<T: Tty>(
 }
 
 /// Apply one typed key event to the session state.
-pub fn handle_event(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
+pub fn handle_event(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode, event: &Event) {
     model.message = None;
     if let Some(prompt) = model.prompt.take() {
         match prompt {
@@ -147,6 +151,8 @@ pub fn handle_event(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
                 handle_confirm_batch_delete(model, fs, count, event);
             }
             Prompt::BatchOverwrite(paused) => handle_batch_overwrite(model, fs, paused, event),
+            Prompt::OpenAs(prompt) => handle_open_as(model, fs, decode, prompt, event),
+            Prompt::IsaPick(prompt) => handle_isa_pick(model, prompt, event),
         }
         return;
     }
@@ -163,7 +169,7 @@ pub fn handle_event(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
         Overlay::None => {}
     }
     if model.view == View::Viewer {
-        handle_viewer_key(model, fs, event);
+        handle_viewer_key(model, fs, decode, event);
         return;
     }
     if model.view == View::Flat {
@@ -192,6 +198,7 @@ pub fn handle_event(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
             model.tags.clear();
             model.message = Some(String::from("tags cleared"));
         }
+        Event::Char('o') => open_open_as(model),
         Event::Char('u') => start_walk(model, WalkPurpose::Usage),
         Event::Char('v') => start_walk(model, WalkPurpose::Flat),
         Event::Char('f') => open_filter_prompt(model),
@@ -222,7 +229,7 @@ pub fn handle_event(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
         }
         Event::Enter => match model.pane {
             Pane::Tree => toggle_expanded(model, fs),
-            Pane::Files => enter_file_row(model, fs),
+            Pane::Files => enter_file_row(model, fs, decode),
         },
         _ => {}
     }
@@ -472,8 +479,8 @@ fn submit_input(model: &mut Model, fs: &mut dyn Fs, prompt: InputPrompt) {
         InputOp::TagGlob => submit_tag_glob(model, &prompt.input),
         InputOp::FilterPattern { .. } => submit_filter(model, &prompt.input),
         InputOp::SearchGlob => submit_name_search(model, &prompt.input),
-        InputOp::ViewerGoto { hex } => submit_viewer_goto(model, fs, hex, &prompt.input),
-        InputOp::ViewerSearch { hex } => submit_viewer_search(model, fs, hex, &prompt.input),
+        InputOp::ViewerGoto { kind } => submit_viewer_goto(model, fs, kind, &prompt.input),
+        InputOp::ViewerSearch { kind } => submit_viewer_search(model, fs, kind, &prompt.input),
         InputOp::ContentNeedle { tagged } => submit_content_search(model, tagged, &prompt.input),
         InputOp::BatchDest { moving, .. } => submit_batch_dest(model, fs, moving, &prompt.input),
     }
@@ -1128,9 +1135,11 @@ fn open_flat_delete(model: &mut Model) {
 }
 
 /// Open the viewer the head sample picks on the regular file at `path`:
-/// the text pager for NUL-free, valid-UTF-8 heads, the hex dump for
-/// everything else. A refused read reports and opens nothing.
-fn open_viewer(model: &mut Model, fs: &mut dyn Fs, path: &str, size: u64) {
+/// the disassembly viewer for a recognised executable container or a
+/// standalone signed manifest, the text pager for NUL-free, valid-UTF-8
+/// heads, the hex dump for everything else. A refused read reports and
+/// opens nothing.
+fn open_viewer(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode, path: &str, size: u64) {
     let mut buf = [0_u8; HEAD_SAMPLE];
     let read = match fs.read(path, 0, &mut buf) {
         Ok(read) => read,
@@ -1139,13 +1148,176 @@ fn open_viewer(model: &mut Model, fs: &mut dyn Fs, path: &str, size: u64) {
             return;
         }
     };
-    let viewer = if is_text_head(&buf[..read]) {
+    let head = &buf[..read];
+    if rustos_binfmt::detect(head).is_some() || is_manifest_head(head) {
+        open_disasm(model, fs, decode, path, size);
+        return;
+    }
+    let viewer = if is_text_head(head) {
         Viewer::Text(TextView::new(path, size))
     } else {
         Viewer::Hex(HexView::new(path, size))
     };
     model.viewer = Some(viewer);
     model.view = View::Viewer;
+}
+
+/// Open the disassembly viewer on `path` through the sandboxed decode; a
+/// refused or failed decode falls back to the hex view with a one-line
+/// notice — never an error dialog, never a crash.
+fn open_disasm(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode, path: &str, size: u64) {
+    if size > MAX_INPUT as u64 {
+        model.viewer = Some(Viewer::Hex(HexView::new(path, size)));
+        model.view = View::Viewer;
+        model.message = Some(String::from("too large to decode — showing hex"));
+        return;
+    }
+    let bytes = match read_all(fs, path, size) {
+        Ok(bytes) => bytes,
+        Err(errno) => {
+            model.report(path, errno);
+            return;
+        }
+    };
+    match DisasmView::open(decode, path, size, &bytes) {
+        Ok(view) => {
+            model.viewer = Some(Viewer::Disasm(view));
+            model.view = View::Viewer;
+        }
+        Err(error) => {
+            model.viewer = Some(Viewer::Hex(HexView::new(path, size)));
+            model.view = View::Viewer;
+            model.message = Some(format!("{} — showing hex", describe(error)));
+        }
+    }
+}
+
+/// Read the whole of `path` (at most [`MAX_INPUT`] bytes — the caller
+/// checked) for the container/manifest summary decode.
+fn read_all(fs: &mut dyn Fs, path: &str, size: u64) -> Result<Vec<u8>, Errno> {
+    let len = usize::try_from(size.min(MAX_INPUT as u64)).unwrap_or(MAX_INPUT);
+    let mut bytes = alloc::vec![0_u8; len];
+    let mut filled = 0;
+    while filled < len {
+        let read = fs.read(path, filled as u64, &mut bytes[filled..])?;
+        if read == 0 {
+            break;
+        }
+        filled += read;
+    }
+    bytes.truncate(filled);
+    Ok(bytes)
+}
+
+/// The `o` key: ask which viewer to open the focused regular file in.
+fn open_open_as(model: &mut Model) {
+    let entry = if model.pane == Pane::Files {
+        model.visible_files().get(model.file_cursor).copied()
+    } else {
+        None
+    };
+    let Some(entry) = entry else {
+        model.message = Some(String::from("open as: select a regular file"));
+        return;
+    };
+    if entry.kind.is_dir() {
+        model.message = Some(String::from("open as: select a regular file"));
+        return;
+    }
+    model.prompt = Some(Prompt::OpenAs(OpenAsPrompt {
+        path: join(&model.files_dir, &entry.name),
+        size: entry.size,
+    }));
+}
+
+/// Apply one key to the open-as chooser: t)ext, he(x), d)isassembly, Esc
+/// cancels; any other key keeps asking.
+fn handle_open_as(
+    model: &mut Model,
+    fs: &mut dyn Fs,
+    decode: &mut dyn Decode,
+    prompt: OpenAsPrompt,
+    event: &Event,
+) {
+    match event {
+        Event::Esc => {}
+        Event::Char('t' | 'T') => {
+            model.viewer = Some(Viewer::Text(TextView::new(&prompt.path, prompt.size)));
+            model.view = View::Viewer;
+        }
+        Event::Char('x' | 'X') => {
+            model.viewer = Some(Viewer::Hex(HexView::new(&prompt.path, prompt.size)));
+            model.view = View::Viewer;
+        }
+        Event::Char('d' | 'D') => force_disasm(model, fs, decode, &prompt.path, prompt.size, 0),
+        _ => model.prompt = Some(Prompt::OpenAs(prompt)),
+    }
+}
+
+/// Force-open `path` in the disassembly viewer: a recognised container
+/// or manifest decodes as itself; anything else asks for the ISA and
+/// opens as a raw fragment at `offset`.
+fn force_disasm(
+    model: &mut Model,
+    fs: &mut dyn Fs,
+    decode: &mut dyn Decode,
+    path: &str,
+    size: u64,
+    offset: u64,
+) {
+    let mut buf = [0_u8; HEAD_SAMPLE];
+    let read = match fs.read(path, 0, &mut buf) {
+        Ok(read) => read,
+        Err(errno) => {
+            model.report(path, errno);
+            return;
+        }
+    };
+    let head = &buf[..read];
+    if rustos_binfmt::detect(head).is_some() || is_manifest_head(head) {
+        open_disasm(model, fs, decode, path, size);
+        return;
+    }
+    model.prompt = Some(Prompt::IsaPick(IsaPrompt {
+        purpose: IsaPurpose::OpenRaw {
+            path: String::from(path),
+            size,
+            offset,
+        },
+    }));
+}
+
+/// Apply one key to the ISA chooser: x)86-64, a)arch64, r)iscv64, w)asm,
+/// Esc cancels; any other key keeps asking.
+fn handle_isa_pick(model: &mut Model, prompt: IsaPrompt, event: &Event) {
+    let isa = match event {
+        Event::Esc => return,
+        Event::Char('x' | 'X') => Isa::X86_64,
+        Event::Char('a' | 'A') => Isa::Aarch64,
+        Event::Char('r' | 'R') => Isa::Riscv64,
+        Event::Char('w' | 'W') => Isa::Wasm,
+        _ => {
+            model.prompt = Some(Prompt::IsaPick(prompt));
+            return;
+        }
+    };
+    match prompt.purpose {
+        IsaPurpose::OpenRaw { path, size, offset } => {
+            model.viewer = Some(Viewer::Disasm(DisasmView::raw(&path, size, isa, offset)));
+            model.view = View::Viewer;
+        }
+        IsaPurpose::EnterRegion { index } => {
+            if let Some(Viewer::Disasm(view)) = &mut model.viewer {
+                view.isa_choice = Some(isa);
+                view.enter_region(index);
+            }
+        }
+        IsaPurpose::Override => {
+            if let Some(Viewer::Disasm(view)) = &mut model.viewer {
+                view.set_isa(isa);
+            }
+        }
+    }
 }
 
 /// Whether a head sample reads as text: no NUL byte, and valid UTF-8
@@ -1171,6 +1343,7 @@ fn viewer_path(model: &Model) -> String {
     match &model.viewer {
         Some(Viewer::Text(view)) => view.path.clone(),
         Some(Viewer::Hex(view)) => view.path.clone(),
+        Some(Viewer::Disasm(view)) => view.path.clone(),
         None => String::new(),
     }
 }
@@ -1180,15 +1353,17 @@ fn viewer_ticking(model: &Model) -> bool {
     match &model.viewer {
         Some(Viewer::Text(view)) => view.ticking(),
         Some(Viewer::Hex(view)) => view.ticking(),
+        Some(Viewer::Disasm(view)) => view.ticking(),
         None => false,
     }
 }
 
 /// Apply one key inside the viewer.
-fn handle_viewer_key(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
+fn handle_viewer_key(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode, event: &Event) {
     let page = match &model.viewer {
         Some(Viewer::Text(view)) => view.viewport_rows.max(1),
         Some(Viewer::Hex(view)) => view.viewport_rows.max(1),
+        Some(Viewer::Disasm(view)) => view.viewport_rows.max(1),
         None => {
             exit_viewer(model);
             return;
@@ -1203,36 +1378,56 @@ fn handle_viewer_key(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
                 match &mut model.viewer {
                     Some(Viewer::Text(view)) => view.cancel_job(),
                     Some(Viewer::Hex(view)) => view.cancel_job(),
+                    Some(Viewer::Disasm(view)) => view.cancel_job(),
                     None => {}
                 }
                 model.message = Some(String::from("stopped"));
                 return;
             }
+            // A container's code pane steps back to its summary page
+            // first; raw mode has no summary and leaves the viewer.
+            if let Some(Viewer::Disasm(view)) = &mut model.viewer {
+                if view.pane == DisasmPane::Code && !matches!(view.body, DisasmBody::Raw) {
+                    view.leave_code();
+                    return;
+                }
+            }
             exit_viewer(model);
         }
         Event::Char('q') => exit_viewer(model),
         Event::Char('?') => model.overlay = Overlay::Help,
-        Event::Up | Event::Char('k') => viewer_scroll(model, fs, -1),
-        Event::Down | Event::Char('j') => viewer_scroll(model, fs, 1),
-        Event::PageUp | Event::Char('b') => viewer_scroll(model, fs, -page_rows),
-        Event::PageDown | Event::Char(' ') => viewer_scroll(model, fs, page_rows),
+        Event::Up | Event::Char('k') => viewer_scroll(model, fs, decode, -1),
+        Event::Down | Event::Char('j') => viewer_scroll(model, fs, decode, 1),
+        Event::PageUp | Event::Char('b') => viewer_scroll(model, fs, decode, -page_rows),
+        Event::PageDown | Event::Char(' ') => viewer_scroll(model, fs, decode, page_rows),
         Event::Home => match &mut model.viewer {
             Some(Viewer::Text(view)) => view.go_home(),
             Some(Viewer::Hex(view)) => view.go_home(),
+            Some(Viewer::Disasm(view)) => match view.pane {
+                DisasmPane::Summary => {
+                    view.sum_cursor = 0;
+                    view.sum_scroll = 0;
+                }
+                DisasmPane::Code => view.go_home(),
+            },
             None => {}
         },
         Event::End => viewer_go_end(model, fs, page),
         Event::Char('g') => {
-            let hex = matches!(model.viewer, Some(Viewer::Hex(_)));
+            let Some(kind) = viewer_prompt_kind(model) else {
+                return;
+            };
             model.prompt = Some(Prompt::Input(InputPrompt {
-                op: InputOp::ViewerGoto { hex },
+                op: InputOp::ViewerGoto { kind },
                 input: String::new(),
             }));
         }
         Event::Char('/') => {
-            let hex = matches!(model.viewer, Some(Viewer::Hex(_)));
+            let Some(kind) = viewer_prompt_kind(model) else {
+                return;
+            };
             model.prompt = Some(Prompt::Input(InputPrompt {
-                op: InputOp::ViewerSearch { hex },
+                op: InputOp::ViewerSearch { kind },
                 input: String::new(),
             }));
         }
@@ -1245,14 +1440,90 @@ fn handle_viewer_key(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
         }
         Event::Char('x') => viewer_switch_hex(model),
         Event::Char('t') => viewer_switch_text(model, fs),
+        Event::Char('d') => viewer_switch_disasm(model, fs, decode),
+        Event::Char('I') => {
+            if matches!(model.viewer, Some(Viewer::Disasm(_))) {
+                model.prompt = Some(Prompt::IsaPick(IsaPrompt {
+                    purpose: IsaPurpose::Override,
+                }));
+            }
+        }
+        Event::Enter => enter_summary_row(model),
         _ => {}
+    }
+}
+
+/// Which viewer the goto/search prompt should ask for; the disassembly
+/// summary page has neither (`None` opens no prompt).
+fn viewer_prompt_kind(model: &Model) -> Option<ViewerKind> {
+    match &model.viewer {
+        Some(Viewer::Text(_)) => Some(ViewerKind::Text),
+        Some(Viewer::Hex(_)) => Some(ViewerKind::Hex),
+        Some(Viewer::Disasm(view)) if view.pane == DisasmPane::Code => Some(ViewerKind::Disasm),
+        _ => None,
+    }
+}
+
+/// Enter on the disassembly summary page: a code region opens in the
+/// code pane (asking for the ISA when the container names none); a data
+/// region shows as a hex dump at its file bytes.
+fn enter_summary_row(model: &mut Model) {
+    let Some(Viewer::Disasm(view)) = &mut model.viewer else {
+        return;
+    };
+    if view.pane != DisasmPane::Summary {
+        return;
+    }
+    let Some(region) = view.selected_region() else {
+        return;
+    };
+    if region.kind == RegionKind::Data {
+        if region.file_size == 0 {
+            model.message = Some(String::from("region has no file bytes"));
+            return;
+        }
+        let (path, size, offset) = (view.path.clone(), view.size, region.file_offset);
+        model.viewer = Some(Viewer::Hex(HexView::at_offset(&path, size, offset)));
+        return;
+    }
+    if region.file_size == 0 {
+        model.message = Some(String::from("region has no code bytes"));
+        return;
+    }
+    let index = view.sum_cursor;
+    if view.isa().is_some() {
+        view.enter_region(index);
+    } else {
+        model.prompt = Some(Prompt::IsaPick(IsaPrompt {
+            purpose: IsaPurpose::EnterRegion { index },
+        }));
     }
 }
 
 /// Scroll the viewer by `delta` display rows (negative is up). A refused
 /// read reports and keeps the place.
-fn viewer_scroll(model: &mut Model, fs: &mut dyn Fs, delta: i64) {
+fn viewer_scroll(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode, delta: i64) {
     let rows = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
+    if let Some(Viewer::Disasm(view)) = &mut model.viewer {
+        let result = match view.pane {
+            DisasmPane::Summary => {
+                let step = isize::try_from(delta).unwrap_or(isize::MAX);
+                view.move_summary_cursor(step);
+                Ok(())
+            }
+            DisasmPane::Code => {
+                if delta.is_negative() {
+                    view.scroll_up(fs, decode, rows)
+                } else {
+                    view.scroll_down(fs, decode, rows)
+                }
+            }
+        };
+        if let Err(error) = result {
+            model.message = Some(describe(error));
+        }
+        return;
+    }
     let result = match &mut model.viewer {
         Some(Viewer::Text(view)) => {
             if delta.is_negative() {
@@ -1262,7 +1533,7 @@ fn viewer_scroll(model: &mut Model, fs: &mut dyn Fs, delta: i64) {
             }
         }
         Some(Viewer::Hex(view)) => view.scroll(fs, delta),
-        None => Ok(()),
+        Some(Viewer::Disasm(_)) | None => Ok(()),
     };
     if let Err(errno) = result {
         let path = viewer_path(model);
@@ -1270,11 +1541,22 @@ fn viewer_scroll(model: &mut Model, fs: &mut dyn Fs, delta: i64) {
     }
 }
 
-/// Jump the viewer to the file's end (`End`).
+/// Jump the viewer to the file's end (`End`); the disassembly code pane
+/// walks to its region's final page in the background.
 fn viewer_go_end(model: &mut Model, fs: &mut dyn Fs, page: usize) {
     let result = match &mut model.viewer {
         Some(Viewer::Text(view)) => view.go_end(fs, page),
         Some(Viewer::Hex(view)) => view.go_end(fs, page),
+        Some(Viewer::Disasm(view)) => {
+            match view.pane {
+                DisasmPane::Summary => {
+                    let last = view.regions.len().saturating_sub(1);
+                    view.sum_cursor = last;
+                }
+                DisasmPane::Code => view.go_end(),
+            }
+            Ok(())
+        }
         None => Ok(()),
     };
     if let Err(errno) = result {
@@ -1288,6 +1570,7 @@ fn viewer_search_next(model: &mut Model, fs: &mut dyn Fs) {
     let started = match &mut model.viewer {
         Some(Viewer::Text(view)) => view.search_next(fs),
         Some(Viewer::Hex(view)) => view.search_next(),
+        Some(Viewer::Disasm(view)) => view.pane == DisasmPane::Code && view.search_next(),
         None => return,
     };
     if !started {
@@ -1303,6 +1586,12 @@ fn viewer_switch_hex(model: &mut Model) {
             view.size,
             view.top.offset,
         )));
+    } else if let Some(Viewer::Disasm(view)) = &model.viewer {
+        model.viewer = Some(Viewer::Hex(HexView::at_offset(
+            &view.path,
+            view.size,
+            view.switch_offset(),
+        )));
     }
 }
 
@@ -1312,65 +1601,101 @@ fn viewer_switch_text(model: &mut Model, fs: &mut dyn Fs) {
     if let Some(Viewer::Hex(view)) = &model.viewer {
         let (path, size, top) = (view.path.clone(), view.size, view.top);
         model.viewer = Some(Viewer::Text(TextView::at_offset(fs, &path, size, top)));
+    } else if let Some(Viewer::Disasm(view)) = &model.viewer {
+        let (path, size, top) = (view.path.clone(), view.size, view.switch_offset());
+        model.viewer = Some(Viewer::Text(TextView::at_offset(fs, &path, size, top)));
     }
 }
 
-/// A submitted viewer goto: a byte offset (decimal or `0x`-hex) for the
-/// hex dump, a 1-based line number for the text pager (a background scan
-/// counts its way there).
-fn submit_viewer_goto(model: &mut Model, fs: &mut dyn Fs, hex: bool, typed: &str) {
-    if hex {
-        let Some(offset) = parse_offset(typed) else {
-            model.message = Some(String::from("goto: not an offset (decimal or 0x-hex)"));
-            return;
-        };
-        let result = match &mut model.viewer {
-            Some(Viewer::Hex(view)) => view.go_to(fs, offset),
-            _ => Ok(()),
-        };
-        if let Err(errno) = result {
-            let path = viewer_path(model);
-            model.report(&path, errno);
-        }
-        return;
-    }
-    let Ok(target) = typed.parse::<u64>() else {
-        model.message = Some(String::from("goto: not a line number"));
-        return;
+/// The `d` key: show the same file in the disassembly viewer — the
+/// container summary for a recognised executable/manifest, or (after an
+/// ISA choice) a raw fragment starting at the current place.
+fn viewer_switch_disasm(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode) {
+    let (path, size, offset) = match &model.viewer {
+        Some(Viewer::Text(view)) => (view.path.clone(), view.size, view.top.offset),
+        Some(Viewer::Hex(view)) => (view.path.clone(), view.size, view.top),
+        Some(Viewer::Disasm(_)) | None => return,
     };
-    if target == 0 {
-        model.message = Some(String::from("goto: lines count from 1"));
-        return;
-    }
-    if let Some(Viewer::Text(view)) = &mut model.viewer {
-        view.start_goto(target);
+    force_disasm(model, fs, decode, &path, size, offset);
+}
+
+/// A submitted viewer goto: a byte offset (decimal or `0x`-hex) for the
+/// hex dump, a 1-based line number for the text pager, or an address for
+/// the disassembly code pane (both scans run in the background).
+fn submit_viewer_goto(model: &mut Model, fs: &mut dyn Fs, kind: ViewerKind, typed: &str) {
+    match kind {
+        ViewerKind::Hex => {
+            let Some(offset) = parse_offset(typed) else {
+                model.message = Some(String::from("goto: not an offset (decimal or 0x-hex)"));
+                return;
+            };
+            let result = match &mut model.viewer {
+                Some(Viewer::Hex(view)) => view.go_to(fs, offset),
+                _ => Ok(()),
+            };
+            if let Err(errno) = result {
+                let path = viewer_path(model);
+                model.report(&path, errno);
+            }
+        }
+        ViewerKind::Text => {
+            let Ok(target) = typed.parse::<u64>() else {
+                model.message = Some(String::from("goto: not a line number"));
+                return;
+            };
+            if target == 0 {
+                model.message = Some(String::from("goto: lines count from 1"));
+                return;
+            }
+            if let Some(Viewer::Text(view)) = &mut model.viewer {
+                view.start_goto(target);
+            }
+        }
+        ViewerKind::Disasm => {
+            let Some(target) = parse_offset(typed) else {
+                model.message = Some(String::from("goto: not an address (decimal or 0x-hex)"));
+                return;
+            };
+            if let Some(Viewer::Disasm(view)) = &mut model.viewer {
+                if !view.start_goto(target) {
+                    model.message = Some(String::from("goto: no code region holds that address"));
+                }
+            }
+        }
     }
 }
 
 /// A submitted viewer search: literal text for the text pager; text or a
-/// `0x…` byte sequence for the hex dump. The scan runs in the background;
-/// Esc stops it.
-fn submit_viewer_search(model: &mut Model, fs: &mut dyn Fs, hex: bool, typed: &str) {
-    let started = match &mut model.viewer {
-        Some(Viewer::Text(view)) if !hex => view.start_search(fs, typed),
-        Some(Viewer::Hex(view)) if hex => view.start_search(typed),
+/// `0x…` byte sequence for the hex dump; mnemonic/operand text for the
+/// disassembly code pane. The scan runs in the background; Esc stops it.
+fn submit_viewer_search(model: &mut Model, fs: &mut dyn Fs, kind: ViewerKind, typed: &str) {
+    let started = match (&mut model.viewer, kind) {
+        (Some(Viewer::Text(view)), ViewerKind::Text) => view.start_search(fs, typed),
+        (Some(Viewer::Hex(view)), ViewerKind::Hex) => view.start_search(typed),
+        (Some(Viewer::Disasm(view)), ViewerKind::Disasm) => view.start_search(typed),
         _ => return,
     };
     if !started {
-        model.message = Some(if hex {
-            String::from("search: text, or 0x followed by hex byte pairs")
-        } else {
-            String::from("empty text — nothing searched")
+        model.message = Some(match kind {
+            ViewerKind::Hex => String::from("search: text, or 0x followed by hex byte pairs"),
+            ViewerKind::Text | ViewerKind::Disasm => String::from("empty text — nothing searched"),
         });
     }
 }
 
 /// Advance the viewer's live scan by one bounded tick, surfacing its
 /// outcome on the message line.
-pub fn viewer_tick(model: &mut Model, fs: &mut dyn Fs) {
+pub fn viewer_tick(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode) {
     let outcome = match &mut model.viewer {
         Some(Viewer::Text(view)) => view.tick(fs, SCAN_BYTES_PER_TICK),
         Some(Viewer::Hex(view)) => view.tick(fs, SCAN_BYTES_PER_TICK),
+        Some(Viewer::Disasm(view)) => match view.tick(fs, decode) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                model.message = Some(describe(error));
+                return;
+            }
+        },
         None => return,
     };
     match outcome {
@@ -1384,6 +1709,10 @@ pub fn viewer_tick(model: &mut Model, fs: &mut dyn Fs) {
                 Some(Viewer::Hex(view)) => match view.last_hit {
                     Some(hit) => format!("found at 0x{hit:x}"),
                     None => format!("offset 0x{:x}", view.top),
+                },
+                Some(Viewer::Disasm(view)) => match view.last_hit {
+                    Some(hit) => format!("found at {hit:#x}"),
+                    None => format!("address {:#x}", view.place.top),
                 },
                 None => return,
             });
@@ -1400,16 +1729,29 @@ pub fn viewer_tick(model: &mut Model, fs: &mut dyn Fs) {
 }
 
 /// Re-read the open viewer's page for the frame about to render. A
-/// refused read closes the viewer and reports — stale content is never
-/// shown as live.
-pub fn refresh_viewer(model: &mut Model, fs: &mut dyn Fs, rows: usize, cols: usize) {
+/// refused read (or a failed decode) closes the viewer and reports —
+/// stale content is never shown as live.
+pub fn refresh_viewer(
+    model: &mut Model,
+    fs: &mut dyn Fs,
+    decode: &mut dyn Decode,
+    rows: usize,
+    cols: usize,
+) {
     if model.view != View::Viewer {
+        return;
+    }
+    if let Some(Viewer::Disasm(view)) = &mut model.viewer {
+        if let Err(error) = view.refresh(fs, decode, rows) {
+            exit_viewer(model);
+            model.message = Some(describe(error));
+        }
         return;
     }
     let result = match &mut model.viewer {
         Some(Viewer::Text(view)) => view.refresh(fs, rows, cols),
         Some(Viewer::Hex(view)) => view.refresh(fs, rows),
-        None => Ok(()),
+        Some(Viewer::Disasm(_)) | None => Ok(()),
     };
     if let Err(errno) = result {
         let path = viewer_path(model);
@@ -1620,13 +1962,13 @@ fn toggle_expanded(model: &mut Model, fs: &mut dyn Fs) {
 /// Enter on a file-pane row: a directory descends into it (selecting it
 /// in the tree); a regular file opens in the viewer the head sample
 /// picks.
-fn enter_file_row(model: &mut Model, fs: &mut dyn Fs) {
+fn enter_file_row(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode) {
     let Some(entry) = model.visible_files().get(model.file_cursor).copied() else {
         return;
     };
     if !entry.kind.is_dir() {
         let path = join(&model.files_dir, &entry.name);
-        open_viewer(model, fs, &path, entry.size);
+        open_viewer(model, fs, decode, &path, entry.size);
         return;
     }
     let parent = model.files_dir.clone();
