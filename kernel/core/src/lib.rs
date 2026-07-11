@@ -150,7 +150,7 @@ mod reclaim_integration_tests;
 pub use appspawn::{
     app_error_errno, bundle_run_path, AnchorVerifier, AppStore, BundleRunPath, FsBundleStore,
 };
-pub use aspace::{AddressSpaceRegistry, AspaceError};
+pub use aspace::{AddressSpaceRegistry, AspaceError, StackSpan};
 pub use audit::AuditEvent;
 pub use blockwait::{FallbackPark, IrqParkWaiter};
 pub use bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch, MAX_COMMAND_LINE_BYTES};

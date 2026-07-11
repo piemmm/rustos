@@ -273,6 +273,10 @@ impl ProcessSpawn for X86_64ProcessSpawn {
         // through the shared per-spawn derivation (one definition across
         // the ports); an image too large for the user region fails closed.
         let layout = spawn_layout::user_layout(&image, CHILD_USER_BIAS).ok_or(Errno::NoSpace)?;
+        // The span record the admission path stores so the stack-growth
+        // fault path can back pages inside it (one shared derivation
+        // across the ports; a malformed span refuses the spawn closed).
+        let stack_span = spawn_layout::stack_span(&layout).ok_or(Errno::NoSpace)?;
 
         let request = SpawnRequest {
             image: &image,
@@ -411,8 +415,19 @@ impl ProcessSpawn for X86_64ProcessSpawn {
         // The child receives exactly the capability set the caller already
         // derived (its manifest request, intersected at admission) — never
         // the spawning caller's authority.
-        unsafe { ctx.admit_process(caps, frozen, physmap, kernel_stack, pre_resume, live, enter) }
-            .map_err(admit_errno)
+        unsafe {
+            ctx.admit_process(
+                caps,
+                frozen,
+                physmap,
+                stack_span,
+                kernel_stack,
+                pre_resume,
+                live,
+                enter,
+            )
+        }
+        .map_err(admit_errno)
     }
 }
 

@@ -646,6 +646,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         caps: CapabilitySet,
         space: Box<dyn UserAddressSpace + Send + Sync>,
         physmap: Box<dyn PhysMap + Send + Sync>,
+        stack_span: crate::aspace::StackSpan,
         stack: Box<dyn crate::kthread::KernelStack + Send>,
         pre_resume: Box<dyn FnMut(u64) + Send>,
         live: Option<Box<dyn rustos_kernel_mem::LiveUserSpace + Send>>,
@@ -747,9 +748,16 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // discovered console the boot path installed, so `init` writes
         // its banner through `stream_write(STDOUT, …)` over an inherited
         // stream rather than an ambient device.
-        self.aspaces
-            .write()
-            .set_streams(sec_id, DescriptorTable::standard());
+        {
+            let mut aspaces = self.aspaces.write();
+            aspaces.set_streams(sec_id, DescriptorTable::standard());
+            // Record PID 1's reserved user-stack span beside its streams,
+            // under the same write lock, so the stack-growth fault path can
+            // back pages inside it on demand — bounded by its `StackBytes`
+            // limit. The span is seam-derived from the validated spawn
+            // layout, never a caller-supplied value.
+            aspaces.set_stack_span(sec_id, stack_span);
+        }
 
         // Drive PID 1 (and anything it spawns) to completion: each `step`
         // dispatches the next runnable task on this CPU. The first step
@@ -1953,12 +1961,18 @@ mod tests {
             let enter: Box<dyn FnMut() + Send> = Box::new(|| {});
             let stack: Box<dyn crate::kthread::KernelStack + Send> =
                 Box::new(crate::kthread::BoxStack::new());
+            let stack_span = crate::aspace::StackSpan::new(0x2000, 0x2000, 0x3000)
+                .expect("the host test span is page-aligned and well-formed");
             // SAFETY: the host test never dispatches the admitted task, so
             // the inert `enter`/`pre_resume` closures never run and the
             // frozen host space need only answer `translate`; it faithfully
             // describes the one page mapped above.
-            unsafe { ctx.admit_process(caps, frozen, physmap, stack, pre_resume, None, enter) }
-                .map_err(|_| Errno::NoSpace)
+            unsafe {
+                ctx.admit_process(
+                    caps, frozen, physmap, stack_span, stack, pre_resume, None, enter,
+                )
+            }
+            .map_err(|_| Errno::NoSpace)
         }
     }
 

@@ -136,11 +136,14 @@ pub enum AuditEvent {
     /// (`KernelSyscallHandlers::record_fault_exit`, a crate-private
     /// method) so a crashing program is visible on the
     /// system log, not only via its `wait` status. The record carries the
-    /// task id and a coarse `fault_class` (`file_region` — a miss inside a
-    /// live file mapping the resolver refused, e.g. past end-of-file;
-    /// `wild` — an address outside every mapping), and deliberately **not**
-    /// the raw faulting address (diagnostics policy: no address-space
-    /// layout leakage onto the log).
+    /// task id and a coarse `fault_class` (`stack_limit` — stack growth
+    /// refused because the task's `StackBytes` soft bound is exhausted;
+    /// `stack` — growth room the resolver could not back, e.g. frame
+    /// exhaustion; `file_region` — a miss inside a live file mapping the
+    /// resolver refused, e.g. past end-of-file; `wild` — an address
+    /// outside every mapping, including the stack guard page below the
+    /// reserved span), and deliberately **not** the raw faulting address
+    /// (diagnostics policy: no address-space layout leakage onto the log).
     TaskFaultKilled,
     /// A task ended itself with a **nonzero** exit status.
     ///

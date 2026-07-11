@@ -615,6 +615,7 @@ mod tests {
             _caps: CapabilitySet,
             _space: Box<dyn UserAddressSpace + Send + Sync>,
             _physmap: Box<dyn PhysMap + Send + Sync>,
+            _stack_span: rustos_kernel_core::StackSpan,
             _stack: Box<dyn KernelStack + Send>,
             _pre_resume: Box<dyn FnMut(u64) + Send>,
             _live: Option<Box<dyn LiveUserSpace + Send>>,

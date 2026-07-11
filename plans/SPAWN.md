@@ -1165,17 +1165,29 @@ enforced nowhere yet). Session-to-session working notes:
   so production behaviour is byte-identical until the growth path exists;
   the six port `init_spawn`/`spawn_producer` files consume the committed
   constant. `memory.md` §7c describes the reserve/commit shape.
-- **SP11b — kernel/core growth path (host-proven) `[ ]`.** The per-task
-  stack-span record + accessors in `AddressSpaceRegistry`; the span
-  threaded through `admit_process`/`admit_init` (all ports + test doubles
-  in the same change); `resolve_stack_fault` beside `resolve_file_fault`
-  with the reordered write gate; `StackBytes` soft-bound enforcement +
-  committed-bytes usage accounting (surfaced through `sysinfo limits`
-  like `mapped_anon_bytes`); the `stack_limit` fault class on the audited
-  kill. Unit tests: growth, write-fault growth, resident race, past-limit
-  refusal, below-span refusal, frame exhaustion, withdraw clears the
-  record, usage accounting. `resource-limits.md`'s "not yet wired" list
-  shrinks accordingly.
+- **SP11b — kernel/core growth path (host-proven) `[x]`.** **Landed.**
+  `StackSpan` (fail-closed constructor: page-aligned bounds, committed ≥
+  reserve, non-empty committed top) lives in `AddressSpaceRegistry` with
+  the per-process lifecycle (recorded at admission, withdrawn at exit);
+  the span threads through `SpawnCtx::admit_process` /
+  `InitSpawnCtx::admit_init` (in-place signature evolution, every port +
+  double updated together) from the one shared derivation
+  `spawn_layout::stack_span`. `resolve_stack_fault` sits beside
+  `resolve_file_fault` and is offered first in
+  `KernelDispatchHook::resolve_user_fault` — for reads *and* writes, so
+  the write-fatal file rule can never kill a growth fault — backing one
+  zeroed `RW` page per fault through the installed `MemMap` producer
+  (`MapFlags::FIXED`, `Errno::BadAddress` folded as the benign resident
+  race), lowering the committed base, and re-freezing the snapshot; the
+  `copy_in_user` retry offers stack growth too. `StackBytes` soft bound
+  enforced before any page maps; committed bytes are the live usage the
+  `TaskLimits` introspect report carries (`AddressSpaceBytes` usage now
+  reports `mapped_aspace_bytes` there too — a noticed drift fixed in the
+  same change). The audited kill classifies `stack_limit` / `stack`
+  beside `file_region` / `wild`. Host tests cover span shapes, record
+  lifecycle, growth, bounds, the limit gate, the race/OOM folds, and the
+  fault classes; `resource-limits.md`'s "not yet wired" list is down to
+  `OpenStreams` / `Processes`.
 - **SP11c — policy flip + `-M virt` verticals `[ ]`.** Widen
   `USER_STACK_RESERVE_PAGES` (proposal 2048 pages / 8 MiB; verify the
   largest `Run` image still fits below the device window) and shrink

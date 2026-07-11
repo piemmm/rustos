@@ -40,6 +40,7 @@ use rustos_kernel_mem::{
 use rustos_log::{Event, Field, Level, Sink};
 use rustos_util::fmt::format_hex_u64;
 
+use crate::aspace::StackSpan;
 use crate::audit::AuditEvent;
 
 /// The architecture-specific seam that spawns PID 1 (`init`) into user
@@ -173,12 +174,17 @@ pub trait InitSpawnCtx {
     /// and valid for as long as the task lives. When `live` is [`Some`] it
     /// must wrap the same arch address space `space` was frozen from, so the
     /// live mutations and the frozen copy view stay consistent.
+    /// `stack_span` must describe the user-stack span the seam's layout
+    /// actually placed in `space` — the fault path backs growth pages
+    /// inside it, so a span naming the wrong region would let a fault map
+    /// memory the layout never reserved.
     #[allow(clippy::too_many_arguments)]
     unsafe fn admit_init(
         &self,
         caps: CapabilitySet,
         space: Box<dyn UserAddressSpace + Send + Sync>,
         physmap: Box<dyn PhysMap + Send + Sync>,
+        stack_span: StackSpan,
         stack: Box<dyn crate::kthread::KernelStack + Send>,
         pre_resume: Box<dyn FnMut(u64) + Send>,
         live: Option<Box<dyn LiveUserSpace + Send>>,
@@ -793,13 +799,17 @@ pub trait SpawnCtx {
     /// `stack` must be a region exclusive to the child that stays mapped
     /// (its guard page aside) and valid for as long as the task lives.
     /// When `live` is [`Some`] it must wrap the same arch address space
-    /// `space` was frozen from.
+    /// `space` was frozen from. `stack_span` must describe the user-stack
+    /// span the producer's layout actually placed in `space` — the fault
+    /// path backs growth pages inside it, so a span naming the wrong
+    /// region would let a fault map memory the layout never reserved.
     #[allow(clippy::too_many_arguments)]
     unsafe fn admit_process(
         &self,
         caps: CapabilitySet,
         space: Box<dyn UserAddressSpace + Send + Sync>,
         physmap: Box<dyn PhysMap + Send + Sync>,
+        stack_span: StackSpan,
         stack: Box<dyn crate::kthread::KernelStack + Send>,
         pre_resume: Box<dyn FnMut(u64) + Send>,
         live: Option<Box<dyn LiveUserSpace + Send>>,
@@ -1158,6 +1168,7 @@ mod tests {
             _caps: CapabilitySet,
             _space: Box<dyn UserAddressSpace + Send + Sync>,
             _physmap: Box<dyn PhysMap + Send + Sync>,
+            _stack_span: StackSpan,
             _stack: Box<dyn crate::kthread::KernelStack + Send>,
             _pre_resume: Box<dyn FnMut(u64) + Send>,
             _live: Option<Box<dyn LiveUserSpace + Send>>,
@@ -1219,6 +1230,7 @@ mod tests {
             _caps: CapabilitySet,
             _space: Box<dyn UserAddressSpace + Send + Sync>,
             _physmap: Box<dyn PhysMap + Send + Sync>,
+            _stack_span: StackSpan,
             _stack: Box<dyn crate::kthread::KernelStack + Send>,
             _pre_resume: Box<dyn FnMut(u64) + Send>,
             _live: Option<Box<dyn LiveUserSpace + Send>>,

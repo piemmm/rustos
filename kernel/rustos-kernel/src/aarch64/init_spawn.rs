@@ -189,6 +189,12 @@ impl InitSpawn for Aarch64InitSpawn {
         let Some(layout) = spawn_layout::user_layout(&image, INIT_USER_BIAS) else {
             return;
         };
+        // The span record the admission path stores so the stack-growth
+        // fault path can back pages inside it (one shared derivation
+        // across the ports; a malformed span fails the boot closed).
+        let Some(stack_span) = spawn_layout::stack_span(&layout) else {
+            return;
+        };
 
         let request = SpawnRequest {
             image: &image,
@@ -343,6 +349,7 @@ impl InitSpawn for Aarch64InitSpawn {
                 spawn_layout::init_caps(),
                 frozen,
                 physmap,
+                stack_span,
                 kernel_stack,
                 pre_resume,
                 live,

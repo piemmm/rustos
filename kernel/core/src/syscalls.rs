@@ -1113,18 +1113,20 @@ where
     }
 
     /// Copy `dst.len()` bytes in from the caller's user buffer at `uaddr`,
-    /// resolving demand-paged file-mapping misses on the way — the one
-    /// fault-aware `copy_in` every syscall handler that stages a user
-    /// buffer uses.
+    /// resolving demand-paged file-mapping and demand-grown stack misses
+    /// on the way — the one fault-aware `copy_in` every syscall handler
+    /// that stages a user buffer uses.
     ///
     /// A syscall buffer inside an untouched `file_map` region has no
     /// resident page yet, so the plain copy walk reports the miss as
     /// [`UaccessError::NotMapped`] with the failing page's base. This
-    /// helper offers exactly that page to [`Self::resolve_file_fault`] —
-    /// the same region table and the same mapping-time identity the
-    /// hardware fault path uses — and retries the copy against the
-    /// re-frozen snapshot, so `write(fd, mapped, n)` works without
-    /// pre-touching the mapping. The registry read guard is released
+    /// helper offers exactly that page to [`Self::resolve_file_fault`],
+    /// then [`Self::resolve_stack_fault`] — the same region/span tables
+    /// and identities the hardware fault path uses — and retries the copy
+    /// against the re-frozen snapshot, so `write(fd, mapped, n)` works
+    /// without pre-touching the mapping and a syscall buffer on a
+    /// not-yet-grown stack page is backed exactly as a hardware fault
+    /// would back it. The registry read guard is released
     /// before each resolution (the resolver re-freezes through the write
     /// lock), and the retry budget is one resolution per touched page
     /// plus the unaligned head, so a hostile or shrinking mapping can
@@ -1152,7 +1154,9 @@ where
                 Some(Ok(())) => return Ok(()),
                 Some(Err(UaccessError::NotMapped { va })) if budget > 0 => {
                     budget -= 1;
-                    if !self.resolve_file_fault(caller.task_id, va) {
+                    if !self.resolve_file_fault(caller.task_id, va)
+                        && !self.resolve_stack_fault(caller.task_id, va)
+                    {
                         return Err(Errno::BadAddress);
                     }
                 }
@@ -1347,20 +1351,32 @@ where
     /// ([`AuditEvent::TaskFaultKilled`]) so a crashing program is visible
     /// on the system log, not only via its `wait` status. The record
     /// names the task and a coarse class of the faulting address —
-    /// `file_region` (a miss inside a live file mapping the resolver
-    /// refused, e.g. past end-of-file) or `wild` (outside every mapping)
-    /// — never the raw address (diagnostics policy: no address-space
-    /// layout leakage onto the log).
+    /// `stack_limit` (stack growth refused because the task's `StackBytes`
+    /// soft bound is exhausted), `stack` (growth room the resolver could
+    /// not back, e.g. frame exhaustion), `file_region` (a miss inside a
+    /// live file mapping the resolver refused, e.g. past end-of-file) or
+    /// `wild` (outside every mapping, including the stack guard page below
+    /// the reserved span) — never the raw address (diagnostics policy: no
+    /// address-space layout leakage onto the log).
     pub(crate) fn record_fault_exit(&self, task: SecTaskId, fault_va: u64) {
-        let fault_class = if self
-            .aspaces
-            .read()
-            .file_region_covering(task, fault_va)
-            .is_some()
-        {
-            "file_region"
-        } else {
-            "wild"
+        let fault_class = {
+            let aspaces = self.aspaces.read();
+            let growth_span = aspaces
+                .stack_span(task)
+                .filter(|span| span.in_growth_room(fault_va));
+            if let Some(span) = growth_span {
+                let page_va = fault_va & !(PAGE_SIZE as u64 - 1);
+                let soft = aspaces.limits(task).get(LimitKind::StackBytes).soft;
+                if span.top() - page_va > soft {
+                    "stack_limit"
+                } else {
+                    "stack"
+                }
+            } else if aspaces.file_region_covering(task, fault_va).is_some() {
+                "file_region"
+            } else {
+                "wild"
+            }
         };
         crate::audit::emit(
             self.audit,
@@ -1435,6 +1451,65 @@ where
                 Err(Errno::BadAddress) => true,
                 Err(_) => false,
             },
+        }
+    }
+
+    /// Resolve a user-mode fault at `fault_va` as demand-grown stack for
+    /// `task`, returning `true` when the faulting page is now resident and
+    /// the access should simply be retried.
+    ///
+    /// The growth half of the demand-grown user stack (`plans/SPAWN.md`
+    /// SP11): a fault inside the task's recorded stack span, below its
+    /// committed base, backs the single faulting page with a fresh zeroed
+    /// `RW` page through the installed anonymous-memory producer — the
+    /// same producer `mem_map` uses, mapping into the faulting task's own
+    /// live address space. Offered for reads and writes alike (a stack
+    /// push is a write). Growth is bounded by the task's effective
+    /// `StackBytes` soft bound, checked *before* the page is mapped: the
+    /// committed extent the faulting page would reach (span top minus the
+    /// faulting page base, counting any holes above it conservatively as
+    /// committed) must fit inside the bound, so a lowered `ulimit` stack
+    /// bound stops growth exactly where it says (fail closed). Everything
+    /// else is refused: a fault outside the span or at/above the committed
+    /// base (the guard page below the span stays fatal), a past-limit
+    /// fault, and frame exhaustion all report `false`, and the arch port
+    /// terminates the task. A page that became resident since the fault (a
+    /// concurrent resolution) is a benign race and reports `true`.
+    ///
+    /// `task` is the kernel-trusted current task of the faulting CPU,
+    /// never a caller-supplied value.
+    #[must_use]
+    pub fn resolve_stack_fault(&self, task: SecTaskId, fault_va: u64) -> bool {
+        let (span, soft) = {
+            let aspaces = self.aspaces.read();
+            let Some(span) = aspaces.stack_span(task) else {
+                return false;
+            };
+            (span, aspaces.limits(task).get(LimitKind::StackBytes).soft)
+        };
+        if !span.in_growth_room(fault_va) {
+            return false;
+        }
+        let page_va = fault_va & !(PAGE_SIZE as u64 - 1);
+        // Enforce the bound before touching any state. Cannot overflow:
+        // `page_va < span.top()` inside the growth room.
+        if span.top() - page_va > soft {
+            return false;
+        }
+        match self.mem_map.map(PAGE_SIZE, MapFlags::FIXED, page_va) {
+            Ok(_) => {
+                self.aspaces.write().commit_stack_page(task, page_va);
+                // The fault grew the live space; re-freeze the registry
+                // snapshot so the copy path can see the new page.
+                self.refreeze_task_aspace(task);
+                true
+            }
+            // Already resident: another resolution won the race; the
+            // retried access succeeds as-is.
+            Err(Errno::BadAddress) => true,
+            // Frame exhaustion or an uninstalled producer: fatal to the
+            // task and only the task — deterministic OOM, never a panic.
+            Err(_) => false,
         }
     }
 
@@ -6425,6 +6500,7 @@ where
         caps: CapabilitySet,
         space: Box<dyn UserAddressSpace + Send + Sync>,
         physmap: Box<dyn PhysMap + Send + Sync>,
+        stack_span: crate::aspace::StackSpan,
         stack: Box<dyn crate::kthread::KernelStack + Send>,
         pre_resume: Box<dyn FnMut(u64) + Send>,
         live: Option<Box<dyn rustos_kernel_mem::LiveUserSpace + Send>>,
@@ -6583,6 +6659,13 @@ where
         {
             let mut aspaces = self.aspaces.write();
             aspaces.set_streams(sec_id, self.streams);
+            // Record the child's reserved user-stack span beside its
+            // streams, under the same write lock, so the stack-growth
+            // fault path can back pages inside it on demand — bounded by
+            // the `StackBytes` limit inherited below. The span is
+            // producer-derived from the validated spawn layout, never a
+            // caller-supplied value.
+            aspaces.set_stack_span(sec_id, stack_span);
             for (fd, file) in &self.wired {
                 // `fd` is a standard slot by construction (the wire loop
                 // indexes the fixed table); a refusal here would signal a
@@ -7217,10 +7300,18 @@ where
             return UserFaultOutcome::Unhandled;
         };
         let task = SecTaskId(sched_task_id);
-        // A write is never resolved: file mappings are read-only, so
-        // mapping the page would retry the store forever against a
-        // resident page. It is fatal to the task below — the one shared
-        // policy every port's write gate feeds.
+        // Stack growth is offered first, for reads and writes alike (a
+        // stack push is a write), so the write-fatal file rule below can
+        // never kill a legitimate growth fault. The resolver itself bounds
+        // growth by the recorded span and the task's `StackBytes` soft
+        // limit (fail closed).
+        if self.handlers.resolve_stack_fault(task, fault_va) {
+            return UserFaultOutcome::Resolved;
+        }
+        // A write is never resolved as file backing: file mappings are
+        // read-only, so mapping the page would retry the store forever
+        // against a resident page. It is fatal to the task below — the one
+        // shared policy every port's write gate feeds.
         if !write && self.handlers.resolve_file_fault(task, fault_va) {
             return UserFaultOutcome::Resolved;
         }
@@ -10385,6 +10476,8 @@ mod tests {
             // (`plans/PI.md` G3b-2), unreachable from a host test.
             let stack: Box<dyn crate::kthread::KernelStack + Send> =
                 Box::new(crate::kthread::BoxStack::new());
+            let stack_span = crate::aspace::StackSpan::new(0x2000, 0x2000, 0x3000)
+                .expect("the host test span is page-aligned and well-formed");
             // SAFETY: the host test never dispatches the admitted task, so
             // the (inert) `enter`/`pre_resume` closures never run and the
             // frozen host space need only answer `translate`; it faithfully
@@ -10392,7 +10485,9 @@ mod tests {
             // live space (`None`), so the child's `mem_map`/`mmio_map` would
             // fail closed — unexercised here.
             unsafe {
-                ctx.admit_process(child_caps, frozen, physmap, stack, pre_resume, None, enter)
+                ctx.admit_process(
+                    child_caps, frozen, physmap, stack_span, stack, pre_resume, None, enter,
+                )
             }
             .map_err(|_| Errno::NoSpace)
         }
@@ -15452,6 +15547,222 @@ mod tests {
             .fields
             .contains(&(String::from("fault_class"), String::from("wild"))));
         // Diagnostics policy: the record never carries the raw address.
+        for kill in &kills {
+            assert_eq!(kill.fields.len(), 2, "task + fault_class only");
+        }
+    }
+
+    /// Lowest page of the test task's reserved stack span.
+    const STACK_RESERVE_BASE: u64 = 0x4_0000;
+    /// Lowest committed page at "spawn" — pages below it are growth room.
+    const STACK_COMMITTED_BASE: u64 = 0x8_0000;
+    /// One past the highest stack byte.
+    const STACK_TOP: u64 = 0xA_0000;
+
+    /// A `MemMap` producer double for the stack-growth resolver: records
+    /// each map request and returns a configurable result, so the growth,
+    /// race, and exhaustion folds are exercised without a page table.
+    struct StackGrowMemMap {
+        maps: rustos_sync::SpinLock<Vec<(usize, u32, u64)>>,
+        map_result: rustos_sync::SpinLock<Result<(), Errno>>,
+    }
+    impl StackGrowMemMap {
+        fn new() -> Self {
+            Self {
+                maps: rustos_sync::SpinLock::new(Vec::new()),
+                map_result: rustos_sync::SpinLock::new(Ok(())),
+            }
+        }
+    }
+    impl crate::memmap::MemMap for StackGrowMemMap {
+        fn map(
+            &self,
+            len: usize,
+            flags: rustos_abi::MapFlags,
+            addr_hint: u64,
+        ) -> Result<u64, Errno> {
+            self.maps.lock().push((len, flags.bits(), addr_hint));
+            self.map_result.lock().map(|()| addr_hint)
+        }
+        fn unmap(&self, _base: u64, _len: usize) -> Result<(), Errno> {
+            Err(Errno::NotImplemented)
+        }
+    }
+
+    /// Build the shared stack-growth fixture: task 2 with a recorded
+    /// `[STACK_RESERVE_BASE, STACK_TOP)` span whose committed bottom is
+    /// `STACK_COMMITTED_BASE`, over a recording anonymous-memory producer.
+    fn stack_fault_fixture() -> (
+        &'static StackGrowMemMap,
+        &'static RwLock<AddressSpaceRegistry>,
+        KernelSyscallHandlers<'static, TestArch>,
+        &'static TestSink,
+    ) {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch: &'static Arc<TestArch> = Box::leak(Box::new(Arc::new(TestArch::with_cpus(1))));
+        let sched = Box::leak(Box::new(make_sched(arch.clone())));
+        let table = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let ipc = Box::leak(Box::new(RwLock::new(PortRegistry::new())));
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let rng = Box::leak(Box::new(unseeded_rng()));
+        let irq = Box::leak(Box::new(IrqTable::new(31)));
+        let ctl = Box::leak(Box::new(UnsupportedController));
+        let span =
+            crate::aspace::StackSpan::new(STACK_RESERVE_BASE, STACK_COMMITTED_BASE, STACK_TOP)
+                .expect("the fixture span is page-aligned and well-formed");
+        aspaces.write().set_stack_span(SecTaskId(2), span);
+        let producer: &'static StackGrowMemMap = Box::leak(Box::new(StackGrowMemMap::new()));
+        let h = KernelSyscallHandlers::new(sched, table, arch, sink, irq, ctl, ipc, aspaces, rng)
+            .with_mem_map(producer);
+        (producer, aspaces, h, sink)
+    }
+
+    /// A fault in the growth room backs exactly the faulting page — one
+    /// zeroed `RW` page, `FIXED` at the page base, through the same
+    /// producer `mem_map` uses — and lowers the recorded committed base so
+    /// the usage accounting tracks the low-water mark.
+    #[test]
+    fn resolve_stack_fault_backs_the_faulting_page_and_lowers_the_committed_base() {
+        let (producer, aspaces, h, _sink) = stack_fault_fixture();
+        let fault = STACK_COMMITTED_BASE - 5;
+        let page_va = STACK_COMMITTED_BASE - PAGE_SIZE as u64;
+        assert!(h.resolve_stack_fault(SecTaskId(2), fault));
+        assert_eq!(
+            *producer.maps.lock(),
+            std::vec![(PAGE_SIZE, rustos_abi::MapFlags::FIXED.bits(), page_va)]
+        );
+        let span = aspaces.read().stack_span(SecTaskId(2)).expect("recorded");
+        assert_eq!(span.committed_base(), page_va);
+        assert_eq!(
+            aspaces.read().stack_committed_bytes(SecTaskId(2)),
+            STACK_TOP - page_va
+        );
+        // A deeper fault keeps growing; a shallower re-fault (the resident
+        // race through the registry) never raises the base back up.
+        let deep = STACK_RESERVE_BASE + PAGE_SIZE as u64;
+        assert!(h.resolve_stack_fault(SecTaskId(2), deep));
+        assert_eq!(
+            aspaces
+                .read()
+                .stack_span(SecTaskId(2))
+                .expect("recorded")
+                .committed_base(),
+            deep
+        );
+    }
+
+    /// Growth is confined to the recorded span below the committed base:
+    /// the guard page below the span, an address at/above the committed
+    /// base, and a task with no recorded span are all refused without the
+    /// producer ever being touched (fail closed — the guard page stays
+    /// fatal).
+    #[test]
+    fn resolve_stack_fault_refuses_everything_outside_the_growth_room() {
+        let (producer, _aspaces, h, _sink) = stack_fault_fixture();
+        // The unmapped guard page immediately below the reserved span.
+        assert!(!h.resolve_stack_fault(SecTaskId(2), STACK_RESERVE_BASE - 1));
+        // At and above the committed base (already-mapped territory).
+        assert!(!h.resolve_stack_fault(SecTaskId(2), STACK_COMMITTED_BASE));
+        assert!(!h.resolve_stack_fault(SecTaskId(2), STACK_TOP - 1));
+        // A task with no recorded span has no growable stack.
+        assert!(!h.resolve_stack_fault(SecTaskId(3), STACK_COMMITTED_BASE - 5));
+        assert!(producer.maps.lock().is_empty());
+    }
+
+    /// The `StackBytes` soft bound is enforced before any page is mapped:
+    /// a fault whose committed extent would exceed the bound is refused
+    /// (the producer is never touched), while one exactly at the bound
+    /// grows — so a lowered `ulimit` stack bound stops growth exactly
+    /// where it says.
+    #[test]
+    fn resolve_stack_fault_enforces_the_stack_bytes_soft_bound() {
+        let (producer, aspaces, h, _sink) = stack_fault_fixture();
+        // Allow exactly one page of growth below the committed region.
+        let soft = STACK_TOP - STACK_COMMITTED_BASE + PAGE_SIZE as u64;
+        aspaces.write().set_limit(
+            SecTaskId(2),
+            LimitKind::StackBytes,
+            ResourceLimit::new(soft, u64::MAX).expect("well-formed"),
+        );
+        // Two pages below the committed base: past the bound, refused.
+        let too_deep = STACK_COMMITTED_BASE - 2 * PAGE_SIZE as u64;
+        assert!(!h.resolve_stack_fault(SecTaskId(2), too_deep));
+        assert!(producer.maps.lock().is_empty());
+        // One page below: exactly at the bound, admitted.
+        let allowed = STACK_COMMITTED_BASE - PAGE_SIZE as u64;
+        assert!(h.resolve_stack_fault(SecTaskId(2), allowed));
+        assert_eq!(producer.maps.lock().len(), 1);
+        assert_eq!(aspaces.read().stack_committed_bytes(SecTaskId(2)), soft);
+    }
+
+    /// A page that became resident since the fault (a concurrent
+    /// resolution) is a benign race reported as resolved — without moving
+    /// the committed base — while frame exhaustion refuses the fault
+    /// (deterministic OOM, never a panic).
+    #[test]
+    fn resolve_stack_fault_folds_the_resident_race_and_fails_closed_on_oom() {
+        let (producer, aspaces, h, _sink) = stack_fault_fixture();
+        let fault = STACK_COMMITTED_BASE - PAGE_SIZE as u64;
+        *producer.map_result.lock() = Err(Errno::BadAddress);
+        assert!(h.resolve_stack_fault(SecTaskId(2), fault));
+        assert_eq!(
+            aspaces
+                .read()
+                .stack_span(SecTaskId(2))
+                .expect("recorded")
+                .committed_base(),
+            STACK_COMMITTED_BASE,
+            "a race resolution commits nothing it did not map"
+        );
+        *producer.map_result.lock() = Err(Errno::OutOfMemory);
+        assert!(!h.resolve_stack_fault(SecTaskId(2), fault));
+    }
+
+    /// A fault-kill inside the stack span names the stack classes: a
+    /// growth fault past the `StackBytes` bound is `stack_limit`, an
+    /// unresolvable in-span growth fault is `stack`, and the guard page
+    /// below the reserved span stays `wild` — never the raw address.
+    #[test]
+    fn record_fault_exit_names_the_stack_fault_classes() {
+        let (_producer, aspaces, h, sink) = stack_fault_fixture();
+        // One task per kill: the fault-kill reclaims the task's registry
+        // state (span and limits included), so each classification needs
+        // its own live record.
+        let span =
+            crate::aspace::StackSpan::new(STACK_RESERVE_BASE, STACK_COMMITTED_BASE, STACK_TOP)
+                .expect("well-formed");
+        aspaces.write().set_stack_span(SecTaskId(3), span);
+        aspaces.write().set_limit(
+            SecTaskId(3),
+            LimitKind::StackBytes,
+            ResourceLimit::new(STACK_TOP - STACK_COMMITTED_BASE, u64::MAX).expect("well-formed"),
+        );
+        aspaces.write().set_stack_span(SecTaskId(4), span);
+        sink.clear();
+        // Unlimited bound (task 2): an in-span kill is an unresolvable
+        // growth fault.
+        h.record_fault_exit(SecTaskId(2), STACK_COMMITTED_BASE - PAGE_SIZE as u64);
+        // Tightened bound (task 3): the same depth is past the limit.
+        h.record_fault_exit(SecTaskId(3), STACK_COMMITTED_BASE - PAGE_SIZE as u64);
+        // The guard page below the span is outside every mapping (task 4).
+        h.record_fault_exit(SecTaskId(4), STACK_RESERVE_BASE - 1);
+        let kills: Vec<_> = sink
+            .snapshot()
+            .into_iter()
+            .filter(|e| e.id == AuditEvent::TaskFaultKilled.id())
+            .collect();
+        assert_eq!(kills.len(), 3);
+        assert!(kills[0]
+            .fields
+            .contains(&(String::from("fault_class"), String::from("stack"))));
+        assert!(kills[1]
+            .fields
+            .contains(&(String::from("fault_class"), String::from("stack_limit"))));
+        assert!(kills[2]
+            .fields
+            .contains(&(String::from("fault_class"), String::from("wild"))));
         for kill in &kills {
             assert_eq!(kill.fields.len(), 2, "task + fault_class only");
         }

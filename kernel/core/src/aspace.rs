@@ -52,7 +52,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use rustos_abi::hwtree::{GrantedResource, HwResource};
 use rustos_abi::{DescriptorTable, Errno, LimitKind, OpenFlags, ResourceLimit, STD_STREAM_COUNT};
 use rustos_caps::CapabilitySet;
-use rustos_kernel_mem::{PhysMap, UserAddressSpace};
+use rustos_kernel_mem::{PhysMap, UserAddressSpace, PAGE_SIZE};
 use rustos_kernel_sec::TaskId;
 
 use crate::pipe::PipeEnd;
@@ -178,6 +178,17 @@ pub struct AddressSpaceRegistry {
     /// (fail closed). Dropped at [`withdraw`](Self::withdraw) so a reused
     /// id never inherits a dead task's mappings.
     file_regions: BTreeMap<TaskId, BTreeMap<u64, FileRegion>>,
+    /// Each live task's reserved user-stack span (the region the spawn
+    /// layout placed and the stack-growth fault path backs on demand).
+    /// Co-located with the address space for the same reason as
+    /// [`Self::limits`]: the span shares the exact per-process lifecycle —
+    /// recorded at admission, dropped when the task exits — and is keyed by
+    /// the same kernel-trusted [`TaskId`]. A task with no entry has no
+    /// growable stack, so a fault below its committed stack resolves to
+    /// `None` and stays fatal (fail closed). Dropped at
+    /// [`withdraw`](Self::withdraw) so a reused id never inherits a dead
+    /// task's span.
+    stack_spans: BTreeMap<TaskId, StackSpan>,
 }
 
 /// One live demand-paged file mapping of a task: the region `file_map`
@@ -206,6 +217,77 @@ pub struct FileRegion {
     pub uid: u32,
     /// The mapping caller's effective capability set at map time.
     pub caps: CapabilitySet,
+}
+
+/// One live task's reserved user-stack span: the structural bound the
+/// stack may ever occupy, and the low-water mark of what is committed.
+///
+/// `reserve_base` is the lowest page of the whole reserved span (the
+/// unmapped guard page sits immediately below it), `committed_base` the
+/// lowest page currently backed by a frame, and `top` one past the
+/// highest stack byte. The pages in `[reserve_base, committed_base)` are
+/// the growth room the stack-growth fault path backs one page at a time,
+/// bounded by the task's settable `LimitKind::StackBytes` soft bound; the
+/// guard page below `reserve_base` never maps, so a true overrun still
+/// faults deterministically.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StackSpan {
+    reserve_base: u64,
+    committed_base: u64,
+    top: u64,
+}
+
+impl StackSpan {
+    /// Build a span from its page-aligned bounds, failing closed with
+    /// `None` on a malformed shape: a misaligned bound, a committed base
+    /// below the reserve base, or an empty committed top
+    /// (`committed_base >= top`). The committed top is never empty by
+    /// construction — the layout derivation refuses a zero commit — so a
+    /// refusal here signals a caller defect, not a policy choice.
+    #[must_use]
+    pub fn new(reserve_base: u64, committed_base: u64, top: u64) -> Option<Self> {
+        let page = PAGE_SIZE as u64;
+        let aligned = reserve_base % page == 0 && committed_base % page == 0 && top % page == 0;
+        (aligned && reserve_base <= committed_base && committed_base < top).then_some(Self {
+            reserve_base,
+            committed_base,
+            top,
+        })
+    }
+
+    /// Page-aligned user virtual address of the lowest page of the whole
+    /// reserved span.
+    #[must_use]
+    pub fn reserve_base(&self) -> u64 {
+        self.reserve_base
+    }
+
+    /// Page-aligned user virtual address of the lowest committed page.
+    #[must_use]
+    pub fn committed_base(&self) -> u64 {
+        self.committed_base
+    }
+
+    /// One past the highest stack byte (the page-aligned span top).
+    #[must_use]
+    pub fn top(&self) -> u64 {
+        self.top
+    }
+
+    /// Bytes of the span currently committed (`top - committed_base`).
+    #[must_use]
+    pub fn committed_bytes(&self) -> u64 {
+        self.top - self.committed_base
+    }
+
+    /// Whether `va` lies in the uncommitted growth room — inside the span,
+    /// below the committed base. Only such a fault is stack growth; the
+    /// guard page below `reserve_base` and everything outside the span
+    /// resolve `false` and stay fatal.
+    #[must_use]
+    pub fn in_growth_room(&self, va: u64) -> bool {
+        va >= self.reserve_base && va < self.committed_base
+    }
 }
 
 /// What a descriptor resolves to: a filesystem path or a typed resource.
@@ -404,6 +486,7 @@ impl AddressSpaceRegistry {
             mapped_aspace_bytes: BTreeMap::new(),
             cwds: BTreeMap::new(),
             file_regions: BTreeMap::new(),
+            stack_spans: BTreeMap::new(),
         }
     }
 
@@ -483,6 +566,7 @@ impl AddressSpaceRegistry {
         let had_anon = self.mapped_aspace_bytes.remove(&task).is_some();
         let had_cwd = self.cwds.remove(&task).is_some();
         let had_file_regions = self.file_regions.remove(&task).is_some();
+        let had_stack_span = self.stack_spans.remove(&task).is_some();
         self.tasks.remove(&task).is_some()
             || had_streams
             || had_limits
@@ -492,6 +576,7 @@ impl AddressSpaceRegistry {
             || had_anon
             || had_cwd
             || had_file_regions
+            || had_stack_span
     }
 
     /// Record that the autoloaded driver `task` was loaded for the discovered
@@ -732,6 +817,59 @@ impl AddressSpaceRegistry {
                 self.mapped_aspace_bytes.remove(&task);
             }
         }
+    }
+
+    /// Record `task`'s reserved user-stack span.
+    ///
+    /// Called by the spawner when it admits a process, recording the span
+    /// the spawn layout placed (already validated by [`StackSpan::new`]).
+    /// Replacing an existing record is permitted, as for
+    /// [`Self::set_streams`]; a task whose span is never recorded has no
+    /// growable stack and every fault below its committed stack stays
+    /// fatal (fail closed). The `task` argument is the kernel-trusted id
+    /// the admission path minted, never a caller-supplied value.
+    pub fn set_stack_span(&mut self, task: TaskId, span: StackSpan) {
+        self.stack_spans.insert(task, span);
+    }
+
+    /// Resolve `task`'s recorded stack span, or `None` when none was
+    /// recorded (fail closed: no span, no growth).
+    ///
+    /// The stack-growth fault path reads this to decide whether a fault is
+    /// growth room. The `task` argument is the kernel-trusted id of the
+    /// faulting CPU's current task.
+    #[must_use]
+    pub fn stack_span(&self, task: TaskId) -> Option<StackSpan> {
+        self.stack_spans.get(&task).copied()
+    }
+
+    /// Lower `task`'s committed stack base to `page_va` after the growth
+    /// path backed that page.
+    ///
+    /// Called *after* the producer mapped the page, so the record only ever
+    /// names frames the task actually holds. Monotonic: a `page_va` at or
+    /// above the current committed base (the benign already-resident race,
+    /// or a hole above the low-water mark) leaves the record unchanged, and
+    /// one below the reserve base is refused — the record can never claim
+    /// pages outside the span (fail closed).
+    pub fn commit_stack_page(&mut self, task: TaskId, page_va: u64) {
+        if let Some(span) = self.stack_spans.get_mut(&task) {
+            if page_va >= span.reserve_base && page_va < span.committed_base {
+                span.committed_base = page_va;
+            }
+        }
+    }
+
+    /// Bytes of `task`'s stack currently committed, or `0` when no span is
+    /// recorded.
+    ///
+    /// The live usage the `LimitKind::StackBytes` report surfaces beside
+    /// the effective bound, mirroring [`Self::mapped_aspace_bytes`].
+    #[must_use]
+    pub fn stack_committed_bytes(&self, task: TaskId) -> u64 {
+        self.stack_spans
+            .get(&task)
+            .map_or(0, StackSpan::committed_bytes)
     }
 
     /// Record `task`'s live demand-paged file mapping `region`, keyed by its
@@ -1620,5 +1758,99 @@ mod tests {
         reg.record_file_region(TaskId(5), file_region(0x10_0000, 0x4000));
         assert!(reg.withdraw(TaskId(5)));
         assert!(reg.file_region_covering(TaskId(5), 0x10_0000).is_none());
+    }
+
+    // --- reserved user-stack spans (demand-grown stack) -------------------
+
+    fn stack_span() -> StackSpan {
+        StackSpan::new(0x4000, 0x8000, 0xA000).expect("well-formed")
+    }
+
+    #[test]
+    fn stack_span_new_fails_closed_on_a_malformed_shape() {
+        // Misaligned bounds.
+        assert!(StackSpan::new(0x4001, 0x8000, 0xA000).is_none());
+        assert!(StackSpan::new(0x4000, 0x8010, 0xA000).is_none());
+        assert!(StackSpan::new(0x4000, 0x8000, 0xA00F).is_none());
+        // A committed base below the reserve base.
+        assert!(StackSpan::new(0x8000, 0x4000, 0xA000).is_none());
+        // An empty committed top.
+        assert!(StackSpan::new(0x4000, 0xA000, 0xA000).is_none());
+        // A fully committed span (reserve == committed) is legal.
+        assert!(StackSpan::new(0x4000, 0x4000, 0xA000).is_some());
+    }
+
+    #[test]
+    fn stack_span_reports_growth_room_and_committed_bytes() {
+        let span = stack_span();
+        // The growth room is `[reserve_base, committed_base)` exactly.
+        assert!(span.in_growth_room(0x4000));
+        assert!(span.in_growth_room(0x7fff));
+        assert!(!span.in_growth_room(0x3fff));
+        assert!(!span.in_growth_room(0x8000));
+        assert!(!span.in_growth_room(0x9fff));
+        assert_eq!(span.committed_bytes(), 0x2000);
+    }
+
+    #[test]
+    fn unrecorded_stack_span_resolves_to_none() {
+        let reg = AddressSpaceRegistry::new();
+        assert!(reg.stack_span(TaskId(2)).is_none());
+        assert_eq!(reg.stack_committed_bytes(TaskId(2)), 0);
+    }
+
+    #[test]
+    fn set_stack_span_then_resolve_returns_the_owners_record() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.set_stack_span(TaskId(2), stack_span());
+        assert_eq!(reg.stack_span(TaskId(2)), Some(stack_span()));
+        // Another task's lookup resolves nothing (fail closed).
+        assert!(reg.stack_span(TaskId(3)).is_none());
+        assert_eq!(reg.stack_committed_bytes(TaskId(2)), 0x2000);
+    }
+
+    #[test]
+    fn commit_stack_page_lowers_the_base_monotonically_within_the_span() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.set_stack_span(TaskId(2), stack_span());
+        // A growth page lowers the committed base and grows the usage.
+        reg.commit_stack_page(TaskId(2), 0x6000);
+        assert_eq!(
+            reg.stack_span(TaskId(2))
+                .expect("recorded")
+                .committed_base(),
+            0x6000
+        );
+        assert_eq!(reg.stack_committed_bytes(TaskId(2)), 0x4000);
+        // A page at/above the base (the resident race) never raises it.
+        reg.commit_stack_page(TaskId(2), 0x7000);
+        reg.commit_stack_page(TaskId(2), 0x9000);
+        assert_eq!(
+            reg.stack_span(TaskId(2))
+                .expect("recorded")
+                .committed_base(),
+            0x6000
+        );
+        // A page below the reserve base is refused — the record can never
+        // claim pages outside the span.
+        reg.commit_stack_page(TaskId(2), 0x3000);
+        assert_eq!(
+            reg.stack_span(TaskId(2))
+                .expect("recorded")
+                .committed_base(),
+            0x6000
+        );
+        // A task with no record is a no-op.
+        reg.commit_stack_page(TaskId(3), 0x6000);
+        assert!(reg.stack_span(TaskId(3)).is_none());
+    }
+
+    #[test]
+    fn withdraw_drops_the_stack_span_so_a_reused_id_starts_clean() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.set_stack_span(TaskId(6), stack_span());
+        assert!(reg.withdraw(TaskId(6)));
+        assert!(reg.stack_span(TaskId(6)).is_none());
+        assert_eq!(reg.stack_committed_bytes(TaskId(6)), 0);
     }
 }

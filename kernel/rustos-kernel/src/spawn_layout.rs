@@ -29,7 +29,7 @@ use rustos_abi::{CapabilityId, CapabilityQuery, LoadImage};
 use rustos_caps::CapabilitySet;
 #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
 use rustos_kernel_core::EmbeddedProgram;
-use rustos_kernel_core::ProgramRegistry;
+use rustos_kernel_core::{ProgramRegistry, StackSpan};
 use rustos_kernel_mem::{derive_user_layout, UserLayout};
 
 use crate::program_manifests::INIT_MANIFEST;
@@ -325,6 +325,23 @@ pub fn user_layout(image: &LoadImage, bias: u64) -> Option<UserLayout> {
         USER_STACK_COMMIT_PAGES,
         ceiling,
     )
+}
+
+/// The stack span the admission path records for one spawned process,
+/// derived from `layout`: the reserved span's lowest page, the committed
+/// bottom, and the span top [`USER_STACK_COMMIT_PAGES`] above that bottom
+/// (one guard page below the startup block). Every port passes this one
+/// derivation to `admit_process`/`admit_init`, so the recorded span and
+/// the mapped layout can never diverge per architecture.
+///
+/// Fails closed with `None` when the span arithmetic overflows or the
+/// bounds are malformed — the caller refuses the spawn, exactly as for a
+/// [`user_layout`] refusal.
+#[must_use]
+pub fn stack_span(layout: &UserLayout) -> Option<StackSpan> {
+    let commit_bytes = USER_STACK_COMMIT_PAGES.checked_mul(rustos_kernel_mem::PAGE_SIZE as u64)?;
+    let top = layout.stack_base.checked_add(commit_bytes)?;
+    StackSpan::new(layout.stack_reserve_base, layout.stack_base, top)
 }
 
 /// Offset of the device-window virtual region above the image bias

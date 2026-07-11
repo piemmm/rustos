@@ -114,11 +114,23 @@ resource**, before the resource is committed, and fails closed (`AGENTS.md`
   exceed its soft `AddressSpaceBytes` bound. A task at the default
   `RLIMIT_INFINITY` is never affected; a tightened ceiling is honoured rather
   than silently ignored.
+- **`StackBytes` on the demand-grown stack fault path.** Each admitted
+  process's reserved stack span (recorded at admission, see
+  [the memory page](./memory.md) §7c) grows one page per fault through the
+  stack-growth resolver, and the resolver checks the committed extent the
+  faulting page would reach against the task's soft `StackBytes` bound
+  *before* any page is mapped: a fault past the bound is refused, the task
+  is fault-killed with the audited `stack_limit` class, and nothing is
+  mapped (fail closed). The committed-bytes low-water mark is the live
+  usage the `sysinfo limits` query reports for `stack-bytes`. A task at
+  the default `RLIMIT_INFINITY` grows to the structural span bound; a
+  lowered `ulimit` stack bound stops growth exactly where it says.
 
-The remaining `LimitKind`s (`OpenStreams`, `Processes`, `StackBytes`) carry
-their soft/hard bounds and inherit correctly, but their *consuming-path*
+The remaining `LimitKind`s (`OpenStreams`, `Processes`) carry their
+soft/hard bounds and inherit correctly, but their *consuming-path*
 enforcement is not yet wired; until it is, those ceilings are observed and
-settable but not yet acted on at the descriptor/spawn/stack path.
+settable but not yet acted on at the descriptor/spawn path, and their
+reported usage stays an honest zero (no live accounter yet).
 
 ## The `ulimit` shell command
 

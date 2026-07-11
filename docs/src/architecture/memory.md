@@ -589,11 +589,23 @@ the uncommitted remainder below the committed bottom is growth room the
 demand-grown stack path (`plans/SPAWN.md` SP11) backs on fault, bounded by
 the settable `StackBytes` resource limit, and the guard page below the
 span stays unmapped so a true overrun still faults deterministically.
-Until SP11's fault-growth path lands, the shared policy keeps
+The growth mechanism is landed: every admission path
+(`SpawnCtx::admit_process` / `InitSpawnCtx::admit_init`) records the
+producer-derived span (`spawn_layout::stack_span`, one derivation across
+the ports) in the address-space registry beside the task's limits, and a
+user fault inside the span below the committed base — read or write, and
+offered *before* the write-fatal file rule (§7o) — backs the single
+faulting page with a fresh zeroed `RW` page through the installed
+`mem_map` producer, lowers the recorded committed base (the live usage
+`sysinfo limits` reports for `stack-bytes`), and re-freezes the registry
+snapshot. Growth stops fail-closed at the effective `StackBytes` soft
+bound (checked before any page is mapped), a fault below the span or on
+frame exhaustion stays fatal, and the audited kill names the class
+(`stack_limit` / `stack`). The shared policy still keeps
 `USER_STACK_RESERVE_PAGES == USER_STACK_COMMIT_PAGES` (288 pages,
-1.125 MiB) so behaviour is unchanged — the eagerly committed fixed-size
-stack is the capacity-ceiling defect (`AGENTS.md` §24.1) SP11 removes,
-staged rather than left unstated. The
+1.125 MiB), so no growth room exists in production yet; SP11c widens the
+reserve and shrinks the eager commit now that faults can grow the stack
+(wasm32's linear-memory model is an honest n/a). The
 `mem_map` (`abi-v1` no. 14) / `mem_unmap` (no. 15) syscalls are the one
 mechanism by which a process obtains and releases *additional* memory at
 runtime — the foundation the `lib/rt` userland heap allocator (§7d) layers its
@@ -1350,8 +1362,12 @@ costs only the pages actually touched, `AGENTS.md` §26.7):
   endless fault storm — and the one shared hook policy sends every write
   (like every unresolvable read) down the task-kill path, so a store to a
   read-only mapping or any wild user write costs the task, never the
-  CPU. An instruction fetch is never offered at all (a file mapping is
-  never executable) and still falls to the port's fatal path.
+  CPU. The demand-grown **stack** resolver (§7c) is offered *before* this
+  write-fatal file rule, for reads and writes alike — a stack push is a
+  write — so a legitimate growth fault inside the task's recorded stack
+  span is backed, never killed. An instruction fetch is never offered at
+  all (a file mapping is never executable) and still falls to the port's
+  fatal path.
 - **Fail closed, kill the task not the machine.** An address outside every
   region, a page wholly at/past end-of-file (the `SIGBUS` analogue), a
   filesystem error, or frame exhaustion terminates the *faulting task*: the
@@ -1359,7 +1375,8 @@ costs only the pages actually touched, `AGENTS.md` §26.7):
   `exit`/signal-kill reclaim, and the port suspends it with an `Exit`
   action. The kill is audited with the stable `TaskFaultKilled` event
   (kernel/core id 4034): task id plus a coarse `fault_class`
-  (`file_region` / `wild`), never the raw address — so a crashing program
+  (`stack_limit` / `stack` / `file_region` / `wild`), never the raw
+  address — so a crashing program
   is visible on the system log, not only via its `wait` status. A fault
   with no attributable task falls back to the fatal halt. A page already
   resident (a concurrent resolution) is a benign race and simply resumes.
@@ -1376,7 +1393,9 @@ costs only the pages actually touched, `AGENTS.md` §26.7):
   (`UaccessError::NotMapped { va }`), and the one fault-aware staging
   helper (`KernelSyscallHandlers::copy_in_user`, used by every handler
   that copies a user buffer in) offers exactly that page to the same
-  resolver — same region table, same mapping-time identity — releasing
+  resolvers — the file resolver, then the stack-growth resolver (§7c),
+  over the same region/span tables and identities the hardware path
+  uses — releasing
   the registry guard around each resolution and retrying under a budget
   of one resolution per touched page (an unresolvable miss stays the
   stable `BadAddress`). Copy-*out* is unchanged: file mappings are
