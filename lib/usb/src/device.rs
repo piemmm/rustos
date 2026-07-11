@@ -21,6 +21,9 @@
 //! through the seam; the ring state machines themselves hold no
 //! memory ([`ProducerRing`], [`EventRingCursor`]).
 
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+
 use rustos_abi::driver::dma::DmaSlab;
 use rustos_abi::{Delay, DriverError, HwDeviceClass, HwMatchKey, HwNode};
 
@@ -123,21 +126,27 @@ pub const BULK_BUF_LEN: usize = 4096;
 /// Device regions available to one controller engine: the root-attached
 /// device, or — when the root device is a hub — the devices served across
 /// every hub tier at once, where a downstream hub's contexts also claim
-/// one region (`HubState::device_region`). Four matches the downstream
-/// port count of the Pi 4's integrated hub; the DMA carve is sized so
-/// every region fits ([`crate::XHCI_DMA_BYTES`]) and the layout
-/// computation fails closed if not.
-/// A protocol working set for one controller, not a scalable capacity.
-pub const MAX_DEVICES: usize = 4;
+/// one region (`HubState::device_region`). Sixteen covers a real deep
+/// fan-out with headroom: a recorded reference assembly chains two hub
+/// tiers below the root-attached hub and fans out to ten mass-storage
+/// bridges — fifteen concurrently addressed devices in all (five hubs
+/// plus ten leaves). The DMA carve is sized so every region fits
+/// ([`crate::XHCI_DMA_BYTES`]) and the layout computation fails closed if
+/// not. A protocol working set for one controller, not a scalable
+/// capacity.
+pub const MAX_DEVICES: usize = 16;
 
 /// Hubs tracked concurrently by one controller engine: the root-attached
 /// hub plus downstream hubs (a hub plugged into a hub), each addressed and
-/// watched at once. Four covers the root hub with a three-hub chain or
-/// fan-out below it while every region still fits the fixed controller DMA
-/// carve ([`crate::XHCI_DMA_BYTES`]); the layout computation fails closed
-/// if not. A protocol working set for one controller, not a scalable
+/// watched at once. Eight covers the root hub with a seven-hub chain or
+/// fan-out below it — the recorded reference assembly cascades five
+/// downstream hubs, six tracked tiers in all, and every tier must hold a
+/// live status-change watch or the devices behind it go undetected —
+/// while every region still fits the fixed controller DMA carve
+/// ([`crate::XHCI_DMA_BYTES`]); the layout computation fails closed if
+/// not. A protocol working set for one controller, not a scalable
 /// capacity.
-pub const MAX_HUBS: usize = 4;
+pub const MAX_HUBS: usize = 8;
 
 /// Deepest hub chain a device may sit behind: the xHCI Route String has
 /// five four-bit tiers (§8.9.1 / §6.2.2), matching USB 2.0 §4.1.1's
@@ -1721,6 +1730,26 @@ impl DeviceState {
     }
 }
 
+/// Allocate the engine's device table on the heap, fallibly.
+///
+/// At [`MAX_DEVICES`] entries the table is far too large for a stack
+/// frame, so it is reserved through the fallible allocation path and
+/// exhaustion surfaces as a typed error, never a panic (deterministic
+/// OOM).
+fn new_device_table() -> Result<Box<[Option<DeviceState>; MAX_DEVICES]>, DriverError> {
+    let mut table = Vec::new();
+    table
+        .try_reserve_exact(MAX_DEVICES)
+        .map_err(|_| DriverError::LengthOutOfRange)?;
+    for _ in 0..MAX_DEVICES {
+        table.push(None);
+    }
+    let table: Box<[Option<DeviceState>]> = table.into_boxed_slice();
+    // The length is exactly MAX_DEVICES by construction, so the fixed-size
+    // conversion cannot fail; fail closed anyway rather than panicking.
+    table.try_into().map_err(|_| DriverError::LengthOutOfRange)
+}
+
 /// The controller engine serving every enumerated device on one started
 /// xHCI controller.
 ///
@@ -1768,8 +1797,10 @@ pub struct UsbDevice<H: XhciHost, M: DmaRegion> {
     slot: u8,
     /// The concurrently served devices, indexed by the device index the
     /// [`HubEvent`]s carry and the per-device transfer paths take. `None`
-    /// entries are free.
-    devices: [Option<DeviceState>; MAX_DEVICES],
+    /// entries are free. Heap-allocated ([`new_device_table`]): at
+    /// [`MAX_DEVICES`] entries the table is far too large for a stack
+    /// frame, and it lives exactly as long as the engine.
+    devices: Box<[Option<DeviceState>; MAX_DEVICES]>,
     /// Index into [`Self::devices`] of the device that is the active
     /// control context, `None` while a hub (or the root device) is active.
     active_device: Option<usize>,
@@ -1840,9 +1871,12 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// * [`DriverError::OutOfRange`] if `dma` is not 64-byte aligned.
     /// * [`DriverError::LengthOutOfRange`] if `dma` cannot hold the
     ///   structures (the 64-byte-aligned layout described in the
-    ///   module docs).
+    ///   module docs), or the heap cannot supply the device table
+    ///   (deterministic OOM — the [`DmaHost`] exhaustion convention).
     /// * [`DriverError::DeviceFault`] if the controller does not
     ///   start within `budget` polls.
+    ///
+    /// [`DmaHost`]: rustos_abi::driver::dma::DmaHost
     pub fn start(xhci: Xhci<H>, dma: M, budget: u32) -> Result<Self, DriverError> {
         let mut xhci = xhci;
         let mut dma = dma;
@@ -1872,7 +1906,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             event_cursor,
             budget,
             slot: 0,
-            devices: [const { None }; MAX_DEVICES],
+            devices: new_device_table()?,
             active_device: None,
             hubs: [const { None }; MAX_HUBS],
             active_hub: None,
@@ -4633,7 +4667,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         // device/ring so the controller falls back to awaiting a fresh
         // root-port connect; the reconnect's full reset rebuilds the rest.
         self.slot = 0;
-        self.devices = [const { None }; MAX_DEVICES];
+        self.devices.fill_with(|| None);
         self.active_device = None;
         self.hubs = [const { None }; MAX_HUBS];
         self.active_hub = None;
@@ -4906,7 +4940,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         self.root_port = 0;
         self.root_speed = 0;
         self.slot = 0;
-        self.devices = [const { None }; MAX_DEVICES];
+        self.devices.fill_with(|| None);
         self.active_device = None;
         self.hubs = [const { None }; MAX_HUBS];
         self.active_hub = None;

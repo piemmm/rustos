@@ -31,8 +31,10 @@ other (§17.4 — `drivers/* → lib/*` only).
 
 ## Design
 
-- `no_std`, `#![forbid(unsafe_op_in_unsafe_fn)]`, depends only on `lib/abi`, so
-  it builds for every Tier-1 target.
+- `no_std` + `alloc`, `#![forbid(unsafe_op_in_unsafe_fn)]`, depends only on
+  `lib/abi`, so it builds for every Tier-1 target. The enumeration engine's
+  device table is heap-allocated fallibly (allocation failure is a typed
+  error, never a panic); everything else is allocation-free.
 - Every access is mediated by the `XhciHost` / `device::DmaRegion` seams, so
   the bring-up, enumeration, and ring state machines are proven host-side
   against a register-level mock plus an in-memory ring/DMA model (§2.2); the

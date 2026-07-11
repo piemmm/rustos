@@ -1522,8 +1522,9 @@ page-aligned scratchpad pointer array plus that many page-aligned buffers
 controller reports no page size / an unaligned base), and
 `UsbDevice::start` fills the array with each buffer's device-visible base
 and points `DCBAA[0]` at it. The device-shared DMA carve
-(`wiring::XHCI_DMA_BYTES`) grew from 16 KiB to **256 KiB** to hold 31 ×
-4 KiB scratchpad pages plus the rings/contexts. Host-proven by
+(`rustos_usb::XHCI_DMA_BYTES`) is sized to hold the 31 × 4 KiB scratchpad
+pages plus the rings/contexts and every per-device/per-hub region
+(`MAX_DEVICES` / `MAX_HUBS`). Host-proven by
 `start_reserves_scratchpad_and_programs_dcbaa0` (a mock that, like the
 VL805, withholds every command completion until `DCBAA[0]` is programmed —
 enumeration then runs end to end), `start_stalls_without_scratchpad_on_a_controller_that_needs_it`

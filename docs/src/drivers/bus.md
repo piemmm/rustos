@@ -431,11 +431,12 @@ bytes live in one caller-provided region behind the crate's
 production and by a plain shared buffer in tests — and the engine
 computes a 64-byte-aligned `Layout` inside it: the shared structures
 (DCBAA, ERST, command ring, event segment, input context, the root
-device's output context and EP0 ring, the hub status-change ring and
-report, the control data buffer) plus one region per concurrently
-served device (`MAX_DEVICES`, each holding an output context, EP0 /
-interrupt-IN / bulk transfer rings, report buffers, and bulk staging),
-refusing a region that is misaligned or too small.
+device's output context and EP0 ring, one status-change ring and
+report per concurrently addressed hub (`MAX_HUBS`), the control data
+buffer) plus one region per concurrently served device (`MAX_DEVICES`,
+each holding an output context, EP0 / interrupt-IN / bulk transfer
+rings, report buffers, and bulk staging), refusing a region that is
+misaligned or too small.
 
 `UsbDevice::start` zeroes the region, publishes the ERST entry and
 the rings' Link TRBs, and starts the controller through `Xhci::start`.

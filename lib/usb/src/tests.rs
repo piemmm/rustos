@@ -12,8 +12,8 @@ use core::cell::RefCell;
 use super::device::{
     hub_port_connected, hub_port_enabled, hub_port_speed, route_for_child, AttachOutcome,
     BulkDirection, BulkPipe, DeviceDescriptor, DmaRegion, EnumStage, HubEvent, InterfaceInfo,
-    UsbDevice, BULK_BUF_LEN, BULK_SLOTS, EVENT_RING_SEGMENT_MIN_TRBS, MAX_HUB_DEPTH, REPORT_LEN,
-    RING_TRBS,
+    UsbDevice, BULK_BUF_LEN, BULK_SLOTS, EVENT_RING_SEGMENT_MIN_TRBS, MAX_DEVICES, MAX_HUBS,
+    MAX_HUB_DEPTH, REPORT_LEN, RING_TRBS,
 };
 use super::ring::{EventRingCursor, ProducerRing};
 use super::trb::{CompletionCode, Trb, TrbType, CONTROL_CYCLE, TRB_LEN};
@@ -37,11 +37,11 @@ const MOCK_WINDOW_LEN: usize = 0x3000;
 /// Device-visible base address of the shared DMA buffer.
 const MOCK_DMA_BASE: u64 = 0x0010_0000;
 /// Byte length of the shared DMA buffer (the layout for 32 slots with
-/// 64-byte contexts, plus the hub status-change ring and report buffer,
-/// needs ~5.5 KiB; each of the `MAX_DEVICES` device regions — output
+/// 64-byte contexts, plus the hub status-change rings and report buffers,
+/// needs ~7 KiB; each of the `MAX_DEVICES` device regions — output
 /// context, EP0/interrupt/bulk rings, report and bulk staging buffers —
 /// adds ~67 KiB, and the scratchpad test reserves 31 more pages).
-const MOCK_DMA_LEN: usize = 0x80000;
+const MOCK_DMA_LEN: usize = 0x18_0000;
 /// The mock's 64-byte contexts (its `HCCPARAMS1` sets CSZ).
 const MOCK_CTX_SIZE: usize = 64;
 
@@ -618,47 +618,14 @@ struct MockXhci {
     int_slot: u8,
     /// As [`Self::int_slot`], for the bulk endpoint pair.
     bulk_slot: u8,
-    /// A downstream **root-hub** port carrying a nested hub — a hub plugged
-    /// into a hub (`0` = none). The addressed device on this port answers
-    /// with the hub fixtures, reporting [`Self::nested_hub_ports`]
-    /// downstream ports of its own; once addressed, its hub-class requests
-    /// are served from the nested bank below, keyed by
-    /// [`Self::nested_hub_slot`]. Its root-hub-port `wPortStatus` reads
-    /// connected (high-speed) while [`Self::nested_root_connected`], with
-    /// [`Self::nested_root_change`] as the port's latched changes.
-    nested_hub_downstream_port: u8,
-    /// The nested hub's downstream port count (its hub class descriptor's
-    /// `bNbrPorts`).
-    nested_hub_ports: u8,
-    /// The slot the nested hub was addressed on, captured at Address
-    /// Device (`0` = not yet addressed). Hub-class requests arriving on
-    /// this slot's EP0 are served from the nested bank.
-    nested_hub_slot: u8,
+    /// The downstream hubs plugged into the root hub's ports — each a
+    /// [`NestedHub`] with its own port bank, slot, and status-change
+    /// endpoint, so a deep multi-hub fan-out is modelled faithfully.
+    nested_hubs: Vec<NestedHub>,
     /// The full Route String of the most recent Address Device
     /// ([`Self::downstream_route_port`] keeps only the low nibble, for the
     /// single-tier assertions).
     downstream_route: u32,
-    /// Whether the nested hub is physically present on its root-hub port.
-    nested_root_connected: bool,
-    /// The root-hub port's latched `wPortChange` for the nested hub's port
-    /// (the unplug/replug connect change).
-    nested_root_change: u16,
-    /// Bitmask of nested-hub downstream ports software has powered.
-    nested_powered: u32,
-    /// Bitmask of nested-hub downstream ports software has reset.
-    nested_reset: u32,
-    /// The nested hub's downstream port carrying a keyboard (`0` = none),
-    /// with that device's `wPortStatus` and latched `wPortChange`.
-    nested_downstream_port: u8,
-    nested_downstream_status: u16,
-    nested_downstream_change: u16,
-    /// Set once a hub-topology Configure Endpoint marked the **nested**
-    /// hub's slot (the root hub's marking is [`Self::hub_marked_as_hub`]).
-    nested_marked: bool,
-    /// The nested hub's interrupt-IN status-change endpoint, captured at
-    /// Configure Endpoint on the marked nested slot; a change is posted
-    /// with [`Self::post_nested_hub_status_change`].
-    nested_int: MockInt,
     /// The bulk-IN endpoint model, captured from the two-endpoint (bulk
     /// pair) Configure Endpoint.
     bulk_in: MockBulk,
@@ -724,6 +691,69 @@ impl MockInt {
             cycle: true,
             dci: 0,
             slot: 0,
+        }
+    }
+}
+
+/// One downstream hub of the device model — a hub plugged into a hub.
+/// The root hub's port [`Self::root_port`] carries it: the addressed
+/// device on that port answers with the hub fixtures, reporting
+/// [`Self::ports`] downstream ports of its own; once addressed, hub-class
+/// requests riding its EP0 are served from this hub's own bank, keyed by
+/// [`Self::slot`]. Its root-hub-port `wPortStatus` reads connected
+/// (high-speed) while [`Self::connected`], with [`Self::root_change`] as
+/// the port's latched changes. The model holds any number of these at
+/// once ([`MockXhci::nested_hubs`]), so a deep multi-hub fan-out is
+/// exercised host-side.
+struct NestedHub {
+    /// The root-hub downstream port carrying this hub.
+    root_port: u8,
+    /// This hub's downstream port count (its hub class descriptor's
+    /// `bNbrPorts`).
+    ports: u8,
+    /// The slot this hub was addressed on, captured at Address Device
+    /// (`0` = not yet addressed).
+    slot: u8,
+    /// Whether this hub is physically present on its root-hub port.
+    connected: bool,
+    /// The root-hub port's latched `wPortChange` for this hub's port
+    /// (the unplug/replug connect change).
+    root_change: u16,
+    /// Bitmask of this hub's downstream ports software has powered.
+    powered: u32,
+    /// Bitmask of this hub's downstream ports software has reset.
+    reset: u32,
+    /// This hub's downstream port carrying a keyboard (`0` = none), with
+    /// that device's `wPortStatus` and latched `wPortChange`.
+    downstream_port: u8,
+    downstream_status: u16,
+    downstream_change: u16,
+    /// Set once a hub-topology Configure Endpoint marked this hub's slot
+    /// (the root hub's marking is [`MockXhci::hub_marked_as_hub`]).
+    marked: bool,
+    /// This hub's interrupt-IN status-change endpoint, captured at
+    /// Configure Endpoint on the marked slot; a change is posted with
+    /// [`MockXhci::post_nested_hub_status_change`].
+    int: MockInt,
+}
+
+impl NestedHub {
+    /// A connected, empty-ported hub on the root hub's `root_port` with
+    /// `ports` downstream ports of its own.
+    const fn new(root_port: u8, ports: u8) -> Self {
+        Self {
+            root_port,
+            ports,
+            slot: 0,
+            connected: true,
+            root_change: 0,
+            powered: 0,
+            reset: 0,
+            downstream_port: 0,
+            downstream_status: 0,
+            downstream_change: 0,
+            marked: false,
+            int: MockInt::new(),
         }
     }
 }
@@ -827,19 +857,8 @@ impl MockXhci {
             pending_reports2: VecDeque::new(),
             int_slot: 0,
             bulk_slot: 0,
-            nested_hub_downstream_port: 0,
-            nested_hub_ports: 0,
-            nested_hub_slot: 0,
+            nested_hubs: Vec::new(),
             downstream_route: 0,
-            nested_root_connected: false,
-            nested_root_change: 0,
-            nested_powered: 0,
-            nested_reset: 0,
-            nested_downstream_port: 0,
-            nested_downstream_status: 0,
-            nested_downstream_change: 0,
-            nested_marked: false,
-            nested_int: MockInt::new(),
             bulk_in: MockBulk::new(),
             bulk_out: MockBulk::new(),
             bulk_in_responses: VecDeque::new(),
@@ -875,14 +894,47 @@ impl MockXhci {
     /// device.
     fn with_nested_hub(mem: &SharedMem) -> Self {
         let mut mock = Self::with_hub(mem, 4, 0);
-        mock.nested_hub_downstream_port = 3;
-        mock.nested_hub_ports = 4;
-        mock.nested_root_connected = true;
-        mock.nested_downstream_port = 2;
+        let mut hub = NestedHub::new(3, 4);
+        hub.downstream_port = 2;
         // Current Connect Status only: a full-speed keyboard, so its
         // transactions split through the nested hub's TT.
-        mock.nested_downstream_status = 1 << 0;
+        hub.downstream_status = 1 << 0;
+        mock.nested_hubs.push(hub);
         mock
+    }
+
+    /// As [`Self::with_hub`], but with `count` downstream hubs fanned out
+    /// on the root hub's ports `1..=count`, each carrying a full-speed
+    /// keyboard on its own downstream port 2 — the deep multi-hub fan-out
+    /// of a real cascaded hub assembly with a leaf device behind every
+    /// tier.
+    fn with_hub_fanout(mem: &SharedMem, root_ports: u8, count: u8) -> Self {
+        let mut mock = Self::with_hub(mem, root_ports, 0);
+        for port in 1..=count {
+            let mut hub = NestedHub::new(port, 4);
+            hub.downstream_port = 2;
+            // Current Connect Status only: a full-speed device, so its
+            // transactions split through its own hub's TT.
+            hub.downstream_status = 1 << 0;
+            mock.nested_hubs.push(hub);
+        }
+        mock
+    }
+
+    /// Index of the nested hub carried on root-hub port `port`, if any.
+    fn nested_by_root_port(&self, port: u8) -> Option<usize> {
+        if port == 0 {
+            return None;
+        }
+        self.nested_hubs.iter().position(|h| h.root_port == port)
+    }
+
+    /// Index of the nested hub addressed on `slot` (`0` never matches).
+    fn nested_by_slot(&self, slot: u8) -> Option<usize> {
+        if slot == 0 {
+            return None;
+        }
+        self.nested_hubs.iter().position(|h| h.slot == slot)
     }
 
     /// A mock with the device model attached and a high-speed HID
@@ -1323,12 +1375,18 @@ impl MockXhci {
             // wrong topology faults Address Device, so the host test proves
             // the driver programmed them — the root hub occupies slot 1.
             let route_port = (route_string & 0xF) as u8;
-            let nested_route = u32::from(self.nested_hub_downstream_port);
-            let is_nested_hub =
-                self.nested_hub_downstream_port != 0 && route_string == nested_route;
-            let is_nested_child = self.nested_hub_downstream_port != 0
-                && self.nested_downstream_port != 0
-                && route_string == (nested_route | (u32::from(self.nested_downstream_port) << 4));
+            let nested_hub = if route_string <= 0xF {
+                self.nested_by_root_port(route_port)
+            } else {
+                None
+            };
+            let is_nested_hub = nested_hub.is_some();
+            let nested_child = self.nested_hubs.iter().position(|h| {
+                h.downstream_port != 0
+                    && route_string
+                        == (u32::from(h.root_port) | (u32::from(h.downstream_port) << 4))
+            });
+            let is_nested_child = nested_child.is_some();
             let single_tier = route_string <= 0xF && !is_nested_hub;
             let scripted = is_nested_hub
                 || is_nested_child
@@ -1348,8 +1406,11 @@ impl MockXhci {
             // translator of the nearest **high-speed** hub above it: the
             // nested hub for its own child, else the root hub (slot 1).
             let (want_hub, want_port) = if needs_tt {
-                if is_nested_child {
-                    (self.nested_hub_slot, self.nested_downstream_port)
+                if let Some(i) = nested_child {
+                    (
+                        self.nested_hubs[i].slot,
+                        self.nested_hubs[i].downstream_port,
+                    )
                 } else {
                     (1u8, route_port)
                 }
@@ -1359,8 +1420,8 @@ impl MockXhci {
             if tt_hub_slot != want_hub || tt_port != want_port {
                 return CompletionCode::TrbError;
             }
-            if is_nested_hub {
-                self.nested_hub_slot = self.active_slot;
+            if let Some(i) = nested_hub {
+                self.nested_hubs[i].slot = self.active_slot;
             }
             self.downstream_active = true;
             self.downstream_route = route_string;
@@ -1492,13 +1553,7 @@ impl MockXhci {
                 self.hub_int_cycle = true;
                 return CompletionCode::Success;
             }
-            if self.nested_marked && slot == self.nested_hub_slot {
-                self.nested_int.dci = u8::try_from(dci).expect("DCI fits a byte");
-                self.nested_int.base =
-                    self.ep_ctx_dequeue(input_ctx + (1 + u64::from(dci)) * MOCK_CTX_SIZE as u64);
-                self.nested_int.index = 0;
-                self.nested_int.cycle = true;
-                self.nested_int.slot = slot;
+            if self.capture_nested_hub_int_endpoint(input_ctx, dci, slot) {
                 return CompletionCode::Success;
             }
             // The *second* HID interrupt endpoint is recorded in the second
@@ -1542,10 +1597,10 @@ impl MockXhci {
         if slot_ctx[0] & (1 << 26) == 0 {
             return CompletionCode::TrbError;
         }
-        // The nested hub is marked on its own slot; the root hub's marking
+        // A nested hub is marked on its own slot; the root hub's marking
         // (and its captured context fields) stay intact beside it.
-        if self.nested_hub_slot != 0 && slot == self.nested_hub_slot {
-            self.nested_marked = true;
+        if let Some(i) = self.nested_by_slot(slot) {
+            self.nested_hubs[i].marked = true;
             return CompletionCode::Success;
         }
         self.hub_marked_as_hub = true;
@@ -1553,6 +1608,27 @@ impl MockXhci {
         self.hub_ctx_num_ports = ((slot_ctx[1] >> 24) & 0xFF) as u8;
         self.hub_ctx_tt_think_time = ((slot_ctx[2] >> 16) & 0b11) as u8;
         CompletionCode::Success
+    }
+
+    /// Record an interrupt-IN endpoint added to an already-marked nested
+    /// hub's slot as that hub's status-change endpoint, returning `true`
+    /// when `slot` named one — recorded separately so it never clobbers a
+    /// downstream device's interrupt endpoint state.
+    fn capture_nested_hub_int_endpoint(&mut self, input_ctx: u64, dci: u32, slot: u8) -> bool {
+        let Some(i) = self.nested_by_slot(slot) else {
+            return false;
+        };
+        if !self.nested_hubs[i].marked {
+            return false;
+        }
+        let base = self.ep_ctx_dequeue(input_ctx + (1 + u64::from(dci)) * MOCK_CTX_SIZE as u64);
+        let hub = &mut self.nested_hubs[i];
+        hub.int.dci = u8::try_from(dci).expect("DCI fits a byte");
+        hub.int.base = base;
+        hub.int.index = 0;
+        hub.int.cycle = true;
+        hub.int.slot = slot;
+        true
     }
 
     /// Record an interrupt-IN endpoint into the second endpoint model
@@ -1627,11 +1703,13 @@ impl MockXhci {
     /// hub, the HID keyboard fixtures once a downstream device has been
     /// addressed (a non-zero Route String set `downstream_active`).
     fn descriptor_fixture(&self, desc_type: u8) -> &'static [u8] {
-        // The nested hub answers with the hub fixtures too: it is a hub
+        // A nested hub answers with the hub fixtures too: it is a hub
         // one tier down, identified by its full route string.
-        let is_nested_hub_addressed = self.nested_hub_downstream_port != 0
-            && self.downstream_active
-            && self.downstream_route == u32::from(self.nested_hub_downstream_port);
+        let is_nested_hub_addressed = self.downstream_active
+            && self.downstream_route <= 0xF
+            && self
+                .nested_by_root_port((self.downstream_route & 0xF) as u8)
+                .is_some();
         let is_hub_device =
             (self.hub_ports > 0 && !self.downstream_active) || is_nested_hub_addressed;
         // The device kind is the *addressed* device's: the global flag for a
@@ -1714,10 +1792,9 @@ impl MockXhci {
                 } else {
                     0x29
                 };
-                let ports = if self.nested_hub_slot != 0 && self.ep0_slot == self.nested_hub_slot {
-                    self.nested_hub_ports
-                } else {
-                    self.hub_ports
+                let ports = match self.nested_by_slot(self.ep0_slot) {
+                    Some(i) => self.nested_hubs[i].ports,
+                    None => self.hub_ports,
                 };
                 let hub_desc = [9u8, desc_type, ports, 0x00, 0x00, 0x32, 0x00, 0xFF];
                 if !self.deliver_in_data(data, &hub_desc, w_length, status_addr) {
@@ -2029,23 +2106,29 @@ impl MockXhci {
             return;
         }
         let bit = 1 << (u32::from(port) - 1);
-        let nested = self.nested_hub_slot != 0 && self.ep0_slot == self.nested_hub_slot;
-        match (feature, nested) {
-            (8, false) => self.hub_powered |= bit,
-            (8, true) => self.nested_powered |= bit,
-            (4, false) => {
+        if let Some(i) = self.nested_by_slot(self.ep0_slot) {
+            let hub = &mut self.nested_hubs[i];
+            match feature {
+                8 => hub.powered |= bit,
+                4 => {
+                    hub.reset |= bit;
+                    if port == hub.downstream_port {
+                        hub.downstream_change |= 1 << 4;
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        match feature {
+            8 => self.hub_powered |= bit,
+            4 => {
                 self.hub_reset |= bit;
                 if port == self.hub_downstream_port {
                     self.hub_downstream_change |= 1 << 4;
                 }
-                if self.nested_hub_downstream_port != 0 && port == self.nested_hub_downstream_port {
-                    self.nested_root_change |= 1 << 4;
-                }
-            }
-            (4, true) => {
-                self.nested_reset |= bit;
-                if port == self.nested_downstream_port {
-                    self.nested_downstream_change |= 1 << 4;
+                if let Some(i) = self.nested_by_root_port(port) {
+                    self.nested_hubs[i].root_change |= 1 << 4;
                 }
             }
             _ => {}
@@ -2064,32 +2147,36 @@ impl MockXhci {
             return;
         }
         let bit = 1u16 << (feature - 16);
-        if self.nested_hub_slot != 0 && self.ep0_slot == self.nested_hub_slot {
-            if port == self.nested_downstream_port {
-                self.nested_downstream_change &= !bit;
+        if let Some(i) = self.nested_by_slot(self.ep0_slot) {
+            let hub = &mut self.nested_hubs[i];
+            if port == hub.downstream_port {
+                hub.downstream_change &= !bit;
             }
-        } else if self.nested_hub_downstream_port != 0 && port == self.nested_hub_downstream_port {
-            self.nested_root_change &= !bit;
+        } else if let Some(i) = self.nested_by_root_port(port) {
+            self.nested_hubs[i].root_change &= !bit;
         } else {
             self.hub_downstream_change &= !bit;
         }
     }
 
-    /// Deliver one status-change report from the **nested** hub, as
-    /// [`Self::post_hub_status_change`] does for the root hub: write
-    /// `bitmap` into the nested hub's armed status-change transfer and post
-    /// its completion with the nested hub's slot and DCI.
-    fn post_nested_hub_status_change(&mut self, bitmap: &[u8]) {
-        let (mut index, mut cycle) = (self.nested_int.index, self.nested_int.cycle);
-        let base = self.nested_int.base;
+    /// Deliver one status-change report from the **nested** hub carried on
+    /// root-hub port `root_port`, as [`Self::post_hub_status_change`] does
+    /// for the root hub: write `bitmap` into that hub's armed status-change
+    /// transfer and post its completion with that hub's slot and DCI.
+    fn post_nested_hub_status_change(&mut self, root_port: u8, bitmap: &[u8]) {
+        let Some(i) = self.nested_by_root_port(root_port) else {
+            return;
+        };
+        let (mut index, mut cycle) = (self.nested_hubs[i].int.index, self.nested_hubs[i].int.cycle);
+        let base = self.nested_hubs[i].int.base;
         let Some((addr, trb)) = self.next_owned(base, &mut index, &mut cycle) else {
             return;
         };
         if trb.trb_type() != Ok(TrbType::Normal) {
             return;
         }
-        self.nested_int.index = index;
-        self.nested_int.cycle = cycle;
+        self.nested_hubs[i].int.index = index;
+        self.nested_hubs[i].int.cycle = cycle;
         self.write_mem(trb.parameter, bitmap);
         let residual = trb.status - u32::try_from(bitmap.len()).expect("bitmap fits");
         let code = if residual > 0 {
@@ -2101,8 +2188,8 @@ impl MockXhci {
             parameter: addr,
             status: (u32::from(code.as_u8()) << 24) | residual,
             control: (u32::from(TrbType::TransferEvent.as_u8()) << 10)
-                | (u32::from(self.nested_int.dci) << 16)
-                | trb::control_slot(self.nested_hub_slot),
+                | (u32::from(self.nested_hubs[i].int.dci) << 16)
+                | trb::control_slot(self.nested_hubs[i].slot),
         });
     }
 
@@ -2135,39 +2222,35 @@ impl MockXhci {
         } else {
             0
         };
-        // The addressed hub's bank: the nested hub's ports when the request
+        // The addressed hub's bank: a nested hub's ports when the request
         // rides its EP0, else the root hub's.
-        let (w_status, change) = if self.nested_hub_slot != 0
-            && self.ep0_slot == self.nested_hub_slot
-        {
-            let powered = port >= 1 && self.nested_powered & bit != 0;
-            let w_status = if powered && port == self.nested_downstream_port {
-                let enabled = if self.nested_reset & bit != 0 {
-                    1 << 1
-                } else {
-                    0
-                };
-                self.nested_downstream_status | enabled
+        let (w_status, change) = if let Some(i) = self.nested_by_slot(self.ep0_slot) {
+            let hub = &self.nested_hubs[i];
+            let powered = port >= 1 && hub.powered & bit != 0;
+            let w_status = if powered && port == hub.downstream_port {
+                let enabled = if hub.reset & bit != 0 { 1 << 1 } else { 0 };
+                hub.downstream_status | enabled
             } else {
                 0
             };
-            let change = if port == self.nested_downstream_port {
-                self.nested_downstream_change
+            let change = if port == hub.downstream_port {
+                hub.downstream_change
             } else {
                 0
             };
             (w_status, change)
-        } else if self.nested_hub_downstream_port != 0 && port == self.nested_hub_downstream_port {
-            // The root-hub port carrying the nested hub itself: connected
+        } else if let Some(i) = self.nested_by_root_port(port) {
+            // The root-hub port carrying a nested hub itself: connected
             // high-speed while present, with its own latched changes.
+            let hub = &self.nested_hubs[i];
             let powered = self.hub_powered & bit != 0;
-            let w_status = if powered && self.nested_root_connected {
+            let w_status = if powered && hub.connected {
                 let enabled = if self.hub_reset & bit != 0 { 1 << 1 } else { 0 };
                 (1 << 0) | (1 << 10) | enabled
             } else {
                 0
             };
-            (w_status, self.nested_root_change)
+            (w_status, hub.root_change)
         } else {
             let powered = port >= 1 && self.hub_powered & bit != 0;
             let is_device_port = port == self.hub_downstream_port
@@ -2244,12 +2327,14 @@ impl MockXhci {
         self.int_slot = 0;
         self.bulk_slot = 0;
         self.int2 = MockInt::new();
-        self.nested_hub_slot = 0;
         self.downstream_route = 0;
-        self.nested_powered = 0;
-        self.nested_reset = 0;
-        self.nested_marked = false;
-        self.nested_int = MockInt::new();
+        for hub in &mut self.nested_hubs {
+            hub.slot = 0;
+            hub.powered = 0;
+            hub.reset = 0;
+            hub.marked = false;
+            hub.int = MockInt::new();
+        }
     }
 }
 
@@ -3103,7 +3188,7 @@ fn start_reserves_scratchpad_and_programs_dcbaa0() {
     // Enable Slot produced no completion event (the Pi 4 metal
     // `4126 stage=2 completion=0`); now `start` reserves the buffers, so
     // the command ring runs and enumeration completes.
-    let mem: SharedMem = Rc::new(RefCell::new(alloc::vec![0u8; 512 * 1024]));
+    let mem = shared_mem();
     let xhci = Xhci::open(MockXhci::with_device_scratchpad(&mem, 31)).expect("bring-up succeeds");
     assert_eq!(xhci.max_scratchpad_buffers(), 31);
     assert_eq!(xhci.page_size(), 4096);
@@ -6556,11 +6641,11 @@ fn bring_up_serves_a_keyboard_behind_a_nested_hub() {
         "nibble 0 routes the root hub's port 3, nibble 1 the nested hub's port 2"
     );
     assert!(
-        device.host_mut().nested_marked,
+        device.host_mut().nested_hubs[0].marked,
         "the nested hub's own slot carries the Hub bit"
     );
     assert_ne!(
-        device.host_mut().nested_int.dci,
+        device.host_mut().nested_hubs[0].int.dci,
         0,
         "the nested hub's status-change watch is configured and armed"
     );
@@ -6590,7 +6675,7 @@ fn hot_plug_on_a_nested_hubs_port_attaches_and_detaches_through_its_own_watch() 
     // the keyboard again, leaving both hubs watched.
     let mem = shared_mem();
     let mut mock = MockXhci::with_nested_hub(&mem);
-    mock.nested_downstream_status = 0;
+    mock.nested_hubs[0].downstream_status = 0;
     let mut device = started_device(mock, &mem);
     let delay = TestDelay::default();
     device
@@ -6600,9 +6685,11 @@ fn hot_plug_on_a_nested_hubs_port_attaches_and_detaches_through_its_own_watch() 
     assert!(device.hub_watch_active());
 
     // Plug the keyboard into the nested hub's port 2.
-    device.host_mut().nested_downstream_status = 1 << 0;
-    device.host_mut().nested_downstream_change = PORT_CHANGE_CONNECTION;
-    device.host_mut().post_nested_hub_status_change(&[1 << 2]);
+    device.host_mut().nested_hubs[0].downstream_status = 1 << 0;
+    device.host_mut().nested_hubs[0].downstream_change = PORT_CHANGE_CONNECTION;
+    device
+        .host_mut()
+        .post_nested_hub_status_change(3, &[1 << 2]);
     let index = match device.next_hub_change(&delay) {
         Ok(HubEvent::Attached(index)) => index,
         other => panic!("expected an attach through the nested hub's watch, got {other:?}"),
@@ -6611,9 +6698,11 @@ fn hot_plug_on_a_nested_hubs_port_attaches_and_detaches_through_its_own_watch() 
 
     // Unplug it again: the disconnect arrives on the nested hub's watch
     // and frees only the keyboard, never a hub.
-    device.host_mut().nested_downstream_status = 0;
-    device.host_mut().nested_downstream_change = PORT_CHANGE_CONNECTION;
-    device.host_mut().post_nested_hub_status_change(&[1 << 2]);
+    device.host_mut().nested_hubs[0].downstream_status = 0;
+    device.host_mut().nested_hubs[0].downstream_change = PORT_CHANGE_CONNECTION;
+    device
+        .host_mut()
+        .post_nested_hub_status_change(3, &[1 << 2]);
     assert_eq!(
         device.next_hub_change(&delay),
         Ok(HubEvent::Detached(index))
@@ -6634,8 +6723,8 @@ fn unplugging_a_nested_hub_cascades_and_a_replug_rebuilds_the_tier() {
     device.bring_up(&delay).expect("both hub tiers come up");
     assert!(device.device_live(1));
 
-    device.host_mut().nested_root_connected = false;
-    device.host_mut().nested_root_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().nested_hubs[0].connected = false;
+    device.host_mut().nested_hubs[0].root_change = PORT_CHANGE_CONNECTION;
     device.host_mut().post_hub_status_change(&[1 << 3]);
     match device.next_hub_change(&delay) {
         Ok(HubEvent::HubDetached(_)) => {}
@@ -6647,10 +6736,10 @@ fn unplugging_a_nested_hub_cascades_and_a_replug_rebuilds_the_tier() {
     // Re-plug the hub assembly. The old slot was disabled with the tier,
     // so the mock forgets it too; a brand-new enumeration re-addresses
     // the hub on a fresh slot and re-marks it.
-    device.host_mut().nested_hub_slot = 0;
-    device.host_mut().nested_marked = false;
-    device.host_mut().nested_root_connected = true;
-    device.host_mut().nested_root_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().nested_hubs[0].slot = 0;
+    device.host_mut().nested_hubs[0].marked = false;
+    device.host_mut().nested_hubs[0].connected = true;
+    device.host_mut().nested_hubs[0].root_change = PORT_CHANGE_CONNECTION;
     device.host_mut().post_hub_status_change(&[1 << 3]);
     match device.next_hub_change(&delay) {
         Ok(HubEvent::HubAttached(_)) => {}
@@ -6660,4 +6749,51 @@ fn unplugging_a_nested_hub_cascades_and_a_replug_rebuilds_the_tier() {
         device.any_device_live(),
         "the keyboard behind the re-plugged hub is served again"
     );
+}
+
+#[test]
+fn bring_up_serves_a_deep_hub_fanout_with_every_tier_watched() {
+    // The recorded reference assembly shape: five downstream hubs hanging
+    // below the root-attached hub at once — six tracked hub tiers in all —
+    // with a device behind every tier. Each downstream hub claims a device
+    // region for its own contexts and each leaf claims one of its own, so
+    // the walk needs ten regions live at once. Every tier must be
+    // installed, marked a hub on its own slot, and hold an armed
+    // status-change watch, and every leaf must be served: a tier the
+    // engine cannot track leaves every device behind it undetected.
+    const FANOUT_HUBS: u8 = 5;
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_hub_fanout(&mem, 8, FANOUT_HUBS), &mem);
+    let delay = TestDelay::default();
+    device.bring_up(&delay).expect("every hub tier comes up");
+
+    for i in 0..usize::from(FANOUT_HUBS) {
+        let hub = &device.host_mut().nested_hubs[i];
+        assert_ne!(hub.slot, 0, "downstream hub {i} is addressed");
+        assert!(hub.marked, "downstream hub {i}'s slot carries the Hub bit");
+        assert_ne!(
+            hub.int.dci, 0,
+            "downstream hub {i}'s status-change watch is configured and armed"
+        );
+    }
+    let live = (0..MAX_DEVICES).filter(|&i| device.device_live(i)).count();
+    assert_eq!(
+        live,
+        usize::from(FANOUT_HUBS),
+        "every hub tier's leaf device is served"
+    );
+    assert!(device.hub_watch_active());
+}
+
+#[test]
+fn capacity_covers_the_reference_deep_fanout_topology() {
+    // Tripwire for the engine's working set: the recorded reference
+    // assembly cascades five downstream hubs below the root-attached hub
+    // (six tracked tiers) and fans out to ten mass-storage bridges —
+    // fifteen concurrently addressed devices. The tracked working set must
+    // cover it, or whole tiers of a real assembly go silently unserved.
+    const REFERENCE_HUBS: usize = 6;
+    const REFERENCE_DEVICES: usize = 15;
+    assert!(MAX_HUBS >= core::hint::black_box(REFERENCE_HUBS));
+    assert!(MAX_DEVICES >= core::hint::black_box(REFERENCE_DEVICES));
 }

@@ -2755,8 +2755,9 @@ keyboard service kthread**:
     carve cannot hold them or a scratchpad-needing controller reports no page
     size / an unaligned base); `UsbDevice::start` fills the array with each
     buffer's device-visible base and points `DCBAA[0]` at it; and the carve
-    (`wiring::XHCI_DMA_BYTES`) grew 16 KiB → **256 KiB** to hold 31 × 4 KiB
-    pages plus the rings/contexts. Host-proven by `drivers/bus/usb`
+    (`rustos_usb::XHCI_DMA_BYTES`) is sized to hold the 31 × 4 KiB pages plus
+    the rings/contexts and every per-device/per-hub region
+    (`MAX_DEVICES` / `MAX_HUBS`). Host-proven by `drivers/bus/usb`
     `start_reserves_scratchpad_and_programs_dcbaa0` (a mock that, like the VL805,
     withholds every command completion until `DCBAA[0]` is programmed —
     enumeration then runs end to end),
