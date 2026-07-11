@@ -210,15 +210,20 @@ adding it updates `AGENTS.md` §3 and `PLAN.md` in the same change, §6):
 
 - Same data source, capability posture, and bundle shape as `lspci`.
 - **Selection:** nodes with `HwMatchKind::Usb` keys (the per-interface
-  nodes the HCD emits) plus their parent controller nodes for the `-t`
-  topology view.
+  nodes the HCD emits), grouped into physical devices by the bus-local
+  device address each node carries (`HwNode::address`, the device's
+  xHCI slot id the HCD reports — `0` = unreported, never grouped), plus
+  their parent controller nodes for the `-t` topology view.
 - **Output follows `usbutils`:** default `Bus NNN Device NNN: ID
-  vvvv:pppp Vendor Product` lines — bus/device numbers derive from the
-  tree's stable node ids (a deliberate, documented divergence: RustOS
-  numbers come from the hardware tree, not a Linux devnum, §16.7
-  divergence-by-concept), `-v` (interface class/subclass/protocol names
-  from the usb.ids class table), `-s`/`-d` filters, `-t` (controller →
-  interface tree).
+  vvvv:pppp Vendor Product` lines — **one line per physical device**,
+  never per interface — with bus and device numbers rendered as 1-based
+  per-snapshot ordinals in stable bus order (a deliberate, documented
+  divergence: RustOS has no Linux devnum registry, so the numbers are
+  small dense orderings of the snapshot, §16.7 divergence-by-concept),
+  `-v` (each interface's class/subclass/protocol names from the usb.ids
+  class table, one triple per interface), `-s`/`-d` filters on the
+  rendered numbers and ids, `-t` (bus → device → interface tree, the
+  bus line naming the controller by its `compatible` identity).
 - Same `stdinfo`, `Help/`, and docs obligations as `lspci`.
 
 ### 1.5 DEVICE1 increments
@@ -275,18 +280,20 @@ Each increment ends green on the whole-project gate (§7).
   `usbutils` default `Bus NNN Device NNN: ID vvvv:pppp <vendor>
   <product>` line, `-v` interface class/subclass/protocol names from the
   usb.ids class tables — decimal descriptor values, as `usbutils` prints
-  them — `-t` controller→interface topology, `-d [<vendor>]:[<product>]`
+  them — `-t` bus→device→interface topology, `-d [<vendor>]:[<product>]`
   and `-s [[<bus>]:][<devnum>]` filters, the `usb.names_unresolved` fd-3
   advisory) over the same seams as `lspci`; the freestanding `Run` loads
   `Resources/usb.ids.bin` and degrades to bare ids (reason on stderr) on
   a missing/invalid table; thirteen-locale `Help/` with the
   switch-pinning test; host unit tests over a canned tree + a fixture
   database compiled through the real `lib/devids` pipeline.
-  Reality-driven decisions: a device's bus number is its controller's
-  stable hardware-tree node id and its device number its own node id
+  Reality-driven decisions: one line renders per *physical device* —
+  the interface nodes the HCD emits are grouped by their shared
+  `HwNode::address` (the xHCI slot id; two identical devices carry
+  distinct addresses, an address-less node is never guessed into a
+  group) — with 1-based ordinal bus/device numbers in stable bus order
   (RustOS has no Linux devnum registry — the §1.4 documented
-  divergence), and one line renders per *interface* node (the inventory
-  the HCD emits), with no root-hub pseudo-devices; an identity the
+  divergence) and no root-hub pseudo-devices; an identity the
   database does not name shows only its `ID vvvv:pppp` (the `usbutils`
   omission shape), counted on fd 3. The shared hardware-tree walk
   (fail-closed decode, stable bus order, depth, ancestor-keep, class

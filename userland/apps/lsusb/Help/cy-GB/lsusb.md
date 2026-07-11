@@ -8,8 +8,8 @@ lsusb — rhestru'r dyfeisiau USB a ddarganfuwyd
 
 ## DESCRIPTION
 
-Yn rhestru, un llinell fesul rhyngwyneb USB a ddarganfuwyd, rifau bws
-a dyfais y rhyngwyneb, ei ddynodwr `vendor:product`, ac enwau'r
+Yn rhestru, un llinell fesul dyfais USB a ddarganfuwyd, rifau bws
+a dyfais y ddyfais, ei dynodwr `vendor:product`, ac enwau'r
 gwneuthurwr a'r cynnyrch. Y rhestr yw'r goeden galedwedd — unig restr
 ddyfeisiau'r system — a ddarllenir trwy API gwybodaeth y system, sy'n
 gofyn am y gallu `CAP_SYSINFO_HW`; adroddir gwrthodiad ar y gwall
@@ -24,33 +24,37 @@ gludir ar goll neu'n methu'r dilysu, mae'r rhestr yn dirywio i
 ddynodwyr noeth gyda'r rheswm ar y gwall safonol — rhestrir y rhestr
 ei hun o hyd.
 
-Nid oes gan RustOS gofrestr rhifau bws/dyfais Linux: rhif bws dyfais
-yw rhif nod sefydlog ei rheolydd yn y goeden galedwedd, a'i rhif
-dyfais yw ei rhif nod ei hun, ac mae `-s` yn dewis y rhifau nod hynny
-(gwyriad bwriadol, wedi'i ddogfennu, oddi wrth `lsusb` Linux). Mae'r
-rhestr yn cofnodi un nod fesul *rhyngwyneb*: mae dyfais aml-ryngwyneb
-yn ymddangos unwaith fesul rhyngwyneb.
+Nid oes gan RustOS gofrestr rhifau bws/dyfais Linux: mae rhifau bws a
+dyfais yn rhifau trefnol bach sy'n dechrau ar 1 dros y rhestr
+gyfredol (y bysiau yn nhrefn eu darganfod, y dyfeisiau yn nhrefn eu
+rhestru ar bob bws), yn sefydlog cyhyd â bod y topoleg heb newid, ac
+mae `-s` yn dewis y rhifau a ddangosir hynny (gwyriad bwriadol,
+wedi'i ddogfennu, oddi wrth `lsusb` Linux). Mae'r rhestr yn cofnodi
+un cofnod fesul *rhyngwyneb*: caiff rhyngwynebau'r un ddyfais
+ffisegol eu grwpio yn ôl cyfeiriad y ddyfais a adroddwyd gan reolydd
+y gwesteiwr, felly mae dyfais aml-ryngwyneb yn ymddangos unwaith yn
+unig.
 
 ## OPTIONS
 
 - `-v` — ar ôl pob dyfais, rhestru dosbarth, is-ddosbarth a phrotocol
-  ei rhyngwyneb (`bInterfaceClass`, `bInterfaceSubClass`,
+  pob un o'i rhyngwynebau (`bInterfaceClass`, `bInterfaceSubClass`,
   `bInterfaceProtocol`) gyda'r enwau o dablau dosbarth USB.
-- `-t` — dangos y dyfeisiau fel coeden o dan eu rheolyddion a'u
-  bysiau.
+- `-t` — dangos fel coeden y bysiau, eu dyfeisiau a dosbarthiadau
+  rhyngwynebau pob dyfais.
 - `-d [<vendor>]:[<product>]` — rhestru dim ond y dyfeisiau sy'n cyfateb
   i'r dynodwyr gwneuthurwr/cynnyrch a roddir (hecs); mae hanner a
   hepgorir yn cyfateb i unrhyw un.
 - `-s [[<bus>]:][<devnum>]` — rhestru dim ond y dyfeisiau sy'n cyfateb
-  i rifau nod y rheolydd (bws) a/neu'r ddyfais (degol); rhif dyfais yn
-  unig yw gwerth heb golon.
+  i'r rhifau bws a/neu ddyfais a roddir (degol, fel y'u dangosir yn y
+  rhestr); rhif dyfais yn unig yw gwerth heb golon.
 - `-?, --help` — dangos cymorth byr y gorchymyn hwn.
 
 ## EXAMPLES
 
 - `lsusb` — pob dyfais USB a ddarganfuwyd, gydag enwau.
 - `lsusb -v` — yr un peth, gyda hunaniaeth dosbarth pob rhyngwyneb.
-- `lsusb -s 2:` — pob dyfais o dan nod rheolydd 2.
+- `lsusb -s 2:` — pob dyfais ar fws 2.
 - `lsusb -d 046d:` — pob dyfais gan y gwneuthurwr `046d` (Logitech).
 - `lsusb -t` — y dyfeisiau o dan eu topoleg bws.
 

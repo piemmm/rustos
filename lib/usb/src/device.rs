@@ -4610,7 +4610,11 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// against it. Its [`HwDeviceClass`] is derived from the interface
     /// class, the match key mirroring the PCI child node
     /// [`PciBus::describe_function`](rustos_abi::driver::pci::PciBus::describe_function)
-    /// emits for the controller above it.
+    /// emits for the controller above it. The node's device address is the
+    /// device's xHCI slot id, so every interface node of one composite
+    /// device carries the same non-zero address (a slot is never `0` while
+    /// served) and an inventory consumer can attribute sibling interfaces
+    /// to their one physical device.
     ///
     /// # Errors
     ///
@@ -4629,7 +4633,9 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         parent_id: u32,
         node_id: u32,
     ) -> Result<HwNode, DriverError> {
-        let identity = self.device(index).ok_or(DriverError::NotFound)?.identity;
+        let device = self.device(index).ok_or(DriverError::NotFound)?;
+        let identity = device.identity;
+        let slot = device.slot;
         // Derive the node's device class from the interface's own class
         // byte, never assumed: a HID interface is an input device, a
         // mass-storage interface a storage device. An unmapped class is
@@ -4640,6 +4646,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             _ => HwDeviceClass::Other,
         };
         let mut node = HwNode::new(node_id, parent_id, device_class);
+        node.set_address(u32::from(slot));
         node.push_match_key(HwMatchKey::usb(
             identity.vendor_id,
             identity.product_id,

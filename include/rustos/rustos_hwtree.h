@@ -30,7 +30,7 @@
 /* Packed little-endian wire sizes, in bytes. */
 #define ROS_HW_MATCH_KEY_WIRE_LEN 76u
 #define ROS_HW_RESOURCE_WIRE_LEN 32u
-#define ROS_HW_NODE_WIRE_LEN 572u
+#define ROS_HW_NODE_WIRE_LEN 576u
 
 /* Device classes (uint16_t). */
 #define ROS_HW_CLASS_ROOT ((uint16_t)0u)

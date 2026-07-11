@@ -4756,6 +4756,7 @@ fn describe_device_emits_the_hid_child_node() {
     let node = device.describe_device(0, 7, 9).expect("identity captured");
     assert_eq!(node.id(), 9);
     assert_eq!(node.parent(), 7);
+    assert_ne!(node.address(), 0, "the node names its device's slot");
     assert_eq!(node.class(), Some(HwDeviceClass::Input));
     assert_eq!(node.match_keys().len(), 1);
     let emitted = node.match_keys()[0];
@@ -6148,6 +6149,11 @@ fn bring_up_serves_both_interfaces_of_a_composite_receiver() {
     assert!(HwMatchKey::usb(0, 0, 0x03_01_01).matches(&kbd_node.match_keys()[0]));
     let mouse_node = device.describe_device(1, 0, 2).expect("mouse node");
     assert!(HwMatchKey::usb(0, 0, 0x03_01_02).matches(&mouse_node.match_keys()[0]));
+    // Both interface nodes carry the one physical device's slot as their
+    // device address, so an inventory consumer (`lsusb`) attributes them
+    // to a single device rather than listing it twice.
+    assert_ne!(kbd_node.address(), 0);
+    assert_eq!(kbd_node.address(), mouse_node.address());
 
     // Keystrokes flow on the keyboard interface's index...
     let mut buf = [0u8; REPORT_LEN];

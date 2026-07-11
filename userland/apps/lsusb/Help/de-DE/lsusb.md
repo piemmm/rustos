@@ -8,8 +8,8 @@ lsusb — erkannte USB-Geräte auflisten
 
 ## DESCRIPTION
 
-Listet, eine Zeile je erkannter USB-Schnittstelle, die Bus- und
-Gerätenummern der Schnittstelle, ihre `vendor:product`-Kennung sowie
+Listet, eine Zeile je erkanntem USB-Gerät, die Bus- und
+Gerätenummern des Geräts, seine `vendor:product`-Kennung sowie
 die Namen von Hersteller und Produkt. Das Inventar ist der
 Hardware-Baum — das einzige Geräteinventar des Systems — gelesen über
 die Systeminformations-API, die die Capability `CAP_SYSINFO_HW`
@@ -25,34 +25,38 @@ Fehlt die mitgelieferte Tabelle oder scheitert ihre Prüfung, fällt die
 Auflistung auf nackte Kennungen zurück, mit dem Grund auf der
 Standardfehlerausgabe — das Inventar selbst wird weiterhin gelistet.
 
-RustOS führt kein Linux-Register für Bus-/Gerätenummern: Die Busnummer
-eines Geräts ist die stabile Hardware-Baum-Knotennummer seines
-Controllers, seine Gerätenummer die eigene Knotennummer, und `-s`
-wählt diese Knotennummern aus (eine bewusste, dokumentierte Abweichung
-vom `lsusb` unter Linux). Das Inventar führt einen Knoten je
-*Schnittstelle*: Ein Gerät mit mehreren Schnittstellen erscheint einmal
-je Schnittstelle.
+RustOS führt kein Linux-Register für Bus-/Gerätenummern: Bus- und
+Gerätenummern sind kleine, bei 1 beginnende Ordnungszahlen über das
+aktuelle Inventar (Busse in Erkennungsreihenfolge, Geräte in
+Auflistungsreihenfolge je Bus), stabil solange sich die Topologie nicht
+ändert, und `-s` wählt diese angezeigten Nummern aus (eine bewusste,
+dokumentierte Abweichung vom `lsusb` unter Linux). Das Inventar führt
+einen Eintrag je *Schnittstelle*: Die Schnittstellen eines physischen
+Geräts werden anhand der vom Host-Controller gemeldeten Geräteadresse
+gruppiert, sodass ein Gerät mit mehreren Schnittstellen nur einmal
+erscheint.
 
 ## OPTIONS
 
-- `-v` — nach jedem Gerät seine Schnittstellenklasse, -unterklasse und
-  sein Protokoll auflisten (`bInterfaceClass`, `bInterfaceSubClass`,
-  `bInterfaceProtocol`), mit den Namen der USB-Klassentabellen.
-- `-t` — die Geräte als Baum unter ihren Controllern und Bussen
-  darstellen.
+- `-v` — nach jedem Gerät für jede seiner Schnittstellen Klasse,
+  Unterklasse und Protokoll auflisten (`bInterfaceClass`,
+  `bInterfaceSubClass`, `bInterfaceProtocol`), mit den Namen der
+  USB-Klassentabellen.
+- `-t` — die Busse, ihre Geräte und die Schnittstellenklassen jedes
+  Geräts als Baum darstellen.
 - `-d [<vendor>]:[<product>]` — nur Geräte mit den angegebenen
   Hersteller-/Produktkennungen (hexadezimal) auflisten; eine
   ausgelassene Hälfte passt auf alles.
-- `-s [[<bus>]:][<devnum>]` — nur Geräte mit den angegebenen
-  Controller- (Bus-) und/oder Geräteknotennummern (dezimal) auflisten;
-  ein Wert ohne Doppelpunkt ist eine Gerätenummer allein.
+- `-s [[<bus>]:][<devnum>]` — nur Geräte mit den angegebenen Bus-
+  und/oder Gerätenummern (dezimal) auflisten, wie sie in der Auflistung
+  erscheinen; ein Wert ohne Doppelpunkt ist eine Gerätenummer allein.
 - `-?, --help` — die Kurzhilfe dieses Kommandos anzeigen.
 
 ## EXAMPLES
 
 - `lsusb` — jedes erkannte USB-Gerät, mit Namen.
 - `lsusb -v` — dasselbe, mit der Klassenidentität jeder Schnittstelle.
-- `lsusb -s 2:` — jedes Gerät unter Controller-Knoten 2.
+- `lsusb -s 2:` — jedes Gerät auf Bus 2.
 - `lsusb -d 046d:` — jedes Gerät des Herstellers `046d` (Logitech).
 - `lsusb -t` — die Geräte in ihrer Bus-Topologie.
 

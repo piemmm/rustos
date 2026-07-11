@@ -968,8 +968,12 @@ then returns an `HwNode` of class `Input`, parented at the controller's
 node, carrying one `HwMatchKey::usb` of the device's `vid:pid` and that
 captured interface class — never a fabricated one (`AGENTS.md` §18.5) —
 so the `usb_kbd`/`usb_mouse` class-wildcard `BIND_KEYS` resolve
-against it exactly as `devmgr` will. It fails closed with `NotFound`
-before a device has been enumerated.
+against it exactly as `devmgr` will. The node's `HwNode::address` is
+the device's xHCI slot id, so the sibling interface nodes of one
+composite device carry the same non-zero address and an inventory
+consumer (`lsusb`) attributes them to a single physical device —
+purely descriptive, never part of bind matching. It fails closed with
+`NotFound` before a device has been enumerated.
 
 Together with the bus-driver `BIND_KEYS` (item 5a), the `devmgr` autoload
 wiring (item 5c) is the data-driven path that **replaced** the former

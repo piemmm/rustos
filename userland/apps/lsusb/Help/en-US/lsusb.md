@@ -8,7 +8,7 @@ lsusb — list discovered USB devices
 
 ## DESCRIPTION
 
-Lists, one line per discovered USB interface, the interface's bus and
+Lists, one line per discovered USB device, the device's bus and
 device numbers, its `vendor:product` id, and its vendor and product
 names. The inventory is the hardware tree — the system's single device
 inventory — read through the System Information API, which requires the
@@ -23,32 +23,34 @@ the number of such devices is noted on the standard information stream
 listing degrades to bare ids with the reason on standard error — the
 inventory itself is still listed.
 
-RustOS has no Linux bus/device-number registry: a device's bus number
-is its controller's stable hardware-tree node id and its device number
-is its own node id, and `-s` selects those node ids (a deliberate,
-documented divergence from Linux's `lsusb`). The inventory records one
-node per *interface*, so a multi-interface device lists once per
-interface.
+RustOS has no Linux bus/device-number registry: bus and device numbers
+are small 1-based orderings of the current inventory (buses in
+discovery order, devices in listing order on each bus), stable while
+the topology is unchanged, and `-s` selects those rendered numbers (a
+deliberate, documented divergence from Linux's `lsusb`). The inventory
+records one entry per *interface*; the interfaces of one physical
+device are grouped by the device address the host controller reported,
+so a multi-interface device lists once.
 
 ## OPTIONS
 
-- `-v` — after each device, list its interface class, subclass, and
-  protocol (`bInterfaceClass`, `bInterfaceSubClass`,
+- `-v` — after each device, list every one of its interfaces' class,
+  subclass, and protocol (`bInterfaceClass`, `bInterfaceSubClass`,
   `bInterfaceProtocol`) with the names the USB class tables carry.
-- `-t` — render the devices as a tree under their controllers and
-  buses.
+- `-t` — render the buses, their devices, and each device's interface
+  classes as a tree.
 - `-d [<vendor>]:[<product>]` — list only devices matching the given
   vendor/product ids (hex); an omitted half matches any.
-- `-s [[<bus>]:][<devnum>]` — list only devices matching the given
-  controller (bus) and/or device node ids (decimal); a value without a
-  colon is a device number alone.
+- `-s [[<bus>]:][<devnum>]` — list only devices matching the given bus
+  and/or device numbers (decimal), as rendered in the listing; a value
+  without a colon is a device number alone.
 - `-?, --help` — show this command's own short help.
 
 ## EXAMPLES
 
 - `lsusb` — every discovered USB device, with names.
 - `lsusb -v` — the same, with each interface's class identity.
-- `lsusb -s 2:` — every device under controller node 2.
+- `lsusb -s 2:` — every device on bus 2.
 - `lsusb -d 046d:` — every device from vendor `046d` (Logitech).
 - `lsusb -t` — the devices under their bus topology.
 

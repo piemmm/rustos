@@ -24,20 +24,87 @@ pub const USAGE: &str =
 /// The command word this bundle is named by, for the own-help lookup.
 const OWN_WORD: &str = "lsusb";
 
-/// One discovered USB interface: its tree identity and the numeric
-/// identity its match key carries.
-struct Interface<'a> {
-    node: &'a HwNode,
+/// One physical USB device: the interfaces grouped under it, its
+/// controller, and the rendered bus/device numbers.
+///
+/// Interface nodes are the inventory's bind unit; a physical device is
+/// their truthful grouping — the interfaces under one controller that
+/// carry the same non-zero [`HwNode::address`] (the device address the
+/// host controller reported). A node whose emitter reported no address
+/// (`0`) cannot be grouped and stands as its own device. Bus and device
+/// numbers are per-snapshot ordinals starting at 1, in stable bus order
+/// — `usbutils`-shaped small numbers, not kernel node ids.
+struct Device {
+    /// Hardware-tree node id of the controller this device hangs under.
+    controller: u32,
+    /// The device address its interface nodes carry (`0` = unreported).
+    address: u32,
+    /// Rendered bus number (1-based ordinal of the controller).
+    bus: u32,
+    /// Rendered device number (1-based ordinal within the bus).
+    number: u32,
+    /// The device's vendor id (shared by all its interfaces).
     vendor: u16,
+    /// The device's product id (shared by all its interfaces).
     product: u16,
-    class24: u32,
+    /// Each interface's 24-bit class triple
+    /// `(bInterfaceClass << 16) | (bInterfaceSubClass << 8) | bInterfaceProtocol`,
+    /// in stable bus order.
+    interfaces: Vec<u32>,
 }
 
-impl Interface<'_> {
-    /// The controller (bus) node id this interface hangs under.
-    fn bus(&self) -> u32 {
-        self.node.parent()
+/// Group the tree's USB interface nodes into physical devices, in stable
+/// bus order, assigning the 1-based bus and per-bus device ordinals the
+/// listing renders.
+fn group_devices(nodes: &[HwNode], order: &[usize]) -> Vec<Device> {
+    let mut devices: Vec<Device> = Vec::new();
+    // Controller node ids in first-appearance order; a controller's bus
+    // number is its position + 1.
+    let mut controllers: Vec<u32> = Vec::new();
+    for &index in order {
+        let node = &nodes[index];
+        let Some(key) = node
+            .match_keys()
+            .iter()
+            .find(|key| key.kind() == Some(HwMatchKind::Usb))
+        else {
+            continue;
+        };
+        let controller = node.parent();
+        if node.address() != 0 {
+            if let Some(device) = devices
+                .iter_mut()
+                .find(|d| d.controller == controller && d.address == node.address())
+            {
+                device.interfaces.push(key.class());
+                continue;
+            }
+        }
+        let bus = if let Some(position) = controllers.iter().position(|&c| c == controller) {
+            ordinal(position)
+        } else {
+            controllers.push(controller);
+            ordinal(controllers.len() - 1)
+        };
+        let number = ordinal(devices.iter().filter(|d| d.bus == bus).count());
+        devices.push(Device {
+            controller,
+            address: node.address(),
+            bus,
+            number,
+            vendor: key.vendor(),
+            product: key.product(),
+            interfaces: alloc::vec![key.class()],
+        });
     }
+    devices
+}
+
+/// The 1-based ordinal for zero-based `position`. The tree's node count
+/// bounds every ordinal, so the conversion cannot truncate in practice;
+/// it saturates rather than wrapping if it ever would.
+fn ordinal(position: usize) -> u32 {
+    u32::try_from(position).map_or(u32::MAX, |p| p.saturating_add(1))
 }
 
 /// Run a parsed `lsusb` command against the injected seams.
@@ -73,46 +140,21 @@ pub fn run(
 
     let nodes = hwtree::fetch_tree(transport).map_err(LsusbError::from)?;
     let order = hwtree::bus_order(&nodes);
-
-    // The USB interfaces, in stable bus order (parent-chain order from
-    // the tree), then filtered by `-s` / `-d`.
-    let mut interfaces: Vec<Interface<'_>> = Vec::new();
-    for &index in &order {
-        let node = &nodes[index];
-        let Some(key) = node
-            .match_keys()
-            .iter()
-            .find(|key| key.kind() == Some(HwMatchKind::Usb))
-        else {
-            continue;
-        };
-        let interface = Interface {
-            node,
-            vendor: key.vendor(),
-            product: key.product(),
-            class24: key.class(),
-        };
-        if !selected(&options, &interface) {
-            continue;
-        }
-        interfaces.push(interface);
-    }
+    let devices = group_devices(&nodes, &order);
 
     let mut unnamed = 0u64;
     if options.tree {
-        render_tree(&options, &nodes, &interfaces, database, out, &mut unnamed)?;
+        render_tree(&options, &nodes, &devices, database, out, &mut unnamed)?;
     } else {
-        for interface in &interfaces {
-            let mut line = format!(
-                "Bus {:03} Device {:03}: ",
-                interface.bus(),
-                interface.node.id()
-            );
-            push_identity(&mut line, interface, database, &mut unnamed);
+        for device in devices.iter().filter(|d| selected(&options, d)) {
+            let mut line = format!("Bus {:03} Device {:03}: ", device.bus, device.number);
+            push_identity(&mut line, device, database, &mut unnamed);
             line.push('\n');
             out.write_all(line.as_bytes()).map_err(LsusbError::Output)?;
             if options.verbose {
-                render_class(interface, database, 1, out)?;
+                for &class24 in &device.interfaces {
+                    render_class(class24, database, 1, out)?;
+                }
             }
         }
     }
@@ -122,47 +164,44 @@ pub fn run(
     Ok(())
 }
 
-/// `true` if `interface` passes the `-s` / `-d` filters.
-fn selected(options: &Options, interface: &Interface<'_>) -> bool {
+/// `true` if `device` passes the `-s` / `-d` filters. `-s` names the
+/// rendered bus/device numbers; `-d` the vendor/product ids.
+fn selected(options: &Options, device: &Device) -> bool {
     if let Some(slot) = options.slot {
-        if slot.bus.is_some_and(|bus| bus != interface.bus()) {
+        if slot.bus.is_some_and(|bus| bus != device.bus) {
             return false;
         }
-        if slot.device.is_some_and(|dev| dev != interface.node.id()) {
+        if slot.device.is_some_and(|dev| dev != device.number) {
             return false;
         }
     }
     if let Some(filter) = options.device {
-        if filter.vendor.is_some_and(|v| v != interface.vendor) {
+        if filter.vendor.is_some_and(|v| v != device.vendor) {
             return false;
         }
-        if filter.product.is_some_and(|p| p != interface.product) {
+        if filter.product.is_some_and(|p| p != device.product) {
             return false;
         }
     }
     true
 }
 
-/// Append `interface`'s identity — `ID vvvv:pppp` plus the vendor and
+/// Append `device`'s identity — `ID vvvv:pppp` plus the vendor and
 /// product names the database carries — to `line`, counting an identity
 /// the database could not fully name. An unknown name is omitted, never
 /// fabricated: the numeric id is already on the line, exactly as
 /// `usbutils` renders an entry absent from `usb.ids`.
 fn push_identity(
     line: &mut String,
-    interface: &Interface<'_>,
+    device: &Device,
     database: Option<&DevIds<'_>>,
     unnamed: &mut u64,
 ) {
     // `write!` to a `String` cannot fail; the results are discarded on
     // that basis.
-    let _ = write!(
-        line,
-        "ID {:04x}:{:04x}",
-        interface.vendor, interface.product
-    );
-    let vendor_name = database.and_then(|db| db.vendor(interface.vendor));
-    let product_name = database.and_then(|db| db.device(interface.vendor, interface.product));
+    let _ = write!(line, "ID {:04x}:{:04x}", device.vendor, device.product);
+    let vendor_name = database.and_then(|db| db.vendor(device.vendor));
+    let product_name = database.and_then(|db| db.device(device.vendor, device.product));
     if vendor_name.is_none() || product_name.is_none() {
         *unnamed += 1;
     }
@@ -174,20 +213,21 @@ fn push_identity(
     }
 }
 
-/// Render an interface's class identity in the `-v` view: the
+/// Render one interface's class identity in the `-v` view: the
 /// `bInterfaceClass` / `bInterfaceSubClass` / `bInterfaceProtocol`
 /// descriptor fields (decimal values, as `usbutils` prints them) with
 /// the names the `usb.ids` class tables carry; an unknown name is
-/// omitted, never fabricated.
+/// omitted, never fabricated. A composite device renders one triple per
+/// interface, in bus order.
 fn render_class(
-    interface: &Interface<'_>,
+    class24: u32,
     database: Option<&DevIds<'_>>,
     depth: usize,
     out: &dyn Output,
 ) -> Result<(), LsusbError> {
-    let class = ((interface.class24 >> 16) & 0xFF) as u8;
-    let sub = ((interface.class24 >> 8) & 0xFF) as u8;
-    let protocol = (interface.class24 & 0xFF) as u8;
+    let class = ((class24 >> 16) & 0xFF) as u8;
+    let sub = ((class24 >> 8) & 0xFF) as u8;
+    let protocol = (class24 & 0xFF) as u8;
     let rows: [(&str, u8, Option<&str>); 3] = [
         (
             "bInterfaceClass",
@@ -222,47 +262,69 @@ fn render_class(
     Ok(())
 }
 
-/// Render the `-t` topology view: every USB interface under its ancestor
-/// chain (its controller and the buses above it), ancestors shown as
-/// `#<id> <class>` context lines, indentation one step per tree level.
+/// Render the `-t` topology view: each bus (controller), the devices on
+/// it, and each device's interfaces — the USB topology only, never the
+/// non-USB ancestors above the controller.
+///
+/// The bus line names the controller by its first `compatible` match key
+/// (the model identity discovery recorded) or, absent one, its class
+/// label. An interface line is its class triple `Class=cc:ss:pp` (hex
+/// bytes, `usbutils`' `Class=` shape) with the `usb.ids` class name when
+/// the database carries it.
 fn render_tree(
     options: &Options,
     nodes: &[HwNode],
-    interfaces: &[Interface<'_>],
+    devices: &[Device],
     database: Option<&DevIds<'_>>,
     out: &dyn Output,
     unnamed: &mut u64,
 ) -> Result<(), LsusbError> {
-    // Which nodes are (or contain) a selected USB interface.
-    let selected_ids: Vec<u32> = interfaces.iter().map(|i| i.node.id()).collect();
-    let keep = hwtree::keep_with_ancestors(nodes, &selected_ids);
-
-    // Depth-first over the kept nodes, in the same stable bus order.
-    for &index in &hwtree::bus_order(nodes) {
-        if !keep[index] {
-            continue;
+    let mut last_bus = 0u32;
+    for device in devices.iter().filter(|d| selected(options, d)) {
+        if device.bus != last_bus {
+            last_bus = device.bus;
+            let label = controller_label(nodes, device.controller);
+            let line = format!("Bus {:03}: {label}\n", device.bus);
+            out.write_all(line.as_bytes()).map_err(LsusbError::Output)?;
         }
-        let node = &nodes[index];
-        let depth = hwtree::depth_of(nodes, node);
-        let mut line = String::new();
-        for _ in 0..depth {
-            line.push_str("  ");
-        }
-        if let Some(interface) = interfaces.iter().find(|i| i.node.id() == node.id()) {
-            let _ = write!(line, "#{} ", node.id());
-            push_identity(&mut line, interface, database, unnamed);
-        } else {
-            let _ = write!(line, "#{} {}", node.id(), hwtree::class_label(node.class()));
-        }
+        let mut line = format!("  Device {:03}: ", device.number);
+        push_identity(&mut line, device, database, unnamed);
         line.push('\n');
         out.write_all(line.as_bytes()).map_err(LsusbError::Output)?;
-        if options.verbose {
-            if let Some(interface) = interfaces.iter().find(|i| i.node.id() == node.id()) {
-                render_class(interface, database, depth + 1, out)?;
+        for &class24 in &device.interfaces {
+            let class = ((class24 >> 16) & 0xFF) as u8;
+            let sub = ((class24 >> 8) & 0xFF) as u8;
+            let protocol = (class24 & 0xFF) as u8;
+            let mut line = format!("    Class={class:02x}:{sub:02x}:{protocol:02x}");
+            if let Some(name) = database.and_then(|db| db.class(class)) {
+                // `write!` to a `String` cannot fail; the result is
+                // discarded on that basis.
+                let _ = write!(line, " {name}");
             }
+            line.push('\n');
+            out.write_all(line.as_bytes()).map_err(LsusbError::Output)?;
         }
     }
     Ok(())
+}
+
+/// The `-t` bus line's controller label: the controller node's first
+/// `compatible` match key, or its class label when it carries none (or
+/// the node is absent from the snapshot).
+fn controller_label(nodes: &[HwNode], controller: u32) -> String {
+    let node = nodes.iter().find(|node| node.id() == controller);
+    if let Some(node) = node {
+        if let Some(key) = node
+            .match_keys()
+            .iter()
+            .find(|key| key.kind() == Some(HwMatchKind::Compatible))
+        {
+            if let Ok(compatible) = core::str::from_utf8(key.compatible_bytes()) {
+                return String::from(compatible);
+            }
+        }
+    }
+    String::from(hwtree::class_label(node.and_then(HwNode::class)))
 }
 
 /// Emit the `usb.names_unresolved` advisory (fd 3) when identities were
@@ -332,9 +394,11 @@ C 03  Human Interface Device
     }
 
     /// The canned tree: a root bus (#1) carrying an xHCI controller (#2)
-    /// with two interfaces — a named Logitech boot keyboard (#3) and an
-    /// unnamed vendor-specific interface (#4) — plus a non-USB timer (#5)
-    /// the listing must ignore.
+    /// with three interface nodes — a named Logitech composite receiver's
+    /// boot-keyboard (#3) and boot-mouse (#4) interfaces sharing device
+    /// address 1, and an unnamed vendor-specific single-interface device
+    /// (#5) at address 2 — plus a non-USB timer (#6) the listing must
+    /// ignore.
     fn fixture_tree() -> Vec<u8> {
         let mut root = HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Bus);
         root.push_match_key(HwMatchKey::compatible(b"fixture,root").expect("fits"))
@@ -347,16 +411,23 @@ C 03  Human Interface Device
         keyboard
             .push_match_key(HwMatchKey::usb(0x046d, 0xc534, 0x03_01_01))
             .expect("key fits");
-        let mut unnamed = HwNode::new(4, 2, HwDeviceClass::Other);
+        keyboard.set_address(1);
+        let mut mouse = HwNode::new(4, 2, HwDeviceClass::Input);
+        mouse
+            .push_match_key(HwMatchKey::usb(0x046d, 0xc534, 0x03_01_02))
+            .expect("key fits");
+        mouse.set_address(1);
+        let mut unnamed = HwNode::new(5, 2, HwDeviceClass::Other);
         unnamed
             .push_match_key(HwMatchKey::usb(0xabcd, 0x1234, 0xff_00_00))
             .expect("key fits");
-        let mut timer = HwNode::new(5, 1, HwDeviceClass::Timer);
+        unnamed.set_address(2);
+        let mut timer = HwNode::new(6, 1, HwDeviceClass::Timer);
         timer
             .push_match_key(HwMatchKey::compatible(b"fixture,timer").expect("fits"))
             .expect("key fits");
 
-        let nodes = [root, controller, keyboard, unnamed, timer];
+        let nodes = [root, controller, keyboard, mouse, unnamed, timer];
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&HwTreeHeader::new(1, nodes.len() as u64).to_le_bytes());
         for node in nodes {
@@ -449,16 +520,20 @@ C 03  Human Interface Device
 
     #[test]
     fn default_listing_names_what_the_database_knows() {
+        // The composite receiver's two interface nodes share device
+        // address 1, so it lists once — one line per physical device,
+        // never per interface — and bus/device numbers are small 1-based
+        // ordinals, never hardware-tree node ids.
         let (out, result) = run_case(&[], Ok(fixture_tree()), true);
         result.expect("listing succeeds");
         assert_eq!(
             out.lines(),
             [
-                "Bus 002 Device 003: ID 046d:c534 Logitech, Inc. Unifying Receiver",
-                "Bus 002 Device 004: ID abcd:1234",
+                "Bus 001 Device 001: ID 046d:c534 Logitech, Inc. Unifying Receiver",
+                "Bus 001 Device 002: ID abcd:1234",
             ]
         );
-        // The unnamed vendor-specific interface is advised on fd 3, and
+        // The unnamed vendor-specific device is advised on fd 3, and
         // only it.
         let infos = out.infos.borrow();
         assert_eq!(infos.len(), 1, "{infos:?}");
@@ -477,8 +552,8 @@ C 03  Human Interface Device
         assert_eq!(
             out.lines(),
             [
-                "Bus 002 Device 003: ID 046d:c534",
-                "Bus 002 Device 004: ID abcd:1234",
+                "Bus 001 Device 001: ID 046d:c534",
+                "Bus 001 Device 002: ID abcd:1234",
             ]
         );
         let infos = out.infos.borrow();
@@ -493,18 +568,18 @@ C 03  Human Interface Device
 
     #[test]
     fn slot_and_device_filters_select() {
-        // A bare `-s` value is a device (interface node) number.
-        let (out, result) = run_case(&["-s", "4"], Ok(fixture_tree()), true);
+        // A bare `-s` value is a rendered device number.
+        let (out, result) = run_case(&["-s", "2"], Ok(fixture_tree()), true);
         result.expect("listing succeeds");
-        assert_eq!(out.lines(), ["Bus 002 Device 004: ID abcd:1234"]);
+        assert_eq!(out.lines(), ["Bus 001 Device 002: ID abcd:1234"]);
 
-        // `bus:` selects everything under the controller node.
-        let (out, result) = run_case(&["-s", "2:"], Ok(fixture_tree()), true);
+        // `bus:` selects every device on the rendered bus.
+        let (out, result) = run_case(&["-s", "1:"], Ok(fixture_tree()), true);
         result.expect("listing succeeds");
         assert_eq!(out.lines().len(), 2);
 
-        // A bus that exists but is not a controller matches nothing.
-        let (out, result) = run_case(&["-s", "1:"], Ok(fixture_tree()), true);
+        // A bus number no controller renders as matches nothing.
+        let (out, result) = run_case(&["-s", "2:"], Ok(fixture_tree()), true);
         result.expect("listing succeeds");
         assert!(out.lines().is_empty());
 
@@ -512,36 +587,42 @@ C 03  Human Interface Device
         result.expect("listing succeeds");
         assert_eq!(
             out.lines(),
-            ["Bus 002 Device 003: ID 046d:c534 Logitech, Inc. Unifying Receiver"]
+            ["Bus 001 Device 001: ID 046d:c534 Logitech, Inc. Unifying Receiver"]
         );
 
         let (out, result) = run_case(&["-d", ":1234"], Ok(fixture_tree()), true);
         result.expect("listing succeeds");
-        assert_eq!(out.lines(), ["Bus 002 Device 004: ID abcd:1234"]);
+        assert_eq!(out.lines(), ["Bus 001 Device 002: ID abcd:1234"]);
     }
 
     #[test]
     fn verbose_appends_the_class_identity() {
-        let (out, result) = run_case(&["-v", "-s", "3"], Ok(fixture_tree()), true);
+        // The composite receiver renders one class triple per interface
+        // under its single device line (the boot-mouse protocol `2` has
+        // no name in the fixture tables and none is fabricated).
+        let (out, result) = run_case(&["-v", "-s", "1"], Ok(fixture_tree()), true);
         result.expect("listing succeeds");
         assert_eq!(
             out.lines(),
             [
-                "Bus 002 Device 003: ID 046d:c534 Logitech, Inc. Unifying Receiver",
+                "Bus 001 Device 001: ID 046d:c534 Logitech, Inc. Unifying Receiver",
                 "  bInterfaceClass 3 Human Interface Device",
                 "  bInterfaceSubClass 1 Boot Interface Subclass",
                 "  bInterfaceProtocol 1 Keyboard",
+                "  bInterfaceClass 3 Human Interface Device",
+                "  bInterfaceSubClass 1 Boot Interface Subclass",
+                "  bInterfaceProtocol 2",
             ]
         );
 
         // An identity outside the class tables keeps its decimal values
         // with no fabricated names.
-        let (out, result) = run_case(&["-v", "-s", "4"], Ok(fixture_tree()), true);
+        let (out, result) = run_case(&["-v", "-s", "2"], Ok(fixture_tree()), true);
         result.expect("listing succeeds");
         assert_eq!(
             out.lines(),
             [
-                "Bus 002 Device 004: ID abcd:1234",
+                "Bus 001 Device 002: ID abcd:1234",
                 "  bInterfaceClass 255",
                 "  bInterfaceSubClass 0",
                 "  bInterfaceProtocol 0",
@@ -550,16 +631,70 @@ C 03  Human Interface Device
     }
 
     #[test]
-    fn tree_view_shows_the_parent_chain() {
+    fn tree_view_shows_buses_devices_and_interfaces() {
         let (out, result) = run_case(&["-t"], Ok(fixture_tree()), true);
         result.expect("listing succeeds");
         assert_eq!(
             out.lines(),
             [
-                "#1 bus",
-                "  #2 bus",
-                "    #3 ID 046d:c534 Logitech, Inc. Unifying Receiver",
-                "    #4 ID abcd:1234",
+                "Bus 001: fixture,xhci",
+                "  Device 001: ID 046d:c534 Logitech, Inc. Unifying Receiver",
+                "    Class=03:01:01 Human Interface Device",
+                "    Class=03:01:02 Human Interface Device",
+                "  Device 002: ID abcd:1234",
+                "    Class=ff:00:00",
+            ]
+        );
+    }
+
+    #[test]
+    fn identical_devices_group_by_address_and_an_unreported_address_never_groups() {
+        // Two identical keyboards (same vid:pid, same controller) at
+        // distinct addresses stay two devices; two address-less nodes —
+        // an emitter that reported no device address — are never guessed
+        // into one device, even with identical identities.
+        let mut root = HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Bus);
+        root.push_match_key(HwMatchKey::compatible(b"fixture,root").expect("fits"))
+            .expect("key fits");
+        let mut controller = HwNode::new(2, 1, HwDeviceClass::Bus);
+        controller
+            .push_match_key(HwMatchKey::compatible(b"fixture,xhci").expect("fits"))
+            .expect("key fits");
+        let mut twin_a = HwNode::new(3, 2, HwDeviceClass::Input);
+        twin_a
+            .push_match_key(HwMatchKey::usb(0x046d, 0xc534, 0x03_01_01))
+            .expect("key fits");
+        twin_a.set_address(1);
+        let mut twin_b = HwNode::new(4, 2, HwDeviceClass::Input);
+        twin_b
+            .push_match_key(HwMatchKey::usb(0x046d, 0xc534, 0x03_01_01))
+            .expect("key fits");
+        twin_b.set_address(2);
+        let mut bare_a = HwNode::new(5, 2, HwDeviceClass::Other);
+        bare_a
+            .push_match_key(HwMatchKey::usb(0xabcd, 0x1234, 0xff_00_00))
+            .expect("key fits");
+        let mut bare_b = HwNode::new(6, 2, HwDeviceClass::Other);
+        bare_b
+            .push_match_key(HwMatchKey::usb(0xabcd, 0x1234, 0xff_00_00))
+            .expect("key fits");
+
+        let nodes = [root, controller, twin_a, twin_b, bare_a, bare_b];
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&HwTreeHeader::new(1, nodes.len() as u64).to_le_bytes());
+        for node in nodes {
+            bytes.extend_from_slice(&node.to_le_bytes());
+        }
+
+        let (out, result) = run_case(&[], Ok(bytes), true);
+        result.expect("listing succeeds");
+        assert_eq!(
+            out.lines(),
+            [
+                "Bus 001 Device 001: ID 046d:c534 Logitech, Inc. Unifying Receiver",
+                "Bus 001 Device 002: ID 046d:c534 Logitech, Inc. Unifying Receiver",
+                "Bus 001 Device 003: ID abcd:1234",
+                "Bus 001 Device 004: ID abcd:1234",
             ]
         );
     }

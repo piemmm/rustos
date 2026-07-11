@@ -8,8 +8,8 @@ lsusb — lister les périphériques USB découverts
 
 ## DESCRIPTION
 
-Affiche, une ligne par interface USB découverte, les numéros de bus et
-de périphérique de l'interface, son identifiant `vendor:product` et les
+Affiche, une ligne par périphérique USB découvert, les numéros de bus
+et de périphérique du périphérique, son identifiant `vendor:product` et les
 noms de son fabricant et de son produit. L'inventaire est l'arbre
 matériel — l'inventaire unique des périphériques du système — lu à
 travers l'API d'informations système, qui exige la capacité
@@ -25,29 +25,32 @@ est absente ou invalide, l'affichage se replie sur les identifiants
 bruts avec la raison sur la sortie d'erreur standard — l'inventaire
 lui-même reste listé.
 
-RustOS n'a pas de registre Linux de numéros de bus/périphérique : le
-numéro de bus d'un périphérique est l'identifiant de nœud stable de son
-contrôleur dans l'arbre matériel et son numéro de périphérique est son
-propre identifiant de nœud, et `-s` sélectionne ces identifiants (une
-divergence délibérée et documentée par rapport au `lsusb` de Linux).
-L'inventaire enregistre un nœud par *interface* : un périphérique à
-plusieurs interfaces apparaît une fois par interface.
+RustOS n'a pas de registre Linux de numéros de bus/périphérique : les
+numéros de bus et de périphérique sont de petits ordinaux commençant à
+1 sur l'inventaire courant (les bus dans l'ordre de découverte, les
+périphériques dans l'ordre d'affichage sur chaque bus), stables tant
+que la topologie ne change pas, et `-s` sélectionne ces numéros
+affichés (une divergence délibérée et documentée par rapport au `lsusb`
+de Linux). L'inventaire enregistre une entrée par *interface* : les
+interfaces d'un même périphérique physique sont regroupées d'après
+l'adresse de périphérique rapportée par le contrôleur hôte, si bien
+qu'un périphérique à plusieurs interfaces n'apparaît qu'une fois.
 
 ## OPTIONS
 
-- `-v` — après chaque périphérique, afficher sa classe, sa sous-classe
-  et son protocole d'interface (`bInterfaceClass`,
+- `-v` — après chaque périphérique, afficher la classe, la sous-classe
+  et le protocole de chacune de ses interfaces (`bInterfaceClass`,
   `bInterfaceSubClass`, `bInterfaceProtocol`) avec les noms des tables
   de classes USB.
-- `-t` — afficher les périphériques en arbre sous leurs contrôleurs et
-  leurs bus.
+- `-t` — afficher en arbre les bus, leurs périphériques et les classes
+  d'interface de chaque périphérique.
 - `-d [<vendor>]:[<product>]` — ne lister que les périphériques
   correspondant aux identifiants fabricant/produit donnés (hex) ; une
   moitié omise correspond à tout.
 - `-s [[<bus>]:][<devnum>]` — ne lister que les périphériques
-  correspondant aux identifiants de nœud du contrôleur (bus) et/ou du
-  périphérique (décimal) ; une valeur sans deux-points est un numéro de
-  périphérique seul.
+  correspondant aux numéros de bus et/ou de périphérique donnés
+  (décimal), tels qu'affichés dans la liste ; une valeur sans
+  deux-points est un numéro de périphérique seul.
 - `-?, --help` — afficher l'aide courte de cette commande.
 
 ## EXAMPLES
@@ -55,7 +58,7 @@ plusieurs interfaces apparaît une fois par interface.
 - `lsusb` — chaque périphérique USB découvert, avec ses noms.
 - `lsusb -v` — la même chose, avec l'identité de classe de chaque
   interface.
-- `lsusb -s 2:` — chaque périphérique sous le nœud contrôleur 2.
+- `lsusb -s 2:` — chaque périphérique du bus 2.
 - `lsusb -d 046d:` — chaque périphérique du fabricant `046d`
   (Logitech).
 - `lsusb -t` — les périphériques sous leur topologie de bus.

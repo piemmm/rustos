@@ -1082,20 +1082,23 @@ impl HwMatchKey {
 
 /// One node in the hardware tree.
 ///
-/// A node names exactly one detected bus or device: a stable [`id`], its
-/// [`parent`] ([`HW_NODE_ROOT`] for a root), a [`HwDeviceClass`], the
-/// [`HwMatchKey`]s the device manager binds against, and the
-/// [`HwResource`]s it exposes as capability-grant requests. The match-key
-/// and resource arrays are fixed-size; the valid prefix of each is given by
-/// its count.
+/// A node names exactly one detected bus or device function: a stable
+/// [`id`], its [`parent`] ([`HW_NODE_ROOT`] for a root), a
+/// [`HwDeviceClass`], the [`HwMatchKey`]s the device manager binds
+/// against, the [`HwResource`]s it exposes as capability-grant requests,
+/// and the bus-local device [`address`] of the physical device the node
+/// belongs to. The match-key and resource arrays are fixed-size; the
+/// valid prefix of each is given by its count.
 ///
 /// [`id`]: Self::id
 /// [`parent`]: Self::parent
+/// [`address`]: Self::address
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct HwNode {
     id: u32,
     parent: u32,
+    address: u32,
     class: u16,
     match_key_count: u8,
     resource_count: u8,
@@ -1104,9 +1107,9 @@ pub struct HwNode {
 }
 
 impl HwNode {
-    /// Encoded size on the wire: a 12-byte header followed by the full
+    /// Encoded size on the wire: a 16-byte header followed by the full
     /// fixed-size match-key and resource arrays.
-    pub const WIRE_LEN: usize = 12
+    pub const WIRE_LEN: usize = 16
         + HW_NODE_MAX_MATCH_KEYS * HwMatchKey::WIRE_LEN
         + HW_NODE_MAX_RESOURCES * HwResource::WIRE_LEN;
 
@@ -1116,6 +1119,7 @@ impl HwNode {
         Self {
             id,
             parent,
+            address: 0,
             class: class.as_u16(),
             match_key_count: 0,
             resource_count: 0,
@@ -1191,6 +1195,29 @@ impl HwNode {
         self.parent == HW_NODE_ROOT
     }
 
+    /// Bus-local address of the physical device this node belongs to, or
+    /// `0` when the emitter reported none.
+    ///
+    /// A multi-function device is inventoried as one node per bindable
+    /// function (a USB interface, a PCI function), because the function is
+    /// the driver-bind and capability-grant unit. The address is how
+    /// sibling function nodes of **one** physical device stay attributable
+    /// to it: every function node of the same device under the same parent
+    /// carries the same non-zero address (a USB host controller reports
+    /// the device's xHCI slot id), while two identical devices on one bus
+    /// carry distinct addresses. Purely descriptive — driver binding
+    /// matches [`HwMatchKey`]s and never reads the address.
+    #[must_use]
+    pub const fn address(&self) -> u32 {
+        self.address
+    }
+
+    /// Record the bus-local device address the emitter discovered
+    /// (see [`address`](Self::address); `0` means none).
+    pub fn set_address(&mut self, address: u32) {
+        self.address = address;
+    }
+
     /// The node's device class, or [`None`] if the wire discriminant is
     /// unknown.
     #[must_use]
@@ -1216,10 +1243,11 @@ impl HwNode {
         let mut out = [0u8; Self::WIRE_LEN];
         put_u32(&mut out, 0, self.id);
         put_u32(&mut out, 4, self.parent);
-        put_u16(&mut out, 8, self.class);
-        out[10] = self.match_key_count;
-        out[11] = self.resource_count;
-        let mut off = 12;
+        put_u32(&mut out, 8, self.address);
+        put_u16(&mut out, 12, self.class);
+        out[14] = self.match_key_count;
+        out[15] = self.resource_count;
+        let mut off = 16;
         for key in &self.match_keys {
             out[off..off + HwMatchKey::WIRE_LEN].copy_from_slice(&key.to_le_bytes());
             off += HwMatchKey::WIRE_LEN;
@@ -1243,19 +1271,19 @@ impl HwNode {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
-        let class = read_u16(bytes, 8);
+        let class = read_u16(bytes, 12);
         if HwDeviceClass::from_u16(class).is_none() {
             return Err(Errno::OutOfRange);
         }
-        let match_key_count = bytes[10];
-        let resource_count = bytes[11];
+        let match_key_count = bytes[14];
+        let resource_count = bytes[15];
         if usize::from(match_key_count) > HW_NODE_MAX_MATCH_KEYS
             || usize::from(resource_count) > HW_NODE_MAX_RESOURCES
         {
             return Err(Errno::LengthOutOfRange);
         }
         let mut match_keys = [HwMatchKey::EMPTY; HW_NODE_MAX_MATCH_KEYS];
-        let mut off = 12;
+        let mut off = 16;
         for slot in &mut match_keys {
             *slot = HwMatchKey::from_bytes(&bytes[off..off + HwMatchKey::WIRE_LEN])?;
             off += HwMatchKey::WIRE_LEN;
@@ -1268,6 +1296,7 @@ impl HwNode {
         Ok(Self {
             id: read_u32(bytes, 0),
             parent: read_u32(bytes, 4),
+            address: read_u32(bytes, 8),
             class,
             match_key_count,
             resource_count,
@@ -1905,6 +1934,7 @@ mod tests {
         node.push_resource(HwResource::mmio(0x4000_0000, 0x1000))
             .unwrap();
         node.push_resource(HwResource::irq(34, 1)).unwrap();
+        node.set_address(5);
         node
     }
 
@@ -1914,6 +1944,7 @@ mod tests {
         assert_eq!(node.id(), 7);
         assert_eq!(node.parent(), 0);
         assert!(!node.is_root());
+        assert_eq!(node.address(), 5);
         assert_eq!(node.class(), Some(HwDeviceClass::Network));
         assert_eq!(node.match_keys().len(), 2);
         assert_eq!(node.resources().len(), 2);
@@ -1922,6 +1953,7 @@ mod tests {
         assert_eq!(bytes.len(), HwNode::WIRE_LEN);
         let back = HwNode::from_bytes(&bytes).expect("decode");
         assert_eq!(back, node);
+        assert_eq!(back.address(), 5);
         assert_eq!(back.match_keys()[0].vendor(), 0x1af4);
         assert_eq!(
             back.resources()[1].required_capability(),
@@ -1933,6 +1965,7 @@ mod tests {
     fn root_node_is_detected() {
         let root = HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Root);
         assert!(root.is_root());
+        assert_eq!(root.address(), 0, "a fresh node reports no device address");
         assert_eq!(
             HwNode::from_bytes(&root.to_le_bytes()).unwrap().parent(),
             HW_NODE_ROOT
@@ -1963,15 +1996,15 @@ mod tests {
         assert_eq!(HwNode::from_bytes(&[0u8; 4]), Err(Errno::BufferTooSmall));
 
         let mut bytes = sample_node().to_le_bytes();
-        put_u16(&mut bytes, 8, 11); // unknown device class
+        put_u16(&mut bytes, 12, 11); // unknown device class
         assert_eq!(HwNode::from_bytes(&bytes), Err(Errno::OutOfRange));
 
         let mut bytes = sample_node().to_le_bytes();
-        bytes[10] = u8::try_from(HW_NODE_MAX_MATCH_KEYS + 1).unwrap();
+        bytes[14] = u8::try_from(HW_NODE_MAX_MATCH_KEYS + 1).unwrap();
         assert_eq!(HwNode::from_bytes(&bytes), Err(Errno::LengthOutOfRange));
 
         let mut bytes = sample_node().to_le_bytes();
-        bytes[11] = u8::try_from(HW_NODE_MAX_RESOURCES + 1).unwrap();
+        bytes[15] = u8::try_from(HW_NODE_MAX_RESOURCES + 1).unwrap();
         assert_eq!(HwNode::from_bytes(&bytes), Err(Errno::LengthOutOfRange));
     }
 
@@ -1981,7 +2014,7 @@ mod tests {
         assert_eq!(HwMatchKey::WIRE_LEN, 76);
         assert_eq!(HwResource::WIRE_LEN, 32);
         assert_eq!(GrantedResource::WIRE_LEN, 40);
-        assert_eq!(HwNode::WIRE_LEN, 572);
+        assert_eq!(HwNode::WIRE_LEN, 576);
         assert_eq!(HwTreeHeader::WIRE_LEN, 16);
     }
 

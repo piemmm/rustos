@@ -163,7 +163,14 @@ canned tree and a fixture database compiled through the real
 `rustos-lsusb` is the `usbutils` `lsusb` over what the RustOS model
 actually carries (`plans/DEVICES.md` DEVICE1 V3, `AGENTS.md` §16.7): one
 `Bus NNN Device NNN: ID vvvv:pppp <vendor> <product>` line per
-discovered USB interface. It shares `lspci`'s whole posture: the same
+discovered physical USB device. The inventory records one node per
+*interface* (the driver-bind and grant unit), so the engine groups the
+interface nodes of one device truthfully by the bus-local device
+address the host controller reported on each node (`HwNode::address`,
+the device's xHCI slot id) — a composite keyboard+mouse receiver lists
+once, while two identical devices (distinct addresses) stay distinct,
+and a node whose emitter reported no address is never guessed into a
+group. It shares `lspci`'s whole posture: the same
 `CAP_SYSINFO_HW`-gated `HARDWARE_TREE` query, the same fail-closed paged
 fetch and stable bus order (the shared `rustos_procinfo::hwtree` walk
 both tools use, `AGENTS.md` §2.2), and
@@ -172,14 +179,15 @@ bundle ships as `Resources/usb.ids.bin`. An identity the database lacks
 shows only its `ID vvvv:pppp` (as `usbutils` omits an unknown string),
 with the count advised on fd 3 (`usb.names_unresolved`, `AGENTS.md`
 §20.1); a missing or invalid table degrades the whole listing to bare
-ids with the reason on standard error. `-v` lists the interface class /
-subclass / protocol names from the `usb.ids` class tables, `-t` renders
-the controller → interface topology, and `-d [<vendor>]:[<product>]` /
-`-s [[<bus>]:][<devnum>]` filter. Documented divergences: RustOS has no
-Linux bus/devnum registry (the bus number is the controller's stable
-hardware-tree node id, the device number the interface's own node id),
-and the inventory records one node per *interface*, so a
-multi-interface device lists once per interface. Manifest:
+ids with the reason on standard error. `-v` lists each interface's
+class / subclass / protocol names from the `usb.ids` class tables (one
+triple per interface of the device), `-t` renders the bus → device →
+interface topology (the bus line names the controller by its
+`compatible` identity), and `-d [<vendor>]:[<product>]` /
+`-s [[<bus>]:][<devnum>]` filter. Documented divergence: RustOS has no
+Linux bus/devnum registry, so the bus and device numbers are 1-based
+per-snapshot ordinals in stable bus order — small, dense, and stable
+for an unchanged topology, never kernel node ids. Manifest:
 `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS` + `CAP_SYSINFO_HW`. `cargo test
 -p rustos-lsusb` drives the parser (including the `usbutils` `-s`
 grammar), the naming/bare-id/filter/tree/verbose renders, the
