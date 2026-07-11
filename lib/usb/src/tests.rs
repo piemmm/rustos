@@ -11,8 +11,9 @@ use core::cell::RefCell;
 
 use super::device::{
     hub_port_connected, hub_port_enabled, hub_port_speed, route_for_child, AttachOutcome,
-    BulkDirection, DeviceDescriptor, DmaRegion, EnumStage, HubEvent, InterfaceInfo, UsbDevice,
-    BULK_BUF_LEN, BULK_SLOTS, EVENT_RING_SEGMENT_MIN_TRBS, MAX_HUB_DEPTH, REPORT_LEN, RING_TRBS,
+    BulkDirection, BulkPipe, DeviceDescriptor, DmaRegion, EnumStage, HubEvent, InterfaceInfo,
+    UsbDevice, BULK_BUF_LEN, BULK_SLOTS, EVENT_RING_SEGMENT_MIN_TRBS, MAX_HUB_DEPTH, REPORT_LEN,
+    RING_TRBS,
 };
 use super::ring::{EventRingCursor, ProducerRing};
 use super::trb::{CompletionCode, Trb, TrbType, CONTROL_CYCLE, TRB_LEN};
@@ -20,6 +21,10 @@ use super::*;
 use rustos_abi::driver::input::Input;
 use rustos_abi::Delay;
 use rustos_hid::BootKeyboard;
+
+/// The primary bulk pipes most fixtures exercise (BOT-shaped devices).
+const IN_PIPE: BulkPipe = BulkPipe::primary(BulkDirection::In);
+const OUT_PIPE: BulkPipe = BulkPipe::primary(BulkDirection::Out);
 
 /// The mock's `CAPLENGTH` (so its operational base).
 const MOCK_CAPLENGTH: u32 = 0x20;
@@ -479,6 +484,9 @@ struct MockXhci {
     /// endpoint, so a subsequent control transfer faults. This models
     /// that, catching code that reuses EP0 after a tolerated STALL.
     ep0_halted: bool,
+    /// Command blocks delivered over the class ADSC control-OUT data
+    /// stage (the CBI command channel).
+    adsc_blocks: Vec<Vec<u8>>,
     /// When set, every downstream-port class `GET_STATUS` (USB 2.0
     /// §11.24.2.7) STALLs — modelling the metal failure where the
     /// hub-descriptor read succeeds but each per-port status read
@@ -796,6 +804,7 @@ impl MockXhci {
             hub_powered: 0,
             forge_hub_descriptor: false,
             ep0_halted: false,
+            adsc_blocks: Vec::new(),
             fault_hub_port_status: false,
             fault_hub_port_status_raw: 0,
             fault_hub_port_status_evtype: 0,
@@ -1224,8 +1233,12 @@ impl MockXhci {
                 }
                 Ok(TrbType::ResetEndpoint) => {
                     // Clears the controller-side halt (§4.6.8): the first
-                    // step of the required recovery order.
+                    // step of the required recovery order. A halted default
+                    // control endpoint resumes here too (§4.10.2.4).
                     let dci = trb.endpoint_id();
+                    if dci == 1 && trb.slot_id() == self.ep0_slot {
+                        self.ep0_halted = false;
+                    }
                     if dci == self.bulk_in.dci && self.bulk_in.halt == 1 {
                         self.bulk_in.halt = 2;
                     }
@@ -1240,6 +1253,20 @@ impl MockXhci {
                     let dci = trb.endpoint_id();
                     let base = trb.parameter & !0xF;
                     let cycle = trb.parameter & 1 != 0;
+                    if dci == 1 {
+                        // The default control endpoint: the engine's EP0
+                        // stall recovery rebuilds the ring at its base and
+                        // repoints the dequeue; follow it like hardware so
+                        // later control transfers stay in step.
+                        let slot = trb.slot_id();
+                        if slot == self.ep0_slot {
+                            self.ep0_base = base;
+                            self.ep0_index = 0;
+                            self.ep0_cycle = cycle;
+                        } else if usize::from(slot) < self.ep0_saved.len() {
+                            self.ep0_saved[usize::from(slot)] = (base, 0, cycle);
+                        }
+                    }
                     if dci == self.bulk_in.dci {
                         self.bulk_in.base = base;
                         self.bulk_in.index = 0;
@@ -1703,8 +1730,19 @@ impl MockXhci {
             (0x23, 0x03) => self.execute_set_port_feature(setup[2], setup[4]),
             // Class GET_STATUS on a downstream port (USB 2.0 §11.24.2.7):
             // the connected downstream port reports its status once
-            // powered, every other port reads disconnected.
-            (0xA3, 0x00) => self.execute_get_port_status(setup[4], data, w_length, status_addr),
+            // powered, every other port reads disconnected. A scripted
+            // fault answers with its one fault event and nothing else — a
+            // real controller posts a single event for a faulted transfer,
+            // never a trailing status success.
+            (0xA3, 0x00) => {
+                let faulted = self.fault_hub_port_status
+                    || self.fault_hub_port_status_raw != 0
+                    || self.fault_hub_port_status_evtype != 0;
+                self.execute_get_port_status(setup[4], data, w_length, status_addr);
+                if faulted {
+                    return;
+                }
+            }
             // Class CLEAR_FEATURE on a downstream port (USB 2.0 §11.24.2.2):
             // clear *only* the latched change the feature selector names
             // (C_PORT_CONNECTION=16 .. C_PORT_RESET=20 → wPortChange bits 0..4),
@@ -1743,6 +1781,16 @@ impl MockXhci {
             }
             // SET_CONFIGURATION
             (0x00, 0x09) => self.configuration = Some(setup[2]),
+            // Class ADSC (a control-OUT data stage — the CBI command
+            // channel): capture the delivered command block.
+            (0x21, 0x00) => {
+                let Some((_, buffer, len, _)) = data else {
+                    self.post_transfer_event(status_addr, CompletionCode::TrbError, 1, 0);
+                    return;
+                };
+                let block = self.read_mem(buffer, len as usize);
+                self.adsc_blocks.push(block);
+            }
             // SET_PROTOCOL (HID class)
             (0x21, 0x0B) => {
                 if self.fault_class_requests {
@@ -4002,8 +4050,9 @@ fn faulting_hub_port_status_records_the_completion_code() {
 
     assert_eq!(
         device.hub_port_status(hub, 2),
-        Err(DriverError::DeviceFault),
-        "a STALLed GET_STATUS fails closed"
+        Err(DriverError::EndpointStalled),
+        "a STALLed GET_STATUS fails closed, with the refusal surfaced
+         distinctly and the control endpoint already recovered"
     );
     assert_eq!(
         device.last_completion_code(),
@@ -4826,7 +4875,9 @@ fn bulk_out_transfers_deliver_the_bytes_to_the_device() {
     let mut device = started_msd(&mem);
 
     let payload = alloc::vec![0x5Au8; 24];
-    let slot = device.queue_bulk_out(0, &payload).expect("TD queues");
+    let slot = device
+        .queue_bulk_out(0, OUT_PIPE, &payload)
+        .expect("TD queues");
     assert_eq!(slot, 0);
 
     // The mock device consumed the TD at the doorbell and captured the
@@ -4836,7 +4887,7 @@ fn bulk_out_transfers_deliver_the_bytes_to_the_device() {
         .poll_bulk(0, &mut [])
         .expect("poll succeeds")
         .expect("a completion is pending");
-    assert_eq!(complete.direction, BulkDirection::Out);
+    assert_eq!(complete.pipe, OUT_PIPE);
     assert_eq!(complete.slot, 0);
     assert_eq!(complete.result, Ok(24));
     // Nothing further is pending.
@@ -4855,14 +4906,14 @@ fn bulk_in_transfers_land_the_devices_bytes_and_report_short_packets_honestly() 
         .host_mut()
         .bulk_in_responses
         .push_back(response.clone());
-    device.queue_bulk_in(0, 64).expect("TD queues");
+    device.queue_bulk_in(0, IN_PIPE, 64).expect("TD queues");
 
     let mut buf = [0u8; 64];
     let complete = device
         .poll_bulk(0, &mut buf)
         .expect("poll succeeds")
         .expect("a completion is pending");
-    assert_eq!(complete.direction, BulkDirection::In);
+    assert_eq!(complete.pipe, IN_PIPE);
     assert_eq!(complete.result, Ok(10));
     assert_eq!(&buf[..10], &response[..]);
 }
@@ -4880,7 +4931,7 @@ fn several_bulk_tds_queue_per_direction_and_complete_in_order() {
             .push_back(alloc::vec![byte; 8]);
     }
     for expected_slot in 0..3 {
-        let slot = device.queue_bulk_in(0, 8).expect("TD queues");
+        let slot = device.queue_bulk_in(0, IN_PIPE, 8).expect("TD queues");
         assert_eq!(slot, expected_slot);
     }
 
@@ -4891,12 +4942,83 @@ fn several_bulk_tds_queue_per_direction_and_complete_in_order() {
             .poll_bulk(0, &mut buf)
             .expect("poll succeeds")
             .expect("a completion is pending");
-        assert_eq!(complete.direction, BulkDirection::In);
+        assert_eq!(complete.pipe, IN_PIPE);
         assert_eq!(complete.slot, expected_slot);
         assert_eq!(complete.result, Ok(8));
         assert_eq!(buf, [byte; 8]);
     }
     assert_eq!(device.poll_bulk(0, &mut []), Ok(None));
+}
+
+#[test]
+fn decode_all_captures_a_second_bulk_pair_for_uas_pipes() {
+    // A UAS-shaped interface: class 08:06:62 with two bulk endpoints per
+    // direction. The decoder captures both pairs so all four pipes can be
+    // configured; a BOT-shaped interface leaves the second pair absent.
+    let mut config = alloc::vec![
+        9u8, 2, 0, 0, 1, 1, 0, 0x80, 50, // configuration header
+        9, 4, 0, 0, 4, 0x08, 0x06, 0x62, 0, // interface, four endpoints
+        7, 5, 0x01, 0x02, 0, 2, 0, // bulk-OUT EP1 (command)
+        7, 5, 0x82, 0x02, 0, 2, 0, // bulk-IN EP2 (status)
+        7, 5, 0x83, 0x02, 0, 2, 0, // bulk-IN EP3 (data-in)
+        7, 5, 0x04, 0x02, 0, 2, 0, // bulk-OUT EP4 (data-out)
+    ];
+    let total = u16::try_from(config.len()).expect("fits");
+    config[2..4].copy_from_slice(&total.to_le_bytes());
+    let interfaces = InterfaceInfo::decode_all(&config).expect("decodes");
+    let iface = interfaces[0].expect("one interface");
+    assert_eq!(iface.bulk_out_dci, 2); // EP1 OUT
+    assert_eq!(iface.bulk_in_dci, 5); // EP2 IN
+    assert_eq!(iface.bulk_in2_dci, 7); // EP3 IN
+    assert_eq!(iface.bulk_out2_dci, 8); // EP4 OUT
+}
+
+#[test]
+fn control_out_data_stage_reaches_the_device() {
+    // The CBI ADSC path end to end through the engine: the command block
+    // is staged through the control data buffer and delivered to the
+    // device's control endpoint as an OUT data stage.
+    let mem = shared_mem();
+    let mut device = started_msd(&mem);
+    let block = [0x28u8, 0, 0, 0, 0, 9, 0, 0, 1, 0, 0, 0];
+    let setup = [0x21, 0x00, 0, 0, 0, 0, 12, 0];
+    {
+        let mut engine = device.engine_for(0);
+        crate::transport::UrbEngine::control_out(&mut engine, setup, &block)
+            .expect("the block is delivered");
+    }
+    assert_eq!(device.host_mut().adsc_blocks, alloc::vec![block.to_vec()]);
+}
+
+#[test]
+fn a_stalled_control_out_is_surfaced_and_the_endpoint_recovered() {
+    // A refused class request (the CBI "command not accepted" answer):
+    // the STALL surfaces distinctly, and EP0 is recovered in place so the
+    // very next control transfer serves.
+    let mem = shared_mem();
+    let mut device = started_msd(&mem);
+    // An unmodelled request: the mock's generic arm STALLs and halts EP0.
+    let refused = [0x21, 0xDE, 0, 0, 0, 0, 4, 0];
+    {
+        let mut engine = device.engine_for(0);
+        assert_eq!(
+            crate::transport::UrbEngine::control_out(&mut engine, refused, &[1, 2, 3, 4]),
+            Err(DriverError::EndpointStalled)
+        );
+    }
+    // The recovery ran: a follow-up control-IN (a device-descriptor read)
+    // still serves on the rebuilt EP0 ring.
+    let mut data = [0u8; 18];
+    {
+        let mut engine = device.engine_for(0);
+        let n = crate::transport::UrbEngine::control_in(
+            &mut engine,
+            [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 18, 0],
+            &mut data,
+        )
+        .expect("EP0 serves after the recovery");
+        assert_eq!(n, 18);
+    }
 }
 
 #[test]
@@ -4908,18 +5030,21 @@ fn a_full_bulk_ring_refuses_further_tds_and_bounds_the_queue() {
     // ring holds `BULK_SLOTS - 1` TDs (one slot stays free to distinguish
     // full from empty); the next queue is refused, never wrapped over.
     for _ in 0..BULK_SLOTS - 1 {
-        device.queue_bulk_in(0, 8).expect("TD queues");
+        device.queue_bulk_in(0, IN_PIPE, 8).expect("TD queues");
     }
-    assert_eq!(device.queue_bulk_in(0, 8).err(), Some(DriverError::Busy));
     assert_eq!(
-        device.bulk_in_flight(0, BulkDirection::In),
+        device.queue_bulk_in(0, IN_PIPE, 8).err(),
+        Some(DriverError::Busy)
+    );
+    assert_eq!(
+        device.bulk_in_flight(0, IN_PIPE),
         BULK_SLOTS - 1,
         "every accepted TD stays accounted"
     );
 
     // An oversize TD is refused before any staging is touched.
     assert_eq!(
-        device.queue_bulk_in(0, BULK_BUF_LEN + 1).err(),
+        device.queue_bulk_in(0, IN_PIPE, BULK_BUF_LEN + 1).err(),
         Some(DriverError::LengthOutOfRange)
     );
 }
@@ -4931,8 +5056,12 @@ fn a_bulk_stall_recovers_the_endpoint_and_answers_every_queued_td() {
 
     // Two reads are in flight when the device STALLs the first.
     device.host_mut().bulk_in.stall_next = true;
-    device.queue_bulk_in(0, 8).expect("first TD queues");
-    device.queue_bulk_in(0, 8).expect("second TD queues");
+    device
+        .queue_bulk_in(0, IN_PIPE, 8)
+        .expect("first TD queues");
+    device
+        .queue_bulk_in(0, IN_PIPE, 8)
+        .expect("second TD queues");
 
     // The stalled TD surfaces the distinct per-transfer stall, and the
     // recovery ran in-line: Reset Endpoint → Set TR Dequeue Pointer →
@@ -4959,7 +5088,9 @@ fn a_bulk_stall_recovers_the_endpoint_and_answers_every_queued_td() {
         .host_mut()
         .bulk_in_responses
         .push_back(alloc::vec![0x77u8; 8]);
-    device.queue_bulk_in(0, 8).expect("fresh TD queues");
+    device
+        .queue_bulk_in(0, IN_PIPE, 8)
+        .expect("fresh TD queues");
     let fresh = device
         .poll_bulk(0, &mut buf)
         .expect("poll succeeds")
@@ -4987,7 +5118,9 @@ fn a_downstream_msd_stall_recovery_targets_the_device_never_the_hub() {
     assert_eq!(descriptor.vendor_id, 0x0781);
 
     device.host_mut().bulk_out.stall_next = true;
-    device.queue_bulk_out(0, &[0xE1u8; 4]).expect("TD queues");
+    device
+        .queue_bulk_out(0, OUT_PIPE, &[0xE1u8; 4])
+        .expect("TD queues");
     let complete = device
         .poll_bulk(0, &mut [])
         .expect("poll succeeds")
@@ -5001,7 +5134,7 @@ fn a_downstream_msd_stall_recovery_targets_the_device_never_the_hub() {
 
     // And the recovered endpoint accepts a fresh transfer end to end.
     device
-        .queue_bulk_out(0, &[0xE2u8; 4])
+        .queue_bulk_out(0, OUT_PIPE, &[0xE2u8; 4])
         .expect("fresh TD queues");
     let fresh = device
         .poll_bulk(0, &mut [])
@@ -5932,7 +6065,7 @@ fn bring_up_serves_a_keyboard_and_a_storage_stick_behind_the_hub_together() {
         .host_mut()
         .bulk_in_responses
         .push_back(response.clone());
-    device.queue_bulk_in(0, 8).expect("bulk TD queues");
+    device.queue_bulk_in(0, IN_PIPE, 8).expect("bulk TD queues");
     let mut bulk_buf = [0u8; 8];
     let complete = device
         .poll_bulk(0, &mut bulk_buf)
@@ -5979,7 +6112,7 @@ fn unplugging_the_keyboard_leaves_the_storage_stick_served() {
         .host_mut()
         .bulk_in_responses
         .push_back(response.clone());
-    device.queue_bulk_in(0, 6).expect("bulk TD queues");
+    device.queue_bulk_in(0, IN_PIPE, 6).expect("bulk TD queues");
     let mut bulk_buf = [0u8; 6];
     let complete = device
         .poll_bulk(0, &mut bulk_buf)

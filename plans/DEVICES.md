@@ -12,6 +12,9 @@ This is the staged build plan for RustOS's next tier of device support:
   surprise removal is handled with retained uncommitted data, a syslog
   record, and an explicit force-unmount / verified re-insert recovery
   choice.
+- **DEVICE3 (D5)** — the further mass-storage wire transports on the same
+  seams: USB Attached SCSI (UAS), Control/Bulk/Interrupt (CBI), and USB
+  floppy drives (the UFI command set over BOT and CBI).
 
 `AGENTS.md` is binding — read it and `PLAN.md` first. Every rule in this
 file is binding too. Related plans: `plans/USB.md` (the modular USB stack
@@ -41,8 +44,10 @@ Facts the stages below build on, so no stage re-derives them:
   (`lib/abi/src/usb_urb.rs`), with event-driven hotplug in both
   directions and the kernel driver-unload mechanism. The URB transport
   serves control-IN, the no-data control-OUT (since D2 — a SETUP-only
-  class request; a control-OUT *data stage* stays refused, it has no
-  consumer), interrupt, and — since D1 (§2.2) — bulk transfers.
+  class request), the control-OUT *data stage* (since D5 — the CBI ADSC
+  command channel), interrupt, and — since D1 (§2.2) — bulk transfers on
+  every configured bulk endpoint (up to the two pairs a UAS interface's
+  four pipes need, since D5).
   **The engine and HCD serve every reachable device concurrently**
   (`UsbDevice::bring_up` walks every connected hub port into a table of
   up to `MAX_DEVICES` devices, each with its own layout region and its
@@ -418,8 +423,9 @@ names a sibling crate.
   to derive the interface number and bulk pair — the same facts the HCD
   derived, never assumed. (3) The planned no-data control-OUT landed with
   its first consumer: `UrbEngine::control_no_data` / `drive_urb`
-  Control+Out+len==0 / `UrbClient::control_no_data` (a data-stage OUT
-  stays refused); the engine reuses the existing SETUP_TRT_NO_DATA
+  Control+Out+len==0 / `UrbClient::control_no_data` (the data-stage OUT
+  landed later with its own first consumer, the D5 CBI ADSC channel —
+  §2.7); the engine reuses the existing SETUP_TRT_NO_DATA
   control path. (4) The HCD's per-interface URB buffer grew from 64 B to
   one bulk chunk (`BULK_BUF_LEN` = 4096, the same page) so bulk data fits;
   a class-side transfer splits into ≤4 KiB URB chunks.
@@ -868,6 +874,8 @@ first, then the force-unmount exit, then the verified re-insert replay.
   sysinfo availability mark). **Done** (§2.5.2).
 - **D4c** verified re-insert (mutation evidence + retained-write replay).
   **Done** (§2.5.3).
+- **D5** UAS + CBI wire transports and UFI floppy support (host-provable
+  alone). **Done** (§2.7).
 
 D3 is deliberately after D2 so automount is proven against a real
 hot-pluggable block source, but its volume-forest core is bus-neutral
@@ -876,12 +884,97 @@ and serves the existing virtio/emmc disks identically — nothing in
 nodes by their own compatible keys, which is data, not bus coupling
 (§2.20).
 
+### 2.7 D5 — UAS, CBI, and USB floppy (UFI) support. **Done.**
+
+- **One SCSI command layer, three wire transports (§2.2).** `usb_msd`'s
+  BOT+SCSI engine was split in place (§2.13 — no compatibility seam): the
+  transport-neutral command layer (`usb_msd/src/scsi.rs`: `ScsiDevice`
+  over the `ScsiTransport` seam — `execute`/`lun_count`/`take_sense`/
+  `scrub` — with `LunBlock`, the sense→errno map, and the bounded
+  chunking) drives three sibling transports: `bot.rs` (`Bot`, the
+  CBW/CSW framing, `GET MAX LUN`, reset recovery — unchanged semantics),
+  `cbi.rs` (`Cbi`: the 12-byte command block over the ADSC control-OUT
+  channel, a control STALL as the "command not accepted" answer, the
+  bulk data phase, the two-byte completion interrupt in both spellings —
+  UFI ASC/ASCQ and the typed status — and the Command Block Reset), and
+  `uas.rs` (`Uas` over the `UasPipes` seam: tag-checked Command /
+  Read-Ready / Write-Ready / Sense IU sequencing, USB 2.0 non-stream
+  operation, in-band autosense in fixed and descriptor formats,
+  `REPORT LUNS` unit discovery, every hostile IU refused closed).
+- **Command sets are data, not forks.** `CommandSet::{Transparent, Ufi}`
+  carries the per-device spelling: UFI pads every CDB to 12 bytes, reads
+  write-protect via `MODE SENSE(10)`, and has no `SYNCHRONIZE CACHE`
+  (flush succeeds without a wire round trip — the floppy medium is
+  written through). The sub-class byte selects the set; the bring-up and
+  serve paths are one generic body (`run_device`) over any transport.
+- **Descriptor-derived transport selection.** `desc.rs` classifies the
+  interface by its own `(sub-class, protocol)` — accepted: `06:50`,
+  `04:50`, `04:00`, `06:62` — and derives that transport's endpoints,
+  including the UAS Pipe Usage descriptors (direction-checked,
+  duplicate-refusing; a malformed UAS interface is poisoned and a later
+  servable sibling still serves). `BIND_KEYS` carries the four class
+  keys; `devmgr`'s existing match machinery does the rest.
+- **URB/engine surface grown in place (§2.13, `lib/usb`).** (1) The
+  control-OUT *data stage* landed with its first consumer (ADSC):
+  `UrbEngine::control_out` / `drive_urb` Control+Out+len>0 /
+  `UrbClient::control_out`, staged through the control data buffer
+  (`SETUP_TRT_OUT`, status stage IN). (2) A **STALLed control transfer
+  is recovered in place** — Reset Endpoint + a rebuilt EP0 ring + Set TR
+  Dequeue (the device side self-clears at the next SETUP) — and surfaced
+  as the distinct `EndpointStalled` with the observed completion code
+  preserved for the diagnostics; `control_optional` and the GET MAX LUN
+  refusal ride the same semantics. (3) A non-HID interface's
+  interrupt-IN endpoint (the CBI completion channel) is configured
+  beside its bulk pair and served over the existing interrupt URB path.
+  (4) Bulk serving is **per-pipe** (`BulkPipe`): `InterfaceInfo` captures
+  up to two bulk endpoints per direction, `configure_bulk_endpoints`
+  configures all four for a UAS-shaped interface (two extra 9-TRB rings
+  per device region; the second pair shares the direction's staging
+  buffers — sound because the URB service holds one URB, so one bulk TD,
+  in flight per interface), and completion decode / stall recovery /
+  event attribution route by DCI.
+- **Defects fixed en route (§2.18), each with its regression test:** the
+  mock controller posted a trailing status *success* after a scripted
+  `GET_STATUS` fault (a real controller posts one event per faulted
+  transfer), and ignored Set TR Dequeue / Reset Endpoint on the default
+  control endpoint, desynchronising its EP0 cursor from a recovered
+  ring.
+- Host-proven end to end over scripted doubles: the shared SCSI layer
+  (per-set CDB spelling, MODE SENSE forms, flush semantics, the bounded
+  ready drain, autosense vs `REQUEST SENSE`), each transport's framing
+  and recovery trails, descriptor classification incl. hostile streams,
+  and the engine's control-OUT delivery, EP0 stall recovery, and
+  second-pair capture. Live path: Pi 4 metal acceptance (QEMU models no
+  Pi USB — the D2/D3/D4 precedent).
+- **Deliberate staging (the remaining work, each with its own
+  increment):**
+  - **BOT→UAS alternate-setting policy.** Most retail UAS bridges expose
+    BOT at alternate setting 0 and UAS at alternate setting 1; the
+    engine serves only the default setting (`SET_INTERFACE` is not
+    issued), so dual devices run BOT today and UAS serves devices whose
+    default interface is UAS. The switch needs an engine-side
+    alt-setting selection policy (configure the alt-1 endpoints,
+    `SET_INTERFACE(1)`) staged with its own conformance tests.
+  - **UAS command queueing, task-management IUs, and SuperSpeed
+    streams.** One command in flight serves the synchronous block
+    service; a protocol violation fails the exchange closed rather than
+    aborting via TMF. Queueing and streams arrive together with a
+    queued block consumer and xHCI stream-context support.
+  - **Floppy media-change polling.** A medium inserted after bring-up is
+    served on re-plug; a `TEST UNIT READY` poll cycle (one-shot-timed,
+    never a spin) is staged with the removable-media policy work.
+  - The interrupt-less CB variant (protocol `0x01`) and ATAPI
+    sub-classes stay out of scope (§3).
+
 ---
 
 ## 3. Out of scope (explicitly)
 
-- Non-SCSI mass-storage transports (UAS, CBI) and non-disk SCSI types
+- The CB mass-storage transport (protocol `0x01` — CBI without the
+  completion interrupt), ATAPI/SFF sub-classes, and non-disk SCSI types
   (tape, optical) — later class-driver extensions on the same seams.
+- UAS command queueing, task-management IUs, SuperSpeed bulk streams,
+  and the BOT→UAS alternate-setting switch — staged in §2.7.
 - Multi-tier USB hubs (unchanged from `plans/USB.md` §4).
 - Writing the hardware-tree subsystem-id extension for `lspci -v`
   parity — a future `hwtree` ABI revision with its own consumer.

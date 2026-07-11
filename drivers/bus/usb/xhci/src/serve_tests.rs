@@ -74,6 +74,12 @@ impl UrbEngine for MockEngine {
         Err(DriverError::NotFound)
     }
 
+    fn control_out(&mut self, _setup: [u8; 8], _data: &[u8]) -> Result<(), DriverError> {
+        // As `control_no_data`: the data-stage round-trip is proven at the
+        // seam level, not through this serve-loop double.
+        Err(DriverError::NotFound)
+    }
+
     fn interrupt_in(&mut self, data: &mut [u8]) -> Result<Option<usize>, DriverError> {
         self.interrupt_calls += 1;
         if let Some(err) = self.interrupt_fault.take() {

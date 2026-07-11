@@ -102,7 +102,7 @@ driving the device from an arbitrary caller's context.
 |------------------------------------------|--------------------------------------|---------------------|------------------------------------------|
 | [virtio-blk](./virtio.md)                | `rustos-drv-storage-virtio-blk`      | virtio (PCI / MMIO) | host-side tests + mock transport only    |
 | Raspberry Pi 4 EMMC2                      | `rustos-drv-storage-emmc2`           | Pi 4 SDHCI (MMIO)   | read + write host-tested; interrupt-driven; wired into root-unlock; metal acceptance pending (Pi 4) |
-| USB mass storage (BOT)                    | `rustos-drv-storage-usb-msd`         | any USB host via the URB transport | BOT/SCSI engine + block service host-tested over scripted doubles; metal acceptance pending (Pi 4) |
+| USB mass storage (BOT / CBI / UAS)        | `rustos-drv-storage-usb-msd`         | any USB host via the URB transport | shared SCSI layer + three wire transports (incl. UFI floppies) host-tested over scripted doubles; metal acceptance pending (Pi 4) |
 
 QEMU integration on real PCI / MMIO virtio devices depends on the
 prerequisites enumerated in `.junie/next-session-prompt.md` (kernel
@@ -241,32 +241,52 @@ fault`) from a decode rejection (`error=unsupported`) at the same step.
 Since `raspi4b` cannot model EMMC2, that live bring-up is metal-gated; the
 host test and the §0.9 metal checklist are the acceptance artefacts.
 
-### USB mass storage (Bulk-Only Transport) — `drivers/storage/usb_msd`
+### USB mass storage (BOT / CBI / UAS) — `drivers/storage/usb_msd`
 
 `rustos-drv-storage-usb-msd` is the first **discovered-tier, user-space**
-block driver (`plans/DEVICES.md` D2): a pure USB *class* driver `devmgr`
+block driver (`plans/DEVICES.md` D2/D5): a pure USB *class* driver `devmgr`
 autoloads against the mass-storage interface node the xHCI host-controller
 driver emits. It owns no register window, no DMA, and no IRQ — every
 transfer rides the bus-agnostic URB transport (`lib/usb`), so the same
 binary serves a disk behind any host controller that speaks it.
 
 The driver reads the device's own configuration descriptor to derive the
-interface number and bulk endpoint pair (never assumed), then speaks USB
-MSC Bulk-Only Transport 1.0: each SCSI command wrapped in a CBW on
-bulk-OUT, the data phase over the bulk pair in bounded chunks, and the CSW
-validated field by field (signature, tag match, residue bound, status) —
-the device is hostile input. A stalled data phase falls through to the
-CSW; a stalled CSW read is retried once; a tag mismatch, corrupt CSW, or
-phase error runs the spec's Bulk-Only Mass Storage Reset (the D2 no-data
-control-OUT extension of the URB seam) and fails the command closed.
+interface number, wire transport, command set, and endpoints (never
+assumed), then drives one transport-neutral SCSI command layer
+(`src/scsi.rs` — the transparent set, or UFI's 12-byte padded CDBs and
+`MODE SENSE(10)` for floppies) over the transport the device speaks:
 
-Per logical unit (`GET MAX LUN`, up to 16) the bring-up runs `INQUIRY`
-(non-disk types are skipped), a bounded `TEST UNIT READY`/`REQUEST SENSE`
-ready drain, `READ CAPACITY(10)`/`(16)` with a fully validated geometry
-(power-of-two block size 512–4096; the 16-byte form covers units past the
-32-bit LBA horizon), and the `MODE SENSE(6)` write-protect bit — enforced
-driver-side (`DriverError::PermissionDenied` before any byte reaches the
-device), not merely reported.
+- **Bulk-Only Transport 1.0** (`08:06:50`, `08:04:50`): each command
+  wrapped in a CBW on bulk-OUT, the data phase over the bulk pair in
+  bounded chunks, and the CSW validated field by field (signature, tag
+  match, residue bound, status) — the device is hostile input. A stalled
+  data phase falls through to the CSW; a stalled CSW read is retried once;
+  a tag mismatch, corrupt CSW, or phase error runs the spec's Bulk-Only
+  Mass Storage Reset and fails the command closed.
+- **Control/Bulk/Interrupt 1.1** (`08:04:00`, the classic USB floppy):
+  the 12-byte command block over the ADSC control-OUT data stage (a
+  control STALL is the device's "command not accepted" answer, recovered
+  in place by the URB layer), the data phase over the bulk pair, and the
+  two-byte command-completion interrupt (UFI ASC/ASCQ, or the typed
+  status spelling for non-UFI sets); a malformed or out-of-step
+  completion runs the spec's Command Block Reset.
+- **USB Attached SCSI** (`08:06:62`): the four Pipe-Usage-named bulk
+  pipes with tag-checked Command / Read-Ready / Write-Ready / Sense IU
+  sequencing (USB 2.0 non-stream operation) and in-band autosense; every
+  IU is validated fail-closed — a foreign tag, wrong-direction ready IU,
+  or lying sense length refuses the exchange. One command is in flight at
+  a time (the block service is synchronous); queueing, task-management
+  IUs, and SuperSpeed streams are the staged remainder (`plans/DEVICES.md`
+  §3).
+
+Per logical unit (`GET MAX LUN` for BOT, `REPORT LUNS` for UAS, exactly
+one for CBI; up to 16) the bring-up runs `INQUIRY` (non-disk types are
+skipped), a bounded ready drain (the sense consumed per failed attempt),
+`READ CAPACITY(10)`/`(16)` with a fully validated geometry (power-of-two
+block size 512–4096; the 16-byte form covers units past the 32-bit LBA
+horizon), and the command set's write-protect bit — enforced driver-side
+(`DriverError::PermissionDenied` before any byte reaches the device), not
+merely reported.
 
 Each ready LUN is published as a **storage-class hardware-tree node**
 (compatible `rustos,usb-msd-lun`) carrying two grants: a block-service

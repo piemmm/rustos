@@ -1,7 +1,7 @@
 //! The `Run` entry-point binary of the USB **mass-storage class driver**,
 //! installed as a signed `/System/Drivers/` bundle and autoloaded into user
-//! space by `devmgr` when a bulk-only mass-storage **interface** node is
-//! discovered (`plans/DEVICES.md` D2).
+//! space by `devmgr` when a mass-storage **interface** node is discovered
+//! (`plans/DEVICES.md` D2/D5).
 //!
 //! This is a pure *class* driver: it touches **no** controller register,
 //! owns **no** controller DMA, and holds no IRQ line. The USB
@@ -9,9 +9,11 @@
 //! enumerates the device, publishes one node per interface, and serves that
 //! interface's transfers over the bus-agnostic URB transport. This driver
 //! binds the mass-storage interface node, reads the device's own
-//! configuration descriptor to learn its interface number and bulk endpoint
-//! pair, brings each logical unit up over BOT/SCSI
-//! (`rustos_drv_storage_usb_msd::bot`), emits one **storage-class**
+//! configuration descriptor to learn its interface number, wire transport,
+//! and endpoints, brings each logical unit up over the shared SCSI command
+//! layer (`rustos_drv_storage_usb_msd::scsi`) on the transport the device
+//! speaks — Bulk-Only (`bot`), Control/Bulk/Interrupt (`cbi`, USB floppy
+//! drives), or USB Attached SCSI (`uas`) — emits one **storage-class**
 //! hardware-tree node per ready LUN carrying a block-service call endpoint
 //! and a shared data window (`rustos_abi::blkio`), and serves those
 //! endpoints for the life of the device. It knows neither the controller

@@ -41,10 +41,11 @@ use rustos_abi::{DriverError, Errno};
 /// served device classes need are present: a control-IN transfer (used
 /// during enumeration and for class-IN requests), a **no-data** control-OUT
 /// (a class request carrying its whole meaning in SETUP — the BOT Mass
-/// Storage Reset, `plans/DEVICES.md` D2), a non-blocking interrupt-IN poll
-/// (the HID report path), and non-blocking bulk IN/OUT (the mass-storage
-/// data path, `plans/DEVICES.md` D1). A control-OUT *data stage* has no
-/// consumer and is refused fail-closed rather than pretended.
+/// Storage Reset, `plans/DEVICES.md` D2), a control-OUT **data stage** (a
+/// class request carrying a payload — the CBI ADSC command channel,
+/// `plans/DEVICES.md` D5), a non-blocking interrupt-IN poll (the HID report
+/// and CBI completion paths), and non-blocking bulk IN/OUT (the
+/// mass-storage data path, `plans/DEVICES.md` D1).
 pub trait UrbEngine {
     /// Run a control-IN transfer (SETUP + IN data stage) into `data`,
     /// returning the bytes the device delivered.
@@ -64,6 +65,18 @@ pub trait UrbEngine {
     /// A [`DriverError`] from the controller/device (e.g.
     /// [`DriverError::DeviceFault`]).
     fn control_no_data(&mut self, setup: [u8; 8]) -> Result<(), DriverError>;
+
+    /// Run a control-OUT transfer (SETUP + OUT data stage carrying `data` +
+    /// status stage): a class request with a payload, e.g. the CBI ADSC
+    /// command block.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::EndpointStalled`] — the device refused the request
+    ///   with a protocol STALL (the control endpoint recovers on the next
+    ///   SETUP, USB 2.0 §8.5.3.4).
+    /// * Any other [`DriverError`] from the controller/device.
+    fn control_out(&mut self, setup: [u8; 8], data: &[u8]) -> Result<(), DriverError>;
 
     /// Poll the interface's interrupt-IN endpoint for one pending report into
     /// `data`. `Ok(Some(n))` if a report arrived, `Ok(None)` if none is
@@ -141,17 +154,19 @@ pub fn drive_urb<E: UrbEngine>(
             if urb.endpoint != 0 {
                 return Err(Errno::OutOfRange);
             }
-            // The served control shapes are the IN data stage and the
-            // no-data OUT (SETUP only); a control-OUT *data stage* has no
-            // consumer and is refused fail-closed.
+            // The served control-OUT shapes: the no-data form (SETUP only)
+            // and the data-stage form carrying the shared buffer's bytes.
             if urb.direction == UsbDirection::Out {
-                if urb.length != 0 {
-                    return Err(Errno::NotImplemented);
+                if urb.length == 0 {
+                    engine
+                        .control_no_data(urb.setup)
+                        .map_err(DriverError::as_errno)?;
+                    return Ok(Some(0));
                 }
                 engine
-                    .control_no_data(urb.setup)
+                    .control_out(urb.setup, slice)
                     .map_err(DriverError::as_errno)?;
-                return Ok(Some(0));
+                return Ok(Some(urb.length));
             }
             // A control transfer completes synchronously within the call.
             let transferred = engine
@@ -310,6 +325,32 @@ impl<T: UrbCall> UrbClient<T> {
             direction: UsbDirection::Out,
             buffer: 0,
             length: 0,
+            setup,
+        })
+        .map(|_| ())
+    }
+
+    /// Submit a control-OUT URB on endpoint 0 whose OUT data stage carries
+    /// `length` bytes from the shared `buffer`: a class request with a
+    /// payload, e.g. the CBI ADSC command block.
+    ///
+    /// # Errors
+    ///
+    /// The carried completion [`Errno`] — notably [`Errno::EndpointStalled`]
+    /// when the device refused the request with a protocol STALL — or an
+    /// encode/transport error. A zero `length` is refused
+    /// ([`Errno::LengthOutOfRange`]): the no-data form is
+    /// [`Self::control_no_data`], and the two must not be conflated.
+    pub fn control_out(&mut self, setup: [u8; 8], buffer: u64, length: u32) -> Result<(), Errno> {
+        if length == 0 {
+            return Err(Errno::LengthOutOfRange);
+        }
+        self.submit(&UrbRequest {
+            endpoint: 0,
+            transfer_type: UsbTransferType::Control,
+            direction: UsbDirection::Out,
+            buffer,
+            length,
             setup,
         })
         .map(|_| ())

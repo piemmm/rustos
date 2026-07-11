@@ -21,7 +21,7 @@ use rustos_abi::blkio::{
 use rustos_abi::driver::block::Block;
 use rustos_abi::{DriverError, Errno};
 
-use crate::bot::Flush;
+use crate::scsi::Flush;
 
 /// Serve one block-service request over `device` and the LUN's shared
 /// data `window`, framing the completion into `reply` and returning its

@@ -1,22 +1,31 @@
-//! Fail-closed configuration-descriptor reader: which interface and bulk
-//! endpoint pair this class driver drives.
+//! Fail-closed configuration-descriptor reader: which storage interface,
+//! wire transport, and endpoints this class driver drives.
 //!
 //! The interface node the host-controller driver emits carries the device's
 //! `vid:pid:class` identity but not its endpoint numbers, and the URB
-//! transport's bulk server refuses any endpoint that is not the interface's
-//! *configured* bulk endpoint in that direction. The class driver therefore
-//! reads the device's own configuration descriptor over control-IN (the
-//! standard `GET_DESCRIPTOR` every USB device serves) and derives the same
-//! facts the host-controller driver derived at enumeration — the bulk-only
-//! mass-storage interface's number (the `wIndex` of the class requests) and
-//! its first bulk-IN + bulk-OUT endpoints — from the descriptor stream,
-//! never assumed (USB 2.0 §9.6).
+//! transport's servers refuse any endpoint that is not one of the
+//! interface's *configured* endpoints. The class driver therefore reads the
+//! device's own configuration descriptor over control-IN (the standard
+//! `GET_DESCRIPTOR` every USB device serves) and derives the same facts the
+//! host-controller driver derived at enumeration — the mass-storage
+//! interface's number (the `wIndex` of the class requests), its wire
+//! transport (the interface protocol byte), its command set (the sub-class
+//! byte), and the endpoints that transport uses — from the descriptor
+//! stream, never assumed (USB 2.0 §9.6):
+//!
+//! * **BOT** (protocol `0x50`): the first bulk-IN + bulk-OUT pair.
+//! * **CBI** (protocol `0x00`): the bulk pair plus the interrupt-IN
+//!   completion endpoint.
+//! * **UAS** (protocol `0x62`): four bulk pipes, each named by the Pipe
+//!   Usage descriptor (UAS §4.9) that follows its endpoint descriptor.
 //!
 //! The descriptor bytes come from the device and are hostile input: every
-//! length is validated, the walk is bounded by the buffer, and a stream that
-//! cannot be parsed refuses the whole device rather than guessing.
+//! length is validated, the walk is bounded by the buffer, and a stream
+//! that cannot be parsed refuses the whole device rather than guessing.
 
 use rustos_abi::Errno;
+
+use crate::scsi::CommandSet;
 
 /// `bDescriptorType` of a configuration descriptor (USB 2.0 table 9-5).
 const DESC_TYPE_CONFIGURATION: u8 = 2;
@@ -24,6 +33,9 @@ const DESC_TYPE_CONFIGURATION: u8 = 2;
 const DESC_TYPE_INTERFACE: u8 = 4;
 /// `bDescriptorType` of an endpoint descriptor.
 const DESC_TYPE_ENDPOINT: u8 = 5;
+/// `bDescriptorType` of the UAS Pipe Usage descriptor (UAS §4.9, the
+/// class-specific `CS_INTERFACE`-shaped value).
+const DESC_TYPE_PIPE_USAGE: u8 = 0x24;
 
 /// Length of a configuration-descriptor header (USB 2.0 §9.6.3).
 pub const CONFIGURATION_HEADER_LEN: usize = 9;
@@ -31,27 +43,87 @@ pub const CONFIGURATION_HEADER_LEN: usize = 9;
 const INTERFACE_DESC_LEN: usize = 9;
 /// Minimum length of an endpoint descriptor (USB 2.0 §9.6.6).
 const ENDPOINT_DESC_LEN: usize = 7;
+/// Length of a Pipe Usage descriptor (UAS §4.9).
+const PIPE_USAGE_DESC_LEN: usize = 4;
 
-/// `bmAttributes` transfer-type mask and the bulk value (USB 2.0 §9.6.6).
+/// `bmAttributes` transfer-type mask and values (USB 2.0 §9.6.6).
 const ATTR_TRANSFER_TYPE_MASK: u8 = 0x03;
 const ATTR_TRANSFER_TYPE_BULK: u8 = 0x02;
+const ATTR_TRANSFER_TYPE_INTERRUPT: u8 = 0x03;
 
 /// `bEndpointAddress` direction bit: set for IN endpoints.
 const ENDPOINT_ADDRESS_IN: u8 = 0x80;
 /// `bEndpointAddress` endpoint-number mask.
 const ENDPOINT_ADDRESS_NUMBER_MASK: u8 = 0x0F;
 
-/// The facts the class driver derives from the configuration descriptor:
-/// the bulk-only mass-storage interface and its bulk endpoint pair.
+/// Mass-storage interface class (USB 2.0 §9.6.5 `bInterfaceClass`).
+const CLASS_MASS_STORAGE: u8 = 0x08;
+/// Sub-class: SCSI transparent command set.
+pub const SUBCLASS_SCSI: u8 = 0x06;
+/// Sub-class: UFI (the USB floppy command set).
+pub const SUBCLASS_UFI: u8 = 0x04;
+/// Protocol: Bulk-Only Transport.
+pub const PROTOCOL_BOT: u8 = 0x50;
+/// Protocol: Control/Bulk/Interrupt with command-completion interrupt.
+pub const PROTOCOL_CBI: u8 = 0x00;
+/// Protocol: USB Attached SCSI.
+pub const PROTOCOL_UAS: u8 = 0x62;
+
+/// UAS Pipe Usage ids (UAS §4.9 table 8).
+const PIPE_ID_COMMAND: u8 = 0x01;
+const PIPE_ID_STATUS: u8 = 0x02;
+const PIPE_ID_DATA_IN: u8 = 0x03;
+const PIPE_ID_DATA_OUT: u8 = 0x04;
+
+/// The four UAS pipes' endpoint numbers, by Pipe Usage id.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct MsdInterface {
-    /// `bInterfaceNumber` — the `wIndex` of the class requests
-    /// (`GET MAX LUN`, Bulk-Only Mass Storage Reset).
+pub struct UasEndpoints {
+    /// Command pipe (bulk-OUT).
+    pub command: u8,
+    /// Status pipe (bulk-IN).
+    pub status: u8,
+    /// Data-in pipe (bulk-IN).
+    pub data_in: u8,
+    /// Data-out pipe (bulk-OUT).
+    pub data_out: u8,
+}
+
+/// The wire transport a matched interface speaks, with the endpoints that
+/// transport uses.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum StorageProtocol {
+    /// Bulk-Only Transport over the bulk endpoint pair.
+    Bot {
+        /// Endpoint number of the first bulk-IN endpoint.
+        bulk_in: u8,
+        /// Endpoint number of the first bulk-OUT endpoint.
+        bulk_out: u8,
+    },
+    /// Control/Bulk/Interrupt: the bulk pair plus the completion
+    /// interrupt.
+    Cbi {
+        /// Endpoint number of the first bulk-IN endpoint.
+        bulk_in: u8,
+        /// Endpoint number of the first bulk-OUT endpoint.
+        bulk_out: u8,
+        /// Endpoint number of the command-completion interrupt-IN
+        /// endpoint.
+        interrupt_in: u8,
+    },
+    /// USB Attached SCSI over the four named pipes.
+    Uas(UasEndpoints),
+}
+
+/// The facts the class driver derives from the configuration descriptor:
+/// the storage interface, its command set, and its transport endpoints.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct StorageInterface {
+    /// `bInterfaceNumber` — the `wIndex` of the class requests.
     pub interface_number: u8,
-    /// Endpoint number of the interface's first bulk-IN endpoint.
-    pub bulk_in: u8,
-    /// Endpoint number of the interface's first bulk-OUT endpoint.
-    pub bulk_out: u8,
+    /// The command set the sub-class byte declares.
+    pub command_set: CommandSet,
+    /// The wire transport and its endpoints.
+    pub protocol: StorageProtocol,
 }
 
 /// Total length (`wTotalLength`) the configuration-descriptor header
@@ -78,11 +150,89 @@ pub fn configuration_total_length(header: &[u8]) -> Result<usize, Errno> {
     Ok(total)
 }
 
-/// Find the first SCSI-transparent bulk-only mass-storage interface
-/// (class `08:06:50`, alternate setting 0) in the full configuration
-/// descriptor stream and derive its bulk endpoint pair — the first bulk-IN
-/// and the first bulk-OUT endpoint the interface declares, exactly the pair
-/// the host-controller driver configured at enumeration.
+/// The `(sub-class, protocol)` pairs this driver serves, mapped to the
+/// command set the sub-class declares. Anything else — vendor-specific
+/// sets, the interrupt-less CB variant (protocol `0x01`), ATAPI sub-classes
+/// — is left for a driver that actually implements it (fail closed, never
+/// half-served).
+fn accepted_command_set(sub_class: u8, protocol: u8) -> Option<CommandSet> {
+    match (sub_class, protocol) {
+        (SUBCLASS_SCSI, PROTOCOL_BOT | PROTOCOL_UAS) => Some(CommandSet::Transparent),
+        (SUBCLASS_UFI, PROTOCOL_BOT | PROTOCOL_CBI) => Some(CommandSet::Ufi),
+        _ => None,
+    }
+}
+
+/// One matched interface's endpoint collection state.
+#[derive(Copy, Clone, Debug, Default)]
+struct Collect {
+    bulk_in: Option<u8>,
+    bulk_out: Option<u8>,
+    interrupt_in: Option<u8>,
+    /// The most recent bulk endpoint (number, is-IN), awaiting the Pipe
+    /// Usage descriptor that names its UAS pipe.
+    pending_pipe: Option<(u8, bool)>,
+    command: Option<u8>,
+    status: Option<u8>,
+    data_in: Option<u8>,
+    data_out: Option<u8>,
+}
+
+impl Collect {
+    /// The completed transport for `protocol`, if every endpoint it needs
+    /// has been seen.
+    fn complete(&self, protocol: u8) -> Option<StorageProtocol> {
+        match protocol {
+            PROTOCOL_BOT => Some(StorageProtocol::Bot {
+                bulk_in: self.bulk_in?,
+                bulk_out: self.bulk_out?,
+            }),
+            PROTOCOL_CBI => Some(StorageProtocol::Cbi {
+                bulk_in: self.bulk_in?,
+                bulk_out: self.bulk_out?,
+                interrupt_in: self.interrupt_in?,
+            }),
+            PROTOCOL_UAS => Some(StorageProtocol::Uas(UasEndpoints {
+                command: self.command?,
+                status: self.status?,
+                data_in: self.data_in?,
+                data_out: self.data_out?,
+            })),
+            _ => None,
+        }
+    }
+
+    /// Record a Pipe Usage id for the pending bulk endpoint, enforcing the
+    /// pipe's direction (UAS §4.9: command/data-out ride OUT endpoints,
+    /// status/data-in ride IN endpoints). A duplicate pipe id or a pipe on
+    /// an endpoint of the wrong direction poisons the interface (`false`),
+    /// so a malformed UAS interface is skipped, never half-assembled.
+    fn assign_pipe(&mut self, pipe_id: u8) -> bool {
+        let Some((number, is_in)) = self.pending_pipe.take() else {
+            // A Pipe Usage descriptor with no preceding bulk endpoint;
+            // tolerated (the spec also allows the interface-level form
+            // that precedes the endpoints).
+            return true;
+        };
+        let slot = match (pipe_id, is_in) {
+            (PIPE_ID_COMMAND, false) => &mut self.command,
+            (PIPE_ID_STATUS, true) => &mut self.status,
+            (PIPE_ID_DATA_IN, true) => &mut self.data_in,
+            (PIPE_ID_DATA_OUT, false) => &mut self.data_out,
+            _ => return false,
+        };
+        if slot.is_some() {
+            return false;
+        }
+        *slot = Some(number);
+        true
+    }
+}
+
+/// Find the first servable mass-storage interface (alternate setting 0) in
+/// the full configuration descriptor stream and derive its transport
+/// endpoints — exactly the endpoints the host-controller driver configured
+/// at enumeration.
 ///
 /// # Errors
 ///
@@ -91,9 +241,10 @@ pub fn configuration_total_length(header: &[u8]) -> Result<usize, Errno> {
 ///   length is shorter than its type requires or runs past the stream (a
 ///   zero `bLength` cannot advance the walk and is refused, never looped
 ///   on).
-/// * [`Errno::NotFound`] if no such interface exists, or it declares no
-///   bulk-IN + bulk-OUT pair, or an endpoint number is outside `1..=15`.
-pub fn find_msd_interface(stream: &[u8]) -> Result<MsdInterface, Errno> {
+/// * [`Errno::NotFound`] if no servable interface completes: none matches
+///   the accepted class/sub-class/protocol set, or the matched one lacks
+///   the endpoints its transport needs, or its UAS pipes are malformed.
+pub fn find_storage_interface(stream: &[u8]) -> Result<StorageInterface, Errno> {
     let total = configuration_total_length(stream)?;
     if stream.len() < total {
         return Err(Errno::LengthOutOfRange);
@@ -103,11 +254,13 @@ pub fn find_msd_interface(stream: &[u8]) -> Result<MsdInterface, Errno> {
     // Walk the descriptor stream. `offset` only ever advances by a
     // validated, non-zero `bLength`, so the walk is bounded by the stream.
     let mut offset = CONFIGURATION_HEADER_LEN;
-    // The matched interface, once seen; endpoint descriptors that follow it
-    // (until the next interface descriptor) belong to it.
-    let mut matched: Option<u8> = None;
-    let mut bulk_in: Option<u8> = None;
-    let mut bulk_out: Option<u8> = None;
+    // The matched interface, once seen: (number, protocol, command set).
+    // Descriptors that follow it (until the next interface descriptor)
+    // belong to it. `poisoned` marks a matched interface whose UAS pipes
+    // turned out malformed; its remaining descriptors are skipped.
+    let mut matched: Option<(u8, u8, CommandSet)> = None;
+    let mut poisoned = false;
+    let mut collect = Collect::default();
     while offset < stream.len() {
         let remaining = &stream[offset..];
         if remaining.len() < 2 {
@@ -123,54 +276,75 @@ pub fn find_msd_interface(stream: &[u8]) -> Result<MsdInterface, Errno> {
                 if length < INTERFACE_DESC_LEN {
                     return Err(Errno::LengthOutOfRange);
                 }
-                if matched.is_some() {
-                    // The matched interface's endpoint list has ended
-                    // without a full bulk pair; keep looking for a later
-                    // matching interface.
-                    matched = None;
-                    bulk_in = None;
-                    bulk_out = None;
-                }
+                // The previous matched interface's endpoint list has ended
+                // without completing; keep looking for a later matching
+                // interface.
+                matched = None;
+                poisoned = false;
+                collect = Collect::default();
                 let alternate_setting = descriptor[3];
                 let class = descriptor[5];
                 let sub_class = descriptor[6];
                 let protocol = descriptor[7];
-                if alternate_setting == 0
-                    && u32::from_be_bytes([0, class, sub_class, protocol])
-                        == crate::MSD_INTERFACE_CLASS
-                {
-                    matched = Some(descriptor[2]);
+                if alternate_setting == 0 && class == CLASS_MASS_STORAGE {
+                    if let Some(command_set) = accepted_command_set(sub_class, protocol) {
+                        matched = Some((descriptor[2], protocol, command_set));
+                    }
                 }
             }
             DESC_TYPE_ENDPOINT => {
                 if length < ENDPOINT_DESC_LEN {
                     return Err(Errno::LengthOutOfRange);
                 }
-                if let Some(interface_number) = matched {
+                if matched.is_some() && !poisoned {
                     let address = descriptor[2];
                     let attributes = descriptor[3];
                     let number = address & ENDPOINT_ADDRESS_NUMBER_MASK;
-                    if attributes & ATTR_TRANSFER_TYPE_MASK == ATTR_TRANSFER_TYPE_BULK
-                        && number != 0
-                    {
-                        if address & ENDPOINT_ADDRESS_IN != 0 {
-                            if bulk_in.is_none() {
-                                bulk_in = Some(number);
+                    let is_in = address & ENDPOINT_ADDRESS_IN != 0;
+                    if number != 0 {
+                        match attributes & ATTR_TRANSFER_TYPE_MASK {
+                            ATTR_TRANSFER_TYPE_BULK => {
+                                collect.pending_pipe = Some((number, is_in));
+                                if is_in {
+                                    if collect.bulk_in.is_none() {
+                                        collect.bulk_in = Some(number);
+                                    }
+                                } else if collect.bulk_out.is_none() {
+                                    collect.bulk_out = Some(number);
+                                }
                             }
-                        } else if bulk_out.is_none() {
-                            bulk_out = Some(number);
+                            ATTR_TRANSFER_TYPE_INTERRUPT
+                                if is_in && collect.interrupt_in.is_none() =>
+                            {
+                                collect.interrupt_in = Some(number);
+                            }
+                            _ => {}
                         }
-                    }
-                    if let (Some(bulk_in), Some(bulk_out)) = (bulk_in, bulk_out) {
-                        return Ok(MsdInterface {
-                            interface_number,
-                            bulk_in,
-                            bulk_out,
-                        });
                     }
                 }
             }
+            DESC_TYPE_PIPE_USAGE if matched.is_some() && !poisoned => {
+                if length < PIPE_USAGE_DESC_LEN {
+                    return Err(Errno::LengthOutOfRange);
+                }
+                if !collect.assign_pipe(descriptor[2]) {
+                    // Malformed UAS pipes: skip this interface and keep
+                    // scanning for a later servable one.
+                    poisoned = true;
+                }
+            }
             _ => {}
+        }
+        if let Some((interface_number, protocol, command_set)) = matched {
+            if !poisoned {
+                if let Some(protocol) = collect.complete(protocol) {
+                    return Ok(StorageInterface {
+                        interface_number,
+                        command_set,
+                        protocol,
+                    });
+                }
+            }
         }
         offset += length;
     }
@@ -178,180 +352,5 @@ pub fn find_msd_interface(stream: &[u8]) -> Result<MsdInterface, Errno> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use alloc::vec::Vec;
-
-    /// Build a configuration stream from a header and raw descriptors,
-    /// patching `wTotalLength` to the real total.
-    fn stream(descriptors: &[&[u8]]) -> Vec<u8> {
-        let mut out = alloc::vec![
-            9,
-            DESC_TYPE_CONFIGURATION,
-            0,
-            0,
-            1,    // bNumInterfaces
-            1,    // bConfigurationValue
-            0,    // iConfiguration
-            0x80, // bmAttributes
-            50,   // bMaxPower
-        ];
-        for descriptor in descriptors {
-            out.extend_from_slice(descriptor);
-        }
-        let total = u16::try_from(out.len()).expect("test stream fits u16");
-        out[2..4].copy_from_slice(&total.to_le_bytes());
-        out
-    }
-
-    fn interface(number: u8, class: [u8; 3]) -> [u8; 9] {
-        [
-            9,
-            DESC_TYPE_INTERFACE,
-            number,
-            0, // bAlternateSetting
-            2, // bNumEndpoints
-            class[0],
-            class[1],
-            class[2],
-            0, // iInterface
-        ]
-    }
-
-    fn endpoint(address: u8, attributes: u8) -> [u8; 7] {
-        [7, DESC_TYPE_ENDPOINT, address, attributes, 0, 2, 0]
-    }
-
-    #[test]
-    fn finds_the_bulk_pair_of_the_msd_interface() {
-        let bytes = stream(&[
-            &interface(0, [0x08, 0x06, 0x50]),
-            &endpoint(0x83, 0x02), // bulk-IN, EP3
-            &endpoint(0x04, 0x02), // bulk-OUT, EP4
-        ]);
-        assert_eq!(
-            find_msd_interface(&bytes),
-            Ok(MsdInterface {
-                interface_number: 0,
-                bulk_in: 3,
-                bulk_out: 4,
-            })
-        );
-    }
-
-    #[test]
-    fn skips_foreign_interfaces_and_their_endpoints() {
-        let bytes = stream(&[
-            &interface(0, [0x03, 0x01, 0x01]), // HID boot keyboard
-            &endpoint(0x81, 0x03),             // its interrupt-IN
-            &interface(1, [0x08, 0x06, 0x50]),
-            &endpoint(0x02, 0x02), // bulk-OUT first
-            &endpoint(0x85, 0x02), // bulk-IN second
-        ]);
-        assert_eq!(
-            find_msd_interface(&bytes),
-            Ok(MsdInterface {
-                interface_number: 1,
-                bulk_in: 5,
-                bulk_out: 2,
-            })
-        );
-    }
-
-    #[test]
-    fn ignores_non_bulk_endpoints_on_the_msd_interface() {
-        let bytes = stream(&[
-            &interface(0, [0x08, 0x06, 0x50]),
-            &endpoint(0x81, 0x03), // interrupt-IN — not the data pair
-            &endpoint(0x82, 0x02), // bulk-IN, EP2
-            &endpoint(0x03, 0x02), // bulk-OUT, EP3
-        ]);
-        assert_eq!(
-            find_msd_interface(&bytes),
-            Ok(MsdInterface {
-                interface_number: 0,
-                bulk_in: 2,
-                bulk_out: 3,
-            })
-        );
-    }
-
-    #[test]
-    fn refuses_a_stream_with_no_msd_interface() {
-        let bytes = stream(&[&interface(0, [0x03, 0x01, 0x01]), &endpoint(0x81, 0x03)]);
-        assert_eq!(find_msd_interface(&bytes), Err(Errno::NotFound));
-    }
-
-    #[test]
-    fn refuses_an_msd_interface_missing_a_bulk_direction() {
-        let bytes = stream(&[
-            &interface(0, [0x08, 0x06, 0x50]),
-            &endpoint(0x81, 0x02), // bulk-IN only
-        ]);
-        assert_eq!(find_msd_interface(&bytes), Err(Errno::NotFound));
-    }
-
-    #[test]
-    fn refuses_a_zero_length_descriptor_rather_than_looping() {
-        let mut bytes = stream(&[&interface(0, [0x08, 0x06, 0x50])]);
-        // A hostile descriptor whose bLength is zero can never advance the
-        // walk; append one and assert the refusal.
-        bytes.extend_from_slice(&[0, DESC_TYPE_ENDPOINT]);
-        let total = u16::try_from(bytes.len()).expect("fits");
-        bytes[2..4].copy_from_slice(&total.to_le_bytes());
-        assert_eq!(find_msd_interface(&bytes), Err(Errno::LengthOutOfRange));
-    }
-
-    #[test]
-    fn refuses_a_descriptor_running_past_the_stream() {
-        let mut bytes = stream(&[&interface(0, [0x08, 0x06, 0x50])]);
-        // An endpoint descriptor claiming more bytes than remain.
-        bytes.extend_from_slice(&[9, DESC_TYPE_ENDPOINT, 0x81, 0x02]);
-        let total = u16::try_from(bytes.len()).expect("fits");
-        bytes[2..4].copy_from_slice(&total.to_le_bytes());
-        assert_eq!(find_msd_interface(&bytes), Err(Errno::LengthOutOfRange));
-    }
-
-    #[test]
-    fn refuses_a_truncated_or_mistyped_header() {
-        assert_eq!(
-            configuration_total_length(&[9, DESC_TYPE_CONFIGURATION, 9, 0, 1, 1, 0, 0x80]),
-            Err(Errno::LengthOutOfRange)
-        );
-        let mistyped = [9, DESC_TYPE_INTERFACE, 9, 0, 1, 1, 0, 0x80, 50];
-        assert_eq!(configuration_total_length(&mistyped), Err(Errno::BadMagic));
-        // A total shorter than the header itself cannot be a stream.
-        let short_total = [9, DESC_TYPE_CONFIGURATION, 4, 0, 1, 1, 0, 0x80, 50];
-        assert_eq!(
-            configuration_total_length(&short_total),
-            Err(Errno::LengthOutOfRange)
-        );
-    }
-
-    #[test]
-    fn refuses_a_stream_shorter_than_its_announced_total() {
-        let bytes = stream(&[&interface(0, [0x08, 0x06, 0x50])]);
-        assert_eq!(
-            find_msd_interface(&bytes[..bytes.len() - 1]),
-            Err(Errno::LengthOutOfRange)
-        );
-    }
-
-    #[test]
-    fn a_second_matching_interface_serves_when_the_first_lacks_endpoints() {
-        let bytes = stream(&[
-            &interface(0, [0x08, 0x06, 0x50]), // no endpoints follow
-            &interface(1, [0x08, 0x06, 0x50]),
-            &endpoint(0x81, 0x02),
-            &endpoint(0x02, 0x02),
-        ]);
-        assert_eq!(
-            find_msd_interface(&bytes),
-            Ok(MsdInterface {
-                interface_number: 1,
-                bulk_in: 1,
-                bulk_out: 2,
-            })
-        );
-    }
-}
+#[path = "desc_tests.rs"]
+mod tests;

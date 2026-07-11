@@ -89,14 +89,19 @@ build on the *same* engine without depending on each other — exactly the split
     transfer — targeting the enumerated *device*, switching a hub-downstream
     device's EP0 ring active for the transfer — `control_no_data` over the
     same path for a SETUP-only class request (the BOT Mass Storage Reset,
-    `plans/DEVICES.md` D2), `interrupt_in` over the `ReportSource` report
-    poll, and `bulk_in` / `bulk_out` over the bulk endpoint pair a
-    mass-storage interface configures at enumeration, `plans/DEVICES.md`
-    D1).
+    `plans/DEVICES.md` D2), `control_out` for a class request carrying an
+    OUT data stage (the CBI ADSC command channel, `plans/DEVICES.md` D5),
+    `interrupt_in` over the `ReportSource` report poll — a HID report
+    endpoint or a CBI interface's completion endpoint alike — and
+    `bulk_in` / `bulk_out` over the interface's configured bulk endpoints:
+    the IN/OUT pair a BOT/CBI interface carries, or the two pairs a UAS
+    interface's four pipes need (`plans/DEVICES.md` D1/D5), addressed by
+    endpoint number and routed to the matching per-pipe ring).
   - `drive_urb` — the controller-side server transformation: decode a URB,
     validate it fail-closed against the interface (control ⇒ endpoint 0,
-    served as IN or the zero-length no-data OUT; interrupt/bulk ⇒ a device
-    endpoint; an oversize length, a control-OUT *data stage*, or a
+    served as IN, the zero-length no-data OUT, or the data-stage OUT
+    carrying the shared buffer's bytes; interrupt/bulk ⇒ a device
+    endpoint; an oversize length or a
     malformed frame is refused **before** the engine is touched), drive the
     engine over the shared buffer, and frame the
     completion in band. A not-yet-arrived interrupt-IN report — or a bulk
@@ -106,19 +111,27 @@ build on the *same* engine without depending on each other — exactly the split
   - `UrbCall` / `UrbClient` — the class-side client: a class driver implements
     `UrbCall` over the kernel `ipc_call` surface (a host test routes the bytes
     straight to `serve_urb`), and
-    `UrbClient::{control_in, control_no_data, interrupt_in, bulk_in,
-    bulk_out}` build the URB,
+    `UrbClient::{control_in, control_no_data, control_out, interrupt_in,
+    bulk_in, bulk_out}` build the URB,
     submit it, and decode the completion. A class driver speaks only
     this ABI, so the same binary works behind any controller that serves it —
     it touches no controller register and no other interface's buffer (§5.4,
     `plans/USB.md` §1.3).
-  - Bulk endpoints are served through per-direction transfer rings with
-    per-slot staging buffers (several TDs may be outstanding per direction,
-    completing in order), short packets report the honest byte count, and a
-    device STALL is recovered in place — Reset Endpoint → Set TR Dequeue
-    Pointer → `CLEAR_FEATURE(ENDPOINT_HALT)` on the device's own EP0 — with
+  - Bulk endpoints are served through per-pipe transfer rings with
+    per-slot staging buffers (several TDs may be outstanding per pipe,
+    completing in order; a UAS interface's second pair shares the
+    direction's staging buffers — the URB service holds one URB in flight
+    per interface, so the pipes never race on them), short packets report
+    the honest byte count, and a device STALL is recovered in place —
+    Reset Endpoint → Set TR Dequeue Pointer →
+    `CLEAR_FEATURE(ENDPOINT_HALT)` on the device's own EP0 — with
     every abandoned TD answered and the stall surfaced as the distinct
-    `EndpointStalled`, so a BOT class driver can run its own recovery.
+    `EndpointStalled`, so a storage class driver can run its own recovery.
+    A STALLed *control* transfer is likewise recovered in place (Reset
+    Endpoint + a rebuilt EP0 ring; the device side self-clears at the next
+    SETUP) and surfaced as `EndpointStalled` — the CBI "command not
+    accepted" answer — with the observed completion code preserved for the
+    diagnostics.
 
 ## Design
 

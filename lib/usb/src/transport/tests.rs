@@ -41,6 +41,8 @@ struct MockEngine {
     interrupt_calls: usize,
     /// SETUP packets delivered by completed no-data control-OUT transfers.
     no_data_setups: Vec<[u8; 8]>,
+    /// Completed control-OUT data-stage transfers: SETUP + payload.
+    control_out_transfers: Vec<([u8; 8], Vec<u8>)>,
     /// Queued device responses for bulk-IN, delivered one per completed TD.
     bulk_in_data: Vec<Vec<u8>>,
     /// Bytes each completed bulk-OUT TD delivered to the device.
@@ -66,6 +68,7 @@ impl MockEngine {
             control_calls: 0,
             interrupt_calls: 0,
             no_data_setups: Vec::new(),
+            control_out_transfers: Vec::new(),
             bulk_in_data: Vec::new(),
             bulk_out_sink: Vec::new(),
             bulk_in_armed: None,
@@ -86,6 +89,11 @@ impl UrbEngine for MockEngine {
 
     fn control_no_data(&mut self, setup: [u8; 8]) -> Result<(), DriverError> {
         self.no_data_setups.push(setup);
+        Ok(())
+    }
+
+    fn control_out(&mut self, setup: [u8; 8], data: &[u8]) -> Result<(), DriverError> {
+        self.control_out_transfers.push((setup, data.to_vec()));
         Ok(())
     }
 
@@ -303,11 +311,10 @@ fn rejects_illegal_direction() {
     );
     assert_eq!(engine.interrupt_calls, 0);
 
-    // A control-OUT *data stage* has no consumer on this seam; it is
-    // refused before the engine is touched. The no-data form (length 0)
-    // is served — see `control_no_data_round_trips_through_the_client`.
-    let control_out_with_data = UrbRequest {
-        endpoint: 0,
+    // A control-OUT data stage on a device endpoint is illegal (control
+    // transfers are the endpoint-0 protocol).
+    let control_out_bad_endpoint = UrbRequest {
+        endpoint: 1,
         transfer_type: UsbTransferType::Control,
         direction: UsbDirection::Out,
         buffer: BUFFER_HANDLE,
@@ -315,11 +322,38 @@ fn rejects_illegal_direction() {
         setup: [0; 8],
     };
     assert_eq!(
-        serve_one(&control_out_with_data, 8, &mut engine),
-        Err(Errno::NotImplemented)
+        serve_one(&control_out_bad_endpoint, 8, &mut engine),
+        Err(Errno::OutOfRange)
     );
     assert_eq!(engine.control_calls, 0);
     assert!(engine.no_data_setups.is_empty());
+    assert!(engine.control_out_transfers.is_empty());
+}
+
+#[test]
+fn control_out_data_stage_delivers_the_shared_buffers_bytes() {
+    // The CBI ADSC path: a control-OUT whose data stage carries the shared
+    // buffer's bytes to the engine, completing with the full length.
+    let mut engine = MockEngine::new();
+    let setup = [0x21, 0x00, 0, 0, 1, 0, 12, 0];
+    let request = UrbRequest {
+        endpoint: 0,
+        transfer_type: UsbTransferType::Control,
+        direction: UsbDirection::Out,
+        buffer: BUFFER_HANDLE,
+        length: 12,
+        setup,
+    };
+    let mut data = [0u8; 12];
+    data[0] = 0x28;
+    let mut frame = [0u8; URB_REQUEST_LEN];
+    let n = request.encode(&mut frame).expect("encodes");
+    let outcome = drive_urb(&frame[..n], &mut data, &mut engine).expect("served");
+    assert_eq!(outcome, Some(12));
+    assert_eq!(engine.control_out_transfers.len(), 1);
+    let (seen_setup, seen_data) = &engine.control_out_transfers[0];
+    assert_eq!(seen_setup, &setup);
+    assert_eq!(seen_data.as_slice(), &data[..]);
 }
 
 #[test]

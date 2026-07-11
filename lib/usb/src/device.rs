@@ -228,12 +228,40 @@ struct DeviceRegion {
     bulk_in_ring: usize,
     /// Bulk-OUT transfer ring, as [`Self::bulk_in_ring`].
     bulk_out_ring: usize,
+    /// Transfer ring of the interface's **second** bulk-IN endpoint (a UAS
+    /// interface's two IN pipes). Its TRBs stage through
+    /// [`Self::bulk_in_bufs`]: the URB service holds one URB — and so one
+    /// bulk TD — in flight per interface, so the direction's pipes never
+    /// race on the buffers.
+    bulk_in2_ring: usize,
+    /// Second bulk-OUT transfer ring, as [`Self::bulk_in2_ring`].
+    bulk_out2_ring: usize,
     /// [`BULK_SLOTS`] staging buffers of [`BULK_BUF_LEN`] bytes for the
-    /// bulk-IN ring: slot `n`'s TRB points at buffer `n`, so a completion
+    /// bulk-IN rings: slot `n`'s TRB points at buffer `n`, so a completion
     /// maps back to its bytes by slot index.
     bulk_in_bufs: usize,
-    /// Staging buffers for the bulk-OUT ring, as [`Self::bulk_in_bufs`].
+    /// Staging buffers for the bulk-OUT rings, as [`Self::bulk_in_bufs`].
     bulk_out_bufs: usize,
+}
+
+impl DeviceRegion {
+    /// Region offset of `pipe`'s transfer ring.
+    fn bulk_ring_off(&self, pipe: BulkPipe) -> usize {
+        match (pipe.direction, pipe.secondary) {
+            (BulkDirection::In, false) => self.bulk_in_ring,
+            (BulkDirection::In, true) => self.bulk_in2_ring,
+            (BulkDirection::Out, false) => self.bulk_out_ring,
+            (BulkDirection::Out, true) => self.bulk_out2_ring,
+        }
+    }
+
+    /// Region offset of `pipe`'s staging buffers (shared per direction).
+    fn bulk_bufs_off(&self, pipe: BulkPipe) -> usize {
+        match pipe.direction {
+            BulkDirection::In => self.bulk_in_bufs,
+            BulkDirection::Out => self.bulk_out_bufs,
+        }
+    }
 }
 
 /// Where each structure lives inside the caller's [`DmaRegion`].
@@ -386,6 +414,8 @@ impl Layout {
                 report_bufs: take(RING_TRBS * REPORT_LEN),
                 bulk_in_ring: take(BULK_RING_TRBS * trb::TRB_LEN),
                 bulk_out_ring: take(BULK_RING_TRBS * trb::TRB_LEN),
+                bulk_in2_ring: take(BULK_RING_TRBS * trb::TRB_LEN),
+                bulk_out2_ring: take(BULK_RING_TRBS * trb::TRB_LEN),
                 bulk_in_bufs: take(BULK_SLOTS * BULK_BUF_LEN),
                 bulk_out_bufs: take(BULK_SLOTS * BULK_BUF_LEN),
             };
@@ -846,6 +876,20 @@ pub struct InterfaceInfo {
     /// `wMaxPacketSize` (bits 0:10) of the bulk-OUT endpoint. `0` when
     /// absent.
     pub bulk_out_max_packet: u16,
+    /// Device Context Index of the interface's **second** bulk-IN
+    /// endpoint — a UAS interface carries two IN pipes (status and
+    /// data-in). `0` when the interface declares fewer than two.
+    pub bulk_in2_dci: u8,
+    /// `wMaxPacketSize` (bits 0:10) of the second bulk-IN endpoint. `0`
+    /// when absent.
+    pub bulk_in2_max_packet: u16,
+    /// Device Context Index of the interface's **second** bulk-OUT
+    /// endpoint (a UAS interface's command and data-out pipes). `0` when
+    /// absent.
+    pub bulk_out2_dci: u8,
+    /// `wMaxPacketSize` (bits 0:10) of the second bulk-OUT endpoint. `0`
+    /// when absent.
+    pub bulk_out2_max_packet: u16,
 }
 
 impl InterfaceInfo {
@@ -894,8 +938,8 @@ impl InterfaceInfo {
         // inside a skipped alternate setting.
         let mut interface: Option<(u8, u32)> = None;
         let mut int_endpoint: Option<(u8, u16, u8)> = None;
-        let mut bulk_in: Option<(u8, u16)> = None;
-        let mut bulk_out: Option<(u8, u16)> = None;
+        let mut bulk_in: [Option<(u8, u16)>; 2] = [None; 2];
+        let mut bulk_out: [Option<(u8, u16)>; 2] = [None; 2];
         while offset + 2 <= buf.len() {
             let length = usize::from(buf[offset]);
             let end = offset.checked_add(length).ok_or(DriverError::BadMagic)?;
@@ -943,11 +987,18 @@ impl InterfaceInfo {
                             int_endpoint =
                                 Some((endpoint_number * 2 + 1, max_packet, buf[offset + 6]));
                         }
-                        ENDPOINT_ATTR_BULK if is_in && bulk_in.is_none() => {
-                            bulk_in = Some((endpoint_number * 2 + 1, max_packet));
+                        // The first two bulk endpoints per direction are
+                        // captured: one pair serves BOT/CBI, a UAS
+                        // interface's four pipes need both.
+                        ENDPOINT_ATTR_BULK if is_in => {
+                            if let Some(slot) = bulk_in.iter_mut().find(|slot| slot.is_none()) {
+                                *slot = Some((endpoint_number * 2 + 1, max_packet));
+                            }
                         }
-                        ENDPOINT_ATTR_BULK if !is_in && bulk_out.is_none() => {
-                            bulk_out = Some((endpoint_number * 2, max_packet));
+                        ENDPOINT_ATTR_BULK if !is_in => {
+                            if let Some(slot) = bulk_out.iter_mut().find(|slot| slot.is_none()) {
+                                *slot = Some((endpoint_number * 2, max_packet));
+                            }
                         }
                         _ => {}
                     }
@@ -976,18 +1027,20 @@ impl InterfaceInfo {
     /// HID interface with no interrupt-IN endpoint is dropped (malformed —
     /// nothing to poll for reports), and an interface beyond the
     /// [`MAX_INTERFACES`] bound is ignored rather than trusted.
+    #[allow(clippy::similar_names)] // The `*2` names are the second pipes'
+                                    // own names beside their primaries — deliberate siblings.
     fn flush_interface(
         configuration_value: u8,
         interface: &mut Option<(u8, u32)>,
         int_endpoint: &mut Option<(u8, u16, u8)>,
-        bulk_in: &mut Option<(u8, u16)>,
-        bulk_out: &mut Option<(u8, u16)>,
+        bulk_in: &mut [Option<(u8, u16)>; 2],
+        bulk_out: &mut [Option<(u8, u16)>; 2],
         out: &mut [Option<Self>; MAX_INTERFACES],
         count: &mut usize,
     ) {
         let int = int_endpoint.take();
-        let b_in = bulk_in.take();
-        let b_out = bulk_out.take();
+        let [b_in, b_in2] = core::mem::take(bulk_in);
+        let [b_out, b_out2] = core::mem::take(bulk_out);
         let Some((interface_number, class24)) = interface.take() else {
             return;
         };
@@ -1002,6 +1055,8 @@ impl InterfaceInfo {
         }
         let (bulk_in_dci, bulk_in_max_packet) = b_in.unwrap_or((0, 0));
         let (bulk_out_dci, bulk_out_max_packet) = b_out.unwrap_or((0, 0));
+        let (bulk_in2_dci, bulk_in2_max_packet) = b_in2.unwrap_or((0, 0));
+        let (bulk_out2_dci, bulk_out2_max_packet) = b_out2.unwrap_or((0, 0));
         out[*count] = Some(Self {
             configuration_value,
             interface_number,
@@ -1013,6 +1068,10 @@ impl InterfaceInfo {
             bulk_in_max_packet,
             bulk_out_dci,
             bulk_out_max_packet,
+            bulk_in2_dci,
+            bulk_in2_max_packet,
+            bulk_out2_dci,
+            bulk_out2_max_packet,
         });
         *count += 1;
     }
@@ -1060,20 +1119,49 @@ pub(crate) struct DeviceIdentity {
 }
 
 /// Direction of a bulk transfer on the enumerated interface's configured
-/// bulk endpoint pair.
+/// bulk endpoints.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum BulkDirection {
-    /// Device → host, on the interface's bulk-IN endpoint.
+    /// Device → host, on a bulk-IN endpoint.
     In,
-    /// Host → device, on the interface's bulk-OUT endpoint.
+    /// Host → device, on a bulk-OUT endpoint.
     Out,
+}
+
+/// One of an interface's configured bulk endpoints: its direction and
+/// whether it is the second endpoint in that direction (a UAS interface
+/// carries two per direction; BOT/CBI use only the primaries).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BulkPipe {
+    /// The pipe's data direction.
+    pub direction: BulkDirection,
+    /// Whether this is the interface's second pipe in that direction.
+    pub secondary: bool,
+}
+
+impl BulkPipe {
+    /// The interface's primary pipe in `direction`.
+    pub(crate) const fn primary(direction: BulkDirection) -> Self {
+        Self {
+            direction,
+            secondary: false,
+        }
+    }
+
+    /// The interface's second pipe in `direction`.
+    pub(crate) const fn secondary(direction: BulkDirection) -> Self {
+        Self {
+            direction,
+            secondary: true,
+        }
+    }
 }
 
 /// One retired bulk TD, as reported by [`UsbDevice::poll_bulk`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) struct BulkComplete {
     /// Which bulk endpoint the TD ran on.
-    pub direction: BulkDirection,
+    pub pipe: BulkPipe,
     /// The transfer-ring data slot the TD occupied (the ticket
     /// [`UsbDevice::queue_bulk_in`] / [`UsbDevice::queue_bulk_out`]
     /// returned), pairing the completion with its submission.
@@ -1087,21 +1175,34 @@ pub(crate) struct BulkComplete {
     pub result: Result<u32, DriverError>,
 }
 
+/// The bulk transfer rings configured for one interface: the primary
+/// IN/OUT pair every bulk interface carries, plus the second pair a UAS
+/// interface's four pipes need.
+#[allow(clippy::struct_field_names)] // Every field *is* a ring — the struct
+                                     // is exactly the set of an interface's bulk rings.
+struct BulkRings {
+    in_ring: ProducerRing,
+    out_ring: ProducerRing,
+    in2_ring: Option<ProducerRing>,
+    out2_ring: Option<ProducerRing>,
+}
+
 /// The endpoint rings configured for one planned interface, held until
 /// the device-table entries are installed after the EP0 transfers of
 /// enumeration complete.
 struct ConfiguredRings {
-    /// The interrupt-IN transfer ring, for a HID interface.
+    /// The interrupt-IN transfer ring: a HID interface's report endpoint,
+    /// or a bulk interface's CBI completion endpoint.
     int_ring: Option<ProducerRing>,
-    /// The bulk-IN/bulk-OUT ring pair, for a bulk interface.
-    bulk_rings: Option<(ProducerRing, ProducerRing)>,
+    /// The bulk transfer rings, for a bulk interface.
+    bulk_rings: Option<BulkRings>,
 }
 
-/// Parked-completion capacity: every data slot of both bulk rings could
-/// complete while a synchronous EP0 transfer or command is awaiting its own
-/// event, so the FIFO holds the worst case. A protocol working set, not a
-/// scalable capacity.
-const BULK_QUEUE_CAP: usize = 2 * BULK_SLOTS;
+/// Parked-completion capacity: every data slot of all four bulk rings
+/// could complete while a synchronous EP0 transfer or command is awaiting
+/// its own event, so the FIFO holds the worst case. A protocol working
+/// set, not a scalable capacity.
+const BULK_QUEUE_CAP: usize = 4 * BULK_SLOTS;
 
 /// A fixed-capacity FIFO over a circular buffer — the parked bulk
 /// completions and halt-dropped TD records, whose worst case is bounded by
@@ -1502,15 +1603,28 @@ struct DeviceState {
     bulk_in_ring: Option<ProducerRing>,
     /// Bulk-OUT transfer ring, as [`Self::bulk_in_ring`].
     bulk_out_ring: Option<ProducerRing>,
+    /// The second bulk-IN ring (a UAS interface's second IN pipe), `None`
+    /// when the interface declares fewer than two.
+    bulk_in2_ring: Option<ProducerRing>,
+    /// The second bulk-OUT ring, as [`Self::bulk_in2_ring`].
+    bulk_out2_ring: Option<ProducerRing>,
     /// Device Context Index of the configured bulk-IN endpoint (`0` = none).
     bulk_in_dci: u8,
     /// Device Context Index of the configured bulk-OUT endpoint (`0` = none).
     bulk_out_dci: u8,
+    /// DCI of the second configured bulk-IN endpoint (`0` = none).
+    bulk_in2_dci: u8,
+    /// DCI of the second configured bulk-OUT endpoint (`0` = none).
+    bulk_out2_dci: u8,
     /// Requested byte length of each in-flight bulk-IN TD, by ring data
     /// slot, so a completion's residual decodes into bytes transferred.
     bulk_in_len: [u32; BULK_SLOTS],
     /// As [`Self::bulk_in_len`], for the bulk-OUT ring.
     bulk_out_len: [u32; BULK_SLOTS],
+    /// As [`Self::bulk_in_len`], for the second bulk-IN ring.
+    bulk_in2_len: [u32; BULK_SLOTS],
+    /// As [`Self::bulk_in_len`], for the second bulk-OUT ring.
+    bulk_out2_len: [u32; BULK_SLOTS],
     /// Bulk completions parked while a synchronous EP0 transfer or command
     /// was awaiting its own event. Several bulk TDs can be outstanding at
     /// once, so this is a FIFO, unlike the single [`Self::pending_report`]
@@ -1518,7 +1632,7 @@ struct DeviceState {
     pending_bulk: Fifo<Trb, BULK_QUEUE_CAP>,
     /// TDs a bulk halt recovery dropped, reported as stalled completions so
     /// every queued transfer is answered, never silently lost.
-    aborted_bulk: Fifo<(BulkDirection, usize), BULK_QUEUE_CAP>,
+    aborted_bulk: Fifo<(BulkPipe, usize), BULK_QUEUE_CAP>,
     /// Raw completion code of the most recent interrupt-IN transfer event
     /// this device's report path *rejected* (a non-`Success`/`ShortPacket`
     /// code). Unlike the engine-wide diagnostics this is not reset by a
@@ -1527,6 +1641,84 @@ struct DeviceState {
     /// only place the controller's verdict on the device's own endpoint can
     /// still be read. `0` until a report has been rejected.
     last_report_fault_code: u8,
+}
+
+impl DeviceState {
+    /// The configured DCI of `pipe` (`0` = the pipe does not exist).
+    fn bulk_dci(&self, pipe: BulkPipe) -> u8 {
+        match (pipe.direction, pipe.secondary) {
+            (BulkDirection::In, false) => self.bulk_in_dci,
+            (BulkDirection::In, true) => self.bulk_in2_dci,
+            (BulkDirection::Out, false) => self.bulk_out_dci,
+            (BulkDirection::Out, true) => self.bulk_out2_dci,
+        }
+    }
+
+    /// The configured pipe whose endpoint is `dci`, `None` when no bulk
+    /// pipe of this device uses it.
+    fn bulk_pipe_of_dci(&self, dci: u8) -> Option<BulkPipe> {
+        if dci == 0 {
+            return None;
+        }
+        [
+            BulkPipe::primary(BulkDirection::In),
+            BulkPipe::primary(BulkDirection::Out),
+            BulkPipe::secondary(BulkDirection::In),
+            BulkPipe::secondary(BulkDirection::Out),
+        ]
+        .into_iter()
+        .find(|&pipe| self.bulk_dci(pipe) == dci)
+    }
+
+    /// Borrow `pipe`'s transfer ring, `None` when unconfigured.
+    fn bulk_ring(&self, pipe: BulkPipe) -> Option<&ProducerRing> {
+        match (pipe.direction, pipe.secondary) {
+            (BulkDirection::In, false) => self.bulk_in_ring.as_ref(),
+            (BulkDirection::In, true) => self.bulk_in2_ring.as_ref(),
+            (BulkDirection::Out, false) => self.bulk_out_ring.as_ref(),
+            (BulkDirection::Out, true) => self.bulk_out2_ring.as_ref(),
+        }
+    }
+
+    /// Mutably borrow `pipe`'s transfer ring.
+    fn bulk_ring_mut(&mut self, pipe: BulkPipe) -> Option<&mut ProducerRing> {
+        match (pipe.direction, pipe.secondary) {
+            (BulkDirection::In, false) => self.bulk_in_ring.as_mut(),
+            (BulkDirection::In, true) => self.bulk_in2_ring.as_mut(),
+            (BulkDirection::Out, false) => self.bulk_out_ring.as_mut(),
+            (BulkDirection::Out, true) => self.bulk_out2_ring.as_mut(),
+        }
+    }
+
+    /// Replace `pipe`'s transfer ring (the halt recovery's rebuild).
+    fn set_bulk_ring(&mut self, pipe: BulkPipe, ring: ProducerRing) {
+        match (pipe.direction, pipe.secondary) {
+            (BulkDirection::In, false) => self.bulk_in_ring = Some(ring),
+            (BulkDirection::In, true) => self.bulk_in2_ring = Some(ring),
+            (BulkDirection::Out, false) => self.bulk_out_ring = Some(ring),
+            (BulkDirection::Out, true) => self.bulk_out2_ring = Some(ring),
+        }
+    }
+
+    /// The requested length recorded for `pipe`'s ring data `slot`.
+    fn bulk_len(&self, pipe: BulkPipe, slot: usize) -> u32 {
+        match (pipe.direction, pipe.secondary) {
+            (BulkDirection::In, false) => self.bulk_in_len[slot],
+            (BulkDirection::In, true) => self.bulk_in2_len[slot],
+            (BulkDirection::Out, false) => self.bulk_out_len[slot],
+            (BulkDirection::Out, true) => self.bulk_out2_len[slot],
+        }
+    }
+
+    /// Record the requested length of the TD in `pipe`'s ring data `slot`.
+    fn set_bulk_len(&mut self, pipe: BulkPipe, slot: usize, len: u32) {
+        match (pipe.direction, pipe.secondary) {
+            (BulkDirection::In, false) => self.bulk_in_len[slot] = len,
+            (BulkDirection::In, true) => self.bulk_in2_len[slot] = len,
+            (BulkDirection::Out, false) => self.bulk_out_len[slot] = len,
+            (BulkDirection::Out, true) => self.bulk_out2_len[slot] = len,
+        }
+    }
 }
 
 /// The controller engine serving every enumerated device on one started
@@ -2016,8 +2208,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         self.devices.iter().position(|entry| {
             entry.as_ref().is_some_and(|device| {
                 event.slot_id() == device.slot
-                    && ((device.bulk_in_dci != 0 && event.endpoint_id() == device.bulk_in_dci)
-                        || (device.bulk_out_dci != 0 && event.endpoint_id() == device.bulk_out_dci))
+                    && device.bulk_pipe_of_dci(event.endpoint_id()).is_some()
             })
         })
     }
@@ -2200,14 +2391,60 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// control data buffer, and the status stage. Returns the bytes
     /// the device actually delivered.
     fn control(&mut self, setup: [u8; 8], data_in_len: u32) -> Result<u32, DriverError> {
-        if data_in_len as usize > CTRL_DATA_LEN {
+        self.control_transfer(setup, data_in_len, None)
+    }
+
+    /// Run one control-OUT transfer on the default endpoint: `setup`, an
+    /// OUT data stage carrying `data` (staged through the control data
+    /// buffer), and the status stage.
+    fn control_out_transfer(&mut self, setup: [u8; 8], data: &[u8]) -> Result<(), DriverError> {
+        self.control_transfer(setup, 0, Some(data)).map(|_| ())
+    }
+
+    /// The shared control-transfer stage builder behind [`Self::control`]
+    /// and [`Self::control_out_transfer`]: SETUP, an optional data stage —
+    /// IN of `data_in_len` bytes into the control data buffer, or OUT
+    /// carrying `out_data` (`data_in_len` must then be `0`) — and the
+    /// status stage, which runs opposite to the data direction (IN when
+    /// there is no data stage, §4.11.2.2). Returns the bytes the device
+    /// actually moved in the data stage.
+    ///
+    /// A device STALL surfaces as [`DriverError::EndpointStalled`] with the
+    /// control endpoint already recovered
+    /// ([`Self::recover_control_endpoint`]), so the caller may issue fresh
+    /// control transfers immediately.
+    fn control_transfer(
+        &mut self,
+        setup: [u8; 8],
+        data_in_len: u32,
+        out_data: Option<&[u8]>,
+    ) -> Result<u32, DriverError> {
+        let data_len = match out_data {
+            Some(data) => {
+                if data_in_len != 0 {
+                    return Err(DriverError::LengthOutOfRange);
+                }
+                u32::try_from(data.len()).map_err(|_| DriverError::LengthOutOfRange)?
+            }
+            None => data_in_len,
+        };
+        if data_len as usize > CTRL_DATA_LEN {
             return Err(DriverError::LengthOutOfRange);
         }
+        // Stage the OUT payload into the control data buffer before any
+        // TRB is published, so a refused write leaves nothing armed.
+        if let Some(data) = out_data {
+            if !data.is_empty() {
+                self.dma.write(self.layout.ctrl_data, data)?;
+            }
+        }
         self.reset_event_diagnostics();
-        let transfer_type = if data_in_len > 0 {
-            trb::SETUP_TRT_IN
-        } else {
+        let transfer_type = if data_len == 0 {
             trb::SETUP_TRT_NO_DATA
+        } else if out_data.is_some() {
+            trb::SETUP_TRT_OUT
+        } else {
+            trb::SETUP_TRT_IN
         };
         let setup_trb = Trb::new(
             TrbType::SetupStage,
@@ -2223,12 +2460,20 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             &outcome,
         )?;
         let mut data_address = None;
-        if data_in_len > 0 {
+        if data_len > 0 {
+            // An IN data stage interrupts on a short packet so the honest
+            // byte count is read from the residual; an OUT stage moves
+            // host bytes and carries no direction flag.
+            let data_flags = if out_data.is_some() {
+                0
+            } else {
+                trb::CONTROL_DIR_IN | trb::CONTROL_ISP
+            };
             let data_trb = Trb::new(
                 TrbType::DataStage,
                 self.phys_of(self.layout.ctrl_data),
-                data_in_len,
-                trb::CONTROL_DIR_IN | trb::CONTROL_ISP,
+                data_len,
+                data_flags,
             );
             let outcome = self.ep0_ring.push(data_trb)?;
             publish(
@@ -2241,7 +2486,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         }
         // The status stage runs opposite to the data direction; with
         // no data stage it is always IN (§4.11.2.2).
-        let status_direction = if data_in_len > 0 {
+        let status_direction = if data_len > 0 && out_data.is_none() {
             0
         } else {
             trb::CONTROL_DIR_IN
@@ -2260,12 +2505,22 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             &status,
         )?;
         self.xhci.ring_doorbell(self.slot, u32::from(DCI_CONTROL))?;
+        self.complete_control_transfer(data_address, status.address, data_len)
+    }
 
-        // At most two events arrive: a short-packet event for the data
-        // stage, then the status-stage completion.
+    /// Await the pushed control transfer's completion: at most two events
+    /// arrive — a short-packet event for the data stage, then the
+    /// status-stage completion — and the honest data-stage byte count is
+    /// `data_len` minus the reported residual.
+    fn complete_control_transfer(
+        &mut self,
+        data_address: Option<u64>,
+        status_address: u64,
+        data_len: u32,
+    ) -> Result<u32, DriverError> {
         let mut residual = 0;
         for _ in 0..2 {
-            let watch = [data_address.unwrap_or(status.address), status.address];
+            let watch = [data_address.unwrap_or(status_address), status_address];
             let event = self.await_event_for(&watch)?;
             if event.trb_type() != Ok(TrbType::TransferEvent)
                 || event.slot_id() != self.slot
@@ -2275,6 +2530,15 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             }
             match event.completion_code() {
                 Ok(CompletionCode::Success | CompletionCode::ShortPacket) => {}
+                // A protocol STALL: the device refused the request. The
+                // controller halts the control endpoint (xHCI §4.8.3);
+                // recover it in place — the device side self-clears at the
+                // next SETUP (USB 2.0 §8.5.3.4) — and surface the refusal
+                // distinctly so a class driver can treat it as an answer.
+                Ok(CompletionCode::StallError) => {
+                    self.recover_control_endpoint()?;
+                    return Err(DriverError::EndpointStalled);
+                }
                 _ => return Err(DriverError::DeviceFault),
             }
             if data_address == Some(event.parameter) {
@@ -2284,11 +2548,57 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             while self.ep0_ring.in_flight() > 0 {
                 self.ep0_ring.retire_one()?;
             }
-            return data_in_len
+            return data_len
                 .checked_sub(residual)
                 .ok_or(DriverError::DeviceFault);
         }
         Err(DriverError::DeviceFault)
+    }
+
+    /// Recover the **active** default control endpoint after a device
+    /// STALL: drop the abandoned stage TRBs, Reset Endpoint (§4.6.8) to
+    /// clear the controller-side halt, rebuild the EP0 transfer ring at its
+    /// base, and repoint the controller's dequeue there (§4.6.10). No
+    /// device-side `CLEAR_FEATURE` is needed: a control endpoint's protocol
+    /// STALL ends at the next SETUP (USB 2.0 §8.5.3.4).
+    fn recover_control_endpoint(&mut self) -> Result<(), DriverError> {
+        // The recovery's own successful commands must not overwrite the
+        // observed STALL: the diagnostic (`last_completion_code`) preserves
+        // the code the failing transfer saw.
+        let observed_completion = self.last_completion;
+        // The halt abandoned every stage TRB still in flight; drop them
+        // from the software ring (they are answered by the STALL itself).
+        while self.ep0_ring.in_flight() > 0 {
+            self.ep0_ring.retire_one()?;
+        }
+        self.command(Trb::new(
+            TrbType::ResetEndpoint,
+            0,
+            0,
+            trb::control_slot(self.slot) | trb::control_endpoint(DCI_CONTROL),
+        ))?;
+        // Rebuild the ring at its base with a fresh cycle and point the
+        // controller's dequeue at it (Dequeue Cycle State 1 to match).
+        let zeros = [0u8; trb::TRB_LEN];
+        for ring_slot in 0..RING_TRBS {
+            self.dma
+                .write(self.ep0_ring_off + ring_slot * trb::TRB_LEN, &zeros)?;
+        }
+        let base = self.phys_of(self.ep0_ring_off);
+        let (ring, link) = ProducerRing::new(RING_TRBS, base)?;
+        self.dma.write(
+            self.ep0_ring_off + ring.link_slot() * trb::TRB_LEN,
+            &link.to_bytes(),
+        )?;
+        self.ep0_ring = ring;
+        self.command(Trb::new(
+            TrbType::SetTrDequeuePointer,
+            base | 1,
+            0,
+            trb::control_slot(self.slot) | trb::control_endpoint(DCI_CONTROL),
+        ))?;
+        self.last_completion = observed_completion;
+        Ok(())
     }
 
     /// Run an *optional* control request (no data stage), tolerating a
@@ -2296,19 +2606,13 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     ///
     /// A device that does not implement an optional class request (e.g.
     /// `SET_PROTOCOL`, mandatory only for boot-subclass devices) STALLs it;
-    /// per USB 2.0 §8.5.3.4 the endpoint resumes on the next SETUP. This is
-    /// the last EP0 transfer of enumeration, so a STALL is absorbed rather
-    /// than aborting an otherwise-enumerable keyboard. Every other
-    /// completion still fails closed; the raw code is preserved in
-    /// [`Self::last_completion_code`].
+    /// the control endpoint is recovered by [`Self::control_transfer`] and
+    /// the refusal absorbed rather than aborting an otherwise-enumerable
+    /// keyboard. Every other failure still fails closed; the raw code is
+    /// preserved in [`Self::last_completion_code`].
     fn control_optional(&mut self, setup: [u8; 8]) -> Result<(), DriverError> {
         match self.control(setup, 0) {
-            Ok(_) => Ok(()),
-            Err(DriverError::DeviceFault)
-                if self.last_completion == CompletionCode::StallError.as_u8() =>
-            {
-                Ok(())
-            }
+            Ok(_) | Err(DriverError::EndpointStalled) => Ok(()),
             Err(other) => Err(other),
         }
     }
@@ -2640,7 +2944,9 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             max_dci = max_dci
                 .max(iface.int_dci)
                 .max(iface.bulk_in_dci)
-                .max(iface.bulk_out_dci);
+                .max(iface.bulk_out_dci)
+                .max(iface.bulk_in2_dci)
+                .max(iface.bulk_out2_dci);
         }
 
         let mut rings: [Option<ConfiguredRings>; MAX_INTERFACES] = [const { None }; MAX_INTERFACES];
@@ -2673,7 +2979,10 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
                 .device_regions
                 .get(*target)
                 .ok_or(DriverError::OutOfRange)?;
-            let int_dci = if iface.is_hid() {
+            // The interrupt DCI is live exactly when its ring was
+            // configured: a HID report endpoint, or a bulk interface's CBI
+            // completion endpoint.
+            let int_dci = if configured.int_ring.is_some() {
                 iface.int_dci
             } else {
                 DCI_CONTROL
@@ -2749,8 +3058,10 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     }
 
     /// Configure one planned interface's endpoints in its `target` index's
-    /// own ring region, returning the built rings. The interrupt-IN
-    /// endpoint is built and configured only for a HID interface; a hub
+    /// own ring region, returning the built rings. A HID interface gets
+    /// its interrupt-IN endpoint; a bulk interface gets its bulk endpoints
+    /// plus — when it declares one — its interrupt-IN endpoint too (a CBI
+    /// mass-storage interface's command-completion channel). A hub
     /// uses only its control endpoint (arming a hub's status-change
     /// endpoint wedges its EP0 ring — see [`Self::enumerate_hid`]). Every
     /// slot-context write carries `max_dci` as Context Entries so a
@@ -2770,19 +3081,44 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             .ok_or(DriverError::OutOfRange)?;
         if !iface.is_hid() {
             // A non-HID interface carrying the bulk endpoint pair (e.g. a
-            // mass-storage Bulk-Only Transport interface) gets both bulk
-            // endpoints configured; its transfers are then served over the
-            // bulk URB path.
+            // mass-storage interface) gets its bulk endpoints configured;
+            // its transfers are then served over the bulk URB path. An
+            // interrupt-IN endpoint beside them (the CBI completion
+            // channel) is configured with its own ring, polled over the
+            // interrupt URB path exactly like a HID report endpoint.
             let pair = self.configure_bulk_endpoints(slot, base, iface, region, max_dci)?;
+            let int_ring = if iface.int_dci == DCI_CONTROL {
+                None
+            } else {
+                Some(self.configure_interrupt_endpoint(slot, base, iface, region, max_dci)?)
+            };
             return Ok(ConfiguredRings {
-                int_ring: None,
+                int_ring,
                 bulk_rings: Some(pair),
             });
         }
-        // Build the interface's interrupt-IN ring in its own region,
-        // zeroing first: a region reused after a detach must start from a
-        // clean producer state (stale TRBs at the producer cycle would be
-        // consumed past the new enqueue pointer).
+        let ring = self.configure_interrupt_endpoint(slot, base, iface, region, max_dci)?;
+        Ok(ConfiguredRings {
+            int_ring: Some(ring),
+            bulk_rings: None,
+        })
+    }
+
+    /// Build the interface's interrupt-IN ring in `region` and configure
+    /// the endpoint the descriptor reports (DCI, max packet size, service
+    /// interval — never assumed), returning the built ring only after the
+    /// controller accepts the command.
+    fn configure_interrupt_endpoint(
+        &mut self,
+        slot: u8,
+        base: SlotCtxBase,
+        iface: &InterfaceInfo,
+        region: DeviceRegion,
+        max_dci: u8,
+    ) -> Result<ProducerRing, DriverError> {
+        // Zero the ring first: a region reused after a detach must start
+        // from a clean producer state (stale TRBs at the producer cycle
+        // would be consumed past the new enqueue pointer).
         let zeros = [0u8; trb::TRB_LEN];
         for ring_slot in 0..RING_TRBS {
             self.dma
@@ -2794,8 +3130,6 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             region.int_ring + ring.link_slot() * trb::TRB_LEN,
             &link.to_bytes(),
         )?;
-        // Configure the interrupt-IN endpoint the descriptor reports
-        // (DCI, max packet size, service interval — never assumed).
         let max_packet = u32::from(iface.int_max_packet);
         let interval = interrupt_interval(base.speed, iface.int_b_interval);
         self.write_input_ctx(
@@ -2814,10 +3148,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             0,
             trb::control_slot(slot),
         ))?;
-        Ok(ConfiguredRings {
-            int_ring: Some(ring),
-            bulk_rings: None,
-        })
+        Ok(ring)
     }
 
     /// Install one freshly enumerated, served interface into the table at
@@ -2831,6 +3162,8 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// transfers route through the slot's EP0 owner
     /// ([`Self::ep0_owner_index`]).
     #[allow(clippy::too_many_arguments)] // The one construction site's facts.
+    #[allow(clippy::similar_names)] // The `*2` names are the second pipes'
+                                    // own names beside their primaries — deliberate siblings.
     fn install_device_entry(
         &mut self,
         index: usize,
@@ -2842,17 +3175,26 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         interface: &InterfaceInfo,
         int_dci: u8,
         int_ring: Option<ProducerRing>,
-        bulk_rings: Option<(ProducerRing, ProducerRing)>,
+        bulk_rings: Option<BulkRings>,
     ) {
-        let (bulk_in_ring, bulk_out_ring, bulk_in_dci, bulk_out_dci) = match bulk_rings {
+        let (bulk_in_ring, bulk_out_ring, bulk_in2_ring, bulk_out2_ring) = match bulk_rings {
             Some(rings) => (
-                Some(rings.0),
-                Some(rings.1),
-                interface.bulk_in_dci,
-                interface.bulk_out_dci,
+                Some(rings.in_ring),
+                Some(rings.out_ring),
+                rings.in2_ring,
+                rings.out2_ring,
             ),
-            None => (None, None, 0, 0),
+            None => (None, None, None, None),
         };
+        // A DCI is recorded exactly when its ring went live, so the
+        // transfer paths and event attribution agree on which endpoints
+        // exist.
+        let bulk_in_dci = bulk_in_ring.as_ref().map_or(0, |_| interface.bulk_in_dci);
+        let bulk_out_dci = bulk_out_ring.as_ref().map_or(0, |_| interface.bulk_out_dci);
+        let bulk_in2_dci = bulk_in2_ring.as_ref().map_or(0, |_| interface.bulk_in2_dci);
+        let bulk_out2_dci = bulk_out2_ring
+            .as_ref()
+            .map_or(0, |_| interface.bulk_out2_dci);
         self.devices[index] = Some(DeviceState {
             slot,
             hub_port,
@@ -2871,25 +3213,51 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             pending_report: None,
             bulk_in_ring,
             bulk_out_ring,
+            bulk_in2_ring,
+            bulk_out2_ring,
             bulk_in_dci,
             bulk_out_dci,
+            bulk_in2_dci,
+            bulk_out2_dci,
             bulk_in_len: [0; BULK_SLOTS],
             bulk_out_len: [0; BULK_SLOTS],
+            bulk_in2_len: [0; BULK_SLOTS],
+            bulk_out2_len: [0; BULK_SLOTS],
             pending_bulk: Fifo::new(),
             aborted_bulk: Fifo::new(),
             last_report_fault_code: 0,
         });
     }
 
-    /// Configure the enumerated interface's bulk-IN/OUT endpoint pair
-    /// (§4.6.6) inside `region`: build both transfer rings, write the input
-    /// context adding both DCIs with Context Entries raised to `max_dci`
-    /// (the highest DCI any of the device's served interfaces uses, so a
-    /// composite sibling's endpoint is never shrunk out of scope), and
-    /// issue one Configure Endpoint. The rings are returned — and go
+    /// Build one bulk transfer ring at region offset `ring_off`, zeroing
+    /// it first: a re-enumeration reuses the memory, and stale TRBs at the
+    /// producer cycle would be consumed past the new enqueue pointer.
+    fn build_bulk_ring(&mut self, ring_off: usize) -> Result<ProducerRing, DriverError> {
+        let zeros = [0u8; trb::TRB_LEN];
+        for slot_index in 0..BULK_RING_TRBS {
+            self.dma
+                .write(ring_off + slot_index * trb::TRB_LEN, &zeros)?;
+        }
+        let base = self.phys_of(ring_off);
+        let (ring, link) = ProducerRing::new(BULK_RING_TRBS, base)?;
+        self.dma
+            .write(ring_off + ring.link_slot() * trb::TRB_LEN, &link.to_bytes())?;
+        Ok(ring)
+    }
+
+    /// Configure the enumerated interface's bulk endpoints (§4.6.6) inside
+    /// `region`: the bulk-IN/OUT pair every bulk interface carries, plus —
+    /// when the interface declares them — the second pair a UAS
+    /// interface's four pipes need. Builds each transfer ring, writes the
+    /// input context adding every DCI with Context Entries raised to
+    /// `max_dci` (the highest DCI any of the device's served interfaces
+    /// uses, so a sibling's endpoint is never shrunk out of scope), and
+    /// issues one Configure Endpoint. The rings are returned — and go
     /// live in the caller's device-table entry — only after the controller
     /// accepts the command, so a refused configure leaves no half-armed
     /// bulk state.
+    #[allow(clippy::similar_names)] // The `*2` names are the second pipes'
+                                    // own names beside their primaries — deliberate siblings.
     fn configure_bulk_endpoints(
         &mut self,
         slot: u8,
@@ -2897,54 +3265,70 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         interface: &InterfaceInfo,
         region: DeviceRegion,
         max_dci: u8,
-    ) -> Result<(ProducerRing, ProducerRing), DriverError> {
-        let in_dci = interface.bulk_in_dci;
-        let out_dci = interface.bulk_out_dci;
-        // Zero both rings before building fresh ones: a re-enumeration
-        // reuses the memory, and stale TRBs at the producer cycle would be
-        // consumed past the new enqueue pointer.
-        let zeros = [0u8; trb::TRB_LEN];
-        for slot_index in 0..BULK_RING_TRBS {
-            self.dma
-                .write(region.bulk_in_ring + slot_index * trb::TRB_LEN, &zeros)?;
-            self.dma
-                .write(region.bulk_out_ring + slot_index * trb::TRB_LEN, &zeros)?;
-        }
-        let in_base = self.phys_of(region.bulk_in_ring);
-        let (in_ring, in_link) = ProducerRing::new(BULK_RING_TRBS, in_base)?;
-        self.dma.write(
-            region.bulk_in_ring + in_ring.link_slot() * trb::TRB_LEN,
-            &in_link.to_bytes(),
-        )?;
-        let out_base = self.phys_of(region.bulk_out_ring);
-        let (out_ring, out_link) = ProducerRing::new(BULK_RING_TRBS, out_base)?;
-        self.dma.write(
-            region.bulk_out_ring + out_ring.link_slot() * trb::TRB_LEN,
-            &out_link.to_bytes(),
-        )?;
+    ) -> Result<BulkRings, DriverError> {
+        let in_ring = self.build_bulk_ring(region.bulk_in_ring)?;
+        let out_ring = self.build_bulk_ring(region.bulk_out_ring)?;
+        // The second pair is configured only whole: a UAS interface
+        // declares two endpoints per direction, and a lone extra endpoint
+        // is left unserved rather than half-configured.
+        let secondary = interface.bulk_in2_dci != 0 && interface.bulk_out2_dci != 0;
+        let (in2_ring, out2_ring) = if secondary {
+            (
+                Some(self.build_bulk_ring(region.bulk_in2_ring)?),
+                Some(self.build_bulk_ring(region.bulk_out2_ring)?),
+            )
+        } else {
+            (None, None)
+        };
 
         let context_entries = u32::from(max_dci);
-        let add_flags = 1 | (1u32 << u32::from(in_dci)) | (1u32 << u32::from(out_dci));
+        let mut add_flags = 1
+            | (1u32 << u32::from(interface.bulk_in_dci))
+            | (1u32 << u32::from(interface.bulk_out_dci));
+        if secondary {
+            add_flags |= (1u32 << u32::from(interface.bulk_in2_dci))
+                | (1u32 << u32::from(interface.bulk_out2_dci));
+        }
         self.write_input_ctx(0, &input_control_dwords(add_flags))?;
         self.write_input_ctx(1, &slot_ctx_dwords(base, context_entries))?;
         self.write_input_ctx(
-            1 + usize::from(in_dci),
+            1 + usize::from(interface.bulk_in_dci),
             &ep_ctx_dwords(
                 EP_TYPE_BULK_IN,
                 u32::from(interface.bulk_in_max_packet),
                 0,
-                in_base,
+                self.phys_of(region.bulk_in_ring),
             ),
         )?;
         self.write_input_ctx(
-            1 + usize::from(out_dci),
+            1 + usize::from(interface.bulk_out_dci),
             &ep_ctx_dwords(
                 EP_TYPE_BULK_OUT,
                 u32::from(interface.bulk_out_max_packet),
                 0,
-                out_base,
+                self.phys_of(region.bulk_out_ring),
             ),
         )?;
+        if secondary {
+            self.write_input_ctx(
+                1 + usize::from(interface.bulk_in2_dci),
+                &ep_ctx_dwords(
+                    EP_TYPE_BULK_IN,
+                    u32::from(interface.bulk_in2_max_packet),
+                    0,
+                    self.phys_of(region.bulk_in2_ring),
+                ),
+            )?;
+            self.write_input_ctx(
+                1 + usize::from(interface.bulk_out2_dci),
+                &ep_ctx_dwords(
+                    EP_TYPE_BULK_OUT,
+                    u32::from(interface.bulk_out2_max_packet),
+                    0,
+                    self.phys_of(region.bulk_out2_ring),
+                ),
+            )?;
+        }
         self.stage = EnumStage::ConfigureEndpoint;
         self.command(Trb::new(
             TrbType::ConfigureEndpoint,
@@ -2952,7 +3336,12 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             0,
             trb::control_slot(slot),
         ))?;
-        Ok((in_ring, out_ring))
+        Ok(BulkRings {
+            in_ring,
+            out_ring,
+            in2_ring,
+            out2_ring,
+        })
     }
 
     /// Bring up the first root-hub port reporting a connected device.
@@ -3572,6 +3961,34 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         let transferred = result?;
         restored?;
         Ok(transferred)
+    }
+
+    /// Run a control-OUT transfer (SETUP + OUT data stage + status)
+    /// targeting the served **device** at `index`, with the same
+    /// activate/restore discipline as [`Self::device_control`] so the hub
+    /// watch never loses its ring.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NotFound`] with no device live at `index`, else as
+    /// [`Self::control_out_transfer`] /
+    /// [`Self::activate_device_control`].
+    fn device_control_out(
+        &mut self,
+        index: usize,
+        setup: [u8; 8],
+        data: &[u8],
+    ) -> Result<(), DriverError> {
+        let device_slot = self.device(index).ok_or(DriverError::NotFound)?.slot;
+        if self.slot == device_slot {
+            return self.control_out_transfer(setup, data);
+        }
+        let owner = self.ep0_owner_index(device_slot).unwrap_or(index);
+        self.activate_device_control(owner)?;
+        let result = self.control_out_transfer(setup, data);
+        let restored = self.restore_hub_active();
+        result?;
+        restored
     }
 
     /// Install the hub addressed on the **active** control-context slot
@@ -4790,36 +5207,23 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     fn bulk_params(
         &self,
         index: usize,
-        direction: BulkDirection,
+        pipe: BulkPipe,
     ) -> Result<(usize, usize, u8, u8), DriverError> {
         let device = self.device(index).ok_or(DriverError::NotFound)?;
-        let (ring_off, bufs_off, dci) = match direction {
-            BulkDirection::In => (
-                device.region.bulk_in_ring,
-                device.region.bulk_in_bufs,
-                device.bulk_in_dci,
-            ),
-            BulkDirection::Out => (
-                device.region.bulk_out_ring,
-                device.region.bulk_out_bufs,
-                device.bulk_out_dci,
-            ),
-        };
+        let ring_off = device.region.bulk_ring_off(pipe);
+        let bufs_off = device.region.bulk_bufs_off(pipe);
+        let dci = device.bulk_dci(pipe);
         if dci == 0 {
             return Err(DriverError::NotFound);
         }
         Ok((ring_off, bufs_off, dci, device.slot))
     }
 
-    /// TDs in flight on device `index`'s bulk ring for `direction` (`0`
+    /// TDs in flight on device `index`'s bulk ring for `pipe` (`0`
     /// when unconfigured or no device is live there).
-    pub(crate) fn bulk_in_flight(&self, index: usize, direction: BulkDirection) -> usize {
+    pub(crate) fn bulk_in_flight(&self, index: usize, pipe: BulkPipe) -> usize {
         self.device(index).map_or(0, |device| {
-            match direction {
-                BulkDirection::In => device.bulk_in_ring.as_ref(),
-                BulkDirection::Out => device.bulk_out_ring.as_ref(),
-            }
-            .map_or(0, ProducerRing::in_flight)
+            device.bulk_ring(pipe).map_or(0, ProducerRing::in_flight)
         })
     }
 
@@ -4834,8 +5238,16 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// * [`DriverError::LengthOutOfRange`] — `len` exceeds
     ///   [`BULK_BUF_LEN`] (the caller chunks larger transfers).
     /// * [`DriverError::Busy`] — the ring is full; poll completions first.
-    pub(crate) fn queue_bulk_in(&mut self, index: usize, len: usize) -> Result<usize, DriverError> {
-        self.queue_bulk(index, BulkDirection::In, len, None)
+    pub(crate) fn queue_bulk_in(
+        &mut self,
+        index: usize,
+        pipe: BulkPipe,
+        len: usize,
+    ) -> Result<usize, DriverError> {
+        if pipe.direction != BulkDirection::In {
+            return Err(DriverError::OutOfRange);
+        }
+        self.queue_bulk(index, pipe, len, None)
     }
 
     /// Queue one bulk-OUT TD writing `data` to device `index`, returning
@@ -4847,9 +5259,13 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     pub(crate) fn queue_bulk_out(
         &mut self,
         index: usize,
+        pipe: BulkPipe,
         data: &[u8],
     ) -> Result<usize, DriverError> {
-        self.queue_bulk(index, BulkDirection::Out, data.len(), Some(data))
+        if pipe.direction != BulkDirection::Out {
+            return Err(DriverError::OutOfRange);
+        }
+        self.queue_bulk(index, pipe, data.len(), Some(data))
     }
 
     /// Shared body of the bulk queue paths: stage the OUT bytes (when
@@ -4859,27 +5275,25 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     fn queue_bulk(
         &mut self,
         index: usize,
-        direction: BulkDirection,
+        pipe: BulkPipe,
         len: usize,
         data: Option<&[u8]>,
     ) -> Result<usize, DriverError> {
-        let (ring_off, bufs_off, dci, device_slot) = self.bulk_params(index, direction)?;
+        let (ring_off, bufs_off, dci, device_slot) = self.bulk_params(index, pipe)?;
         if len > BULK_BUF_LEN {
             return Err(DriverError::LengthOutOfRange);
         }
         let len_u32 = u32::try_from(len).map_err(|_| DriverError::LengthOutOfRange)?;
         let slot = {
             let device = self.device(index).ok_or(DriverError::NotFound)?;
-            match direction {
-                BulkDirection::In => device.bulk_in_ring.as_ref(),
-                BulkDirection::Out => device.bulk_out_ring.as_ref(),
-            }
-            .ok_or(DriverError::NotFound)?
-            .enqueue_slot()
+            device
+                .bulk_ring(pipe)
+                .ok_or(DriverError::NotFound)?
+                .enqueue_slot()
         };
         // Refuse a full ring before staging, so a rejected queue leaves no
         // half-written buffer.
-        if self.bulk_in_flight(index, direction) >= BULK_SLOTS - 1 {
+        if self.bulk_in_flight(index, pipe) >= BULK_SLOTS - 1 {
             return Err(DriverError::Busy);
         }
         if let Some(bytes) = data {
@@ -4894,20 +5308,13 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         );
         let (outcome, link_slot) = {
             let device = self.device_mut(index).ok_or(DriverError::NotFound)?;
-            let ring = match direction {
-                BulkDirection::In => device.bulk_in_ring.as_mut(),
-                BulkDirection::Out => device.bulk_out_ring.as_mut(),
-            }
-            .ok_or(DriverError::NotFound)?;
+            let ring = device.bulk_ring_mut(pipe).ok_or(DriverError::NotFound)?;
             (ring.push(normal)?, ring.link_slot())
         };
         publish(&mut self.dma, ring_off, link_slot, &outcome)?;
         {
             let device = self.device_mut(index).ok_or(DriverError::NotFound)?;
-            match direction {
-                BulkDirection::In => device.bulk_in_len[slot] = len_u32,
-                BulkDirection::Out => device.bulk_out_len[slot] = len_u32,
-            }
+            device.set_bulk_len(pipe, slot, len_u32);
         }
         self.xhci.ring_doorbell(device_slot, u32::from(dci))?;
         Ok(slot)
@@ -4941,9 +5348,9 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             };
             (aborted, pending)
         };
-        if let Some((direction, slot)) = aborted {
+        if let Some((pipe, slot)) = aborted {
             return Ok(Some(BulkComplete {
-                direction,
+                pipe,
                 slot,
                 result: Err(DriverError::EndpointStalled),
             }));
@@ -4988,15 +5395,12 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         event: Trb,
         in_buf: &mut [u8],
     ) -> Result<BulkComplete, DriverError> {
-        let direction = {
-            let device = self.device(index).ok_or(DriverError::NotFound)?;
-            if device.bulk_in_dci != 0 && event.endpoint_id() == device.bulk_in_dci {
-                BulkDirection::In
-            } else {
-                BulkDirection::Out
-            }
-        };
-        let (ring_off, bufs_off, _dci, _device_slot) = self.bulk_params(index, direction)?;
+        let pipe = self
+            .device(index)
+            .ok_or(DriverError::NotFound)?
+            .bulk_pipe_of_dci(event.endpoint_id())
+            .ok_or(DriverError::DeviceFault)?;
+        let (ring_off, bufs_off, _dci, _device_slot) = self.bulk_params(index, pipe)?;
         // Map the completed TRB back to its ring slot, validating every
         // step of the controller's claim: alignment, range, and in-order
         // completion (the event must name the oldest in-flight TD).
@@ -5015,11 +5419,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         }
         {
             let device = self.device_mut(index).ok_or(DriverError::DeviceFault)?;
-            let ring = match direction {
-                BulkDirection::In => device.bulk_in_ring.as_mut(),
-                BulkDirection::Out => device.bulk_out_ring.as_mut(),
-            }
-            .ok_or(DriverError::DeviceFault)?;
+            let ring = device.bulk_ring_mut(pipe).ok_or(DriverError::DeviceFault)?;
             if ring.in_flight() == 0 || ring.dequeue_slot() != slot {
                 return Err(DriverError::DeviceFault);
             }
@@ -5029,15 +5429,12 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             Ok(CompletionCode::Success | CompletionCode::ShortPacket) => {
                 let requested = {
                     let device = self.device(index).ok_or(DriverError::DeviceFault)?;
-                    match direction {
-                        BulkDirection::In => device.bulk_in_len[slot],
-                        BulkDirection::Out => device.bulk_out_len[slot],
-                    }
+                    device.bulk_len(pipe, slot)
                 };
                 let transferred = requested
                     .checked_sub(event.transfer_residual())
                     .ok_or(DriverError::DeviceFault)?;
-                if direction == BulkDirection::In {
+                if pipe.direction == BulkDirection::In {
                     let count =
                         usize::try_from(transferred).map_err(|_| DriverError::DeviceFault)?;
                     if count > in_buf.len() {
@@ -5047,7 +5444,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
                         .read(bufs_off + slot * BULK_BUF_LEN, &mut in_buf[..count])?;
                 }
                 Ok(BulkComplete {
-                    direction,
+                    pipe,
                     slot,
                     result: Ok(transferred),
                 })
@@ -5057,9 +5454,9 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
                 // through `aborted_bulk`), then report this TD stalled; by
                 // the time the caller sees it the endpoint accepts fresh
                 // transfers again.
-                self.recover_bulk_endpoint(index, direction)?;
+                self.recover_bulk_endpoint(index, pipe)?;
                 Ok(BulkComplete {
-                    direction,
+                    pipe,
                     slot,
                     result: Err(DriverError::EndpointStalled),
                 })
@@ -5069,7 +5466,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             // failure is reported on this TD; the caller decides whether the
             // device is gone.
             _ => Ok(BulkComplete {
-                direction,
+                pipe,
                 slot,
                 result: Err(DriverError::DeviceFault),
             }),
@@ -5082,12 +5479,8 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// the controller's dequeue there (§4.6.10), then clear the device-side
     /// halt so its data toggle resets (USB 2.0 §9.4.5). The endpoint
     /// accepts fresh transfers when this returns.
-    fn recover_bulk_endpoint(
-        &mut self,
-        index: usize,
-        direction: BulkDirection,
-    ) -> Result<(), DriverError> {
-        let (ring_off, _bufs_off, dci, device_slot) = self.bulk_params(index, direction)?;
+    fn recover_bulk_endpoint(&mut self, index: usize, pipe: BulkPipe) -> Result<(), DriverError> {
+        let (ring_off, _bufs_off, dci, device_slot) = self.bulk_params(index, pipe)?;
         // Every TD still in flight was abandoned by the halt (the endpoint
         // stopped executing); answer each as stalled so no queued transfer
         // is silently lost.
@@ -5095,11 +5488,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             let device = self.device_mut(index).ok_or(DriverError::DeviceFault)?;
             loop {
                 let slot = {
-                    let ring = match direction {
-                        BulkDirection::In => device.bulk_in_ring.as_mut(),
-                        BulkDirection::Out => device.bulk_out_ring.as_mut(),
-                    }
-                    .ok_or(DriverError::DeviceFault)?;
+                    let ring = device.bulk_ring_mut(pipe).ok_or(DriverError::DeviceFault)?;
                     if ring.in_flight() == 0 {
                         break;
                     }
@@ -5107,7 +5496,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
                     ring.retire_one()?;
                     slot
                 };
-                device.aborted_bulk.push((direction, slot))?;
+                device.aborted_bulk.push((pipe, slot))?;
             }
         }
         // Reset Endpoint clears the controller-side halt state.
@@ -5131,10 +5520,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             .write(ring_off + ring.link_slot() * trb::TRB_LEN, &link.to_bytes())?;
         {
             let device = self.device_mut(index).ok_or(DriverError::DeviceFault)?;
-            match direction {
-                BulkDirection::In => device.bulk_in_ring = Some(ring),
-                BulkDirection::Out => device.bulk_out_ring = Some(ring),
-            }
+            device.set_bulk_ring(pipe, ring);
         }
         self.command(Trb::new(
             TrbType::SetTrDequeuePointer,
@@ -5144,7 +5530,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         ))?;
         // Clear the device-side halt on the device's own control endpoint
         // (never the hub's), resetting its data toggle.
-        let ep_addr = match direction {
+        let ep_addr = match pipe.direction {
             BulkDirection::In => (dci / 2) | ENDPOINT_ADDR_DIR_IN,
             BulkDirection::Out => dci / 2,
         };
@@ -5287,34 +5673,37 @@ impl<H: XhciHost, M: DmaRegion> crate::transport::UrbEngine for DeviceEngine<'_,
         self.engine.device_control(self.index, setup, 0).map(|_| ())
     }
 
+    fn control_out(&mut self, setup: [u8; 8], data: &[u8]) -> Result<(), DriverError> {
+        // An OUT data stage carrying the shared buffer's bytes (the CBI
+        // ADSC command channel). It targets this *device* exactly as
+        // `control_in` does — never the hub above it.
+        self.engine.device_control_out(self.index, setup, data)
+    }
+
     fn interrupt_in(&mut self, data: &mut [u8]) -> Result<Option<usize>, DriverError> {
         self.engine.next_report(self.index, data)
     }
 
     fn bulk_in(&mut self, endpoint: u8, data: &mut [u8]) -> Result<Option<usize>, DriverError> {
-        // The URB names an endpoint *number*; it must be the configured
-        // bulk-IN endpoint's (its DCI is `2n + 1`).
-        let bulk_in_dci = self
-            .engine
-            .device(self.index)
-            .map_or(0, |device| device.bulk_in_dci);
-        if bulk_in_dci == 0 || endpoint != bulk_in_dci / 2 {
-            return Err(DriverError::OutOfRange);
-        }
+        // The URB names an endpoint *number*; it must be one of the
+        // interface's configured bulk-IN endpoints (an IN DCI is `2n + 1`).
+        let pipe = self
+            .bulk_pipe_for(endpoint, BulkDirection::In)
+            .ok_or(DriverError::OutOfRange)?;
         // The URB transport holds one URB outstanding per interface: arm
         // the TD on first drive, reap its completion on a later one.
-        if self.engine.bulk_in_flight(self.index, BulkDirection::In) == 0 {
-            self.engine.queue_bulk_in(self.index, data.len())?;
+        if self.engine.bulk_in_flight(self.index, pipe) == 0 {
+            self.engine.queue_bulk_in(self.index, pipe, data.len())?;
             return Ok(None);
         }
         match self.engine.poll_bulk(self.index, data)? {
-            Some(complete) if complete.direction == BulkDirection::In => match complete.result {
+            Some(complete) if complete.pipe == pipe => match complete.result {
                 Ok(n) => Ok(Some(
                     usize::try_from(n).map_err(|_| DriverError::DeviceFault)?,
                 )),
                 Err(err) => Err(err),
             },
-            // A completion for the other direction cannot belong to the one
+            // A completion for another pipe cannot belong to the one
             // outstanding URB — a protocol violation, surfaced.
             Some(_) => Err(DriverError::DeviceFault),
             None => Ok(None),
@@ -5322,21 +5711,17 @@ impl<H: XhciHost, M: DmaRegion> crate::transport::UrbEngine for DeviceEngine<'_,
     }
 
     fn bulk_out(&mut self, endpoint: u8, data: &[u8]) -> Result<Option<usize>, DriverError> {
-        let bulk_out_dci = self
-            .engine
-            .device(self.index)
-            .map_or(0, |device| device.bulk_out_dci);
-        if bulk_out_dci == 0 || endpoint != bulk_out_dci / 2 {
-            return Err(DriverError::OutOfRange);
-        }
-        if self.engine.bulk_in_flight(self.index, BulkDirection::Out) == 0 {
-            self.engine.queue_bulk_out(self.index, data)?;
+        let pipe = self
+            .bulk_pipe_for(endpoint, BulkDirection::Out)
+            .ok_or(DriverError::OutOfRange)?;
+        if self.engine.bulk_in_flight(self.index, pipe) == 0 {
+            self.engine.queue_bulk_out(self.index, pipe, data)?;
             return Ok(None);
         }
         // An OUT completion carries no device bytes to copy back.
         let mut no_in_bytes = [0u8; 0];
         match self.engine.poll_bulk(self.index, &mut no_in_bytes)? {
-            Some(complete) if complete.direction == BulkDirection::Out => match complete.result {
+            Some(complete) if complete.pipe == pipe => match complete.result {
                 Ok(n) => Ok(Some(
                     usize::try_from(n).map_err(|_| DriverError::DeviceFault)?,
                 )),
@@ -5345,5 +5730,20 @@ impl<H: XhciHost, M: DmaRegion> crate::transport::UrbEngine for DeviceEngine<'_,
             Some(_) => Err(DriverError::DeviceFault),
             None => Ok(None),
         }
+    }
+}
+
+impl<H: XhciHost, M: DmaRegion> DeviceEngine<'_, H, M> {
+    /// The configured bulk pipe of this device whose endpoint *number* is
+    /// `endpoint` in `direction`, `None` when no configured pipe matches
+    /// (the URB is refused fail-closed).
+    fn bulk_pipe_for(&self, endpoint: u8, direction: BulkDirection) -> Option<BulkPipe> {
+        let device = self.engine.device(self.index)?;
+        let dci = match direction {
+            BulkDirection::In => endpoint * 2 + 1,
+            BulkDirection::Out => endpoint * 2,
+        };
+        let pipe = device.bulk_pipe_of_dci(dci)?;
+        (pipe.direction == direction).then_some(pipe)
     }
 }

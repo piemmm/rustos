@@ -7,13 +7,17 @@ use rustos_abi::hwtree::HW_NODE_ROOT;
 use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
 use rustos_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource};
 use rustos_caps::CapabilitySet;
-use rustos_drv_storage_usb_msd::bot::{
-    LunBlock, LunState, Msd, MsdTransport, DEVICE_TYPE_DIRECT_ACCESS, MAX_LUNS,
-};
+use rustos_drv_storage_usb_msd::bot::{Bot, MsdTransport};
+use rustos_drv_storage_usb_msd::cbi::{Cbi, CbiStatus};
 use rustos_drv_storage_usb_msd::desc::{
-    configuration_total_length, find_msd_interface, CONFIGURATION_HEADER_LEN,
+    configuration_total_length, find_storage_interface, StorageProtocol, UasEndpoints,
+    CONFIGURATION_HEADER_LEN,
+};
+use rustos_drv_storage_usb_msd::scsi::{
+    CommandSet, LunBlock, LunState, ScsiDevice, ScsiTransport, DEVICE_TYPE_DIRECT_ACCESS, MAX_LUNS,
 };
 use rustos_drv_storage_usb_msd::serve::serve_request;
+use rustos_drv_storage_usb_msd::uas::{Uas, UasPipes};
 use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
 use rustos_log::{log, Event, EventId, Field, FieldValue, Level};
 use rustos_rt::LogSink;
@@ -125,31 +129,26 @@ impl UrbCall for IpcUrbCall {
     }
 }
 
-/// [`MsdTransport`] over the URB transport: control and bulk URBs against
-/// the HCD, bounce-copied through this driver's mapping of the shared URB
-/// data buffer. Bulk transfers are split into per-URB chunks of at most
-/// one buffer ([`BULK_BUF_LEN`], the engine's per-TD ceiling); a short
-/// chunk ends the transfer honestly.
-struct UrbTransport {
+/// The driver's one URB link to its interface: the call client plus this
+/// driver's mapping of the shared URB data buffer (the HCD maps the same
+/// frames and moves each transfer's bytes through it). Both wire-transport
+/// adapters — [`UrbTransport`] for BOT/CBI and [`UasUrbPipes`] for UAS —
+/// move their bytes through these same primitives, so the chunking and
+/// bounce-copy logic exists once. Bulk transfers are split into per-URB
+/// chunks of at most one buffer ([`BULK_BUF_LEN`], the engine's per-TD
+/// ceiling); a short chunk ends the transfer honestly.
+struct UrbLink {
     client: UrbClient<IpcUrbCall>,
-    /// This driver's mapping of the shared URB data buffer (the HCD maps
-    /// the same frames and moves each transfer's bytes through it).
     shm: &'static mut [u8],
-    /// The interface's bulk endpoint numbers, read from the device's own
-    /// configuration descriptor.
-    bulk_in_endpoint: u8,
-    bulk_out_endpoint: u8,
 }
 
-impl UrbTransport {
+impl UrbLink {
     /// Whether the underlying transport endpoint has vanished (the HCD
     /// retracted the interface — the device was unplugged).
     fn disconnected(&self) -> bool {
         self.client.transport().disconnected
     }
-}
 
-impl MsdTransport for UrbTransport {
     fn control_in(&mut self, setup: [u8; 8], data: &mut [u8]) -> Result<usize, Errno> {
         let len =
             u32::try_from(data.len().min(self.shm.len())).map_err(|_| Errno::LengthOutOfRange)?;
@@ -159,16 +158,25 @@ impl MsdTransport for UrbTransport {
         Ok(n)
     }
 
+    fn control_out(&mut self, setup: [u8; 8], data: &[u8]) -> Result<(), Errno> {
+        if data.len() > self.shm.len() {
+            return Err(Errno::LengthOutOfRange);
+        }
+        self.shm[..data.len()].copy_from_slice(data);
+        let len = u32::try_from(data.len()).map_err(|_| Errno::LengthOutOfRange)?;
+        self.client.control_out(setup, 0, len)
+    }
+
     fn control_no_data(&mut self, setup: [u8; 8]) -> Result<(), Errno> {
         self.client.control_no_data(setup)
     }
 
-    fn bulk_in(&mut self, data: &mut [u8]) -> Result<usize, Errno> {
+    fn bulk_in(&mut self, endpoint: u8, data: &mut [u8]) -> Result<usize, Errno> {
         let mut off = 0usize;
         while off < data.len() {
             let chunk = (data.len() - off).min(BULK_BUF_LEN);
             let chunk_u32 = u32::try_from(chunk).map_err(|_| Errno::LengthOutOfRange)?;
-            let n = self.client.bulk_in(self.bulk_in_endpoint, 0, chunk_u32)? as usize;
+            let n = self.client.bulk_in(endpoint, 0, chunk_u32)? as usize;
             let n = n.min(chunk);
             data[off..off + n].copy_from_slice(&self.shm[..n]);
             off += n;
@@ -179,13 +187,13 @@ impl MsdTransport for UrbTransport {
         Ok(off)
     }
 
-    fn bulk_out(&mut self, data: &[u8]) -> Result<usize, Errno> {
+    fn bulk_out(&mut self, endpoint: u8, data: &[u8]) -> Result<usize, Errno> {
         let mut off = 0usize;
         while off < data.len() {
             let chunk = (data.len() - off).min(BULK_BUF_LEN);
             self.shm[..chunk].copy_from_slice(&data[off..off + chunk]);
             let chunk_u32 = u32::try_from(chunk).map_err(|_| Errno::LengthOutOfRange)?;
-            let n = self.client.bulk_out(self.bulk_out_endpoint, 0, chunk_u32)? as usize;
+            let n = self.client.bulk_out(endpoint, 0, chunk_u32)? as usize;
             let n = n.min(chunk);
             off += n;
             if n < chunk {
@@ -195,8 +203,90 @@ impl MsdTransport for UrbTransport {
         Ok(off)
     }
 
+    fn interrupt_in(&mut self, endpoint: u8, data: &mut [u8]) -> Result<usize, Errno> {
+        let len =
+            u32::try_from(data.len().min(self.shm.len())).map_err(|_| Errno::LengthOutOfRange)?;
+        let n = self.client.interrupt_in(endpoint, 0, len)? as usize;
+        let n = n.min(data.len()).min(self.shm.len());
+        data[..n].copy_from_slice(&self.shm[..n]);
+        Ok(n)
+    }
+
     fn scrub(&mut self) {
         self.shm.fill(0);
+    }
+}
+
+/// [`MsdTransport`] (the BOT/CBI seam) over the URB link, addressing the
+/// endpoints the device's own configuration descriptor named.
+struct UrbTransport {
+    link: UrbLink,
+    bulk_in_endpoint: u8,
+    bulk_out_endpoint: u8,
+    /// The CBI command-completion interrupt endpoint; `0` for a BOT
+    /// interface, whose transport never reads one (a use is refused).
+    interrupt_endpoint: u8,
+}
+
+impl MsdTransport for UrbTransport {
+    fn control_in(&mut self, setup: [u8; 8], data: &mut [u8]) -> Result<usize, Errno> {
+        self.link.control_in(setup, data)
+    }
+
+    fn control_out(&mut self, setup: [u8; 8], data: &[u8]) -> Result<(), Errno> {
+        self.link.control_out(setup, data)
+    }
+
+    fn control_no_data(&mut self, setup: [u8; 8]) -> Result<(), Errno> {
+        self.link.control_no_data(setup)
+    }
+
+    fn bulk_in(&mut self, data: &mut [u8]) -> Result<usize, Errno> {
+        self.link.bulk_in(self.bulk_in_endpoint, data)
+    }
+
+    fn bulk_out(&mut self, data: &[u8]) -> Result<usize, Errno> {
+        self.link.bulk_out(self.bulk_out_endpoint, data)
+    }
+
+    fn interrupt_in(&mut self, data: &mut [u8]) -> Result<usize, Errno> {
+        if self.interrupt_endpoint == 0 {
+            return Err(Errno::NotImplemented);
+        }
+        self.link.interrupt_in(self.interrupt_endpoint, data)
+    }
+
+    fn scrub(&mut self) {
+        self.link.scrub();
+    }
+}
+
+/// [`UasPipes`] over the URB link, addressing the four pipes the Pipe
+/// Usage descriptors named.
+struct UasUrbPipes {
+    link: UrbLink,
+    endpoints: UasEndpoints,
+}
+
+impl UasPipes for UasUrbPipes {
+    fn command_out(&mut self, iu: &[u8]) -> Result<(), Errno> {
+        self.link.bulk_out(self.endpoints.command, iu).map(|_| ())
+    }
+
+    fn status_in(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+        self.link.bulk_in(self.endpoints.status, buf)
+    }
+
+    fn data_in(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+        self.link.bulk_in(self.endpoints.data_in, buf)
+    }
+
+    fn data_out(&mut self, buf: &[u8]) -> Result<usize, Errno> {
+        self.link.bulk_out(self.endpoints.data_out, buf)
+    }
+
+    fn scrub(&mut self) {
+        self.link.scrub();
     }
 }
 
@@ -323,8 +413,11 @@ fn emit_lun_node(endpoint: u64, shm_id: u64) -> Option<u32> {
 /// Bring one LUN up: identity, the bounded ready drain, geometry, and
 /// write policy. `Ok(None)` skips the unit (not a disk / never ready);
 /// `Err` is a transport-level failure.
-fn bring_up_lun(msd: &mut Msd<UrbTransport>, lun: u8) -> Result<Option<LunState>, Errno> {
-    let inquiry = msd.inquiry(lun)?;
+fn bring_up_lun<T: ScsiTransport>(
+    scsi: &mut ScsiDevice<T>,
+    lun: u8,
+) -> Result<Option<LunState>, Errno> {
+    let inquiry = scsi.inquiry(lun)?;
     if inquiry.device_type != DEVICE_TYPE_DIRECT_ACCESS {
         log_hex_event(
             MSD_LUN_SKIPPED,
@@ -335,19 +428,9 @@ fn bring_up_lun(msd: &mut Msd<UrbTransport>, lun: u8) -> Result<Option<LunState>
         );
         return Ok(None);
     }
-    // Drain the start-of-day UNIT ATTENTION / not-ready states: each
-    // failed TEST UNIT READY is followed by the REQUEST SENSE that clears
-    // it. Bounded — a unit that never becomes ready is skipped, not
-    // spun on.
-    let mut ready = false;
-    for _ in 0..READY_ATTEMPTS {
-        if msd.test_unit_ready(lun)? {
-            ready = true;
-            break;
-        }
-        let _sense = msd.request_sense(lun)?;
-    }
-    if !ready {
+    // Drain the start-of-day UNIT ATTENTION / not-ready states — bounded;
+    // a unit that never becomes ready is skipped, not spun on.
+    if !scsi.ready_after_drain(lun, READY_ATTEMPTS)? {
         log_hex_event(
             MSD_LUN_SKIPPED,
             Level::Warn,
@@ -357,8 +440,8 @@ fn bring_up_lun(msd: &mut Msd<UrbTransport>, lun: u8) -> Result<Option<LunState>
         );
         return Ok(None);
     }
-    let geometry = msd.read_capacity(lun)?;
-    let write_protected = msd.write_protected(lun)?;
+    let geometry = scsi.read_capacity(lun)?;
+    let write_protected = scsi.write_protected(lun)?;
     Ok(Some(LunState {
         geometry,
         write_protected,
@@ -438,27 +521,101 @@ fn main() -> i32 {
     if (n as usize) < total {
         return EXIT_BRINGUP_FAILED;
     }
-    let Ok(interface) = find_msd_interface(&shm[..total]) else {
+    let Ok(interface) = find_storage_interface(&shm[..total]) else {
         return EXIT_BRINGUP_FAILED;
     };
-    log_hex_event(
-        MSD_SETUP,
-        Level::Info,
-        "usb-msd: interface + bulk endpoint pair derived from descriptors",
-        "in_out_hex",
-        (u64::from(interface.bulk_in) << 8) | u64::from(interface.bulk_out),
-    );
 
-    let transport = UrbTransport {
-        client,
-        shm,
-        bulk_in_endpoint: interface.bulk_in,
-        bulk_out_endpoint: interface.bulk_out,
-    };
-    let mut msd = Msd::new(transport, interface.interface_number);
+    // Build the wire transport the interface's protocol byte named and run
+    // the one shared bring-up + serve body over it.
+    let link = UrbLink { client, shm };
+    match interface.protocol {
+        StorageProtocol::Bot { bulk_in, bulk_out } => {
+            log_hex_event(
+                MSD_SETUP,
+                Level::Info,
+                "usb-msd: BOT interface + bulk endpoint pair derived from descriptors",
+                "in_out_hex",
+                (u64::from(bulk_in) << 8) | u64::from(bulk_out),
+            );
+            let transport = UrbTransport {
+                link,
+                bulk_in_endpoint: bulk_in,
+                bulk_out_endpoint: bulk_out,
+                interrupt_endpoint: 0,
+            };
+            let scsi = ScsiDevice::new(
+                Bot::new(transport, interface.interface_number),
+                interface.command_set,
+            );
+            run_device(scsi, |scsi| {
+                scsi.transport().transport().link.disconnected()
+            })
+        }
+        StorageProtocol::Cbi {
+            bulk_in,
+            bulk_out,
+            interrupt_in,
+        } => {
+            log_hex_event(
+                MSD_SETUP,
+                Level::Info,
+                "usb-msd: CBI interface endpoints derived from descriptors",
+                "in_out_int_hex",
+                (u64::from(bulk_in) << 16) | (u64::from(bulk_out) << 8) | u64::from(interrupt_in),
+            );
+            let transport = UrbTransport {
+                link,
+                bulk_in_endpoint: bulk_in,
+                bulk_out_endpoint: bulk_out,
+                interrupt_endpoint: interrupt_in,
+            };
+            // The accepted CBI command set is UFI (the floppy set), whose
+            // completion block carries ASC/ASCQ.
+            let status = match interface.command_set {
+                CommandSet::Ufi => CbiStatus::UfiSense,
+                CommandSet::Transparent => CbiStatus::CommandStatus,
+            };
+            let scsi = ScsiDevice::new(
+                Cbi::new(transport, interface.interface_number, status),
+                interface.command_set,
+            );
+            run_device(scsi, |scsi| {
+                scsi.transport().transport().link.disconnected()
+            })
+        }
+        StorageProtocol::Uas(endpoints) => {
+            log_hex_event(
+                MSD_SETUP,
+                Level::Info,
+                "usb-msd: UAS pipes derived from descriptors",
+                "cmd_sts_din_dout_hex",
+                (u64::from(endpoints.command) << 24)
+                    | (u64::from(endpoints.status) << 16)
+                    | (u64::from(endpoints.data_in) << 8)
+                    | u64::from(endpoints.data_out),
+            );
+            let pipes = UasUrbPipes { link, endpoints };
+            let scsi = ScsiDevice::new(Uas::new(pipes), interface.command_set);
+            run_device(scsi, |scsi| scsi.transport().pipes().link.disconnected())
+        }
+    }
+}
 
+/// Bring every unit of the brought-up device online and serve block
+/// requests for the life of the device: the one bring-up + serve body
+/// every wire transport runs.
+///
+/// `disconnected` observes the transport's vanished-endpoint state (the
+/// HCD retracted the interface — the device was unplugged), so the serve
+/// loop can retract the LUN nodes and exit `0` for a clean reload on
+/// re-plug.
+fn run_device<T, F>(mut scsi: ScsiDevice<T>, disconnected: F) -> i32
+where
+    T: ScsiTransport,
+    F: Fn(&ScsiDevice<T>) -> bool,
+{
     // Bring every unit up; publish one storage node per ready LUN.
-    let Ok(lun_count) = msd.lun_count() else {
+    let Ok(lun_count) = scsi.lun_count() else {
         return EXIT_BRINGUP_FAILED;
     };
     let Some(blk_block) = claim_blk_block() else {
@@ -467,7 +624,7 @@ fn main() -> i32 {
     let mut luns: [Option<LunServe>; MAX_LUNS] = core::array::from_fn(|_| None);
     let mut published = 0usize;
     for lun in 0..lun_count {
-        let state = match bring_up_lun(&mut msd, lun) {
+        let state = match bring_up_lun(&mut scsi, lun) {
             Ok(Some(state)) => state,
             Ok(None) => continue,
             Err(err) => {
@@ -574,7 +731,7 @@ fn main() -> i32 {
         let read_only = serve.state.write_protected;
         let mut reply = [0u8; BLK_COMPLETION_LEN];
         let len = {
-            let mut block = LunBlock::new(&mut msd, lun, serve.state);
+            let mut block = LunBlock::new(&mut scsi, lun, serve.state);
             serve_request(
                 &mut block,
                 read_only,
@@ -587,7 +744,7 @@ fn main() -> i32 {
         // A vanished URB endpoint means the HCD retracted the interface:
         // the device is gone. Retract the LUN nodes and exit cleanly so a
         // re-plug re-enumerates and reloads this driver.
-        if msd.transport().disconnected() {
+        if disconnected(&scsi) {
             log(
                 &LogSink,
                 &Event {
