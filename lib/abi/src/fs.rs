@@ -470,10 +470,59 @@ impl<'a> DirEntry<'a> {
     }
 }
 
+/// Iterator over a whole `fs_readdir` byte stream — the one shared walker
+/// every consumer of the stream uses (`ls`, the filesystem browser), so the
+/// advance-by-`consumed` bookkeeping is never re-derived per tool.
+///
+/// Yields each decoded [`DirEntry`] in stream order. The first malformed
+/// record surfaces as one terminal `Err` and ends the iteration (the
+/// iterator is fused): a caller refuses the whole listing rather than
+/// showing a partial or guessed one — fail closed, never a truncated view
+/// presented as complete.
+///
+/// Forward progress is structural: a successful decode consumes at least
+/// [`DirEntry::HEADER_LEN`] bytes, so the walk always terminates.
+#[derive(Clone, Debug)]
+pub struct DirEntries<'a> {
+    /// The undecoded remainder of the stream; emptied on error so the
+    /// iterator fuses.
+    rest: &'a [u8],
+}
+
+impl<'a> DirEntries<'a> {
+    /// Walk `stream`, the exact bytes one `fs_readdir` transfer produced.
+    #[must_use]
+    pub const fn new(stream: &'a [u8]) -> Self {
+        Self { rest: stream }
+    }
+}
+
+impl<'a> Iterator for DirEntries<'a> {
+    type Item = Result<DirEntry<'a>, Errno>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.rest.is_empty() {
+            return None;
+        }
+        match DirEntry::decode(self.rest) {
+            Ok((entry, consumed)) => {
+                self.rest = &self.rest[consumed..];
+                Some(Ok(entry))
+            }
+            Err(err) => {
+                self.rest = &[];
+                Some(Err(err))
+            }
+        }
+    }
+}
+
+impl core::iter::FusedIterator for DirEntries<'_> {}
+
 #[cfg(test)]
 mod tests {
     extern crate alloc;
-    use super::{DirEntry, FileKind, FileStat, OpenFlags, UnlinkFlags, FS_NAME_MAX};
+    use super::{DirEntries, DirEntry, FileKind, FileStat, OpenFlags, UnlinkFlags, FS_NAME_MAX};
     use crate::time::Time64;
     use crate::Errno;
     use alloc::vec;
@@ -712,5 +761,108 @@ mod tests {
         let buf = [FileKind::Regular.as_u8(), 0, 4, 0, b'a', b'b'];
         assert_eq!(DirEntry::decode(&buf), Err(Errno::BufferTooSmall));
         assert_eq!(DirEntry::decode(&[0u8; 2]), Err(Errno::BufferTooSmall));
+    }
+
+    /// Encode `entries` back to back into one stream, as the kernel's
+    /// `fs_readdir` handler does.
+    fn encoded_stream(entries: &[DirEntry<'_>]) -> alloc::vec::Vec<u8> {
+        let mut buf = vec![0u8; 1024];
+        let mut off = 0;
+        for e in entries {
+            off += e.encode_into(&mut buf[off..]).expect("fits");
+        }
+        buf.truncate(off);
+        buf
+    }
+
+    #[test]
+    fn dir_entries_walks_the_whole_stream_in_order() {
+        let stream = encoded_stream(&[
+            DirEntry {
+                kind: FileKind::Directory,
+                size: 0,
+                allocated: 4096,
+                modified: Time64::UNIX_EPOCH,
+                name: b"Logs",
+            },
+            DirEntry {
+                kind: FileKind::Regular,
+                size: 7,
+                allocated: 4096,
+                modified: Time64::from_secs(4_000_000_000),
+                name: b"motd.txt",
+            },
+        ]);
+        let mut it = DirEntries::new(&stream);
+        let first = it.next().expect("first entry").expect("valid");
+        assert_eq!(
+            (first.kind, first.name),
+            (FileKind::Directory, &b"Logs"[..])
+        );
+        let second = it.next().expect("second entry").expect("valid");
+        assert_eq!(
+            (second.kind, second.name),
+            (FileKind::Regular, &b"motd.txt"[..])
+        );
+        assert!(it.next().is_none());
+    }
+
+    #[test]
+    fn dir_entries_over_an_empty_stream_yields_nothing() {
+        assert!(DirEntries::new(&[]).next().is_none());
+    }
+
+    #[test]
+    fn dir_entries_surfaces_the_first_bad_record_and_fuses() {
+        let mut stream = encoded_stream(&[DirEntry {
+            kind: FileKind::Regular,
+            size: 1,
+            allocated: 1,
+            modified: Time64::UNIX_EPOCH,
+            name: b"ok",
+        }]);
+        // A second record with an undefined kind byte: the walk must yield
+        // the good entry, then exactly one error, then fuse.
+        let mut bad = vec![0u8; DirEntry::HEADER_LEN + 1];
+        DirEntry {
+            kind: FileKind::Regular,
+            size: 0,
+            allocated: 0,
+            modified: Time64::UNIX_EPOCH,
+            name: b"x",
+        }
+        .encode_into(&mut bad)
+        .expect("fits");
+        bad[0] = 9;
+        stream.extend_from_slice(&bad);
+
+        let mut it = DirEntries::new(&stream);
+        assert!(it.next().expect("good entry").is_ok());
+        assert_eq!(
+            it.next().expect("the bad record surfaces"),
+            Err(Errno::OutOfRange)
+        );
+        assert!(it.next().is_none());
+        assert!(it.next().is_none());
+    }
+
+    #[test]
+    fn dir_entries_truncated_tail_fails_closed() {
+        let mut stream = encoded_stream(&[DirEntry {
+            kind: FileKind::Directory,
+            size: 0,
+            allocated: 0,
+            modified: Time64::UNIX_EPOCH,
+            name: b"Users",
+        }]);
+        // A dangling half header can never be a listing the caller shows.
+        stream.extend_from_slice(&[0u8; 3]);
+        let mut it = DirEntries::new(&stream);
+        assert!(it.next().expect("good entry").is_ok());
+        assert_eq!(
+            it.next().expect("the truncation surfaces"),
+            Err(Errno::BufferTooSmall)
+        );
+        assert!(it.next().is_none());
     }
 }

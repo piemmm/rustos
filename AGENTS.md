@@ -1496,6 +1496,7 @@ You are not exempt from any rule above. In addition:
     | Capabilities: grants, manifests, ceilings, admin, elevation, the capability lifecycle | `plans/CAPABILITY_USE.md` |
     | Process spawn, userland multitasking | `plans/SPAWN.md` |
     | App bundles, command apps, help, command resolution | `plans/APPS.md`; `plans/UNIVERSAL.md` (multi-arch/Wasm distribution) |
+    | Default desktop apps going live: app windows, live app data channels, the file picker | `plans/APPWIN.md` |
     | The shell (`elsh`) | `plans/SHELL.md` |
     | Terminal / TUI stack (`lib/vt`, `lib/termcap`, `lib/curses`) | `plans/CURSES.md` |
     | Userland I/O library layer | `plans/IO.md` |

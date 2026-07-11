@@ -3416,6 +3416,74 @@ pub fn open_dir(path: &[u8]) -> Result<Dir, i64> {
     Ok(Dir { file })
 }
 
+/// Initial byte size of the [`read_dir_all`] listing buffer: one page covers
+/// a typical directory, and `BufferTooSmall` grows it from there.
+const DIR_STREAM_INITIAL: usize = 4096;
+
+/// Fill a growing buffer from a `BufferTooSmall`-signalling reader.
+///
+/// The one buffer-growth retry policy shared by every whole-transfer read
+/// (today [`read_dir_all`]): start at `initial` bytes, double towards the
+/// hard ceiling `max` each time `read` refuses with `BufferTooSmall`
+/// (encoded as `-errno`), and return the exact bytes of the first successful
+/// read. The policy is total: the buffer strictly grows on every retry and
+/// stops at `max`, so the loop always terminates — a refusal at the ceiling
+/// (or any other error) surfaces unchanged.
+///
+/// A reader that reports more bytes used than the buffer it was handed is
+/// refused with `OutOfRange` rather than trusted: the count shapes a slice
+/// the caller will parse, so it is validated like any other boundary input.
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`) of the failing `read`, or
+/// `-OutOfRange` for an over-reporting reader.
+pub fn read_all_growing(
+    initial: usize,
+    max: usize,
+    mut read: impl FnMut(&mut [u8]) -> Result<usize, i64>,
+) -> Result<alloc::vec::Vec<u8>, i64> {
+    let too_small = -i64::from(rustos_abi::Errno::BufferTooSmall.as_i32());
+    let mut buf = alloc::vec![0u8; initial.min(max).max(1)];
+    loop {
+        match read(&mut buf) {
+            Ok(used) => {
+                if used > buf.len() {
+                    return Err(-i64::from(rustos_abi::Errno::OutOfRange.as_i32()));
+                }
+                buf.truncate(used);
+                return Ok(buf);
+            }
+            Err(ret) if ret == too_small && buf.len() < max => {
+                let next = buf.len().saturating_mul(2).min(max);
+                buf.resize(next, 0);
+            }
+            Err(ret) => return Err(ret),
+        }
+    }
+}
+
+/// Read the whole directory listing at the absolute `path`, returning the
+/// packed [`rustos_abi::DirEntry`] stream sized to its exact byte length —
+/// walk it with [`rustos_abi::fs::DirEntries`].
+///
+/// The one directory-listing call every tool shares (`ls`, the filesystem
+/// browser): an [`open_dir`] resolve-and-authorise, then the
+/// [`read_all_growing`] retry policy against the kernel's own per-transfer
+/// staging cap ([`rustos_abi::fs::FS_IO_MAX`]), so no consumer re-derives
+/// the grow loop.
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`) of the failing `fs_open` or
+/// `fs_readdir` syscall.
+pub fn read_dir_all(path: &[u8]) -> Result<alloc::vec::Vec<u8>, i64> {
+    let dir = open_dir(path)?;
+    read_all_growing(DIR_STREAM_INITIAL, rustos_abi::fs::FS_IO_MAX, |buf| {
+        dir.read(buf)
+    })
+}
+
 /// Define the program's entry point.
 ///
 /// `$entry` must be a `fn() -> i32`; the macro exports the runtime's
@@ -4971,5 +5039,86 @@ mod tests {
         let flags = OpenFlags::from_bits(u32::try_from(args[2]).expect("flag bits fit u32"))
             .expect("open_dir requests a legal flag combination");
         assert!(flags.contains(OpenFlags::DIRECTORY));
+    }
+
+    #[test]
+    fn read_all_growing_returns_the_exact_bytes_of_a_first_fit() {
+        let got = read_all_growing(8, 64, |buf| {
+            buf[..3].copy_from_slice(b"abc");
+            Ok(3)
+        })
+        .expect("a fitting read succeeds");
+        assert_eq!(got, b"abc");
+    }
+
+    #[test]
+    fn read_all_growing_doubles_until_the_listing_fits() {
+        let too_small = -i64::from(rustos_abi::Errno::BufferTooSmall.as_i32());
+        let mut sizes = alloc::vec::Vec::new();
+        let got = read_all_growing(4, 64, |buf| {
+            sizes.push(buf.len());
+            if buf.len() < 10 {
+                return Err(too_small);
+            }
+            buf[..10].copy_from_slice(b"0123456789");
+            Ok(10)
+        })
+        .expect("the grown read succeeds");
+        assert_eq!(got, b"0123456789");
+        assert_eq!(sizes, [4, 8, 16]);
+    }
+
+    #[test]
+    fn read_all_growing_gives_up_at_the_ceiling() {
+        let too_small = -i64::from(rustos_abi::Errno::BufferTooSmall.as_i32());
+        let mut calls = 0;
+        let got = read_all_growing(4, 16, |_| {
+            calls += 1;
+            Err(too_small)
+        });
+        // 4 → 8 → 16, then the refusal at the ceiling surfaces unchanged.
+        assert_eq!(got, Err(too_small));
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn read_all_growing_surfaces_other_errors_unchanged() {
+        let denied = -i64::from(rustos_abi::Errno::PermissionDenied.as_i32());
+        let mut calls = 0;
+        let got = read_all_growing(4, 64, |_| {
+            calls += 1;
+            Err(denied)
+        });
+        assert_eq!(got, Err(denied));
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn read_all_growing_refuses_an_over_reporting_reader() {
+        let want = -i64::from(rustos_abi::Errno::OutOfRange.as_i32());
+        assert_eq!(read_all_growing(4, 64, |buf| Ok(buf.len() + 1)), Err(want));
+    }
+
+    #[test]
+    fn read_all_growing_starts_no_smaller_than_one_byte() {
+        // A zero `initial` must not wedge the doubling; the reader still
+        // sees a real buffer.
+        let got = read_all_growing(0, 8, |buf| {
+            assert!(!buf.is_empty());
+            buf[0] = b'x';
+            Ok(1)
+        })
+        .expect("a fitting read succeeds");
+        assert_eq!(got, b"x");
+    }
+
+    #[test]
+    fn read_dir_all_propagates_the_open_refusal() {
+        let want = -i64::from(rustos_abi::Errno::PermissionDenied.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (number, _) = capture(neg, || {
+            assert_eq!(read_dir_all(b"/System/Security").err(), Some(want));
+        });
+        assert_eq!(number, NUM_FS_OPEN);
     }
 }

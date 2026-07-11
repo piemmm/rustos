@@ -2991,8 +2991,18 @@ transfer, landed in increments:
   code the `Run` binary drives (wm + session tests); a click-driven QEMU
   screendump of the live toggle rides the app-window/pointer vertical work,
   which needs the runner's pointer-button injection and a second verified
-  dump. Then: wire the two default apps to live VFS/shell channels +
-  WM-presented windows.
+  dump (staged as `plans/APPWIN.md` AW3). Then: wire the two default apps
+  to live VFS/shell channels + WM-presented windows — staged in
+  `plans/APPWIN.md` (binding). **AW1 is done:** the shared
+  `rustos_abi::fs::DirEntries` stream walker (unit-tested, fuzzed in
+  `fuzz_decode`), the one `lib/rt` directory-listing call
+  (`read_all_growing` + `read_dir_all`, host-tested; `ls` refactored onto
+  it), and the files app's production `VfsDirectorySource` engine
+  (validated path spelling — one spelling shared with `Browser::path` —
+  plus stream→`Entry` mapping, host-proven end to end over encoded
+  streams). Remaining: AW2 window protocol + engine, AW3 session window
+  server + files `Run` bundle + vertical, AW4 terminal (stream wait
+  source + pipe/spawn `ShellSource`), AW5 CU6 picker descriptors.
 - The platform-RNG `EntropySource` that seeds the reserve — **DONE**
   (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `rustos_arch_api::entropy`
   slice (x86_64 `RDSEED`/`RDRAND`, aarch64 `RNDR` `Supported`; riscv64 `Zkr` /

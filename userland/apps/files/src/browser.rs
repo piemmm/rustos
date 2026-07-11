@@ -57,15 +57,7 @@ impl<S: DirectorySource> Browser<S> {
     /// `/System/Fonts`, …).
     #[must_use]
     pub fn path(&self) -> String {
-        if self.components.is_empty() {
-            return String::from("/");
-        }
-        let mut path = String::new();
-        for component in &self.components {
-            path.push('/');
-            path.push_str(component);
-        }
-        path
+        crate::vfs::spell_absolute_path(&self.components)
     }
 
     /// `true` if the browser is showing the filesystem root.
