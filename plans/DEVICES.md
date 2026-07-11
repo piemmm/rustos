@@ -721,24 +721,59 @@ first, then the force-unmount exit, then the verified re-insert replay.
   (the taskbar's notification area is an in-process GUI model, not an
   IPC surface), so the syslog/audit record is the D4a channel and the
   notification emit lands with the session-notification surface when one
-  exists. sysinfo `MOUNT_LIST` does not yet mark availability; it joins
-  D4b, whose force-unmount tooling needs the observable state.
+  exists.
 
-#### 2.5.2 D4b — force-unmount
+#### 2.5.2 D4b — force-unmount. **Done.**
 
-- `unmount --force <name>` (extending the existing mount tooling,
-  coreutils-adjacent spelling per §16.7) discards the retained set,
-  unpublishes the root, and logs the deliberate data loss with its own
-  event id (4179 is reserved next to the D4a events). Capability-gated
-  to the volume's mount authority (`CAP_FS_MOUNT`); fails closed
-  otherwise.
-- The ABI evolves in place (§2.13 — `abi-v1` is unfrozen):
-  `VolumeDetachRequest` gains the force flag, and the kernel detach path
-  distinguishes the audited force-discard of an unavailable volume from
-  the flush-first clean detach.
-- sysinfo `MOUNT_LIST` gains the availability mark so the mount tooling
-  can show `unavailable-dirty`/`unavailable-lost` rather than a volume
-  that looks healthy.
+- **The ABI evolved in place** (§2.13 — `abi-v1` is unfrozen):
+  `VolumeDetachRequest` gained the validated force byte
+  (`VOLUME_DETACH_LEN` = 17, a byte outside {0,1} refused), and
+  `MountRecord` gained a validated availability byte (the former
+  reserved pad — `MountAvailability::{Available, UnavailableDirty,
+  UnavailableLost}`, an unknown state refused, never presumed
+  available) plus the volume's stable 16-byte identity (all-zero for a
+  mount with no published volume), so the unmount tooling resolves a
+  catalog name to the identity `volume_detach` names without a second
+  query surface. C headers regenerated.
+- **The kernel detach path** distinguishes the flush-first clean detach
+  from the audited force-discard: `commit_for_detach` (fs flush →
+  device flush → journal commit, the vanished-clean tolerance kept) is
+  attempted for an available volume even under force — force on a
+  healthy volume commits cleanly and discards nothing — and only when a
+  clean commit is impossible (unavailable-dirty/lost, or a flush
+  failure) does force wipe the retained set
+  (`RetainedWrites::discard_all`, buffers zeroised) and retract the
+  volume, logging event 4179 (`fs.hotplug.force_unmount`, drives.md
+  §23) with the discarded byte count and the refusing cause. A plain
+  detach of an unavailable volume stays refused. The availability facts
+  live in the `LateFilesystem` registry (`DriverEntry` gained the
+  volume identity — a registration-time fact, threaded from the boot
+  mounts and the attach path — and the availability the
+  surprise-removal transition now sets), so `mount_snapshot` reports
+  them without a second bookkeeping home.
+- **`unmount`** is a new full command-app bundle
+  (`userland/apps/unmount`, the df packaging pattern): the pure engine
+  (parse `unmount [-f|--force] [--] NAME`, resolve NAME — catalog name
+  or mount-point path — over the shared `for_each_mount` walk, refuse
+  an unknown name or an identity-less mount locally, hand the identity
+  to the `Detacher` seam) plus the freestanding `Run` over
+  `rustos_rt::volume_detach`; caps `CAP_CONSOLE_WRITE` +
+  `CAP_FS_ACCESS` + `CAP_FS_MOUNT`. A refused plain detach of an
+  unavailable volume spells out the `--force` consequence on stderr and
+  emits the fd-3 `suggestion` record
+  (`fs.volume_unavailable_force_required`, `safe_to_autorun: false`).
+  Thirteen-locale `Help/` with the switch-pinning test; `mount`'s
+  listing renders the additive ` [unavailable-dirty]` /
+  ` [unavailable-lost]` marker through the one shared
+  `rustos_procinfo::render_mount` definition.
+- Host-proven: abi round-trips (force byte, availability byte, hostile
+  wire images), `discard_all` unit tests (dirty→clean, lost→clean),
+  the volume-service lifecycle scenarios (snapshot marks availability +
+  identity; plain detach of unavailable-dirty still refused; force
+  discards, unpublishes the root, retracts the mount, empties the
+  snapshot; force on a healthy volume still commits the device cache),
+  the render marker, and the unmount engine suite. Live path: Pi 4
+  metal acceptance (QEMU models no Pi USB — the D2/D3/D4a precedent).
 
 #### 2.5.3 D4c — verified re-insert
 
@@ -776,7 +811,7 @@ first, then the force-unmount exit, then the verified re-insert replay.
 - **D4a** retained uncommitted writes + the surprise-removal state
   machine. **Done** (§2.5.1).
 - **D4b** force-unmount (`unmount --force`, the detach force flag, the
-  sysinfo availability mark).
+  sysinfo availability mark). **Done** (§2.5.2).
 - **D4c** verified re-insert (mutation evidence + retained-write replay).
 
 D3 is deliberately after D2 so automount is proven against a real

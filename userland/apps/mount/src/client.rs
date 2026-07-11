@@ -73,7 +73,7 @@ mod tests {
     use core::cell::RefCell;
     use rustos_abi::driver::filesystem::{MountFlags, VolumeStats};
     use rustos_abi::sysinfo::{
-        MountListRequest, MountRecord, SysinfoQueryId, SysinfoRequestHeader,
+        MountAvailability, MountListRequest, MountRecord, SysinfoQueryId, SysinfoRequestHeader,
     };
     use rustos_abi::Errno;
     use rustos_procinfo::{Output, Transport};
@@ -192,7 +192,16 @@ mod tests {
     }
 
     fn record(source: &[u8], target: &[u8], fstype: &[u8], flags: MountFlags) -> MountRecord {
-        MountRecord::new(source, target, fstype, flags, VolumeStats::default()).expect("record")
+        MountRecord::new(
+            source,
+            target,
+            fstype,
+            flags,
+            VolumeStats::default(),
+            MountAvailability::Available,
+            [0u8; 16],
+        )
+        .expect("record")
     }
 
     #[test]

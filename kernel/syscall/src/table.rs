@@ -1901,7 +1901,7 @@ pub trait SyscallHandlers {
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::FS_MOUNT`]. `request`/`request_len` name the
     /// caller's encoded `VolumeDetachRequest` (the volume's stable
-    /// identity).
+    /// identity plus the force byte).
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
     fn volume_detach(

@@ -45,7 +45,7 @@ use rustos_abi::driver::filesystem::{
     NodeKind as DriverNodeKind, VolumeStats,
 };
 use rustos_abi::driver::DriverHandle;
-use rustos_abi::sysinfo::MountRecord;
+use rustos_abi::sysinfo::{MountAvailability, MountRecord};
 use rustos_abi::time::Time64;
 use rustos_abi::{
     CapabilityQuery, Errno, FileKind, FileStat, OpenFlags, UnlinkFlags, FS_MODE_MASK,
@@ -84,6 +84,28 @@ struct DriverEntry<F: 'static> {
     source: String,
     /// The driver's filesystem-type name (`rustfs`, …).
     fstype: String,
+    /// The volume's stable published identity (the same 16 bytes the volume
+    /// forest publishes for `id::` paths), or all-zero when the registrar
+    /// published none. A registration-time fact like `source`, reported by
+    /// the mount snapshot so the unmount tooling can name the volume it
+    /// detaches.
+    volume_id: [u8; 16],
+    /// Whether the backing volume is live. Flipped by
+    /// [`LateFilesystem::set_availability`] when a surprise removal parks
+    /// the volume behind its fail-closed stand-in, so the mount snapshot
+    /// never shows a vanished volume as healthy.
+    availability: MountAvailability,
+}
+
+/// One registered volume's snapshot facts, as [`LateFilesystem::entry`]
+/// reports them to the mount snapshot: the registration names, the shared
+/// driver lock, the volume's published identity, and its availability.
+struct SnapshotEntry<F: 'static> {
+    source: String,
+    fstype: String,
+    driver: Arc<SleepLock<F>>,
+    volume_id: [u8; 16],
+    availability: MountAvailability,
 }
 
 /// A set-once VFS policy layer plus a registry of backing filesystem drivers
@@ -182,6 +204,7 @@ impl<F: 'static> LateFilesystem<F> {
         driver: F,
         source: &str,
         fstype: &str,
+        volume_id: [u8; 16],
     ) -> Result<Arc<SleepLock<F>>, FilesystemAlreadyInstalled> {
         let handle = handle.as_u64();
         let mut drivers = self.drivers.lock();
@@ -194,8 +217,33 @@ impl<F: 'static> LateFilesystem<F> {
             driver: Arc::clone(&driver),
             source: String::from(source),
             fstype: String::from(fstype),
+            volume_id,
+            availability: MountAvailability::Available,
         });
         Ok(driver)
+    }
+
+    /// Record the availability of the volume registered for `handle`, so
+    /// the mount snapshot reports a surprise-removed volume as unavailable
+    /// rather than healthy.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] when `handle` names no registered volume
+    /// (fail closed — nothing is marked).
+    pub fn set_availability(
+        &self,
+        handle: DriverHandle,
+        availability: MountAvailability,
+    ) -> Result<(), Errno> {
+        let handle = handle.as_u64();
+        let mut drivers = self.drivers.lock();
+        let entry = drivers
+            .iter_mut()
+            .find(|e| e.handle == handle)
+            .ok_or(Errno::NotImplemented)?;
+        entry.availability = availability;
+        Ok(())
     }
 
     /// Withdraw the driver registered for `handle` (a runtime volume
@@ -256,16 +304,23 @@ impl<F: 'static> LateFilesystem<F> {
     }
 
     /// The registered driver for `handle` together with its registration
-    /// names, for the mount snapshot. `None` when the backing volume is not
-    /// yet online — the caller reports the mount without names or usage
-    /// rather than guessing.
-    fn entry(&self, handle: DriverHandle) -> Option<(String, String, Arc<SleepLock<F>>)> {
+    /// facts (names, volume identity, availability), for the mount
+    /// snapshot. `None` when the backing volume is not yet online — the
+    /// caller reports the mount without names or usage rather than
+    /// guessing.
+    fn entry(&self, handle: DriverHandle) -> Option<SnapshotEntry<F>> {
         let handle = handle.as_u64();
         let drivers = self.drivers.lock();
         drivers
             .iter()
             .find(|e| e.handle == handle)
-            .map(|e| (e.source.clone(), e.fstype.clone(), Arc::clone(&e.driver)))
+            .map(|e| SnapshotEntry {
+                source: e.source.clone(),
+                fstype: e.fstype.clone(),
+                driver: Arc::clone(&e.driver),
+                volume_id: e.volume_id,
+                availability: e.availability,
+            })
     }
 }
 
@@ -812,13 +867,25 @@ where
                 // accounting likewise degrades to the all-zero usage: the
                 // mount itself is still reported (it exists — only its
                 // numbers are unavailable).
-                let (source, fstype, usage) =
+                let (source, fstype, usage, volume_id, availability) =
                     match mount.backing().and_then(|handle| self.mount.entry(handle)) {
-                        Some((source, fstype, driver)) => {
-                            let usage = driver.lock().stats().unwrap_or_default();
-                            (source, fstype, usage)
+                        Some(entry) => {
+                            let usage = entry.driver.lock().stats().unwrap_or_default();
+                            (
+                                entry.source,
+                                entry.fstype,
+                                usage,
+                                entry.volume_id,
+                                entry.availability,
+                            )
                         }
-                        None => (String::new(), String::new(), VolumeStats::default()),
+                        None => (
+                            String::new(),
+                            String::new(),
+                            VolumeStats::default(),
+                            [0u8; 16],
+                            MountAvailability::Available,
+                        ),
                     };
                 // `MountRecord::new` only fails on an over-long field or an
                 // inconsistent usage report, which a validated VFS `Path`
@@ -830,6 +897,8 @@ where
                     fstype.as_bytes(),
                     mount.flags(),
                     usage,
+                    availability,
+                    volume_id,
                 )
                 .ok()
             })

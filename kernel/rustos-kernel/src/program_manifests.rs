@@ -655,6 +655,17 @@ mod tests {
             CapabilityId::SYSINFO_HW,
         ];
 
+        // The volume-detach tool `unmount` (plans/DEVICES.md D4b): the
+        // pure-tool request plus `CAP_FS_MOUNT`, which *is* its job — the
+        // kernel's `volume_detach` path re-checks it and audits every
+        // decision. Not an embedded spawn-floor program, so the list lives
+        // only in this pin.
+        const UNMOUNT_TOOL_REQUEST: &[CapabilityId] = &[
+            CapabilityId::CONSOLE_WRITE,
+            CapabilityId::FS_ACCESS,
+            CapabilityId::FS_MOUNT,
+        ];
+
         let userland = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../userland");
         let discovered = discover_app_manifests(&userland).expect("discovery walks");
 
@@ -697,6 +708,7 @@ mod tests {
             ("tee", AppKind::Command, FILE_TOOL_REQUEST),
             ("top", AppKind::Command, TOP_MANIFEST),
             ("true", AppKind::Command, PURE_TOOL_REQUEST),
+            ("unmount", AppKind::Command, UNMOUNT_TOOL_REQUEST),
             ("useradd", AppKind::Command, ADMIN_TOOL_REQUEST),
             ("users", AppKind::Command, USERS_TOOL_MANIFEST),
             ("vim", AppKind::Command, FILE_TOOL_REQUEST),

@@ -1,0 +1,58 @@
+[package]
+name = "rustos-unmount"
+description = "RustOS `unmount` CLI: detach a runtime-attached volume, with the audited force-unmount for unavailable media (`plans/DEVICES.md` D4b)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The `Run` binary's freestanding userland runtime (`rustos-rt`) is an
+# optional, on-by-default build feature, mirroring `rustos-df` and
+# `rustos-mount`. `cargo build -p rustos-unmount` builds the tool program
+# with it; host tooling builds only the pure *library*, so the host test
+# build never pulls the userland runtime's `_start` / `#[global_allocator]`
+# / panic handler.
+[features]
+default = ["program"]
+program = ["dep:rustos-rt"]
+
+# The package is both the `rustos-unmount` library (the pure parse +
+# resolve engine below) and the `Run` entry-point binary of the `unmount`
+# tool. The binary is a freestanding pure-Rust program on the native
+# Tier-1 targets and an inert host stub elsewhere (see `src/run.rs`).
+[[bin]]
+name = "rustos-unmount-run"
+path = "src/run.rs"
+
+[dependencies]
+# The audited ABI vocabulary: `Errno`, the `MountRecord` availability +
+# volume-identity fields the resolver reads, the `VolumeDetachRequest`
+# frame the detach seam encodes, and the fd-3 advisory record.
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The one help engine: locale fallback, the bounded structured-Markdown
+# parser, and the shared own-bundle short-help render the `-?`/`--help`
+# switches use (plans/APPS.md).
+rustos-help = { path = "../../../lib/help", version = "=0.0.0" }
+# The shared System Information API client: the `MOUNT_LIST` paging walk
+# (`for_each_mount`) `mount` and `df` use too — never a second query
+# client.
+rustos-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
+
+# For the freestanding `Run` binary only: the userland runtime `rustos-rt`
+# (`_start`, canary, panic handler, `mem_map` allocator, the
+# standard-stream I/O, and the `volume_detach` syscall wrapper). Pulled in
+# only for the bare-metal targets the program is actually built for; on
+# the host it is not linked.
+[target.'cfg(target_os = "none")'.dependencies]
+rustos-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+# The freestanding `Run` binary also enables the help engine's
+# syscall-backed own-bundle `HelpSource` (`BundleHelp`) and the shared
+# production client seams in `lib/procinfo` (`IpcTransport`), enabled
+# through its `program` feature exactly as `df` does.
+rustos-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+rustos-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }

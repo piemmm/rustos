@@ -4021,7 +4021,8 @@ where
         request: u64,
         request_len: usize,
     ) -> SyscallResult {
-        // A detach frame is exactly the 16-byte volume identity.
+        // A detach frame is exactly the 16-byte volume identity plus the
+        // force byte.
         if request_len != rustos_abi::volume::VOLUME_DETACH_LEN {
             return Err(Errno::LengthOutOfRange);
         }

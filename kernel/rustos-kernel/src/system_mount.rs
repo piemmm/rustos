@@ -392,7 +392,7 @@ pub fn install_system_mount<B: Block + 'static>(
     }
     let driver = cached(fs, SYSTEM_MOUNT_HANDLE, pressure, audit);
     if LATE_FILESYSTEM
-        .register(system_handle, driver, "RustFsSystem", "rustfs")
+        .register(system_handle, driver, "RustFsSystem", "rustfs", volume_uuid)
         .is_err()
     {
         // Registered once per boot; a refusal is a logic error. The
@@ -465,6 +465,7 @@ pub fn register_writable_state(
         cached(driver, ROOT_VOLUME_HANDLE, pressure, audit),
         "RustFsRoot",
         "rustfs",
+        volume_uuid,
     ) else {
         unavailable(audit, "writable_already_installed");
         return None;

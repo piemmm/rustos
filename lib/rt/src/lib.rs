@@ -1354,10 +1354,13 @@ pub fn volume_attach(request: &[u8]) -> i64 {
 /// D3b).
 ///
 /// `request` is an encoded [`rustos_abi::volume::VolumeDetachRequest`]
-/// (the volume's stable 16-byte identity). Requires `CAP_FS_MOUNT`; only a
-/// volume attached through [`volume_attach`] can be detached, and the
-/// detach fails closed on a flush error rather than discarding uncommitted
-/// data. Returns `0` on success or `-errno`.
+/// (the volume's stable 16-byte identity plus the force byte). Requires
+/// `CAP_FS_MOUNT`; only a volume attached through [`volume_attach`] can be
+/// detached. A plain detach fails closed on a flush error (or an
+/// unavailable, surprise-removed volume) rather than discarding
+/// uncommitted data; a force detach retracts the volume anyway,
+/// deliberately discarding the retained set with its own audit event.
+/// Returns `0` on success or `-errno`.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
 pub fn volume_detach(request: &[u8]) -> i64 {

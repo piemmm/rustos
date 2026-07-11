@@ -221,6 +221,20 @@ impl RetainedWrites {
         self.lost = false;
     }
 
+    /// Deliberately discard everything retained (or the lost mark): the
+    /// audited force-unmount is abandoning the volume's uncommitted data,
+    /// so the journal wipes its buffers and returns to clean. The caller
+    /// reads [`Self::retained_bytes`] first to log what was given up —
+    /// discarding is never silent.
+    pub fn discard_all(&mut self) {
+        for entry in self.blocks.values_mut() {
+            Self::wipe(entry);
+        }
+        self.blocks.clear();
+        self.bytes = 0;
+        self.lost = false;
+    }
+
     /// Abandon retention: wipe and drop everything held and remember that
     /// uncommitted data existed which the journal no longer covers.
     fn mark_lost(&mut self) {
@@ -489,6 +503,30 @@ mod tests {
         device.write_blocks(0, &[1u8; BLOCK_SIZE as usize]).unwrap();
         journal.lock().commit();
         assert!(!journal.lock().is_dirty());
+    }
+
+    #[test]
+    fn a_forced_discard_empties_a_dirty_journal_to_clean() {
+        let (mut device, journal) = journaled(64, small_budget());
+        device.write_blocks(0, &[1u8; BLOCK_SIZE as usize]).unwrap();
+        assert!(journal.lock().is_dirty());
+        journal.lock().discard_all();
+        let journal = journal.lock();
+        assert!(!journal.is_dirty());
+        assert!(!journal.is_lost());
+        assert_eq!(journal.retained_bytes(), 0);
+    }
+
+    #[test]
+    fn a_forced_discard_resets_a_lost_journal_to_clean() {
+        let (mut device, journal) = journaled(8, small_budget());
+        device.device.fail_writes = true;
+        let _ = device.write_blocks(0, &[1u8; BLOCK_SIZE as usize]);
+        assert!(journal.lock().is_lost());
+        journal.lock().discard_all();
+        let journal = journal.lock();
+        assert!(!journal.is_dirty());
+        assert!(!journal.is_lost());
     }
 
     #[test]

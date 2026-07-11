@@ -172,6 +172,7 @@ members = [
     "userland/apps/terminal",
     "userland/apps/top",
     "userland/apps/true",
+    "userland/apps/unmount",
     "userland/apps/useradd",
     "userland/apps/vim",
     "userland/apps/wc",

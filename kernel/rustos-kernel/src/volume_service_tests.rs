@@ -28,6 +28,7 @@ use rustos_abi::blkio::{
 };
 use rustos_abi::driver::block::{Block, BlockGeometry};
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
+use rustos_abi::sysinfo::MountAvailability;
 use rustos_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
 use rustos_abi::{CapabilityId, CapabilityQuery, DriverError, Errno};
 use rustos_caps::CapabilitySet;
@@ -278,7 +279,10 @@ fn an_unwired_service_fails_closed() {
     };
     assert_eq!(service.attach(&attach), Err(Errno::NotImplemented));
     assert_eq!(
-        service.detach(&VolumeDetachRequest { volume_id: [7; 16] }),
+        service.detach(&VolumeDetachRequest {
+            volume_id: [7; 16],
+            force: false
+        }),
         Err(Errno::NotImplemented)
     );
 }
@@ -456,11 +460,22 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
         .expect("read through the mounted volume");
     assert_eq!(&buf[..n], b"runtime volume payload");
 
+    // The mount snapshot reports the live volume as available and carries
+    // its stable identity — the facts the unmount tooling resolves by.
+    let record = FS_SERVICE
+        .mount_snapshot()
+        .into_iter()
+        .find(|r| r.source_bytes() == b"usb1")
+        .expect("the attached volume appears in the mount snapshot");
+    assert_eq!(record.availability(), MountAvailability::Available);
+    assert_eq!(record.volume_id(), expected_identity);
+
     assert_identity_mapped_access();
 
     // --- Detach. ---
     let detach = VolumeDetachRequest {
         volume_id: expected_identity,
+        force: false,
     };
     VOLUME_SERVICE.detach(&detach).expect("detach");
     assert_eq!(
@@ -487,6 +502,7 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
 
     dirty_surprise_removal_scenario(window_ptr, facility);
     clean_surprise_removal_scenario(window_ptr, facility);
+    forced_unmount_of_a_healthy_volume_scenario(window_ptr, facility);
 }
 
 /// The per-scenario facts for [`attach_then_yank`]: the owning task, the
@@ -584,10 +600,47 @@ fn dirty_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
     );
     assert_eq!(
         VOLUME_SERVICE.detach(&VolumeDetachRequest {
-            volume_id: identity
+            volume_id: identity,
+            force: false,
         }),
         Err(Errno::DeviceFault),
         "a plain detach never discards the retained set"
+    );
+    // The mount snapshot says the volume is unavailable-dirty — never a
+    // volume that looks healthy — and still names its identity.
+    let record = FS_SERVICE
+        .mount_snapshot()
+        .into_iter()
+        .find(|r| r.source_bytes() == b"usb2")
+        .expect("the unavailable volume stays in the mount snapshot");
+    assert_eq!(record.availability(), MountAvailability::UnavailableDirty);
+    assert_eq!(record.volume_id(), identity);
+    // The audited force-unmount is the deliberate exit: the retained set
+    // is discarded, the root withdrawn, and the mount retracted.
+    VOLUME_SERVICE
+        .detach(&VolumeDetachRequest {
+            volume_id: identity,
+            force: true,
+        })
+        .expect("force-unmount discards and retracts the unavailable volume");
+    assert_eq!(
+        VOLUME_FOREST.resolve(&identity),
+        None,
+        "the force-unmounted identity no longer resolves"
+    );
+    assert_eq!(
+        FS_SERVICE
+            .read(0, &NoCaps, "/Storage/usb2/hello.txt", 0, &mut buf)
+            .err(),
+        Some(Errno::NotFound),
+        "the force-retracted mount fails closed"
+    );
+    assert!(
+        FS_SERVICE
+            .mount_snapshot()
+            .iter()
+            .all(|r| r.source_bytes() != b"usb2"),
+        "the force-unmounted volume leaves the mount snapshot"
     );
 }
 
@@ -621,9 +674,66 @@ fn clean_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
     );
     assert_eq!(
         VOLUME_SERVICE.detach(&VolumeDetachRequest {
-            volume_id: identity
+            volume_id: identity,
+            force: false,
         }),
         Err(Errno::NotFound),
         "nothing remains to detach"
+    );
+}
+
+/// A force detach of a **healthy** volume commits cleanly — the flush
+/// still runs and nothing is discarded; force only changes the outcome
+/// when a clean commit is impossible (`plans/DEVICES.md` D4b).
+fn forced_unmount_of_a_healthy_volume_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let endpoint_id = 0xB1D0_5E17_0000_0004_u64;
+    let endpoint = register_endpoint(endpoint_id, 0x70_1006);
+    let (image, identity) = fat32_image(0x0D15_C004, b"healthy force payload");
+    let blocks = (image.data.len() / BLOCK_SIZE) as u64;
+    let device = StdArc::new(Mutex::new(ServedDevice {
+        block: image,
+        flushes: 0,
+    }));
+    let stop = StdArc::new(AtomicBool::new(false));
+    let server = serve(
+        StdArc::clone(&endpoint),
+        window_ptr as usize,
+        StdArc::clone(&device),
+        StdArc::clone(&stop),
+    );
+    let (_va, region) = sharedreg::create(facility, TaskId(0x70_0006), 8).expect("region");
+    VOLUME_SERVICE
+        .attach(&VolumeAttachRequest {
+            endpoint: endpoint_id,
+            window: region,
+            first_lba: 0,
+            blocks,
+            fstype: VolumeFsType::Fat32,
+            name: b"usb4",
+        })
+        .expect("attach healthy volume");
+    // Dirty the journal so a discard would be observable, then force.
+    FS_SERVICE
+        .write(0, &NoCaps, "/Storage/usb4/hello.txt", 0, false, b"F")
+        .expect("write dirties the journal");
+    VOLUME_SERVICE
+        .detach(&VolumeDetachRequest {
+            volume_id: identity,
+            force: true,
+        })
+        .expect("a force detach of a healthy volume succeeds");
+    stop.store(true, Ordering::Relaxed);
+    server.join().expect("healthy-force server thread");
+    assert!(
+        device.lock().unwrap().flushes >= 1,
+        "a force detach of a healthy volume still commits the device cache"
+    );
+    assert_eq!(
+        VOLUME_FOREST.resolve(&identity),
+        None,
+        "the force-detached identity no longer resolves"
     );
 }

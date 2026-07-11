@@ -50,8 +50,8 @@ use rustos_abi::{
     DriverHandle, DriverKind, DriverManifest, DriverRegisterReply, Duration64, Errno,
     HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwResource, HwResourceKind, IpcMessageHeader,
     KernelMemoryStats, KeyInput, LibraryScope, LimitKind, LoadAverage, LoadHeader, ManifestHeader,
-    MapFlags, MountListRequest, MountRecord, NamedKeyCode, NeededLibrary, OpenFlags,
-    PointerButtonCode, PointerInput, PortName, ProcessListRequest, ProcessRecord,
+    MapFlags, MountAvailability, MountListRequest, MountRecord, NamedKeyCode, NeededLibrary,
+    OpenFlags, PointerButtonCode, PointerInput, PortName, ProcessListRequest, ProcessRecord,
     ProcessStartHeader, ProcessState, RandomFlags, ResourceLimit, ResourceLimitRecord,
     RxePermission, Segment, Severity, Signal, StdInfoKind, StringSlot, SysinfoQueryId,
     SysinfoRequestHeader, SystemIdentity, Time64, UnlinkFlags, Uptime, UserDirectoryRecord,
@@ -68,8 +68,8 @@ use rustos_abi::{
     LOG_LEVEL_MAX, LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX, MACHINE_ID_LEN,
     MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT, MOD_CTRL,
     MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
-    NANOS_PER_SEC, POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_CPU_NONE, PROCESS_NAME_MAX,
-    PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
+    MOUNT_VOLUME_ID_LEN, NANOS_PER_SEC, POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_CPU_NONE,
+    PROCESS_NAME_MAX, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
     PROCESS_START_MAX_TOTAL_LEN, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES,
     RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ,
     SEG_FLAG_WRITE, SPAWN_UID_INHERIT, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1,
@@ -1465,6 +1465,25 @@ fn sysinfo_emit_record_sizes(out: &mut String) {
     let _ = writeln!(out, "#define ROS_MOUNT_FSTYPE_MAX {MOUNT_FSTYPE_MAX}u");
     let _ = writeln!(
         out,
+        "#define ROS_MOUNT_VOLUME_ID_LEN {MOUNT_VOLUME_ID_LEN}u"
+    );
+    out.push_str("/* Mount availability carried in a mount record (uint8_t). */\n");
+    let mount_availabilities = [
+        ("ROS_MOUNT_AVAILABLE", MountAvailability::Available),
+        (
+            "ROS_MOUNT_UNAVAILABLE_DIRTY",
+            MountAvailability::UnavailableDirty,
+        ),
+        (
+            "ROS_MOUNT_UNAVAILABLE_LOST",
+            MountAvailability::UnavailableLost,
+        ),
+    ];
+    for (name, state) in mount_availabilities {
+        let _ = writeln!(out, "#define {name} ((uint8_t){}u)", state.as_u8());
+    }
+    let _ = writeln!(
+        out,
         "#define ROS_USER_DIRECTORY_NAME_MAX {USER_DIRECTORY_NAME_MAX}u"
     );
     out.push('\n');
@@ -1599,17 +1618,21 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   uint16_t flags;\n\
          } ros_mount_list_request_t;\n\n",
     "/* One mount-table entry. `flags` is a MountFlags bitmap (AGENTS.md sec.5.3);\n\
-         * its flag bits are defined by the filesystem driver ABI. `usage` is the\n\
-         * backing volume's space accounting (all-zero when none is known). The\n\
-         * inline source/target/fstype buffers are valid for their respective\n\
+         * its flag bits are defined by the filesystem driver ABI. `availability` is\n\
+         * a ROS_MOUNT_* state (a surprise-removed volume never reads as healthy).\n\
+         * `usage` is the backing volume's space accounting (all-zero when none is\n\
+         * known). `volume_id` is the volume's stable published identity (all-zero\n\
+         * when the mount has none), the identity a volume_detach request names.\n\
+         * The inline source/target/fstype buffers are valid for their respective\n\
          * *_len byte counts. */\n\
          typedef struct ros_mount_record {\n\
          \x20   uint32_t flags;\n\
          \x20   uint8_t source_len;\n\
          \x20   uint8_t target_len;\n\
          \x20   uint8_t fstype_len;\n\
-         \x20   uint8_t reserved0;\n\
+         \x20   uint8_t availability;\n\
          \x20   ros_volume_stats_t usage;\n\
+         \x20   uint8_t volume_id[ROS_MOUNT_VOLUME_ID_LEN];\n\
          \x20   uint8_t source[ROS_MOUNT_SOURCE_MAX];\n\
          \x20   uint8_t target[ROS_MOUNT_TARGET_MAX];\n\
          \x20   uint8_t fstype[ROS_MOUNT_FSTYPE_MAX];\n\
@@ -3469,7 +3492,7 @@ mod tests {
             (
                 "MountRecord",
                 core::mem::size_of::<MountRecord>(),
-                200,
+                216,
                 core::mem::align_of::<MountRecord>(),
                 8,
             ),
@@ -3737,7 +3760,7 @@ mod tests {
             ("rustos_sysinfo.h", "} ros_load_average_t;", size_of::<LoadAverage>(), 24, align_of::<LoadAverage>(), 4),
             ("rustos_sysinfo.h", "} ros_system_identity_t;", size_of::<SystemIdentity>(), 88, align_of::<SystemIdentity>(), 2),
             ("rustos_sysinfo.h", "} ros_mount_list_request_t;", size_of::<MountListRequest>(), 8, align_of::<MountListRequest>(), 4),
-            ("rustos_sysinfo.h", "} ros_mount_record_t;", size_of::<MountRecord>(), 200, align_of::<MountRecord>(), 8),
+            ("rustos_sysinfo.h", "} ros_mount_record_t;", size_of::<MountRecord>(), 216, align_of::<MountRecord>(), 8),
             ("rustos_driver.h", "} ros_volume_stats_t;", size_of::<VolumeStats>(), 48, align_of::<VolumeStats>(), 8),
             ("rustos_driver.h", "} ros_driver_manifest_t;", size_of::<DriverManifest>(), 140, align_of::<DriverManifest>(), 4),
             ("rustos_driver.h", "} ros_driver_bind_key_t;", size_of::<DriverBindKey>(), 80, align_of::<DriverBindKey>(), 4),

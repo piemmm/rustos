@@ -327,7 +327,11 @@ machinery `ps` uses — the `Transport`/`Output` seams, the request framing,
 and the generic `offset`/`limit` page walk — so none of it is copied
 (`AGENTS.md` §2.2). The shared renderer prints one familiar
 `source on target type fstype (options)` line per mount; the option list
-opens with `ro`/`rw` and then names each restriction in force. The query
+opens with `ro`/`rw` and then names each restriction in force, and a
+surprise-removed volume carries a trailing ` [unavailable-dirty]` /
+` [unavailable-lost]` marker (`plans/DEVICES.md` D4b) — additive, so a
+healthy volume's line keeps the classic shape while a dead one never
+looks healthy. The query
 is ungated: the mount table is system-wide and secret-free, so any task
 may read it (`AGENTS.md` §16.6).
 
@@ -366,6 +370,65 @@ attach request reaching the mounter with the right fields, and the denied
 attach mapping to `MountError::Mount`. The shared page walk and the
 `source on target type fstype (options)` rendering carry their own unit
 tests in `lib/procinfo` (`cargo test -p rustos-procinfo`).
+
+## `unmount` — detach a runtime-attached volume (`userland/apps/unmount`)
+
+`rustos-unmount` is `mount`'s counterpart (`plans/DEVICES.md` D4b):
+`unmount NAME` takes the volume mounted under `NAME` out of service.
+`NAME` is the volume's catalog name (`usb1`) or its mount-point path
+(`/Storage/usb1`), resolved through the same ungated `sysinfo-v1`
+`MOUNT_LIST` query the other tools use — whose records carry each
+mount's stable 16-byte volume identity and its availability — and the
+resolved identity is handed to the kernel's `volume_detach` path
+through the injected `Detacher` seam. The kernel is the policy point
+(`AGENTS.md` §5.4): it requires `CAP_FS_MOUNT`, flushes the filesystem
+and the device, retracts the mount, withdraws the durable `id::` root,
+and audits every decision. A successful detach writes nothing, matching
+the established `umount` behaviour (`AGENTS.md` §16.7).
+
+### Grammar
+
+```
+unmount [-f | --force] [--] NAME
+
+  NAME          the volume to detach (catalog name or mount point)
+  -f, --force   force-unmount: discard retained uncommitted data
+  -?, --help    show the command's own short help
+```
+
+### Force-unmount — the audited exit for an unavailable volume
+
+A surprise-removed volume (`unavailable-dirty`/`unavailable-lost` in
+the mount listing) refuses a plain detach: its retained uncommitted
+writes are held for the verified re-insert. `--force` is the
+deliberate, separately-audited exit — the kernel discards the retained
+set, retracts the volume, and logs the data loss with its own event
+(`fs.hotplug.force_unmount`, carrying the discarded byte count and the
+reason a clean commit was impossible). On a healthy volume `--force`
+still commits cleanly; nothing is discarded when the flush succeeds.
+When a plain detach is refused because the volume is unavailable, the
+tool spells out the `--force` consequence on standard error and emits
+an fd-3 `suggestion` record (`fs.volume_unavailable_force_required`,
+`safe_to_autorun: false` — `AGENTS.md` §20.1), additive and ignorable.
+
+### Fail closed
+
+- An unknown option or a number of operands other than one is a usage
+  error (exit `2`).
+- A name matching no mount is `NotFound`; a matched mount with no
+  detachable volume identity (the permanent boot volumes, the in-RAM
+  view bindings) is `NotDetachable` — the tool never sends the kernel a
+  nil identity or guesses a volume.
+- A refused detach surfaces the kernel's exact `Errno`; a listing
+  failure is a hard `Service` error, never a partially-resolved guess.
+  There is no panic (`AGENTS.md` §2.9).
+
+Manifest: `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS` + `CAP_FS_MOUNT`.
+`cargo test -p rustos-unmount` drives the parser, the resolver (catalog
+name, mount-point path, unknown name, non-detachable mounts), the
+force flag reaching the kernel, the refusal paths with and without the
+fd-3 suggestion, the service-failure path, and the thirteen-locale
+`OPTIONS` pinning of the bundled `Help/` documents.
 
 ## `df` — report filesystem space usage (`userland/apps/df`)
 

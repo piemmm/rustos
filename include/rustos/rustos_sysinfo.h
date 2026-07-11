@@ -66,6 +66,11 @@
 #define ROS_MOUNT_SOURCE_MAX 64u
 #define ROS_MOUNT_TARGET_MAX 64u
 #define ROS_MOUNT_FSTYPE_MAX 16u
+#define ROS_MOUNT_VOLUME_ID_LEN 16u
+/* Mount availability carried in a mount record (uint8_t). */
+#define ROS_MOUNT_AVAILABLE ((uint8_t)0u)
+#define ROS_MOUNT_UNAVAILABLE_DIRTY ((uint8_t)1u)
+#define ROS_MOUNT_UNAVAILABLE_LOST ((uint8_t)2u)
 #define ROS_USER_DIRECTORY_NAME_MAX 32u
 
 /* Packed little-endian wire size of each sysinfo record type, in bytes. */
@@ -77,7 +82,7 @@
 #define ROS_LOAD_AVERAGE_WIRE_LEN 24u
 #define ROS_SYSTEM_IDENTITY_WIRE_LEN 88u
 #define ROS_MOUNT_LIST_REQUEST_WIRE_LEN 8u
-#define ROS_MOUNT_RECORD_WIRE_LEN 200u
+#define ROS_MOUNT_RECORD_WIRE_LEN 216u
 #define ROS_RESOURCE_LIMIT_RECORD_WIRE_LEN 32u
 #define ROS_USER_DIRECTORY_REQUEST_WIRE_LEN 8u
 #define ROS_USER_DIRECTORY_RECORD_WIRE_LEN 40u
@@ -169,17 +174,21 @@ typedef struct ros_mount_list_request {
 } ros_mount_list_request_t;
 
 /* One mount-table entry. `flags` is a MountFlags bitmap (AGENTS.md sec.5.3);
-* its flag bits are defined by the filesystem driver ABI. `usage` is the
-* backing volume's space accounting (all-zero when none is known). The
-* inline source/target/fstype buffers are valid for their respective
+* its flag bits are defined by the filesystem driver ABI. `availability` is
+* a ROS_MOUNT_* state (a surprise-removed volume never reads as healthy).
+* `usage` is the backing volume's space accounting (all-zero when none is
+* known). `volume_id` is the volume's stable published identity (all-zero
+* when the mount has none), the identity a volume_detach request names.
+* The inline source/target/fstype buffers are valid for their respective
 * *_len byte counts. */
 typedef struct ros_mount_record {
     uint32_t flags;
     uint8_t source_len;
     uint8_t target_len;
     uint8_t fstype_len;
-    uint8_t reserved0;
+    uint8_t availability;
     ros_volume_stats_t usage;
+    uint8_t volume_id[ROS_MOUNT_VOLUME_ID_LEN];
     uint8_t source[ROS_MOUNT_SOURCE_MAX];
     uint8_t target[ROS_MOUNT_TARGET_MAX];
     uint8_t fstype[ROS_MOUNT_FSTYPE_MAX];

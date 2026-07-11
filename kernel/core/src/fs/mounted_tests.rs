@@ -171,9 +171,9 @@ fn rebased_submounts_route_to_their_backing_subtree_and_handle() {
 
     let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs).expect("install vfs");
-    cell.register(h_shared, shared, "shared", "memfs")
+    cell.register(h_shared, shared, "shared", "memfs", [0u8; 16])
         .expect("register shared");
-    cell.register(h_other, other, "other", "memfs")
+    cell.register(h_other, other, "other", "memfs", [0u8; 16])
         .expect("register other");
     let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");
@@ -290,11 +290,11 @@ fn readdir_merges_direct_child_mounts_into_the_parent_listing() {
 
     let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs).expect("install vfs");
-    cell.register(h_parent, parent, "root", "memfs")
+    cell.register(h_parent, parent, "root", "memfs", [0u8; 16])
         .expect("register parent");
-    cell.register(h_usb, usb, "usb1", "memfs")
+    cell.register(h_usb, usb, "usb1", "memfs", [0u8; 16])
         .expect("register usb");
-    cell.register(h_dup, driver(), "dup", "memfs")
+    cell.register(h_dup, driver(), "dup", "memfs", [0u8; 16])
         .expect("register dup");
     let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");
@@ -348,7 +348,7 @@ fn service(
         // `vfs`); register it under that same handle so the service routes
         // operations on `/Storage/vol/...` to it.
         let handle = DriverHandle::from_raw(9).expect("non-zero handle");
-        cell.register(handle, driver(), "vol", "memfs")
+        cell.register(handle, driver(), "vol", "memfs", [0u8; 16])
             .expect("register driver");
     }
     let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
@@ -824,9 +824,9 @@ fn an_ordinary_user_lists_the_system_owned_read_only_mount() {
 
     let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs).expect("install vfs");
-    cell.register(system_handle, system, "system", "memfs")
+    cell.register(system_handle, system, "system", "memfs", [0u8; 16])
         .expect("register system");
-    cell.register(root_handle, rootvol, "root", "memfs")
+    cell.register(root_handle, rootvol, "root", "memfs", [0u8; 16])
         .expect("register root");
     let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");

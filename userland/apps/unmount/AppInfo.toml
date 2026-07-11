@@ -1,0 +1,17 @@
+# Signed-AppInfo manifest source for the `unmount` command app
+# (plans/APPS.md deliverable 8, plans/DEVICES.md D4b). Discovered by the
+# build's app-bundle composer; the capability list is the bundle's
+# request, intersected with the launching user's grants.
+# CAP_CONSOLE_WRITE covers the inherited standard output/error streams;
+# CAP_FS_ACCESS reads the tool's own bundle's Help/ documents through
+# the secured VFS; CAP_FS_MOUNT is the tool's job — the kernel's
+# volume_detach path requires the mount authority and re-checks it on
+# every call, so the tool holds exactly the privilege the operation
+# needs and nothing more. The mount table it resolves names against
+# comes from the ungated sysinfo-v1 MOUNT_LIST query served by
+# sysinfod. It reads no standard input.
+id = "os.rustos.unmount"
+name = "unmount"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_FS_MOUNT"]

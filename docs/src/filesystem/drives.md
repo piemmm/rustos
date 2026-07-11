@@ -464,7 +464,10 @@ event IDs (`AGENTS.md` §5.4, §19.4): `fs.root.{discovered,attached}`,
 `fs.raw_device.open.{allow,deny}`, `fs.hotplug.root_{added,removed}`,
 `fs.hotplug.surprise_removal.{clean,dirty,lost}` (a vanished device with
 nothing uncommitted / with its uncommitted writes retained / after retention
-was abandoned), and `fs.conflict.alias_ambiguous`. No secret, key,
+was abandoned), `fs.hotplug.force_unmount` (a volume force-unmounted, its
+retained uncommitted writes deliberately discarded — the event carries the
+discarded byte count and the reason a clean commit was impossible), and
+`fs.conflict.alias_ambiguous`. No secret, key,
 capability-token value, or private path content beyond the audit subsystem's
 policy set is logged.
 

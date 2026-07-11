@@ -500,7 +500,9 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use rustos_abi::driver::filesystem::{MountFlags, VolumeStats};
-    use rustos_abi::sysinfo::{MountListRequest, MountRecord, SysinfoRequestHeader};
+    use rustos_abi::sysinfo::{
+        MountAvailability, MountListRequest, MountRecord, SysinfoRequestHeader,
+    };
     use rustos_abi::Errno;
     use rustos_help::{HelpSource, SourceError};
     use rustos_procinfo::Transport;
@@ -640,6 +642,8 @@ mod tests {
             fstype.as_bytes(),
             MountFlags::default(),
             stats,
+            MountAvailability::Available,
+            [0u8; 16],
         )
         .expect("record")
     }

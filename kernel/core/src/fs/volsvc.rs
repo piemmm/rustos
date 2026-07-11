@@ -83,7 +83,10 @@ mod tests {
             Err(Errno::NotImplemented)
         );
         assert_eq!(
-            NULL_VOLUME_SERVICE.detach(&VolumeDetachRequest { volume_id: [7; 16] }),
+            NULL_VOLUME_SERVICE.detach(&VolumeDetachRequest {
+                volume_id: [7; 16],
+                force: false
+            }),
             Err(Errno::NotImplemented)
         );
     }

@@ -1670,6 +1670,57 @@ pub const MOUNT_TARGET_MAX: usize = 64;
 /// keeps a hostile reply from claiming an unbounded type string.
 pub const MOUNT_FSTYPE_MAX: usize = 16;
 
+/// Byte length of the stable volume identity a [`MountRecord`] carries —
+/// the same 16-byte identity the volume forest publishes for `id::` paths
+/// and a `volume_detach` request names. All-zero when the mount has no
+/// published volume identity (the in-RAM layout mounts).
+pub const MOUNT_VOLUME_ID_LEN: usize = 16;
+
+/// A mounted volume's availability, as reported by
+/// [`SysinfoQueryId::MOUNT_LIST`] (`plans/DEVICES.md` D4).
+///
+/// A surprise-removed volume stays visible in the mount table — its root,
+/// alias, and mount point remain published while its retained uncommitted
+/// data awaits verified re-insert or an explicit force-unmount — so the
+/// listing must say it is not serving I/O rather than show a volume that
+/// looks healthy.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum MountAvailability {
+    /// The backing volume is live and serving I/O.
+    Available = 0,
+    /// The serving device vanished with uncommitted writes retained for
+    /// verified re-insert or an explicit force-unmount; every operation
+    /// fails closed with a device fault.
+    UnavailableDirty = 1,
+    /// The serving device vanished after write retention was abandoned:
+    /// uncommitted data existed that is not held.
+    UnavailableLost = 2,
+}
+
+impl MountAvailability {
+    /// The wire byte for this availability state.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Recover an availability state from its wire byte.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] if `value` names no known state (fail
+    /// closed — an unknown state is never presumed available).
+    pub const fn from_u8(value: u8) -> Result<Self, Errno> {
+        match value {
+            0 => Ok(Self::Available),
+            1 => Ok(Self::UnavailableDirty),
+            2 => Ok(Self::UnavailableLost),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
 /// Request payload for [`SysinfoQueryId::MOUNT_LIST`].
 ///
 /// Structurally parallel to [`ProcessListRequest`] but a distinct frozen
@@ -1743,6 +1794,13 @@ impl MountListRequest {
 /// A mount with no live backing volume (or one whose driver reports no
 /// accounting) carries an all-zero [`VolumeStats`]: zero total blocks is the
 /// honest "no capacity known" answer a consumer skips, never a guess.
+///
+/// Each record also reports the volume's [`MountAvailability`] — so a
+/// surprise-removed volume never masquerades as healthy — and its stable
+/// 16-byte volume identity (all-zero when none is published), the same
+/// identity a `volume_detach` request names, so the unmount tooling can
+/// resolve a catalog name to the volume it detaches without a second query
+/// surface.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct MountRecord {
@@ -1750,7 +1808,9 @@ pub struct MountRecord {
     source_len: u8,
     target_len: u8,
     fstype_len: u8,
+    availability: MountAvailability,
     usage: VolumeStats,
+    volume_id: [u8; MOUNT_VOLUME_ID_LEN],
     source: [u8; MOUNT_SOURCE_MAX],
     target: [u8; MOUNT_TARGET_MAX],
     fstype: [u8; MOUNT_FSTYPE_MAX],
@@ -1759,18 +1819,23 @@ pub struct MountRecord {
 impl MountRecord {
     /// Encoded size of a [`MountRecord`] on the wire.
     ///
-    /// `4` bytes of flags, three length bytes plus one reserved pad, the
-    /// usage block (`block_size(4)` + reserved pad `(4)` + five `u64`
-    /// counts), then the three fixed-capacity string buffers.
+    /// `4` bytes of flags, three length bytes plus the availability byte,
+    /// the usage block (`block_size(4)` + reserved pad `(4)` + five `u64`
+    /// counts), the 16-byte volume identity, then the three fixed-capacity
+    /// string buffers.
     pub const WIRE_LEN: usize =
         Self::SOURCE_OFFSET + MOUNT_SOURCE_MAX + MOUNT_TARGET_MAX + MOUNT_FSTYPE_MAX;
 
     const USAGE_OFFSET: usize = 8;
-    const SOURCE_OFFSET: usize = Self::USAGE_OFFSET + 48;
+    const VOLUME_ID_OFFSET: usize = Self::USAGE_OFFSET + 48;
+    const SOURCE_OFFSET: usize = Self::VOLUME_ID_OFFSET + MOUNT_VOLUME_ID_LEN;
     const TARGET_OFFSET: usize = Self::SOURCE_OFFSET + MOUNT_SOURCE_MAX;
     const FSTYPE_OFFSET: usize = Self::TARGET_OFFSET + MOUNT_TARGET_MAX;
 
     /// Build a record from its parts.
+    ///
+    /// `volume_id` is the volume's stable published identity, or all-zero
+    /// when the mount has none (the in-RAM layout mounts).
     ///
     /// # Errors
     ///
@@ -1784,6 +1849,8 @@ impl MountRecord {
         fstype: &[u8],
         flags: MountFlags,
         usage: VolumeStats,
+        availability: MountAvailability,
+        volume_id: [u8; MOUNT_VOLUME_ID_LEN],
     ) -> Result<Self, Errno> {
         if source.len() > MOUNT_SOURCE_MAX
             || target.len() > MOUNT_TARGET_MAX
@@ -1802,7 +1869,9 @@ impl MountRecord {
             source_len,
             target_len,
             fstype_len,
+            availability,
             usage,
+            volume_id,
             source: [0u8; MOUNT_SOURCE_MAX],
             target: [0u8; MOUNT_TARGET_MAX],
             fstype: [0u8; MOUNT_FSTYPE_MAX],
@@ -1817,6 +1886,19 @@ impl MountRecord {
     #[must_use]
     pub fn flags(&self) -> MountFlags {
         self.flags
+    }
+
+    /// The backing volume's availability.
+    #[must_use]
+    pub fn availability(&self) -> MountAvailability {
+        self.availability
+    }
+
+    /// The volume's stable published identity, or all-zero when the mount
+    /// has none.
+    #[must_use]
+    pub fn volume_id(&self) -> [u8; MOUNT_VOLUME_ID_LEN] {
+        self.volume_id
     }
 
     /// The volume's space accounting (all-zero when no backing volume
@@ -1852,12 +1934,15 @@ impl MountRecord {
         out[4] = self.source_len;
         out[5] = self.target_len;
         out[6] = self.fstype_len;
+        out[7] = self.availability.as_u8();
         put_u32(&mut out, Self::USAGE_OFFSET, self.usage.block_size);
         put_u64(&mut out, Self::USAGE_OFFSET + 8, self.usage.total_blocks);
         put_u64(&mut out, Self::USAGE_OFFSET + 16, self.usage.free_blocks);
         put_u64(&mut out, Self::USAGE_OFFSET + 24, self.usage.avail_blocks);
         put_u64(&mut out, Self::USAGE_OFFSET + 32, self.usage.files);
         put_u64(&mut out, Self::USAGE_OFFSET + 40, self.usage.files_free);
+        out[Self::VOLUME_ID_OFFSET..Self::VOLUME_ID_OFFSET + MOUNT_VOLUME_ID_LEN]
+            .copy_from_slice(&self.volume_id);
         out[Self::SOURCE_OFFSET..Self::SOURCE_OFFSET + MOUNT_SOURCE_MAX]
             .copy_from_slice(&self.source);
         out[Self::TARGET_OFFSET..Self::TARGET_OFFSET + MOUNT_TARGET_MAX]
@@ -1872,17 +1957,19 @@ impl MountRecord {
     /// Returns:
     /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
     /// * [`Errno::OutOfRange`] if the flags word sets a bit outside the
-    ///   known [`MountFlags`] mask, the reserved pad bytes are non-zero, or
-    ///   the usage block is internally inconsistent (available exceeding
-    ///   free, or free exceeding total — a hostile reply, refused whole).
+    ///   known [`MountFlags`] mask, the availability byte names no known
+    ///   state, the reserved pad bytes are non-zero, or the usage block is
+    ///   internally inconsistent (available exceeding free, or free
+    ///   exceeding total — a hostile reply, refused whole).
     /// * [`Errno::LengthOutOfRange`] if any length byte exceeds its buffer.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
-        if bytes[7] != 0 || read_u32(bytes, Self::USAGE_OFFSET + 4) != 0 {
+        if read_u32(bytes, Self::USAGE_OFFSET + 4) != 0 {
             return Err(Errno::OutOfRange);
         }
+        let availability = MountAvailability::from_u8(bytes[7])?;
         let flags = MountFlags::from_bits(read_u32(bytes, 0)).map_err(|_| Errno::OutOfRange)?;
         let source_len = bytes[4];
         let target_len = bytes[5];
@@ -1904,9 +1991,13 @@ impl MountRecord {
         if usage.avail_blocks > usage.free_blocks || usage.free_blocks > usage.total_blocks {
             return Err(Errno::OutOfRange);
         }
+        let mut volume_id = [0u8; MOUNT_VOLUME_ID_LEN];
         let mut source = [0u8; MOUNT_SOURCE_MAX];
         let mut target = [0u8; MOUNT_TARGET_MAX];
         let mut fstype = [0u8; MOUNT_FSTYPE_MAX];
+        volume_id.copy_from_slice(
+            &bytes[Self::VOLUME_ID_OFFSET..Self::VOLUME_ID_OFFSET + MOUNT_VOLUME_ID_LEN],
+        );
         source.copy_from_slice(&bytes[Self::SOURCE_OFFSET..Self::SOURCE_OFFSET + MOUNT_SOURCE_MAX]);
         target.copy_from_slice(&bytes[Self::TARGET_OFFSET..Self::TARGET_OFFSET + MOUNT_TARGET_MAX]);
         fstype.copy_from_slice(&bytes[Self::FSTYPE_OFFSET..Self::FSTYPE_OFFSET + MOUNT_FSTYPE_MAX]);
@@ -1915,7 +2006,9 @@ impl MountRecord {
             source_len,
             target_len,
             fstype_len,
+            availability,
             usage,
+            volume_id,
             source,
             target,
             fstype,
@@ -2016,15 +2109,15 @@ pub const RESOURCE_LIMITS_REPORT_LEN: usize = ResourceLimitRecord::WIRE_LEN * Li
 mod tests {
     use super::{
         encoded_query_table, spec_for, CpuTimeListRequest, CpuTimeRecord, HardwareTreeRequest,
-        KernelMemoryStats, LoadAverage, MountListRequest, MountRecord, ProcessListRequest,
-        ProcessRecord, ProcessState, ResourceLimitRecord, SeatListRequest, SeatRecord,
-        SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord,
-        UserDirectoryRequest, VolumeStats, ENCODED_QUERY_TABLE, ENCODED_QUERY_TABLE_LEN,
-        HOSTNAME_MAX, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX,
-        MOUNT_TARGET_MAX, PROCESS_CPU_NONE, PROCESS_NAME_MAX, RESOURCE_LIMITS_REPORT_LEN,
-        SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES, SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN,
-        SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
-        USER_DIRECTORY_NAME_MAX,
+        KernelMemoryStats, LoadAverage, MountAvailability, MountListRequest, MountRecord,
+        ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord, SeatListRequest,
+        SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+        UserDirectoryRecord, UserDirectoryRequest, VolumeStats, ENCODED_QUERY_TABLE,
+        ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX,
+        MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_CPU_NONE, PROCESS_NAME_MAX,
+        RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES,
+        SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
+        SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, USER_DIRECTORY_NAME_MAX,
     };
     use crate::driver::filesystem::MountFlags;
     use crate::origin::ProcId;
@@ -2729,15 +2822,38 @@ mod tests {
             files: 0,
             files_free: 0,
         };
-        let rec =
-            MountRecord::new(b"/Storage/data", b"/Storage/data", b"rustfs", flags, usage).unwrap();
+        let volume_id = [0xA5u8; 16];
+        let rec = MountRecord::new(
+            b"/Storage/data",
+            b"/Storage/data",
+            b"rustfs",
+            flags,
+            usage,
+            MountAvailability::UnavailableDirty,
+            volume_id,
+        )
+        .unwrap();
         assert_eq!(rec.source_bytes(), b"/Storage/data");
         assert_eq!(rec.target_bytes(), b"/Storage/data");
         assert_eq!(rec.fstype_bytes(), b"rustfs");
         assert_eq!(rec.flags(), flags);
         assert_eq!(rec.usage(), usage);
+        assert_eq!(rec.availability(), MountAvailability::UnavailableDirty);
+        assert_eq!(rec.volume_id(), volume_id);
         let decoded = MountRecord::from_bytes(&rec.to_le_bytes()).unwrap();
         assert_eq!(decoded, rec);
+    }
+
+    #[test]
+    fn mount_availability_round_trips_and_rejects_unknown() {
+        for state in [
+            MountAvailability::Available,
+            MountAvailability::UnavailableDirty,
+            MountAvailability::UnavailableLost,
+        ] {
+            assert_eq!(MountAvailability::from_u8(state.as_u8()), Ok(state));
+        }
+        assert_eq!(MountAvailability::from_u8(3), Err(Errno::OutOfRange));
     }
 
     #[test]
@@ -2749,7 +2865,9 @@ mod tests {
                 b"/",
                 b"rustfs",
                 MountFlags::default(),
-                VolumeStats::default()
+                VolumeStats::default(),
+                MountAvailability::Available,
+                [0u8; 16],
             ),
             Err(Errno::LengthOutOfRange)
         );
@@ -2760,7 +2878,9 @@ mod tests {
                 &long_target,
                 b"rustfs",
                 MountFlags::default(),
-                VolumeStats::default()
+                VolumeStats::default(),
+                MountAvailability::Available,
+                [0u8; 16],
             ),
             Err(Errno::LengthOutOfRange)
         );
@@ -2771,7 +2891,9 @@ mod tests {
                 b"/",
                 &long_type,
                 MountFlags::default(),
-                VolumeStats::default()
+                VolumeStats::default(),
+                MountAvailability::Available,
+                [0u8; 16],
             ),
             Err(Errno::LengthOutOfRange)
         );
@@ -2794,7 +2916,9 @@ mod tests {
                 b"/",
                 b"rustfs",
                 MountFlags::default(),
-                free_over_total
+                free_over_total,
+                MountAvailability::Available,
+                [0u8; 16],
             ),
             Err(Errno::OutOfRange)
         );
@@ -2813,7 +2937,9 @@ mod tests {
                 b"/",
                 b"rustfs",
                 MountFlags::default(),
-                avail_over_free
+                avail_over_free,
+                MountAvailability::Available,
+                [0u8; 16],
             ),
             Err(Errno::OutOfRange)
         );
@@ -2824,6 +2950,8 @@ mod tests {
             b"rustfs",
             MountFlags::default(),
             VolumeStats::default(),
+            MountAvailability::Available,
+            [0u8; 16],
         )
         .unwrap();
         let mut bytes = ok.to_le_bytes();
@@ -2844,6 +2972,8 @@ mod tests {
             b"rustfs",
             MountFlags::default(),
             VolumeStats::default(),
+            MountAvailability::Available,
+            [0u8; 16],
         )
         .unwrap();
         assert_eq!(
@@ -2854,9 +2984,9 @@ mod tests {
         let mut bytes = rec.to_le_bytes();
         bytes[0] = 0xFF;
         assert_eq!(MountRecord::from_bytes(&bytes), Err(Errno::OutOfRange));
-        // Reserved pad byte non-zero.
+        // An availability byte naming no known state.
         let mut bytes = rec.to_le_bytes();
-        bytes[7] = 1;
+        bytes[7] = 3;
         assert_eq!(MountRecord::from_bytes(&bytes), Err(Errno::OutOfRange));
         // A length byte beyond its buffer.
         let mut bytes = rec.to_le_bytes();

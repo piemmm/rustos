@@ -78,8 +78,9 @@ const ATTACH_FIXED_LEN: usize = 8 + 8 + 8 + 8 + 1 + 1;
 /// Maximum encoded length of a [`VolumeAttachRequest`].
 pub const VOLUME_ATTACH_MAX_LEN: usize = ATTACH_FIXED_LEN + VOLUME_NAME_MAX;
 
-/// Encoded length of a [`VolumeDetachRequest`]: the bare volume identity.
-pub const VOLUME_DETACH_LEN: usize = VOLUME_ID_LEN;
+/// Encoded length of a [`VolumeDetachRequest`]: the volume identity plus
+/// the force byte.
+pub const VOLUME_DETACH_LEN: usize = VOLUME_ID_LEN + 1;
 
 /// `true` if `byte` may appear in a volume catalog name.
 ///
@@ -210,11 +211,22 @@ impl<'a> VolumeAttachRequest<'a> {
 }
 
 /// One runtime volume-detach request: take the volume published under
-/// `volume_id` out of service (flush, unmount, unpublish its root).
+/// `volume_id` out of service.
+///
+/// A plain detach (`force == false`) flushes first and fails closed — a
+/// volume whose uncommitted data cannot be committed (a flush failure, or
+/// a surprise-removed *unavailable* volume) stays attached. A **force**
+/// detach (`force == true`) is the deliberate, separately-audited
+/// force-unmount: it retracts the volume even when nothing can be
+/// committed, discarding any retained uncommitted writes, and the data
+/// loss is logged with its own audit event.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct VolumeDetachRequest {
     /// The volume's stable 16-byte identity, as the forest published it.
     pub volume_id: [u8; VOLUME_ID_LEN],
+    /// `true` for the audited force-unmount that discards retained
+    /// uncommitted data rather than failing closed.
+    pub force: bool,
 }
 
 impl VolumeDetachRequest {
@@ -233,7 +245,8 @@ impl VolumeDetachRequest {
         if buf.len() < VOLUME_DETACH_LEN {
             return Err(Errno::BufferTooSmall);
         }
-        buf[..VOLUME_DETACH_LEN].copy_from_slice(&self.volume_id);
+        buf[..VOLUME_ID_LEN].copy_from_slice(&self.volume_id);
+        buf[VOLUME_ID_LEN] = u8::from(self.force);
         Ok(VOLUME_DETACH_LEN)
     }
 
@@ -244,17 +257,24 @@ impl VolumeDetachRequest {
     /// * [`Errno::LengthOutOfRange`] if `bytes` is not exactly
     ///   [`VOLUME_DETACH_LEN`] bytes.
     /// * [`Errno::OutOfRange`] for the reserved all-zero identity (fail
-    ///   closed; it can never name a published volume).
+    ///   closed; it can never name a published volume), or a force byte
+    ///   that is neither `0` nor `1` (wire corruption is refused, never
+    ///   guessed at).
     pub fn decode(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() != VOLUME_DETACH_LEN {
             return Err(Errno::LengthOutOfRange);
         }
         let mut volume_id = [0u8; VOLUME_ID_LEN];
-        volume_id.copy_from_slice(bytes);
+        volume_id.copy_from_slice(&bytes[..VOLUME_ID_LEN]);
         if volume_id == [0u8; VOLUME_ID_LEN] {
             return Err(Errno::OutOfRange);
         }
-        Ok(Self { volume_id })
+        let force = match bytes[VOLUME_ID_LEN] {
+            0 => false,
+            1 => true,
+            _ => return Err(Errno::OutOfRange),
+        };
+        Ok(Self { volume_id, force })
     }
 }
 
@@ -378,23 +398,46 @@ mod tests {
 
     #[test]
     fn detach_round_trips_and_rejects_nil_and_wrong_lengths() {
-        let req = VolumeDetachRequest { volume_id: [7; 16] };
-        let mut buf = [0u8; VOLUME_DETACH_LEN];
-        let n = req.encode(&mut buf).expect("encodes");
-        assert_eq!(n, VOLUME_DETACH_LEN);
-        assert_eq!(VolumeDetachRequest::decode(&buf[..n]), Ok(req));
+        for force in [false, true] {
+            let req = VolumeDetachRequest {
+                volume_id: [7; 16],
+                force,
+            };
+            let mut buf = [0u8; VOLUME_DETACH_LEN];
+            let n = req.encode(&mut buf).expect("encodes");
+            assert_eq!(n, VOLUME_DETACH_LEN);
+            assert_eq!(VolumeDetachRequest::decode(&buf[..n]), Ok(req));
+        }
 
+        let mut buf = [0u8; VOLUME_DETACH_LEN];
         assert_eq!(
-            VolumeDetachRequest { volume_id: [0; 16] }.encode(&mut buf),
+            VolumeDetachRequest {
+                volume_id: [0; 16],
+                force: false,
+            }
+            .encode(&mut buf),
             Err(Errno::OutOfRange)
         );
         assert_eq!(
             VolumeDetachRequest::decode(&[0u8; VOLUME_DETACH_LEN]),
             Err(Errno::OutOfRange)
         );
+        let n = VolumeDetachRequest {
+            volume_id: [7; 16],
+            force: true,
+        }
+        .encode(&mut buf)
+        .expect("encodes");
         assert_eq!(
-            VolumeDetachRequest::decode(&buf[..VOLUME_DETACH_LEN - 1]),
+            VolumeDetachRequest::decode(&buf[..n - 1]),
             Err(Errno::LengthOutOfRange)
+        );
+        // A force byte outside {0, 1} is wire corruption, refused whole.
+        let mut bad = buf;
+        bad[VOLUME_ID_LEN] = 2;
+        assert_eq!(
+            VolumeDetachRequest::decode(&bad[..n]),
+            Err(Errno::OutOfRange)
         );
     }
 }

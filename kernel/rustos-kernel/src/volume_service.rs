@@ -47,8 +47,12 @@
 //!   and the event says so — uncommitted data existed that is not held.
 //!
 //! A plain `volume_detach` of an unavailable volume is refused: discarding
-//! the retained set is the deliberate, separately-audited force-unmount
-//! operation, never an implicit side effect.
+//! the retained set is the deliberate, separately-audited **force-unmount**
+//! (`plans/DEVICES.md` D4b), never an implicit side effect. A force detach
+//! (`VolumeDetachRequest::force`) still commits a healthy volume cleanly
+//! when it can; only when nothing can be committed — the volume is
+//! unavailable, or its flush fails — does it discard the retained set,
+//! logging the deliberate data loss with its own event id.
 
 use alloc::format;
 use alloc::string::String;
@@ -61,6 +65,7 @@ use rustos_abi::driver::filesystem::{
     DirEntry, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, MountFlags,
     NodeId, NodeInfo, NodeKind, NodeSecurity, VolumeStats,
 };
+use rustos_abi::sysinfo::MountAvailability;
 use rustos_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
 use rustos_abi::{DriverError, DriverHandle, Errno};
 use rustos_drv_fs_ext4::Ext4;
@@ -115,6 +120,12 @@ const VOLUME_SURPRISE_REMOVED_DIRTY: EventId = EventId(4177);
 /// abandoned (budget/pressure refusal or a failed write): uncommitted
 /// data existed that is **not** held. The volume is unavailable-lost.
 const VOLUME_SURPRISE_REMOVED_LOST: EventId = EventId(4178);
+
+/// Audit event: a volume was force-unmounted, deliberately discarding
+/// whatever uncommitted data its journal retained (or had already lost).
+/// Carries the discarded byte count and the reason a clean commit was
+/// impossible (drives.md `fs.hotplug.force_unmount`).
+const VOLUME_FORCE_UNMOUNTED: EventId = EventId(4179);
 
 /// Base of the runtime volume mount-handle space (`"VOL"` tagged). Fresh
 /// handles are minted from here, disjoint from the boot volumes' fixed
@@ -582,7 +593,7 @@ impl VolumeService for RuntimeVolumeService {
         // failure unwinds everything already done, so a refused attach
         // leaves no trace.
         if LATE_FILESYSTEM
-            .register(handle, opened.driver, name, opened.fstype)
+            .register(handle, opened.driver, name, opened.fstype, opened.identity)
             .is_err()
         {
             let _ = vfs.mounts_write().unmount(&path);
@@ -672,48 +683,34 @@ impl VolumeService for RuntimeVolumeService {
 
         // A surprise-removed volume never detaches implicitly: discarding
         // its retained (or already lost) uncommitted data is the
-        // deliberate, separately-audited force-unmount operation.
-        match availability {
-            Availability::Available => {}
+        // deliberate, separately-audited force-unmount operation. A force
+        // detach still commits a healthy volume cleanly when it can; only
+        // when nothing can be committed does it discard.
+        let commit_refusal = match availability {
+            Availability::Available => {
+                commit_for_detach(handle, endpoint, window, &journal, audit).err()
+            }
             Availability::UnavailableDirty => {
-                return Err(refused("volume_unavailable_dirty", Errno::DeviceFault));
+                Some(("volume_unavailable_dirty", Errno::DeviceFault))
             }
-            Availability::UnavailableLost => {
-                return Err(refused("volume_unavailable_lost", Errno::DeviceFault));
-            }
-        }
-
-        // Flush the filesystem's own state first, while it is still
-        // registered — a failure leaves the volume fully attached (data is
-        // never silently discarded; forced discard is the force-unmount
-        // operation).
-        let driver = LATE_FILESYSTEM
-            .driver(handle)
-            .map_err(|err| refused("driver_missing", err))?;
-        driver
-            .lock()
-            .flush()
-            .map_err(|err| refused("filesystem_flush_failed", err.as_errno()))?;
-
-        // Commit the device's own cache and empty the journal: after a
-        // committed flush nothing is uncommitted. A vanished endpoint or
-        // window (`NotFound` — the device was unplugged mid-detach) is
-        // tolerated only when the journal is clean; a dirty journal fails
-        // closed for the surprise-removal transition instead.
-        match kernel_hold(installed_shared_mem_facility(), window)
-            .and_then(|hold| BlkClient::connect(endpoint, hold, audit))
-        {
-            Ok(mut client) => match client.flush() {
-                Ok(()) | Err(DriverError::Unsupported) => journal.lock().commit(),
-                Err(err) => return Err(refused("device_flush_failed", err.as_errno())),
-            },
-            Err(Errno::NotFound) => {
-                if journal.lock().is_dirty() {
-                    return Err(refused("device_vanished_dirty", Errno::DeviceFault));
+            Availability::UnavailableLost => Some(("volume_unavailable_lost", Errno::DeviceFault)),
+        };
+        let discarded = match commit_refusal {
+            None => None,
+            Some((cause, errno)) => {
+                if !request.force {
+                    return Err(refused(cause, errno));
                 }
+                // The audited force-discard: read what is being given up
+                // before wiping it, so the loss is never silent. A lost
+                // journal reports zero retained bytes — that loss was
+                // already on record at the surprise-removal transition.
+                let mut journal = journal.lock();
+                let bytes = journal.retained_bytes();
+                journal.discard_all();
+                Some((cause, bytes))
             }
-            Err(err) => return Err(refused("device_unreachable", err)),
-        }
+        };
 
         // Retract: unmount (new resolutions fail closed), unregister (the
         // registry's driver reference drops; in-flight operations finish
@@ -732,14 +729,98 @@ impl VolumeService for RuntimeVolumeService {
         let _ = vfs.mounts_write().unmount(&path);
         let _ = LATE_FILESYSTEM.unregister(handle);
         let _ = VOLUME_FOREST.unpublish(&request.volume_id);
-        RuntimeVolumeService::audit_event(
+        audit_detach_outcome(audit, &name, discarded);
+        Ok(())
+    }
+}
+
+/// Audit a completed detach: the clean withdrawal, or the force-unmount
+/// that deliberately discarded `bytes` of retained uncommitted data
+/// because `cause` made a clean commit impossible.
+fn audit_detach_outcome(
+    audit: &'static (dyn Sink + Sync),
+    name: &str,
+    discarded: Option<(&'static str, u64)>,
+) {
+    match discarded {
+        None => RuntimeVolumeService::audit_event(
             audit,
             VOLUME_DETACHED,
             "volume-service: runtime volume flushed, unmounted, and withdrawn",
-            &name,
+            name,
             None,
-        );
-        Ok(())
+        ),
+        Some((cause, bytes)) => {
+            log(
+                audit,
+                &Event {
+                    level: Level::Warn,
+                    id: VOLUME_FORCE_UNMOUNTED,
+                    message: "volume-service: volume force-unmounted; retained uncommitted \
+                              writes deliberately discarded",
+                    fields: &[
+                        Field {
+                            key: "volume",
+                            value: FieldValue::Str(name),
+                        },
+                        Field {
+                            key: "cause",
+                            value: FieldValue::Str(cause),
+                        },
+                        Field {
+                            key: "discarded_bytes",
+                            value: FieldValue::UnsignedInt(bytes),
+                        },
+                    ],
+                },
+            );
+        }
+    }
+}
+
+/// Commit everything a departing volume holds: flush the filesystem's own
+/// state while it is still registered, then the device's cache, and empty
+/// the journal — after a committed flush nothing is uncommitted. A
+/// vanished endpoint or window (`NotFound` — the device was unplugged
+/// mid-detach) is tolerated only when the journal is clean.
+///
+/// # Errors
+///
+/// `(cause, errno)` pairs the detach path audits through its refusal
+/// helper; a refusal leaves the volume's state untouched (nothing is
+/// discarded here — that is the caller's audited force path).
+fn commit_for_detach(
+    handle: DriverHandle,
+    endpoint: u64,
+    window: u64,
+    journal: &Arc<SpinLock<RetainedWrites>>,
+    audit: &'static (dyn Sink + Sync),
+) -> Result<(), (&'static str, Errno)> {
+    let driver = LATE_FILESYSTEM
+        .driver(handle)
+        .map_err(|err| ("driver_missing", err))?;
+    driver
+        .lock()
+        .flush()
+        .map_err(|err| ("filesystem_flush_failed", err.as_errno()))?;
+    match kernel_hold(installed_shared_mem_facility(), window)
+        .and_then(|hold| BlkClient::connect(endpoint, hold, audit))
+    {
+        Ok(mut client) => match client.flush() {
+            Ok(()) | Err(DriverError::Unsupported) => {
+                journal.lock().commit();
+                Ok(())
+            }
+            Err(err) => Err(("device_flush_failed", err.as_errno())),
+        },
+        Err(Errno::NotFound) => {
+            if journal.lock().is_dirty() {
+                Err(("device_vanished_dirty", Errno::DeviceFault))
+            } else {
+                Ok(())
+            }
+        }
+        Err(err) => Err(("device_unreachable", err)),
     }
 }
 
@@ -755,6 +836,7 @@ enum VanishOutcome {
         name: String,
         handle: DriverHandle,
         fstype: &'static str,
+        id: [u8; 16],
         retained: Option<u64>,
     },
 }
@@ -789,6 +871,7 @@ impl RuntimeVolumeService {
             name: state[index].name.clone(),
             handle: state[index].handle,
             fstype: state[index].fstype,
+            id: state[index].id,
             retained: (!lost).then_some(retained),
         })
     }
@@ -825,19 +908,30 @@ impl RuntimeVolumeService {
                 name,
                 handle,
                 fstype,
+                id,
                 retained,
             }) => {
                 // The unavailable volume's registry slot is re-pointed at
                 // the fail-closed stand-in: the real driver (and its
                 // plaintext cache) drops, so nothing of the vanished
                 // medium is ever served as live; the mount and the
-                // published root stay visible.
+                // published root stay visible — and the registry entry is
+                // marked unavailable, so the mount snapshot never shows
+                // the vanished volume as healthy.
                 let _ = LATE_FILESYSTEM.unregister(handle);
                 let _ = LATE_FILESYSTEM.register(
                     handle,
                     alloc::boxed::Box::new(UnavailableFs),
                     &name,
                     fstype,
+                    id,
+                );
+                let _ = LATE_FILESYSTEM.set_availability(
+                    handle,
+                    match retained {
+                        Some(_) => MountAvailability::UnavailableDirty,
+                        None => MountAvailability::UnavailableLost,
+                    },
                 );
                 match retained {
                     Some(retained) => {

@@ -4399,7 +4399,7 @@ per-increment guarantees.
 
 ## DEVICES — device inventory commands + USB mass storage (`plans/DEVICES.md`)
 
-**Status: in progress (DEVICE1 V1–V3 done; DEVICE2 D1–D3 and D4a done; D4b–D4c remain).**
+**Status: in progress (DEVICE1 V1–V3 done; DEVICE2 D1–D3, D4a, and D4b done; D4c remains).**
 DEVICE1 adds the `lspci` and `lsusb` system command apps: they render the
 discovered PCI/USB nodes from the existing `CAP_SYSINFO_HW`-gated
 hardware-tree query, naming devices through the `lib/devids` lookup crate
@@ -4511,10 +4511,16 @@ cached reads report `DeviceFault`, and a plain detach of it is refused —
 plus two defects fixed en route with regression tests (`VfsError::Io` now
 maps to `Errno::DeviceFault`, and `Fat32::format` takes a caller-minted
 non-zero BPB serial so two fresh FAT32 volumes no longer share one
-identity). D4b–D4c remain: force-unmount (`unmount --force`, the detach
-force flag, the sysinfo availability mark) and verified re-insert
-(mutation evidence + retained-write replay). See `plans/DEVICES.md` for
-the binding design and staging.
+identity). D4b (done) landed force-unmount: the `VolumeDetachRequest`
+force byte, the kernel force-discard path (event 4179 — a healthy volume
+still commits cleanly under force; only an impossible commit discards,
+with the loss audited), the `MountRecord` availability byte + stable
+volume identity (so the mount listing marks
+`unavailable-dirty`/`unavailable-lost` and the tooling resolves names to
+detach identities), and the new `unmount` command-app bundle
+(`userland/apps/unmount`, `unmount [-f|--force] NAME`). D4c remains:
+verified re-insert (mutation evidence + retained-write replay). See
+`plans/DEVICES.md` for the binding design and staging.
 
 ---
 

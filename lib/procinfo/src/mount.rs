@@ -10,7 +10,7 @@ use alloc::format;
 use alloc::string::String;
 
 use rustos_abi::driver::filesystem::MountFlags;
-use rustos_abi::sysinfo::{MountListRequest, MountRecord, SysinfoQueryId};
+use rustos_abi::sysinfo::{MountAvailability, MountListRequest, MountRecord, SysinfoQueryId};
 use rustos_abi::Errno;
 
 use crate::list::{field_lossy, walk_pages, ListError};
@@ -69,14 +69,25 @@ pub fn for_each_mount(
 
 /// Render one [`MountRecord`] as a `source on target type fstype (options)`
 /// line, the long-standing Unix `mount` listing shape.
+///
+/// A surprise-removed volume carries a trailing ` [unavailable-dirty]` /
+/// ` [unavailable-lost]` marker — additive, so a healthy volume's line is
+/// byte-identical to the classic shape while a dead one never looks
+/// healthy (`plans/DEVICES.md` D4b).
 #[must_use]
 pub fn render_mount(record: &MountRecord) -> String {
+    let marker = match record.availability() {
+        MountAvailability::Available => "",
+        MountAvailability::UnavailableDirty => " [unavailable-dirty]",
+        MountAvailability::UnavailableLost => " [unavailable-lost]",
+    };
     format!(
-        "{} on {} type {} ({})",
+        "{} on {} type {} ({}){}",
         field_lossy(record.source_bytes()),
         field_lossy(record.target_bytes()),
         field_lossy(record.fstype_bytes()),
         render_options(record.flags()),
+        marker,
     )
 }
 
@@ -114,7 +125,7 @@ mod tests {
     use core::cell::RefCell;
     use rustos_abi::driver::filesystem::{MountFlags, VolumeStats};
     use rustos_abi::sysinfo::{
-        MountListRequest, MountRecord, SysinfoQueryId, SysinfoRequestHeader,
+        MountAvailability, MountListRequest, MountRecord, SysinfoQueryId, SysinfoRequestHeader,
     };
     use rustos_abi::Errno;
 
@@ -160,7 +171,16 @@ mod tests {
     }
 
     fn record(source: &[u8], target: &[u8], fstype: &[u8], flags: MountFlags) -> MountRecord {
-        MountRecord::new(source, target, fstype, flags, VolumeStats::default()).expect("record")
+        MountRecord::new(
+            source,
+            target,
+            fstype,
+            flags,
+            VolumeStats::default(),
+            MountAvailability::Available,
+            [0u8; 16],
+        )
+        .expect("record")
     }
 
     fn collect(fixture: &Fixture) -> Result<Vec<MountRecord>, ListError> {
@@ -250,6 +270,30 @@ mod tests {
             line,
             "data on /Storage/data type rustfs (rw,nosuid,nodev,noexec)"
         );
+    }
+
+    #[test]
+    fn an_unavailable_volume_is_marked_in_the_render() {
+        for (availability, marker) in [
+            (MountAvailability::UnavailableDirty, "[unavailable-dirty]"),
+            (MountAvailability::UnavailableLost, "[unavailable-lost]"),
+        ] {
+            let record = MountRecord::new(
+                b"usb1",
+                b"/Storage/usb1",
+                b"fat32",
+                MountFlags::NOSUID,
+                VolumeStats::default(),
+                availability,
+                [7u8; 16],
+            )
+            .expect("record");
+            let line = render_mount(&record);
+            assert_eq!(
+                line,
+                alloc::format!("usb1 on /Storage/usb1 type fat32 (rw,nosuid) {marker}")
+            );
+        }
     }
 
     #[test]

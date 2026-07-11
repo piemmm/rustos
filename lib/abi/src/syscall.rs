@@ -1496,14 +1496,16 @@ impl SyscallNumber {
     ///
     /// Arguments: a non-null pointer to an encoded
     /// [`crate::volume::VolumeDetachRequest`] (the volume's stable
-    /// 16-byte identity) and its length (exactly
+    /// 16-byte identity plus the force byte) and its length (exactly
     /// [`crate::volume::VOLUME_DETACH_LEN`]). Only a volume attached
     /// through [`SyscallNumber::VOLUME_ATTACH`] can be detached — the
     /// boot volumes are permanent and refuse this path. The volume is
-    /// flushed first and the detach fails closed on a flush error rather
-    /// than discarding uncommitted data (forced discard is a separate,
-    /// explicitly-spelled future operation). Requires `CAP_FS_MOUNT`;
-    /// every detach decision is audited.
+    /// flushed first and a plain detach fails closed on a flush error (or
+    /// an unavailable, surprise-removed volume) rather than discarding
+    /// uncommitted data; a **force** detach (`plans/DEVICES.md` D4b)
+    /// retracts the volume anyway, deliberately discarding the retained
+    /// set with its own audit event. Requires `CAP_FS_MOUNT`; every
+    /// detach decision is audited.
     pub const VOLUME_DETACH: Self = Self(81);
 
     /// Grant the serving task of a call endpoint the right to map a shared

@@ -552,8 +552,8 @@ mod tests {
                 "basename", "cat", "chmod", "clear", "cp", "desktop", "devmgr", "df", "dirname",
                 "du", "edit", "elsh", "false", "fstree", "groupadd", "head", "login", "ls",
                 "lspci", "lsusb", "man", "mkdir", "mv", "printf", "ps", "reset", "rm", "rmdir",
-                "seatmgr", "seq", "sysinfo", "sysinfod", "tee", "top", "true", "useradd", "users",
-                "vim", "wc", "whoami", "yes"
+                "seatmgr", "seq", "sysinfo", "sysinfod", "tee", "top", "true", "unmount",
+                "useradd", "users", "vim", "wc", "whoami", "yes"
             ]
         );
         for app in &found {

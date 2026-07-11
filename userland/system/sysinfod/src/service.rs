@@ -413,11 +413,12 @@ mod tests {
     use rustos_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
     use rustos_abi::sysinfo::{
         CpuTimeListRequest, CpuTimeRecord, HardwareTreeRequest, KernelMemoryStats, LoadAverage,
-        MountListRequest, MountRecord, ProcessListRequest, ProcessRecord, ProcessState,
-        ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader,
-        SystemIdentity, Uptime, UserDirectoryRecord, UserDirectoryRequest, LOAD_FIXED_SHIFT,
-        MACHINE_ID_LEN, RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED, SYSINFO_MAX_REPLY,
-        SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
+        MountAvailability, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
+        ProcessState, ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId,
+        SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord, UserDirectoryRequest,
+        LOAD_FIXED_SHIFT, MACHINE_ID_LEN, RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED,
+        SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC,
+        SYSINFO_VERSION_CURRENT,
     };
     use rustos_abi::time::{Duration64, Time64};
     use rustos_abi::{
@@ -538,6 +539,8 @@ mod tests {
                         b"rustfs",
                         MountFlags::READ_ONLY,
                         VolumeStats::default(),
+                        MountAvailability::Available,
+                        [0u8; 16],
                     )
                     .unwrap(),
                     MountRecord::new(
@@ -546,6 +549,8 @@ mod tests {
                         b"rustfs",
                         MountFlags::NOSUID.union(MountFlags::NODEV),
                         VolumeStats::default(),
+                        MountAvailability::Available,
+                        [0u8; 16],
                     )
                     .unwrap(),
                 ],
