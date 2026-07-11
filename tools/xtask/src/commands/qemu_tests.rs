@@ -2292,6 +2292,31 @@ const TESTS: &[QemuTest] = &[
         pointer_move: None,
         serial: &[],
     },
+    // The x86_64 twin of the stack-grow verticals above (SP11e): the same
+    // four-role fixture program and production `KernelDispatchHook`
+    // composition, driven through the shared production board bring-up
+    // (`bring_up_bsp` — the exact per-CPU/#PF/`syscall`+TSS sequence the
+    // production `boot()` runs, including the production dispatch callback
+    // and user-fault resolver) with the hook installed into the production
+    // `DISPATCH_SLOT`, so ring-3 `#PF`s (reads *and* writes) reach the
+    // production stack-growth resolver over the x86_64 dedicated `#PF`
+    // entry and the x86_64 production spawn producer.
+    QemuTest {
+        package: "rustos-test-stack-grow-qemu-x86_64",
+        binary: "rustos-test-stack-grow-qemu-x86_64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        typed_keys: &[],
+        screendump: None,
+        pointer_move: None,
+        serial: &[],
+    },
     // The S8b parser-sandbox vertical (`docs/src/security/sandbox.md`;
     // `.junie/fstree-next-plan.md` S8b): prove the `lib/sandbox` seam end
     // to end over the S8a kernel sandbox spawn mode on the aarch64 `virt`

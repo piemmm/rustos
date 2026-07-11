@@ -3137,6 +3137,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-stack-grow-qemu-x86_64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-api",
+ "rustos-arch-x86_64",
+ "rustos-caps",
+ "rustos-itest-harness",
+ "rustos-kernel",
+ "rustos-kernel-core",
+ "rustos-kernel-ipc",
+ "rustos-kernel-irq",
+ "rustos-kernel-mem",
+ "rustos-kernel-sched-api",
+ "rustos-kernel-sched-eevdf",
+ "rustos-kernel-sec",
+ "rustos-kernel-syscall",
+ "rustos-log",
+ "rustos-sync",
+]
+
+[[package]]
 name = "rustos-test-stack-guard-qemu-aarch64"
 version = "0.0.0"
 dependencies = [

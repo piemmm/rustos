@@ -1221,33 +1221,41 @@ enforced nowhere yet). Session-to-session working notes:
   `StackBytes` prose. No README matrix row: the demand-grown stack is
   arch-neutral kernel behaviour on every MMU port (wasm32 linear memory
   stays the honest n/a), not a per-arch feature split.
-- **SP11e — x86_64 `-M virt` vertical `[ ]`.** The x86_64 twin of the
-  SP11c verticals. Blocked on a genuine port-infrastructure prerequisite:
-  the x86_64 user-fault-resolver slot is **set-once** and the production
-  `boot()` pipeline consumes it (`x86_64/boot.rs` installs
-  `production_user_fault` during `try_boot`), and the production hook
-  attributes a fault to *its own* scheduler's current task — so a
-  post-boot chassis can neither install its own resolver nor have the
-  production one serve its tasks. The aarch64/riscv64 chassis avoid this
-  by bringing their boards up themselves from composable arch-crate
-  pieces; x86_64 bring-up lives only inside `try_boot` (bin-crate-private
-  set-once statics: syscall TLS arena, per-CPU/GDT/TSS/IDT ordering,
-  LAPIC calibration), which a vertical must not fork (§2.2). The
-  deliverable is therefore: factor the x86_64 bring-up into reusable
-  pieces a test chassis can compose (the same seam shape the other two
-  ports already have), then land the `stack_grow_qemu_x86_64` twin — the
-  same prerequisite that has kept the `file_map`/`mem_map` x86_64
-  resolver siblings staged. Until then the x86_64 growth path is covered
-  by the arch-neutral host tests and the production wiring (identical
-  resolver install on the x86_64 boot).
+- **SP11e — x86_64 QEMU vertical `[x]`.** **Landed.** The x86_64 twin of
+  the SP11c verticals, unblocked by factoring the x86_64 bring-up into a
+  composable piece rather than forking it (§2.2): `x86_64/boot.rs` now
+  exposes `bring_up_bsp(boot_info, log_sink) -> BspBringUp` — the whole
+  shared board bring-up (per-CPU/GDT/TSS/IDT ordering, the dedicated
+  `#PF` entry + uaccess window, NXE, park root, LAPIC calibration, the
+  firmware memory map + guard-arena carve, the MADT walk, the production
+  dispatch callback **and** user-fault resolver, syscall TLS + `syscall`/
+  TSS entry, masked IO-APIC routing; every set-once install lives here,
+  and a second resolver occupant now refuses the boot with the typed
+  `BootError::UserFaultResolverInstall` instead of a silent park) —
+  returning the discovered facts (`bsp_lapic_id`, `cpu_to_lapic`,
+  `calibration`, `memory_map`, `irq_routing`); the private `try_boot` is
+  now `bring_up_bsp` + arch-handle construction + `BootInfo` assembly.
+  Because `production_dispatch`/`production_user_fault` resolve through
+  the bin-crate `DISPATCH_SLOT`, the chassis
+  (`tests/integration/stack_grow_qemu_x86_64`) runs the same bring-up and
+  installs its **own** production `KernelDispatchHook` into that same
+  slot (no `kernel_main`, no second dispatch shim) — two `BinArch`
+  handles from the returned facts, the production `LiveMemMap` +
+  `KernelProcessWait` + `X86_64_PROCESS_SPAWN` + `KernelInitSpawner`
+  composition, the same four-role fixture and policy-derived argv as the
+  SP11c twins (failure sites are logged messages + a `parent_exit_code`
+  field: x86_64's `isa-debug-exit` carries no per-site code). Grow /
+  limit / guard all proven on the QEMU x86_64 machine. The same
+  `bring_up_bsp` seam unblocks the staged `file_map`/`mem_map` x86_64
+  resolver siblings.
 
 **Done when (SP11):** a first-party EL0 program can recurse past the
 spawn-time committed stack and keep running, bounded by a `ulimit`-settable
 `StackBytes` limit that kills it (audited) when exceeded; no process pays
 more eager stack frames than the committed top; the guard page below the
 span still faults; host + QEMU matrices and the headless build stay green.
-**Met on aarch64/riscv64 end to end (SP11c) and by host tests + identical
-production wiring on x86_64; the x86_64 board twin is SP11e.**
+**Met end to end on all three MMU ports (SP11c aarch64/riscv64, SP11e
+x86_64); wasm32 linear memory stays the honest n/a.**
 
 ---
 

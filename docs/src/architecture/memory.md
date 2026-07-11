@@ -611,12 +611,14 @@ order) can never strand an unmapped hole above the low-water mark, so
 invariant. Growth stops fail-closed at the effective `StackBytes` soft
 bound (checked before any page is mapped), a fault below the span or on
 frame exhaustion stays fatal, and the audited kill names the class
-(`stack_limit` / `stack`). The `-M virt` verticals
-(`tests/integration/stack_grow_qemu_aarch64` / `…_riscv64`, over the
-`stack_grow_program` fixture) prove growth, the `ulimit`-lowered bound
-kill, and the below-span guard kill end to end; the x86_64 board twin is
-staged (`plans/SPAWN.md` SP11e) on the x86_64 composable-bring-up
-prerequisite, and wasm32's linear-memory model is an honest n/a. The
+(`stack_limit` / `stack`). The QEMU verticals
+(`tests/integration/stack_grow_qemu_aarch64` / `…_riscv64` / `…_x86_64`,
+over the one `stack_grow_program` fixture) prove growth, the
+`ulimit`-lowered bound kill, and the below-span guard kill end to end on
+all three MMU ports — the x86_64 twin composes the shared production
+board bring-up (`rustos_kernel::x86_64::boot::bring_up_bsp`) with the
+production hook in the production `DISPATCH_SLOT` — and wasm32's
+linear-memory model is an honest n/a. The
 `mem_map` (`abi-v1` no. 14) / `mem_unmap` (no. 15) syscalls are the one
 mechanism by which a process obtains and releases *additional* memory at
 runtime — the foundation the `lib/rt` userland heap allocator (§7d) layers its

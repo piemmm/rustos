@@ -3856,13 +3856,13 @@ and fail-closed (§24.4) — this work must not loosen them.
   seams, bounded fail-closed by the settable `StackBytes` soft limit whose
   default (`rustos_kernel_core::DEFAULT_STACK_LIMIT_BYTES` in
   `LimitSet::DEFAULT`) is the one policy value the span is derived from.
-  Proven end to end by the aarch64 + riscv64 `-M virt` verticals
-  (`stack_grow_program` + `stack_grow_qemu_*`: transparent byte-verified
-  growth, `rlimit_set`-lowered bound fault-kill, below-span guard kill)
-  and the kernel/core host tests. Remaining: **SP11e** — the x86_64 board
-  twin, blocked on factoring the x86_64 bring-up into composable pieces a
-  test chassis can use (the set-once resolver slot is consumed by the
-  production `boot()`); wasm32 linear memory is the honest n/a.
+  Proven end to end on all three MMU ports by the QEMU verticals
+  (`stack_grow_program` + `stack_grow_qemu_{aarch64,riscv64,x86_64}`:
+  transparent byte-verified growth, `rlimit_set`-lowered bound
+  fault-kill, below-span guard kill) and the kernel/core host tests; the
+  x86_64 twin composes the factored shared board bring-up
+  (`x86_64::boot::bring_up_bsp`, SP11e) with the production hook in the
+  production `DISPATCH_SLOT`. wasm32 linear memory is the honest n/a.
 
 **Tests**
 - Default policy yields a workable capacity on both a tiny and a large

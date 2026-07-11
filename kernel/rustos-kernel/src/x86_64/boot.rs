@@ -51,7 +51,7 @@ use alloc::vec::Vec;
 use rustos_abi::SYSCALL_MAX_ARGS;
 use rustos_arch_x86_64::acpi::{self, MadtEntry};
 use rustos_arch_x86_64::apic::{IoApic, Lapic, VolatileIoApicMmio, VolatileLapicMmio};
-use rustos_arch_x86_64::apic_timer::{self, PolledPit, Rdtsc};
+use rustos_arch_x86_64::apic_timer::{self, Calibration, PolledPit, Rdtsc};
 use rustos_arch_x86_64::bootinfo::BootData;
 use rustos_arch_x86_64::bootmemory;
 use rustos_arch_x86_64::gdt::PerCpuGdt;
@@ -239,6 +239,13 @@ pub enum BootError {
     IrqRoutingPublish,
     /// `IoApicController::program_pin` rejected the binding.
     IrqProgramPin,
+    /// [`fault::set_user_fault_resolver`] refused the production user-fault
+    /// resolver (a resolver was already installed). The single-entry
+    /// bring-up runs once per boot, so a second occupant is a boot-path
+    /// defect — two bring-up attempts, or a caller that installed its own
+    /// resolver before booting — and the boot refuses rather than running
+    /// with an unpredictable fault path.
+    UserFaultResolverInstall,
     /// More than one CPU was about to be brought up on a part whose
     /// CPUID does not advertise an Invariant TSC. `RDTSC` is the
     /// x86_64 monotonic clock source, and without the invariant
@@ -276,6 +283,7 @@ impl BootError {
             Self::TssRsp0Install => "tss_rsp0_install_failed",
             Self::IrqRoutingPublish => "irq_routing_publish_failed",
             Self::IrqProgramPin => "irq_program_pin_failed",
+            Self::UserFaultResolverInstall => "user_fault_resolver_install_failed",
             Self::TscNotInvariant => "tsc_not_invariant",
         }
     }
@@ -404,12 +412,59 @@ fn log_init_failure(sink: &(dyn Sink + Sync), err: BootError) {
     );
 }
 
-fn try_boot(
+/// Board facts the shared BSP bring-up ([`bring_up_bsp`]) discovered and
+/// hands back to its caller.
+///
+/// The bring-up owns every set-once install (per-CPU GDT/IDT/IST arena,
+/// syscall TLS arena, dispatch callback, user-fault resolver, LAPIC timer,
+/// IO-APIC routing); the caller owns what varies per composition — the
+/// arch handle(s) it builds from these facts and whatever it wires into the
+/// [`DISPATCH_SLOT`] the installed callbacks resolve through. The production
+/// pipeline assembles a [`BootInfo`] and enters `kernel_main` (which
+/// publishes the production hook into the slot); a QEMU test chassis
+/// composes the same facts with its own scheduler and installs its own
+/// production-typed hook into the same slot instead — without forking any
+/// of this bring-up.
+pub struct BspBringUp {
+    /// The BSP's LAPIC id, verified present and enabled in the MADT.
+    pub bsp_lapic_id: u8,
+    /// Dense-CpuId→LAPIC map with only the BSP populated — the one
+    /// definition both the production arch handle and a chassis's handles
+    /// are built from (single-CPU bring-up; an AP bring-up re-sizes it).
+    pub cpu_to_lapic: [Option<u8>; 1],
+    /// LAPIC-timer/TSC calibration measured against the PIT; the unit input
+    /// to [`BinArch`]'s `monotonic_ns`.
+    pub calibration: Calibration,
+    /// The firmware memory map with the running kernel image reserved and
+    /// the kthread-stack guard arena carved out.
+    pub memory_map: BootMemoryMap,
+    /// The MADT-discovered IO-APIC routing, every pin programmed masked.
+    pub irq_routing: IrqRouting,
+}
+
+/// Bring the BSP and its board up: per-CPU tables, the dedicated `#PF`
+/// entry + fault-windowed user copy, NXE, the park root, LAPIC + timer
+/// calibration, the firmware memory map (kernel image reserved, guard
+/// arena carved), the MADT walk, the production syscall-dispatch callback
+/// and user-fault resolver (both resolving through [`DISPATCH_SLOT`]),
+/// `syscall`/TSS entry, and the IO-APIC routing (all pins masked).
+///
+/// This is the single, composable board bring-up every freestanding x86_64
+/// kernel binary runs — the production [`boot`] pipeline and the QEMU
+/// integration chassis alike — so the bring-up ordering and its set-once
+/// installs are never forked. Runs exactly once per boot; every set-once
+/// install fails closed with a typed [`BootError`] on a second attempt.
+///
+/// # SAFETY-INVARIANT
+///
+/// `boot_info` must be the verbatim 64-bit pointer the arch crate's boot
+/// trampoline received (the [`boot`] contract): the record and every table
+/// it points at sit in the identity-mapped 0..4 GiB window, and interrupts
+/// are disabled (`IF=0`) for the whole call.
+pub fn bring_up_bsp(
     boot_info: u64,
     log_sink: &'static (dyn Sink + Sync),
-    audit_sink: &'static (dyn Sink + Sync),
-    log_level: Level,
-) -> Result<BootInfo<'static, BinArch>, BootError> {
+) -> Result<BspBringUp, BootError> {
     // 1. Per-CPU init (BSP).
     //
     //    Publish the caller-owned per-CPU GDT/IDT/IST arena before the
@@ -565,7 +620,7 @@ fn try_boot(
     //    pool keeps its own `MAX_CPUS` secondary-bring-up bound.
     let cpu_to_lapic: [Option<u8>; 1] = [Some(bsp_lapic_id)];
 
-    // 6b. Validate the TSC before trusting `RDTSC` as the cross-CPU
+    // 6a. Validate the TSC before trusting `RDTSC` as the cross-CPU
     //     monotonic clock source. The contract is recorded on every
     //     boot rather than silently assumed. A
     //     single-CPU boot proceeds regardless — one TSC is inherently
@@ -578,13 +633,6 @@ fn try_boot(
     if !invariant_tsc && active_cpu_count > 1 {
         return Err(BootError::TscNotInvariant);
     }
-
-    // The arch handle borrows its per-CPU bookkeeping from this
-    // process-static backing; `boot` runs once, so a
-    // single `static` is sound and needs no allocator.
-    static ARCH_STORAGE: X86_64ArchStorage<1> = X86_64ArchStorage::new();
-    let arch = X86_64Arch::new(&ARCH_STORAGE, 0, bsp_lapic_id, &cpu_to_lapic)
-        .map_err(|_| BootError::ArchInit)?;
 
     // 7. Install the production syscall-dispatch callback **before**
     //    `init_local_syscalls` enables `syscall` on any CPU. The
@@ -600,14 +648,14 @@ fn try_boot(
     //    forever — the same fail-closed posture the (c7-bin) commit
     //    shipped, now coexisting with the live dispatcher.
     syscall_entry::set_dispatch_callback(production_dispatch);
-    // Demand-paged file mappings resolve their ring-3 `#PF`s through the
-    // same resident hook; install the resolver beside the dispatch
-    // callback so both are in place before user space exists. This
-    // single-entry boot path installs exactly once; a second publish
-    // would be a programmer error, so it parks fail-closed rather than
-    // running with an unpredictable fault path.
+    // Demand-paged file mappings and stack growth resolve their ring-3
+    // `#PF`s through the same resident hook; install the resolver beside
+    // the dispatch callback so both are in place before user space exists.
+    // This single-entry bring-up installs exactly once; a second occupant
+    // is a boot-path defect and refuses the boot with a typed, logged
+    // cause rather than running with an unpredictable fault path.
     if fault::set_user_fault_resolver(production_user_fault).is_err() {
-        arch_halt();
+        return Err(BootError::UserFaultResolverInstall);
     }
 
     // 7b. Publish the caller-owned per-CPU syscall-TLS arena before
@@ -682,7 +730,41 @@ fn try_boot(
     //      binds to the GSI.
     let irq_routing = discover_and_program_io_apics(&madt, bsp_lapic_id)?;
 
-    // 11. Assemble the `BootInfo` and hand off to `kernel_core`.
+    Ok(BspBringUp {
+        bsp_lapic_id,
+        cpu_to_lapic,
+        calibration,
+        memory_map,
+        irq_routing,
+    })
+}
+
+fn try_boot(
+    boot_info: u64,
+    log_sink: &'static (dyn Sink + Sync),
+    audit_sink: &'static (dyn Sink + Sync),
+    log_level: Level,
+) -> Result<BootInfo<'static, BinArch>, BootError> {
+    // The shared BSP/board bring-up: per-CPU tables, `#PF` + user-copy
+    // entries, NXE, park root, LAPIC calibration, memory map + guard
+    // arena, MADT, dispatch callback + user-fault resolver, `syscall`/TSS
+    // entry, IO-APIC routing.
+    let board = bring_up_bsp(boot_info, log_sink)?;
+
+    // The arch handle borrows its per-CPU bookkeeping from this
+    // process-static backing; `boot` runs once, so a
+    // single `static` is sound and needs no allocator.
+    static ARCH_STORAGE: X86_64ArchStorage<1> = X86_64ArchStorage::new();
+    let arch = X86_64Arch::new(&ARCH_STORAGE, 0, board.bsp_lapic_id, &board.cpu_to_lapic)
+        .map_err(|_| BootError::ArchInit)?;
+    let BspBringUp {
+        calibration,
+        memory_map,
+        irq_routing,
+        ..
+    } = board;
+
+    // Assemble the `BootInfo` and hand off to `kernel_core`.
     //
     // Build the `Arc<BinArch>` ahead of the `BootInfo::new` call so we
     // can publish the pointer into `panic_ctx::PANIC_ARCH_PTR` for the
