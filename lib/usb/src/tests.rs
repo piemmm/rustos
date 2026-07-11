@@ -11,9 +11,9 @@ use core::cell::RefCell;
 
 use super::device::{
     hub_port_connected, hub_port_enabled, hub_port_speed, route_for_child, AttachOutcome,
-    BulkDirection, BulkPipe, DeviceDescriptor, DmaBank, EnumStage, HubEvent, InterfaceInfo,
-    UsbDevice, BULK_BUF_LEN, BULK_SLOTS, EVENT_RING_SEGMENT_MIN_TRBS, MAX_HUB_DEPTH, REPORT_LEN,
-    RING_TRBS,
+    BulkDirection, BulkPipe, DeviceDescriptor, DmaBank, EnumStage, HubEvent, HubPollOutcome,
+    InterfaceInfo, UsbDevice, BULK_BUF_LEN, BULK_SLOTS, EVENT_RING_SEGMENT_MIN_TRBS, MAX_HUB_DEPTH,
+    REPORT_LEN, RING_TRBS,
 };
 use super::ring::{EventRingCursor, ProducerRing};
 use super::trb::{CompletionCode, Trb, TrbType, CONTROL_CYCLE, TRB_LEN};
@@ -5531,6 +5531,134 @@ fn enumeration_drains_every_port_change_latch_so_the_hub_watch_stays_quiet() {
         device.device_live(0),
         "the keyboard stays enumerated through a spurious status-change report"
     );
+}
+
+#[test]
+fn a_silent_downstream_connect_is_found_by_the_port_poll() {
+    // The metal Pi 4 defect: a device is plugged into a hub's downstream
+    // port after boot, the hub latches the connect change, but its
+    // status-change interrupt endpoint never posts a completion — the
+    // event-driven watch has no wake source, so the device was never
+    // enumerated (and never appeared in `lsusb`). The active port sweep
+    // reads each port's status directly and enumerates it brand-new.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 0; // nothing attached downstream at boot
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+    device
+        .bring_up(&delay)
+        .expect("bring-up leaves the controller serving");
+    assert!(device.hub_watch_active());
+    assert!(!device.any_device_live());
+
+    // The keyboard is plugged in; the hub latches the change but posts no
+    // status-change completion, so the event-driven watch sees nothing.
+    device.host_mut().hub_downstream_status = 1 << 0;
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::None));
+    assert!(
+        !device.any_device_live(),
+        "the silent connect is invisible to the event-driven watch"
+    );
+
+    // The tickless sweep reads the port directly and enumerates the device.
+    let outcome = device.poll_hub_ports(&delay).expect("the sweep succeeds");
+    assert_eq!(
+        outcome,
+        HubPollOutcome {
+            attached: 1,
+            detached: 0
+        }
+    );
+    assert!(device.device_live(0), "the plugged-in device is now served");
+    // The attach drained the connect latch; an idle follow-up sweep is a
+    // no-op, so the 256 ms tick never re-enumerates a served device.
+    assert_eq!(device.host_mut().hub_downstream_change, 0);
+    assert_eq!(device.poll_hub_ports(&delay), Ok(HubPollOutcome::default()));
+    assert!(device.device_live(0));
+}
+
+#[test]
+fn a_silent_downstream_disconnect_is_freed_by_the_port_poll() {
+    // The unplug mirror of the silent connect: the device vanishes from its
+    // hub port with no status-change completion. The sweep sees the port
+    // report no connection while a device is tracked there and frees it.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+    device
+        .bring_up(&delay)
+        .expect("the keyboard behind the hub is reached");
+    assert!(device.device_live(0));
+
+    device.host_mut().hub_downstream_status = 0;
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::None));
+    assert!(
+        device.device_live(0),
+        "the silent disconnect is invisible to the event-driven watch"
+    );
+
+    let outcome = device.poll_hub_ports(&delay).expect("the sweep succeeds");
+    assert_eq!(
+        outcome,
+        HubPollOutcome {
+            attached: 0,
+            detached: 1
+        }
+    );
+    assert!(!device.any_device_live(), "the unplugged device is freed");
+    assert_eq!(
+        device.host_mut().hub_downstream_change,
+        0,
+        "the detach drained the stale latch"
+    );
+}
+
+#[test]
+fn the_port_poll_drains_a_stale_latch_without_fabricating_a_device() {
+    // A change latch left on an empty port (a connect that bounced before
+    // the sweep ran): the sweep drains it and fabricates nothing, so the
+    // status-change endpoint can never wedge on the stale latch.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+    device
+        .bring_up(&delay)
+        .expect("bring-up leaves the controller serving");
+
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    assert_eq!(device.poll_hub_ports(&delay), Ok(HubPollOutcome::default()));
+    assert_eq!(
+        device.host_mut().hub_downstream_change,
+        0,
+        "the stale latch is drained"
+    );
+    assert!(!device.any_device_live());
+}
+
+#[test]
+fn the_port_poll_is_a_no_op_with_no_watched_hub() {
+    // A directly-attached device has no hub to sweep: the poll issues no
+    // control transfer and reports nothing, leaving the served device
+    // untouched.
+    let mem = shared_mem();
+    let mock = MockXhci::with_device(&mem);
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+    device
+        .bring_up(&delay)
+        .expect("the directly-attached device is reached");
+    assert!(!device.hub_watch_active());
+    assert!(device.any_device_live());
+
+    assert_eq!(device.poll_hub_ports(&delay), Ok(HubPollOutcome::default()));
+    assert!(device.any_device_live());
 }
 
 #[test]

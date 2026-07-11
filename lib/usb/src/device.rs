@@ -1547,6 +1547,18 @@ pub enum HubEvent {
     HubDetached(usize),
 }
 
+/// What one full downstream-port sweep ([`UsbDevice::poll_hub_ports`])
+/// changed: how many devices/hub tiers it attached and detached. The HCD
+/// reconciles its published interface nodes when either count is non-zero.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct HubPollOutcome {
+    /// Devices enumerated brand-new (and hub tiers installed) by the sweep.
+    pub attached: usize,
+    /// Tracked devices (and hub tiers, with everything behind them) freed
+    /// by the sweep because their port no longer reports a connection.
+    pub detached: usize,
+}
+
 /// One addressed, watched USB hub: its slot, its place in the hub tree
 /// (parent hub and port, route string, depth), the topology fields its
 /// downstream devices inherit (speed, TT coordinates), its layout region,
@@ -5036,12 +5048,14 @@ impl<H: XhciHost, M: DmaBank> UsbDevice<H, M> {
     /// free what was served on a disconnected port ([`HubEvent::Detached`];
     /// an unplugged hub cascades into [`HubEvent::HubDetached`]).
     ///
-    /// Every changed port has its **whole** latched change set drained — not
-    /// just the connect change — so the status-change watch re-arms clean and
-    /// never wedges firing forever on a stale reset/enable change. A change
-    /// that is not a connect/disconnect we act on (a reset or enable change,
-    /// a connect for a port already served, or a connect with the device
-    /// table full) is drained and ignored.
+    /// Every changed port goes through the shared per-port decision
+    /// ([`Self::reconcile_hub_port`]), which drains the port's **whole**
+    /// latched change set — not just the connect change — so the
+    /// status-change watch re-arms clean and never wedges firing forever on
+    /// a stale reset/enable change. A change that is not a
+    /// connect/disconnect we act on (a reset or enable change, a connect
+    /// for a port already served, or a connect with the device table full)
+    /// is drained and ignored.
     ///
     /// The scan is **per-port fail-soft**, mirroring the bring-up walk: one
     /// port's broken or unresponsive device has its latches drained
@@ -5065,57 +5079,147 @@ impl<H: XhciHost, M: DmaBank> UsbDevice<H, M> {
             if byte >= HUB_REPORT_LEN || bitmap[byte] & (1 << bit) == 0 {
                 continue;
             }
-            let (status, change) = self.hub_port_status_change(hub_index, port)?;
-            if change == 0 {
-                continue;
-            }
-            // A genuine connect transition on a port with nothing tracked,
-            // while the table has room: enumerate a brand-new device (or
-            // install and descend a brand-new hub tier).
-            // `attach_hub_port` resets the port and drains every latch
-            // (including this connect change) whether or not it succeeds.
-            if change & PORT_CHANGE_CONNECT != 0
-                && hub_port_connected(status)
-                && self
-                    .device_index_for_hub_and_port(hub_index, port)
-                    .is_none()
-                && self.hub_index_for_hub_and_port(hub_index, port).is_none()
-            {
-                match self.attach_hub_port(hub_index, port, delay) {
-                    Ok(AttachOutcome::Device(index)) => return Ok(HubEvent::Attached(index)),
-                    Ok(AttachOutcome::Hub(new_hub)) => return Ok(HubEvent::HubAttached(new_hub)),
-                    Err(err) => {
-                        if first_failure.is_none() {
-                            first_failure = Some(err);
-                        }
-                        continue;
+            match self.reconcile_hub_port(hub_index, port, delay) {
+                Ok(Some(event)) => return Ok(event),
+                Ok(None) => {}
+                Err(err) => {
+                    if first_failure.is_none() {
+                        first_failure = Some(err);
                     }
                 }
             }
-            // A genuine disconnect of something we track on this port: drain
-            // the latches, then free it — the other served devices and hubs
-            // are untouched. A vanished hub takes every device and deeper
-            // tier behind it in one cascade.
-            if change & PORT_CHANGE_CONNECT != 0 && !hub_port_connected(status) {
-                if let Some(index) = self.device_index_for_hub_and_port(hub_index, port) {
-                    self.clear_hub_port_changes(hub_index, port, change)?;
-                    self.detach_device(index)?;
-                    return Ok(HubEvent::Detached(index));
-                }
-                if let Some(child) = self.hub_index_for_hub_and_port(hub_index, port) {
-                    self.clear_hub_port_changes(hub_index, port, change)?;
-                    self.detach_hub(child)?;
-                    return Ok(HubEvent::HubDetached(child));
-                }
-            }
-            // Any other change (reset/enable/suspend/over-current, or a connect
-            // for a port already served): drain every latch so the watch
-            // re-arms clean rather than re-firing on the stale change.
-            self.clear_hub_port_changes(hub_index, port, change)?;
         }
         match first_failure {
             Some(err) => Err(err),
             None => Ok(HubEvent::None),
+        }
+    }
+
+    /// Reconcile one downstream port's **live** state against the tracking
+    /// tables, taking whatever topology action the state demands.
+    ///
+    /// The single per-port hot-plug decision, shared by the status-change
+    /// service ([`Self::process_hub_change`]) and the active port poll
+    /// ([`Self::poll_hub_ports`]) so the two paths can never diverge. It is
+    /// keyed on the port's *current* `GET_PORT_STATUS` state compared with
+    /// what the engine tracks — never on the latched change bits alone —
+    /// because some hubs (the Raspberry Pi 4's integrated hub among them)
+    /// fail to deliver a status-change interrupt for a downstream connect,
+    /// so a latch may be stale or missing while the state is real:
+    ///
+    /// * A device present on a port with nothing tracked is enumerated as
+    ///   brand-new (or installed, descended, and watched as a fresh hub
+    ///   tier). [`Self::attach_hub_port`] resets the port and drains every
+    ///   latch (including any connect change) whether or not it succeeds.
+    /// * Nothing on a port the engine tracks something on: the latches are
+    ///   drained and the tracked device — or hub, with every device and
+    ///   deeper tier behind it in one cascade — is freed. Every other
+    ///   served device and hub is untouched.
+    /// * Any other state (a latch with no topology action — a
+    ///   reset/enable/suspend/over-current change, or a connect for a port
+    ///   already served): the latches are drained so the status-change
+    ///   watch re-arms clean rather than re-firing on the stale change.
+    ///
+    /// Returns the event taken, or `None` when the port needed no action.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError`] from the port-status read, the latch drain, or the
+    /// attach/detach (fail closed; the callers are per-port fail-soft).
+    fn reconcile_hub_port(
+        &mut self,
+        hub_index: usize,
+        port: u8,
+        delay: &dyn Delay,
+    ) -> Result<Option<HubEvent>, DriverError> {
+        let (status, change) = self.hub_port_status_change(hub_index, port)?;
+        if hub_port_connected(status)
+            && self
+                .device_index_for_hub_and_port(hub_index, port)
+                .is_none()
+            && self.hub_index_for_hub_and_port(hub_index, port).is_none()
+        {
+            return match self.attach_hub_port(hub_index, port, delay) {
+                Ok(AttachOutcome::Device(index)) => Ok(Some(HubEvent::Attached(index))),
+                Ok(AttachOutcome::Hub(new_hub)) => Ok(Some(HubEvent::HubAttached(new_hub))),
+                Err(err) => Err(err),
+            };
+        }
+        if !hub_port_connected(status) {
+            if let Some(index) = self.device_index_for_hub_and_port(hub_index, port) {
+                self.clear_hub_port_changes(hub_index, port, change)?;
+                self.detach_device(index)?;
+                return Ok(Some(HubEvent::Detached(index)));
+            }
+            if let Some(child) = self.hub_index_for_hub_and_port(hub_index, port) {
+                self.clear_hub_port_changes(hub_index, port, change)?;
+                self.detach_hub(child)?;
+                return Ok(Some(HubEvent::HubDetached(child)));
+            }
+        }
+        if change != 0 {
+            self.clear_hub_port_changes(hub_index, port, change)?;
+        }
+        Ok(None)
+    }
+
+    /// Actively sweep every watched hub's downstream ports once, reconciling
+    /// each port's live state against the tracking tables and returning how
+    /// many devices/hubs the sweep attached and detached.
+    ///
+    /// The event-driven [`Self::next_hub_change`] depends on the hub raising
+    /// its interrupt-IN status-change endpoint. Some hubs (the integrated hub
+    /// on the Raspberry Pi 4 among them) never raise that interrupt for a
+    /// downstream connect, leaving the event-driven watch with no wake source
+    /// — so a device plugged in after boot is never seen. This is the
+    /// tickless polling fallback the charter sanctions for an event with no
+    /// working interrupt: the HCD drives it from a one-shot timer (never a
+    /// busy-poll), and it reads each downstream port's status directly with
+    /// `GET_PORT_STATUS` — no dependence on the status-change endpoint. Each
+    /// port goes through the same `reconcile_hub_port` decision the
+    /// status-change service uses, so there is one hot-plug path, not two: a
+    /// fresh connect is enumerated brand-new (a fresh hub tier is installed,
+    /// descended, and watched — its own ports are then covered by the *next*
+    /// sweep), a vanished device or hub is freed, and stale latches are
+    /// drained so they can never wedge the status-change endpoint.
+    ///
+    /// The sweep is **per-port fail-soft**, mirroring the status-change
+    /// service (`process_hub_change`): one port's broken device costs no other
+    /// port its service, and the first failure is surfaced only when the
+    /// sweep took no action at all. A sweep with no watched hub is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// The first per-port [`DriverError`], only when no port yielded an
+    /// attach or detach (fail closed; the caller logs it and re-polls on the
+    /// next tick).
+    pub fn poll_hub_ports(&mut self, delay: &dyn Delay) -> Result<HubPollOutcome, DriverError> {
+        let mut outcome = HubPollOutcome::default();
+        let mut first_failure = None;
+        for hub_index in 0..self.hubs.len() {
+            let Some(num_ports) = self.hub(hub_index).map(|hub| hub.num_ports) else {
+                continue;
+            };
+            for port in 1..=num_ports {
+                match self.reconcile_hub_port(hub_index, port, delay) {
+                    Ok(Some(HubEvent::Attached(_) | HubEvent::HubAttached(_))) => {
+                        outcome.attached += 1;
+                    }
+                    Ok(Some(HubEvent::Detached(_) | HubEvent::HubDetached(_))) => {
+                        outcome.detached += 1;
+                    }
+                    Ok(Some(HubEvent::None) | None) => {}
+                    Err(err) => {
+                        if first_failure.is_none() {
+                            first_failure = Some(err);
+                        }
+                    }
+                }
+            }
+        }
+        match first_failure {
+            Some(err) if outcome.attached == 0 && outcome.detached == 0 => Err(err),
+            _ => Ok(outcome),
         }
     }
 

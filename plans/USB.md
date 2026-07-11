@@ -581,6 +581,31 @@ the live controller behaviour is host- and CI-proven first.
     symptom). Re-arming first keeps the watch live so the next genuine report
     (the reconnect) still wakes the loop. Host regression:
     `a_failed_status_change_service_re_arms_the_watch_so_a_replug_is_still_seen`.
+  - **Downstream hot-plug does not depend on the hub's interrupt: a tickless
+    port poll is the fallback wake source.** Metal proved the Pi 4's
+    integrated hub can raise *no* interrupt at all for a downstream connect
+    (a mass-storage stick plugged in after boot produced no controller event
+    ever), so a watch that only re-arms can still never wake. The HCD's
+    event loop therefore arms its `waitset_wait` with a one-shot 256 ms
+    deadline (`RECONNECT_POLL_NS`) **only while a hub is watched** (with no
+    hub the wait stays unbounded — no periodic wakes) and, gated on the
+    elapsed monotonic clock so an IRQ storm can neither starve it nor flood
+    the hub's control ring, runs `UsbDevice::poll_hub_ports`: one sweep that
+    reads every watched hub's downstream ports directly with
+    `GET_PORT_STATUS` (no dependence on the status-change endpoint) and puts
+    each port through the same `reconcile_hub_port` decision the
+    status-change service uses — one hot-plug path, not two. The decision is
+    keyed on the port's *live* state against the tracking tables (attach the
+    untracked connected, free the tracked disconnected — hubs cascade — and
+    drain stale latches), never on the latch bits alone, since the latch may
+    be stale or missing while the state is real. The HCD tick
+    (`poll_hub_topology`) checks the whole-assembly root-port unplug first,
+    exactly as the interrupt path does, then reconciles the published
+    interface nodes so `devmgr` autoloads the class driver. Host
+    regressions: `a_silent_downstream_connect_is_found_by_the_port_poll`,
+    `a_silent_downstream_disconnect_is_freed_by_the_port_poll`,
+    `the_port_poll_drains_a_stale_latch_without_fabricating_a_device`,
+    `the_port_poll_is_a_no_op_with_no_watched_hub`.
   - **A stray controller event never silences the hub watch (the
     "controller goes quiet after the first report" fix).** The Pi 4's black
     USB2 sockets sit behind an *integrated* hub (the engine reports
@@ -883,7 +908,8 @@ the live controller behaviour is host- and CI-proven first.
 U1–U9 are landed; the modular USB stack — bus driver → user-space HCD owning
 one controller and serving the URB transport → per-interface class drivers
 (keyboard, mouse, mass storage), with event-driven hub hot-plug on every
-tier, recursive multi-tier hub descent with cascade teardown, fresh
+tier (plus the tickless downstream-port poll for hubs that raise no
+interrupt), recursive multi-tier hub descent with cascade teardown, fresh
 re-enumeration, per-port failure isolation, composite (multi-interface)
 devices served one node per interface, and EP0 max-packet discovery for
 full-speed devices — is complete and host-/CI-proven. The

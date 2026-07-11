@@ -71,6 +71,22 @@ fn waitset_ctl_result(ret: i64) -> Result<(), i64> {
 #[cfg(freestanding)]
 const WAIT_FOREVER_NS: u64 = u64::MAX;
 
+/// One-shot deadline for the event-loop wait while a hub is watched, and the
+/// minimum spacing between two downstream-port poll sweeps.
+///
+/// Metal capture on the Raspberry Pi 4 proved its integrated hub raises no
+/// interrupt at all for a downstream connect: the status-change endpoint
+/// never posts a completion, so the event-driven hub watch has no wake
+/// source and a device plugged in after boot was never enumerated. The poll
+/// sweep is the charter-sanctioned tickless fallback for an event with no
+/// working interrupt: the loop parks the whole interval (the CPU sleeps,
+/// never a busy-poll) and one sweep of `GET_PORT_STATUS` reads runs per
+/// tick. 256 ms keeps a plug-in humanly instant while costing four wakes a
+/// second only while a hub is watched — with no hub the wait stays
+/// unbounded and a quiet controller takes no periodic wakes.
+#[cfg(freestanding)]
+const RECONNECT_POLL_NS: u64 = 256_000_000;
+
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
@@ -157,6 +173,11 @@ mod program {
     /// (a generous bound on simultaneous controllers; the first HCD claims
     /// the first block on its first try).
     const URB_ENDPOINT_BLOCKS: u64 = 64;
+
+    /// `waitset_wait`'s "the armed deadline elapsed with no ready member"
+    /// result (`-Errno::TimedOut`): the poll tick's scheduled wake, never a
+    /// failure.
+    const WAIT_TIMED_OUT: i64 = -(Errno::TimedOut as i64);
 
     /// Bytes of shared buffer per interface: one bulk chunk
     /// ([`rustos_usb::device::BULK_BUF_LEN`], the engine's per-TD ceiling —
@@ -340,6 +361,100 @@ mod program {
                     retract_interface(transport);
                 }
             }
+        }
+    }
+
+    /// Check whether the watched hub assembly's own root port has lost its
+    /// connection; if so, tear the assembly down and retract every published
+    /// interface. Every external device on the Pi 4 hangs off the onboard
+    /// hub, and pulling that assembly out takes the hub with it: the unplug
+    /// surfaces as the *root* port clearing its connect bit, not as a
+    /// downstream hub-port change — the hub is gone, so it answers neither
+    /// its status-change endpoint nor a control transfer. Returns `true`
+    /// when the assembly was gone (a re-plug then re-enumerates from
+    /// scratch); a failed root-port check is logged and treated as "still
+    /// present", so the caller's finer-grained per-port service still runs.
+    fn retract_all_if_hub_assembly_gone(
+        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
+        transports: &mut Vec<Option<Transport>>,
+    ) -> bool {
+        match device.detach_if_hub_root_gone() {
+            Ok(true) => {
+                for transport in transports.iter_mut().flatten() {
+                    retract_interface(transport);
+                }
+                log(
+                    &LogSink,
+                    &Event {
+                        level: Level::Info,
+                        id: HCD_DISCONNECT,
+                        message:
+                            "usb-hcd: hub assembly disconnected at root port, interfaces retracted",
+                        fields: &[],
+                    },
+                );
+                true
+            }
+            Ok(false) => false,
+            Err(err) => {
+                log_hex_event(
+                    HCD_WAIT_ERROR,
+                    Level::Warn,
+                    "usb-hcd: hub root-port check failed",
+                    "err_hex",
+                    err as u64,
+                );
+                false
+            }
+        }
+    }
+
+    /// One tick of the tickless downstream-port poll: reconcile every
+    /// watched hub's ports against the live tracking tables and true up the
+    /// published interface nodes.
+    ///
+    /// Some hubs (the Pi 4's integrated hub among them) never raise their
+    /// status-change interrupt for a downstream connect, so a device plugged
+    /// in after boot produces no IRQ at all — this poll is that event's only
+    /// wake source (see [`RECONNECT_POLL_NS`](super::RECONNECT_POLL_NS)).
+    /// The whole-assembly unplug is checked first, exactly as the
+    /// interrupt-driven path does; a sweep failure is logged and retried on
+    /// the next tick (the engine's sweep is per-port fail-soft).
+    fn poll_hub_topology(
+        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
+        transports: &mut Vec<Option<Transport>>,
+        set: u64,
+        urb_base: u64,
+        delay: &ClockDelay,
+    ) {
+        if retract_all_if_hub_assembly_gone(device, transports) {
+            return;
+        }
+        match device.poll_hub_ports(delay) {
+            Ok(outcome) => {
+                if outcome.attached == 0 && outcome.detached == 0 {
+                    return;
+                }
+                reconcile_interfaces(device, transports, set, urb_base);
+                if outcome.detached > 0 {
+                    log(
+                        &LogSink,
+                        &Event {
+                            level: Level::Info,
+                            id: HCD_DISCONNECT,
+                            message: "usb-hcd: device disconnected, interface retracted",
+                            fields: &[],
+                        },
+                    );
+                }
+            }
+            Err(err) => log_hex_event(
+                HCD_WAIT_ERROR,
+                Level::Warn,
+                "usb-hcd: downstream port poll failed",
+                "err_hex",
+                err as u64,
+            ),
         }
     }
 
@@ -810,12 +925,40 @@ mod program {
             },
         );
 
-        // The asynchronous event loop: park until the transport endpoint or the
-        // controller interrupt is ready, never spinning a quiet controller.
+        // The asynchronous event loop: park until the transport endpoint or
+        // the controller interrupt is ready, never spinning a quiet
+        // controller. While a hub is watched the wait carries a one-shot
+        // `RECONNECT_POLL_NS` deadline driving the downstream-port poll tick
+        // at the top of the loop — the only wake source for a hub that
+        // raises no interrupt on a downstream connect. The tick is gated on
+        // the elapsed monotonic clock, not on *how* the loop woke, so an
+        // interrupt storm can neither starve the poll nor make it flood the
+        // hub's control ring, and with no hub watched the wait is unbounded
+        // (no periodic wakes at all).
+        let mut last_poll_ns = rustos_rt::clock_get();
         loop {
+            if device.hub_watch_active() {
+                let now = rustos_rt::clock_get();
+                if now.saturating_sub(last_poll_ns) >= super::RECONNECT_POLL_NS {
+                    last_poll_ns = now;
+                    poll_hub_topology(&mut device, &mut transports, set, urb_base, &delay);
+                }
+            }
+            let timeout_ns = if device.hub_watch_active() {
+                super::RECONNECT_POLL_NS
+            } else {
+                super::WAIT_FOREVER_NS
+            };
             let mut token = 0u64;
-            let wait_ret = rustos_rt::waitset_wait(set, super::WAIT_FOREVER_NS, &mut token);
+            let wait_ret = rustos_rt::waitset_wait(set, timeout_ns, &mut token);
             if wait_ret < 0 {
+                // The armed poll deadline elapsing is the scheduled wake, not
+                // a failure: no member wrote a token (`TOKEN_IRQ` is 0, so
+                // the untouched token must not be dispatched) — loop back to
+                // the poll tick.
+                if wait_ret == WAIT_TIMED_OUT {
+                    continue;
+                }
                 log_hex_event(
                     HCD_WAIT_ERROR,
                     Level::Warn,
@@ -823,8 +966,8 @@ mod program {
                     "ret_hex",
                     wait_ret as u64,
                 );
-                // With an unbounded timeout on a wait-set we own, a negative
-                // result means the set was torn down — stop rather than spin.
+                // Any other negative result on a wait-set we own means the
+                // set was torn down — stop rather than spin.
                 return 0;
             }
             match token {
@@ -893,31 +1036,12 @@ mod program {
                     // or a re-attach — drives a fresh re-enumeration. All leave
                     // the controller up.
                     if device.hub_watch_active() {
-                        // Every external device on the Pi 4 hangs off a hub,
-                        // and pulling that assembly out takes the hub with it:
-                        // the unplug surfaces as the *root* port (where the hub
-                        // sat) clearing its connect bit, not as a downstream
-                        // hub-port change — the hub is gone, so it answers
-                        // neither its status-change endpoint nor a control
-                        // transfer. Check the hub's own root port first; if it
-                        // is gone, retract every interface and tear down so a
-                        // re-plug re-enumerates from scratch.
-                        match device.detach_if_hub_root_gone() {
-                            Ok(true) => {
-                                for transport in transports.iter_mut().flatten() {
-                                    retract_interface(transport);
-                                }
-                                log(
-                                    &LogSink,
-                                    &Event {
-                                        level: Level::Info,
-                                        id: HCD_DISCONNECT,
-                                        message: "usb-hcd: hub assembly disconnected at root port, interfaces retracted",
-                                        fields: &[],
-                                    },
-                                );
-                            }
-                            Ok(false) => match device.next_hub_change(&delay) {
+                        // Check the hub assembly's own root port first; if it
+                        // is gone, everything was retracted and a re-plug
+                        // re-enumerates from scratch. Otherwise service the
+                        // hub's status-change report.
+                        if !retract_all_if_hub_assembly_gone(&mut device, &mut transports) {
+                            match device.next_hub_change(&delay) {
                                 Ok(HubEvent::Attached(_) | HubEvent::HubAttached(_)) => {
                                     // A fresh leaf device — or a fresh hub
                                     // tier whose downstream devices were
@@ -959,14 +1083,7 @@ mod program {
                                     "err_hex",
                                     err as u64,
                                 ),
-                            },
-                            Err(err) => log_hex_event(
-                                HCD_WAIT_ERROR,
-                                Level::Warn,
-                                "usb-hcd: hub root-port check failed",
-                                "err_hex",
-                                err as u64,
-                            ),
+                            }
                         }
                     } else if device.any_device_live() {
                         // Directly-attached device: retract on a root-port

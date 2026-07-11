@@ -51,6 +51,14 @@ lib/*` only; the USB analogue of `lib/virtio` ↔ `drivers/bus/virtio`).
   hot-plug path is the onboard hub's status-change watch (`next_hub_change`:
   enumerate a freshly-connected device and publish a node, or abort the parked
   URB, retract on disconnect, and reject stale old-driver submits while absent)
+  — backed by a tickless downstream-port poll: while a hub is watched the wait
+  carries a one-shot 256 ms deadline (`RECONNECT_POLL_NS`) and, gated on the
+  elapsed monotonic clock, `poll_hub_topology` sweeps every watched hub's
+  ports with `GET_PORT_STATUS` through the engine's `poll_hub_ports`. That
+  sweep is the only wake source for a hub (the Pi 4's integrated hub among
+  them) that raises no interrupt for a downstream connect, so a device
+  plugged in after boot is still enumerated and published; with no hub
+  watched the wait stays unbounded (no periodic wakes) —
   plus a fault-confirmation path for controllers that report unplug first as the
   watched device's failed interrupt transfer; that path retracts when the
   device's own endpoint reported a device-unreachable completion code (a USB or
