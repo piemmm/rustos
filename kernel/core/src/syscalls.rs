@@ -15384,6 +15384,143 @@ mod tests {
             .any(|(k, v)| k == "caps" && v == "2"));
     }
 
+    /// Spawn a program **as the service account `uid`** through the real
+    /// spawn handler — the compiled system identity table resolving the
+    /// switch — under a lying manifest requesting `ceiling ∪ borrowed`,
+    /// and assert the child's effective set keeps every `ceiling` grant
+    /// and strips every `borrowed` sibling capability.
+    fn assert_service_spawn_strips(uid: u32, ceiling: &[CapabilityId], borrowed: &[CapabilityId]) {
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let attach = SpawnAttach {
+            target_uid: uid,
+            ..SpawnAttach::INHERIT
+        };
+        let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &[attach]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(
+            2,
+            &[CapabilityId::PROC_SPAWN, CapabilityId::SPAWN_AS_USER],
+            sink,
+        );
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        // The authoritative compiled system identity — the same table the
+        // boot `sec` phase installs — resolves the service uid's group set
+        // and capability ceiling.
+        let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+        identity
+            .install(
+                crate::groups::system_identity_table(sink).expect("compiled identity table builds"),
+            )
+            .expect("identity install");
+
+        // The lying manifest: the account's own ceiling plus the borrowed
+        // sibling capabilities.
+        let mut manifest: alloc::vec::Vec<CapabilityId> = ceiling.to_vec();
+        manifest.extend_from_slice(borrowed);
+        let manifest: &'static [CapabilityId] = alloc::vec::Vec::leak(manifest);
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: manifest,
+                    args: &[],
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        )
+        .with_identity(identity);
+        let pid = h
+            .spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                attach_addr(0),
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            )
+            .expect("service-account switch spawn succeeds");
+        let guard = table.read();
+        let child = guard.caps_for(SecTaskId(pid)).expect("child record");
+        // The child runs as the target service account.
+        assert_eq!(child.owner(), UserId(uid));
+        // Every capability the account's own ceiling grants survives.
+        for cap in ceiling {
+            assert!(
+                child.has(*cap),
+                "uid {uid}: own ceiling capability {cap:?} was stripped"
+            );
+        }
+        // Every borrowed sibling capability the manifest requested is
+        // stripped by the intersection.
+        for cap in borrowed {
+            assert!(
+                !child.has(*cap),
+                "uid {uid}: borrowed sibling capability {cap:?} survived"
+            );
+        }
+    }
+
+    /// `plans/USERS.md` U4: a spawn-as-user switch into each **compiled
+    /// service account** derives the child's effective set from the *real*
+    /// compiled identity table, so a manifest that (falsely) requests a
+    /// sibling service's defining capability has it stripped by the
+    /// `ceiling ∩ manifest` intersection — a compromised service cannot
+    /// borrow a sibling's authority even when its manifest lies. Every
+    /// capability the account's own ceiling grants survives the
+    /// intersection, and the child runs as the target service uid.
+    #[test]
+    fn spawn_as_a_service_account_strips_every_siblings_defining_capability() {
+        install_trace_filter();
+
+        // The capability that defines each service (the grant only that
+        // service's ceiling carries — pinned sibling-disjoint by the
+        // `lib/users` grants tests).
+        let defining: &[&[CapabilityId]] = &[
+            &[CapabilityId::DRV_LOAD],
+            &[CapabilityId::SYSINFO_INTROSPECT],
+            &[CapabilityId::SEAT_ADMIN],
+            &[CapabilityId::SPAWN_AS_USER, CapabilityId::USERS_READ],
+        ];
+        let accounts: &[(u32, &[CapabilityId])] = &[
+            (rustos_users::DEVMGR_UID.0, rustos_users::DEVMGR_CEILING),
+            (rustos_users::SYSINFOD_UID.0, rustos_users::SYSINFOD_CEILING),
+            (rustos_users::SEATMGR_UID.0, rustos_users::SEATMGR_CEILING),
+            (rustos_users::LOGIN_UID.0, rustos_users::LOGIN_CEILING),
+        ];
+
+        for (index, (uid, ceiling)) in accounts.iter().enumerate() {
+            // Every sibling's defining capability — the borrowed set the
+            // lying manifest requests on top of the account's own ceiling.
+            let mut borrowed: alloc::vec::Vec<CapabilityId> = alloc::vec::Vec::new();
+            for (other, caps) in defining.iter().enumerate() {
+                if other != index {
+                    borrowed.extend_from_slice(caps);
+                }
+            }
+            assert_service_spawn_strips(*uid, ceiling, &borrowed);
+        }
+    }
+
     /// An inherit spawn intersects the child's manifest against the
     /// spawning caller's stored **user ceiling**, never the caller's
     /// (narrower) effective set: a shell whose own manifest requests little

@@ -2375,6 +2375,41 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
+    // The USERS U4 service-ceiling vertical: the end-to-end proof that a
+    // service account's compiled capability ceiling binds a lying manifest
+    // through the production `KernelDispatchHook` on real traps. The
+    // two-role fixture program's parent is spawned through the production
+    // `InitSpawnCtx::spawn_driver_process` seam holding `CAP_PROC_SPAWN` +
+    // `CAP_SPAWN_AS_USER` and switches the `svc` role into the devmgr
+    // account through the production `spawn` syscall, with the real
+    // compiled system identity table resolving the switch. `svc`'s
+    // registered manifest deliberately requests devmgr's ceiling plus every
+    // sibling service's defining capability; running as devmgr, its own
+    // `SYSINFO_HW`-gated `hw_tree_read` succeeds while `spawn_as`,
+    // `users_db_read`, `seat_switch`, and `sysinfo_introspect` are each
+    // refused `PermissionDenied` at the audited dispatcher gate — a
+    // compromised service cannot borrow a sibling's authority even when its
+    // manifest lies (`plans/USERS.md` U4). PASS once the chassis reaps a
+    // parent exit of 0; every failure site carries a distinct finisher (the
+    // parent's diagnostic exit code is folded in). Single CPU and a
+    // 60-second budget match the other boot-then-do-fixed-work aarch64
+    // tests.
+    QemuTest {
+        package: "rustos-test-service-ceiling-qemu-aarch64",
+        binary: "rustos-test-service-ceiling-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // The riscv64 twin of the stack-grow vertical above: the same
     // four-role fixture program and production `KernelDispatchHook`
     // chassis, driven on the riscv64 `virt` board through the S-mode trap

@@ -11,7 +11,7 @@ none of these accounts can log in or needs a home directory.
 on) first. Every rule in this file is binding too. One fully-gated
 increment (one `U`-stage) per landing.
 
-Status: **U1–U3 done**; U4 planned.
+Status: **U1–U4 done**.
 
 ---
 
@@ -194,10 +194,29 @@ no-login service account.
   - `INIT_MANIFEST` += `CAP_SPAWN_AS_USER` (pinned); the user directory
     lists compiled + human halves with stable cross-half paging (§0.8).
 
-- **U4 — ceiling tightening.** With each service running as itself,
-  shrink each service account's ceiling to exactly its needs and assert
-  the intersection in the per-service QEMU verticals (a service cannot
-  exercise a sibling's capability). Status: planned.
+- **U4 — ceiling tightening.** Status: **done**. What now holds:
+  - Each service account's ceiling (`lib/users/src/grants.rs`) is exactly
+    its service's needs — identical to the service's pinned manifest — so
+    there was no slack to shrink; the U4 deliverable is the enforcement
+    proof that the ceiling *binds* a manifest that lies.
+  - Host: `spawn_as_a_service_account_strips_every_siblings_defining_capability`
+    (`kernel/core/src/syscalls.rs`) drives the real spawn handler over the
+    real compiled identity table for all four service accounts, each under
+    a manifest padded with every sibling's defining capability
+    (`CAP_DRV_LOAD`, `CAP_SYSINFO_INTROSPECT`, `CAP_SEAT_ADMIN`,
+    `CAP_SPAWN_AS_USER`+`CAP_USERS_READ`): the child's effective set keeps
+    the account's own ceiling and strips every borrowed sibling grant.
+  - QEMU: the `service_ceiling_qemu_aarch64` vertical (fixture:
+    `service_ceiling_program`) spawns a program **as `devmgr`** through the
+    production spawn syscall under a deliberately over-wide registered
+    manifest (devmgr's ceiling ∪ the sibling defining capabilities, const-
+    concatenated from the one `DEVMGR_CEILING` definition), with the real
+    compiled identity table installed. Running as devmgr, its own
+    `SYSINFO_HW`-gated `hw_tree_read` succeeds while `spawn_as`,
+    `users_db_read`, `seat_switch`, and `sysinfo_introspect` are each
+    refused `PermissionDenied` at the audited dispatcher gate — a
+    compromised service cannot borrow a sibling's authority even when its
+    manifest lies.
 
 Everything is pre-release in-place evolution (§2.13): no compatibility
 shims, no dual formats — every consumer of a changed `lib/users` type

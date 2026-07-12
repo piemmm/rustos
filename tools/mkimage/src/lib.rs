@@ -27,16 +27,15 @@
 //!   ([`fatboot::ROOT_UNLOCK_NAME`]) so the bootstrap can re-derive the key
 //!   before mounting. The passphrase itself is never stored in the image.
 //!
-//! Two [`ImageProfile`]s exist, and both seed **human**-account security
-//! databases only: the system/service identity is compiled into the
-//! kernel (`rustos_users::system_accounts` / `system_groups`,
-//! `plans/USERS.md`), never written to disk. **Installer** is the
-//! shippable form: it seeds an *empty* users database (the installer
-//! authors the first human user on first
-//! boot), and its encrypted root is unlocked by a **blank** passphrase
-//! ([`INSTALLER_PASSPHRASE`]) the bootstrap auto-enters with no prompt, so
-//! a fresh install boots straight into the installer. **Debug** is the
-//! development form: it additionally appends an interactive `root`/`root`
+//! Two [`ImageProfile`]s exist, and both seed **human accounts only**: the
+//! system/service identity is compiled into the kernel
+//! (`rustos_users::system_accounts` / `system_groups`, `plans/USERS.md`)
+//! and never written to disk. **Installer** is the shippable form: it
+//! seeds an *empty* users database (the installer authors the first human
+//! user on first boot), and its encrypted root is unlocked by a **blank**
+//! passphrase ([`INSTALLER_PASSPHRASE`]) the bootstrap auto-enters with no
+//! prompt, so a fresh install boots straight into the installer. **Debug**
+//! is the development form: it seeds an interactive `root`/`root`
 //! administrator ([`DEBUG_USERNAME`]/[`DEBUG_PASSWORD`], uid
 //! [`DEBUG_UID`], salted and hashed per build), and its encrypted root is
 //! unlocked by the matching `root` passphrase ([`DEBUG_PASSPHRASE`], typed
@@ -942,7 +941,7 @@ mod tests {
             .authenticate(DEBUG_USERNAME, DEBUG_PASSWORD.as_bytes())
             .expect("root/root authenticates");
         // The debug administrator is an ordinary user-band principal: uid 0
-        // is the kernel's compiled-in `system` identity, never this record.
+        // belongs to the no-login `system` record below.
         assert_eq!(record.uid(), DEBUG_UID);
         assert_eq!(record.shell(), Some("/System/Apps/elsh.app/Run"));
         // The seeded grant is exactly the shared administrator ceiling
@@ -954,12 +953,19 @@ mod tests {
         assert!(record.capabilities().contains(CapabilityId::FS_ACCESS));
         assert!(db.authenticate(DEBUG_USERNAME, b"wrong").is_err());
 
-        // The debug administrator is the only on-disk record: the
-        // system/service identity is compiled into the kernel and the
-        // kernel's identity merge refuses an on-disk `system` record, so
-        // none is seeded beside it.
+        // The on-disk database holds the one human debug account and
+        // nothing else: the system/service identity is compiled into the
+        // kernel and never written to disk, and the kernel's identity
+        // merge would refuse any on-disk record colliding with it
+        // (`plans/USERS.md`).
         assert_eq!(db.records().len(), 1);
-        assert!(db.lookup(rustos_users::SYSTEM_USERNAME).is_none());
+        for account in rustos_users::system_accounts().expect("compiled accounts build") {
+            assert!(
+                db.lookup(account.username()).is_none(),
+                "compiled account {} must never be seeded on disk",
+                account.username()
+            );
+        }
     }
 
     #[test]
@@ -997,17 +1003,16 @@ mod tests {
         let text = core::str::from_utf8(&buf[..read]).expect("valid UTF-8");
         let db = UsersDb::parse(text).expect("seeded database parses");
 
-        // An empty database — no debug account, no on-disk system records
-        // (the compiled-in kernel identity is the only system principal
-        // set), and therefore nothing that can start a session; the
-        // installer authors the first human user on first boot.
+        // An empty database — no debug account and nothing that can start
+        // a session: the installer authors the first human user on first
+        // boot, and the system/service identity is compiled into the
+        // kernel, never written to disk (`plans/USERS.md`).
         assert!(db.records().is_empty());
         assert!(db.lookup(DEBUG_USERNAME).is_none());
-        assert!(db.lookup(rustos_users::SYSTEM_USERNAME).is_none());
 
         // The matching group registry carries only the well-known
-        // removable-storage group: no debug group, and the reserved
-        // system/services groups stay compiled into the kernel.
+        // removable-storage group — no debug group and no compiled system
+        // group.
         let groups = rfs
             .lookup(security, rootfs::GROUPS_DB_NAME.as_bytes())
             .expect("Groups registry exists");
@@ -1017,13 +1022,14 @@ mod tests {
             .expect("Groups registry reads");
         let text = core::str::from_utf8(&buf[..read]).expect("valid UTF-8");
         let registry = rustos_users::GroupsDb::parse(text).expect("seeded registry parses");
+        assert_eq!(registry.records().len(), 1);
         assert!(registry.lookup(DEBUG_GROUP).is_none());
         assert_eq!(
-            registry.lookup(STORAGE_GROUP).map(GroupRecord::gid),
+            registry
+                .lookup(rustos_users::STORAGE_GROUP)
+                .map(GroupRecord::gid),
             Some(STORAGE_GID)
         );
-        assert!(registry.lookup(rustos_users::SYSTEM_GROUP).is_none());
-        assert!(registry.lookup(rustos_users::SERVICES_GROUP).is_none());
     }
 
     #[test]
