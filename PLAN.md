@@ -4505,7 +4505,9 @@ increment landing complete and green:
    `SPAWN_PROGRAMS`, the `*_rxe.rs` `include!`s (all but PID 1 `init`),
    `spawn_paths.rs`, and `program_manifests.rs` are deleted (§2.14). Until
    that lands, the embedded registry is those ports' explicitly-justified
-   §18.6 boot floor — the only reason it still exists.
+   §18.6 boot floor — the only reason it still exists. The x86_64 side is
+   staged as `plans/ARCHSUPPORT.md` increments A1–A2 (riscv64 rides the
+   same shared work).
 
 ---
 
