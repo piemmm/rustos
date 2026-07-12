@@ -1249,6 +1249,7 @@ dependencies = [
  "rustos-caps",
  "rustos-log",
  "rustos-rt",
+ "rustos-users",
 ]
 
 [[package]]

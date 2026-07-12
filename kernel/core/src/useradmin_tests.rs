@@ -84,7 +84,7 @@ fn record(username: &str, uid: u32, grants: CapabilitySet, password: &[u8]) -> U
         Identity {
             username,
             uid: Uid(uid),
-            primary_gid: Gid(0),
+            primary_gid: Gid(1000),
             supplementary_gids: &[],
             display_name: "",
             home: Some("/Users/test"),
@@ -117,13 +117,13 @@ fn fixture() -> Fixture {
         baseline.insert(*cap);
     }
     let users = UsersDb::new(alloc::vec![
-        record("root", 0, admin_grants, b"root"),
-        record("ada", 1000, baseline, b"byron"),
+        record("root", 1000, admin_grants, b"root"),
+        record("ada", 1001, baseline, b"byron"),
     ])
     .expect("valid users db");
     let groups = GroupsDb::new(alloc::vec![
-        GroupRecord::new("system", Gid(0)).expect("valid group"),
-        GroupRecord::new("staff", Gid(100)).expect("valid group"),
+        GroupRecord::new("wheel", Gid(1000)).expect("valid group"),
+        GroupRecord::new("staff", Gid(1001)).expect("valid group"),
     ])
     .expect("valid groups db");
 
@@ -174,12 +174,12 @@ fn create_user_provisions_home_persists_and_binds_at_next_resolution() {
     )
     .expect("fits");
     let mut gid_backing = [0u8; 4];
-    let supplementary_gids = gid_list_into(&[100], &mut gid_backing).expect("fits");
+    let supplementary_gids = gid_list_into(&[1001], &mut gid_backing).expect("fits");
     let password = password_record(b"lovelace");
     let request = UsersAdminRequest::CreateUser(CreateUser {
         username: "grace",
-        uid: 1001,
-        primary_gid: 100,
+        uid: 1002,
+        primary_gid: 1001,
         supplementary_gids,
         display_name: "Grace Hopper",
         home: "/Users/grace",
@@ -193,7 +193,7 @@ fn create_user_provisions_home_persists_and_binds_at_next_resolution() {
     assert_eq!(f.backing.persist_count(), 1);
     assert_eq!(
         f.backing.homes.lock().as_slice(),
-        &[(String::from("/Users/grace"), 1001, 100)]
+        &[(String::from("/Users/grace"), 1002, 1001)]
     );
 
     // The next login sees the account: the served text authenticates it.
@@ -204,9 +204,9 @@ fn create_user_provisions_home_persists_and_binds_at_next_resolution() {
     // The next spawn resolves the new ceiling from the live table.
     let (gid, sups, ceiling) = f
         .identity_cell
-        .resolve_credential(1001)
+        .resolve_credential(1002)
         .expect("new uid resolves");
-    assert_eq!(gid.0, 100);
+    assert_eq!(gid.0, 1001);
     assert_eq!(sups.len(), 1);
     assert!(ceiling.contains(CapabilityId::FS_ACCESS));
     assert!(!ceiling.contains(CapabilityId::USER_ADMIN));
@@ -228,7 +228,7 @@ fn a_grant_the_caller_does_not_hold_is_never_minted() {
     let request = UsersAdminRequest::CreateUser(CreateUser {
         username: "mallory",
         uid: 2000,
-        primary_gid: 0,
+        primary_gid: 1000,
         supplementary_gids,
         display_name: "",
         home: "/Users/mallory",
@@ -237,7 +237,7 @@ fn a_grant_the_caller_does_not_hold_is_never_minted() {
         password_record: &password,
     });
     assert_eq!(
-        f.engine.handle(1000, &BaselineCaller, &request, &mut []),
+        f.engine.handle(1001, &BaselineCaller, &request, &mut []),
         Err(Errno::PermissionDenied)
     );
     // Nothing changed anywhere.
@@ -250,7 +250,7 @@ fn a_grant_the_caller_does_not_hold_is_never_minted() {
     let grants = grant_list_into(&[CapabilityId::TIME_SET], &mut grant_backing).expect("fits");
     assert_eq!(
         f.engine.handle(
-            1000,
+            1001,
             &BaselineCaller,
             &UsersAdminRequest::SetGrants {
                 username: "ada",
@@ -314,7 +314,7 @@ fn locking_binds_at_the_next_login_and_unlock_restores() {
     // stays resolvable, so the locked account's files keep their groups.
     let db = served_db(f.users_cell);
     assert!(db.authenticate("ada", b"byron").is_err());
-    assert!(f.identity_cell.resolve_credential(1000).is_ok());
+    assert!(f.identity_cell.resolve_credential(1001).is_ok());
 
     assert_eq!(
         handle(
@@ -340,7 +340,7 @@ fn delete_user_removes_the_account_and_missing_targets_fail_closed() {
     );
     assert!(served_db(f.users_cell).lookup("ada").is_none());
     assert_eq!(
-        f.identity_cell.resolve_credential(1000),
+        f.identity_cell.resolve_credential(1001),
         Err(Errno::PermissionDenied)
     );
     assert_eq!(
@@ -391,7 +391,7 @@ fn duplicate_accounts_and_groups_are_refused() {
     let request = UsersAdminRequest::CreateUser(CreateUser {
         username: "ada",
         uid: 3000,
-        primary_gid: 0,
+        primary_gid: 1000,
         supplementary_gids,
         display_name: "",
         home: "/Users/ada2",
@@ -405,8 +405,8 @@ fn duplicate_accounts_and_groups_are_refused() {
         handle(
             &f,
             &UsersAdminRequest::CreateGroup {
-                name: "wheel",
-                gid: 100,
+                name: "extra",
+                gid: 1001,
             },
         ),
         Err(Errno::AlreadyExists)
@@ -420,21 +420,21 @@ fn group_lifecycle_is_enforced_with_referential_integrity() {
         handle(
             &f,
             &UsersAdminRequest::CreateGroup {
-                name: "wheel",
-                gid: 200,
+                name: "audio",
+                gid: 2000,
             },
         ),
         Ok(0)
     );
     // Deleting an unreferenced group succeeds.
     assert_eq!(
-        handle(&f, &UsersAdminRequest::DeleteGroup { name: "wheel" }),
+        handle(&f, &UsersAdminRequest::DeleteGroup { name: "audio" }),
         Ok(0)
     );
     // Deleting a group an account references is refused: the identity
     // verification fails closed and nothing is persisted.
     let before = f.backing.persist_count();
-    assert!(handle(&f, &UsersAdminRequest::DeleteGroup { name: "system" }).is_err());
+    assert!(handle(&f, &UsersAdminRequest::DeleteGroup { name: "wheel" }).is_err());
     assert_eq!(f.backing.persist_count(), before);
     // A missing group fails closed.
     assert_eq!(
@@ -447,13 +447,13 @@ fn group_lifecycle_is_enforced_with_referential_integrity() {
 fn modify_user_replaces_identity_fields_and_provisions_a_changed_home() {
     let f = fixture();
     let mut gid_backing = [0u8; 4];
-    let supplementary_gids = gid_list_into(&[100], &mut gid_backing).expect("fits");
+    let supplementary_gids = gid_list_into(&[1001], &mut gid_backing).expect("fits");
     assert_eq!(
         handle(
             &f,
             &UsersAdminRequest::ModifyUser(ModifyUser {
                 username: "ada",
-                primary_gid: 100,
+                primary_gid: 1001,
                 supplementary_gids,
                 display_name: "Ada Lovelace",
                 home: "/Users/ada",
@@ -466,10 +466,10 @@ fn modify_user_replaces_identity_fields_and_provisions_a_changed_home() {
     // provisioned under the account's identity.
     assert_eq!(
         f.backing.homes.lock().as_slice(),
-        &[(String::from("/Users/ada"), 1000, 100)]
+        &[(String::from("/Users/ada"), 1001, 1001)]
     );
-    let (gid, sups, ceiling) = f.identity_cell.resolve_credential(1000).expect("resolves");
-    assert_eq!(gid.0, 100);
+    let (gid, sups, ceiling) = f.identity_cell.resolve_credential(1001).expect("resolves");
+    assert_eq!(gid.0, 1001);
     assert_eq!(sups.len(), 1);
     // The security fields are untouched by a modify.
     assert!(ceiling.contains(CapabilityId::FS_ACCESS));
@@ -528,8 +528,8 @@ fn list_users_and_groups_answer_the_non_secret_view() {
         .collect::<Result<_, _>>()
         .expect("all entries decode");
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].name, "system");
-    assert_eq!(entries[1].gid, 100);
+    assert_eq!(entries[0].name, "wheel");
+    assert_eq!(entries[1].gid, 1001);
 
     // An undersized buffer fails closed whole-or-nothing.
     let mut tiny = [0u8; 8];

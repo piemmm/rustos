@@ -28,7 +28,6 @@ use rustos_kernel_core::{
 };
 use rustos_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE};
 use rustos_kernel_sched_api::SchedulerConfig;
-use rustos_kernel_sec::IdentityTableBuilder;
 use rustos_log::Level;
 
 fn make_usable_map() -> BootMemoryMap {
@@ -74,7 +73,6 @@ where
         1,
         "",
         make_usable_map(),
-        IdentityTableBuilder::new(),
         SchedulerConfig::defaults_for(1),
         Arc::clone(&arch),
         log_sink,

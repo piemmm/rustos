@@ -68,7 +68,6 @@ use rustos_arch_riscv64::{
 use rustos_kernel_core::{kernel_main, BootInfo, ConsoleWrite, KernelArch};
 use rustos_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE};
 use rustos_kernel_sched_api::SchedulerConfig;
-use rustos_kernel_sec::IdentityTableBuilder;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 
 use crate::riscv64::dispatch::{production_dispatch, production_user_fault, DISPATCH_SLOT};
@@ -860,7 +859,6 @@ pub fn try_boot(
         1,
         "",
         memory_map,
-        IdentityTableBuilder::new(),
         SchedulerConfig::defaults_for(1),
         arch,
         log_sink,
@@ -876,6 +874,12 @@ pub fn try_boot(
     // Record the device-tree-discovered installed-RAM total so the core
     // mints the `boot_facts_get` machine summary from it.
     .with_installed_memory(installed_memory_bytes)
+    // Hand the shared identity cell to the core: the sec phase
+    // publishes the compiled-in system identity into it, so the
+    // system/service accounts resolve (spawn-as-user, filesystem
+    // groups) from first boot; a later encrypted-root unlock replaces
+    // the held table with the merged system∪human table.
+    .with_spawn_identity(&crate::root_mount::LATE_IDENTITY)
     // Install the PID 1 spawn seam (`plans/PI.md` RV-P3): once every init
     // phase has succeeded and `kernel_main` emits `BootCompleted`, the core
     // invokes it to build `init`'s U-mode image and drop into user mode.

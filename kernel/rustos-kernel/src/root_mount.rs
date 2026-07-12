@@ -795,18 +795,21 @@ pub static LATE_USERS_DB: LateUsersDb = LateUsersDb::new();
 /// with `NotImplemented`.
 pub static LATE_USERS_ADMIN: LateUsersAdmin = LateUsersAdmin::new();
 
-/// The set-once authoritative user/group identity table the `fs_*` syscalls
-/// resolve a caller's groups against (`PREREQUISITES.md` P-A), installed by
-/// the same trusted unlock step that installs [`LATE_USERS_DB`].
+/// The authoritative user/group identity cell the `fs_*` syscalls resolve
+/// a caller's groups against (`PREREQUISITES.md` P-A). The kernel core's
+/// sec phase installs the compiled-in system identity into it at boot
+/// (every port hands it over through `with_spawn_identity`); the trusted
+/// unlock step that installs [`LATE_USERS_DB`] then replaces the held
+/// table with the merged system∪human table.
 ///
 /// Held by the production [`MountedFilesystemService`](rustos_kernel_core::MountedFilesystemService)
-/// the dispatch hook serves the `fs_*` syscalls through. Until the unlock
-/// installs it, every `fs_*` group resolution fails closed
-/// ([`Errno::NotImplemented`]) — the credential-free table carries the
-/// uid → group/capability mapping the VFS needs, never password material,
-/// so the long-lived `&'static` copy leaks no secret. Defined beside
-/// [`LATE_USERS_DB`] so the two halves the one unlock publishes are one
-/// definition.
+/// the dispatch hook serves the `fs_*` syscalls through. From the sec
+/// phase onward the system accounts resolve; a *human* uid resolves only
+/// once the unlock published the merged table (fail closed before then) —
+/// the credential-free table carries the uid → group/capability mapping
+/// the VFS needs, never password material, so the long-lived `&'static`
+/// copy leaks no secret. Defined beside [`LATE_USERS_DB`] so the two
+/// halves the one unlock publishes are one definition.
 pub static LATE_IDENTITY: LateIdentity = LateIdentity::new();
 
 /// The result of [`unlock_root_disk_interactively`].
@@ -863,14 +866,17 @@ fn finish_install(
     // users/identity install below. The key is wiped when `volume_key`
     // drops at the end of this function.
     let admin_fs = install.writable.publish(&volume_key);
-    // Install the authoritative identity table first, so the `fs_*` group
-    // resolution is ready before `login` can act on the installed users
-    // database. Both cells are set-once; a refusal means something was
-    // already published (the kthread runs once, so that is a logic error),
-    // and the rejected value is dropped (the identity table carries no
-    // secret; the users holder is zeroed inside `install`).
-    if install.identity.install(identity).is_err() {
-        gave_up(audit, "identity_already_installed");
+    // Publish the merged identity table first, so the `fs_*` group
+    // resolution covers the human accounts before `login` can act on the
+    // installed users database. The boot sec phase installed the
+    // compiled-in system identity into this same cell; the unlock
+    // *replaces* it with the merged system∪human table built from the
+    // loaded databases. A refusal means the boot never installed a table
+    // — a boot-path logic error — and the unlock fails closed rather than
+    // serve half an identity (the rejected table carries no secret; the
+    // users holder is zeroed inside `install`).
+    if install.identity.replace(identity).is_err() {
+        gave_up(audit, "identity_replace_refused");
         return UnlockOutcome::GaveUp;
     }
     if install.users.install(users).is_err() {
@@ -2048,6 +2054,19 @@ mod tests {
         bytes
     }
 
+    /// A fresh identity cell pre-loaded with the compiled-in system
+    /// identity, exactly as the boot sec phase installs it before any
+    /// unlock runs — the state `finish_install`'s replace-publish
+    /// requires.
+    fn boot_identity() -> LateIdentity {
+        let cell = LateIdentity::new();
+        let table = rustos_kernel_core::system_identity_table(&RecordingSink::new())
+            .expect("the compiled system identity builds");
+        cell.install(table)
+            .expect("a fresh cell accepts the boot table");
+        cell
+    }
+
     /// Build the success whole-disk fixture the interactive tests unlock —
     /// the *same* MBR boot+root image (the root encrypted under
     /// [`PASSPHRASE`]'s derived key) the `-M virt` root-mount->login QEMU
@@ -2065,7 +2084,7 @@ mod tests {
         // authenticate (`plans/PI.md` P11 Chunk B-2).
         let input = ScriptInput::new(script(&[PASSPHRASE]));
         let late = LateUsersDb::new();
-        let late_identity = LateIdentity::new();
+        let late_identity = boot_identity();
         let storage_gid = LateStorageGid::new();
         let sink = RecordingSink::new();
 
@@ -2130,7 +2149,7 @@ mod tests {
             .expect("the blank-passphrase image assembles");
         let disk = FatVecBlock { store: bytes };
         let late = LateUsersDb::new();
-        let late_identity = LateIdentity::new();
+        let late_identity = boot_identity();
         let sink = RecordingSink::new();
 
         let outcome = unlock_root_disk_interactively(
@@ -2182,7 +2201,7 @@ mod tests {
         // wording, the delay count, and the notice are all asserted.
         let input = ScriptInput::new(script(&[b"nope", b"still wrong", PASSPHRASE]));
         let late = LateUsersDb::new();
-        let late_identity = LateIdentity::new();
+        let late_identity = boot_identity();
         let sink = RecordingSink::new();
         let console = RecordingConsole::new();
         let delays = AtomicUsize::new(0);
@@ -2243,7 +2262,7 @@ mod tests {
         let lines = alloc::vec![b"wrong" as &[u8]; 8];
         let input = ScriptInput::new(script(&lines));
         let late = LateUsersDb::new();
-        let late_identity = LateIdentity::new();
+        let late_identity = boot_identity();
         let sink = RecordingSink::new();
         let delays = AtomicUsize::new(0);
 
@@ -2291,7 +2310,7 @@ mod tests {
         // fails closed.
         let input = ScriptInput::new(script(&[PASSPHRASE]));
         let late = LateUsersDb::new();
-        let late_identity = LateIdentity::new();
+        let late_identity = boot_identity();
         let sink = RecordingSink::new();
 
         let outcome = unlock_root_disk_interactively(
@@ -2341,7 +2360,7 @@ mod tests {
             &ScriptInput::new(script(&[PASSPHRASE])),
             &UnlockInstall {
                 users: &LateUsersDb::new(),
-                identity: &LateIdentity::new(),
+                identity: &boot_identity(),
                 writable: &NoWritableRootSink,
                 admin: None,
                 storage_gid: &LateStorageGid::new(),
@@ -2365,7 +2384,7 @@ mod tests {
             &ScriptInput::new(script(&[PASSPHRASE])),
             &UnlockInstall {
                 users: &LateUsersDb::new(),
-                identity: &LateIdentity::new(),
+                identity: &boot_identity(),
                 writable: &NoWritableRootSink,
                 admin: None,
                 storage_gid: &LateStorageGid::new(),
@@ -2389,7 +2408,7 @@ mod tests {
         // fabricated secret, and never touches the disk.
         let input = ScriptInput::failing();
         let late = LateUsersDb::new();
-        let late_identity = LateIdentity::new();
+        let late_identity = boot_identity();
         let sink = RecordingSink::new();
 
         let outcome = unlock_root_disk_interactively(
@@ -2426,7 +2445,7 @@ mod tests {
         let over_long = alloc::vec![b'a'; MAX_PASSPHRASE_LEN + 16];
         let input = ScriptInput::new(script(&[&over_long, PASSPHRASE]));
         let late = LateUsersDb::new();
-        let late_identity = LateIdentity::new();
+        let late_identity = boot_identity();
         let sink = RecordingSink::new();
 
         let outcome = unlock_root_disk_interactively(

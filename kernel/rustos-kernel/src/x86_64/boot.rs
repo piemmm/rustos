@@ -62,7 +62,6 @@ use rustos_kernel_core::{kernel_main, BootInfo, IrqRouting};
 use rustos_kernel_irq::IrqController;
 use rustos_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind};
 use rustos_kernel_sched_api::SchedulerConfig;
-use rustos_kernel_sec::IdentityTableBuilder;
 use rustos_log::{Event, EventId, Field, Level, Sink};
 
 use crate::mem_map::carve_guard_arena_from_map;
@@ -798,7 +797,6 @@ fn try_boot(
         /* cpu_count      = */ 1,
         /* command_line   = */ "",
         memory_map,
-        IdentityTableBuilder::new(),
         scheduler_config,
         arch_arc,
         log_sink,
@@ -820,6 +818,12 @@ fn try_boot(
     // Record the firmware-reported installed-RAM total so the core mints
     // the `boot_facts_get` machine summary from it.
     .with_installed_memory(installed_memory_bytes)
+    // Hand the shared identity cell to the core: the sec phase
+    // publishes the compiled-in system identity into it, so the
+    // system/service accounts resolve (spawn-as-user, filesystem
+    // groups) from first boot; a later encrypted-root unlock replaces
+    // the held table with the merged system∪human table.
+    .with_spawn_identity(&crate::root_mount::LATE_IDENTITY)
     // The PID 1 (`init`) spawn seam: after `BootCompleted`, `kernel_main`
     // builds `init`'s ring-3 image and drops into it as a resumable user
     // kthread (`plans/PI.md` X3a).

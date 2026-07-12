@@ -34,9 +34,7 @@ use rustos_kernel_ipc::PortRegistry;
 use rustos_kernel_irq::{IrqController, IrqTable};
 use rustos_kernel_mem::{AllocError, FrameAllocator, PhysMap, UserAddressSpace};
 use rustos_kernel_sched_api::{Priority, StepOutcome};
-use rustos_kernel_sec::{
-    CapTable, IdentityTable, ProcName, TaskCapabilities, TaskId as SecTaskId, UserId,
-};
+use rustos_kernel_sec::{CapTable, ProcName, TaskCapabilities, TaskId as SecTaskId, UserId};
 use rustos_log::{set_max_level, Field, Level, Sink};
 use rustos_sync::RwLock;
 use rustos_util::fmt::format_hex_u64;
@@ -63,7 +61,7 @@ pub enum Phase {
     /// Construct the physical [`FrameAllocator`] from the boot memory
     /// map.
     Mem,
-    /// Verify and freeze the bootstrap identity table.
+    /// Build, verify, and install the compiled-in system identity table.
     Sec,
     /// Build the SMP scheduler.
     Sched,
@@ -134,7 +132,9 @@ pub enum InitError {
     BadBootInfo(BootInfoError),
     /// `kernel/mem` rejected the memory map or could not initialise.
     Mem(AllocError),
-    /// `kernel/sec` rejected the bootstrap identity table.
+    /// The compiled-in system identity table was rejected by the
+    /// `kernel/sec` verifier or could not be installed into the boot
+    /// path's identity cell.
     Sec(rustos_abi::Errno),
     /// `kernel/sched` rejected the scheduler configuration.
     Sched(SchedError),
@@ -1088,7 +1088,6 @@ fn run_phases<A: KernelArch>(
     let BootInfo {
         cpu_count,
         memory_map,
-        identity,
         scheduler_config,
         arch,
         dispatcher_callback_slot,
@@ -1120,11 +1119,26 @@ fn run_phases<A: KernelArch>(
     let frame_allocator = FrameAllocator::new(&memory_map).map_err(InitError::Mem)?;
     phase_ready(log_sink, Phase::Mem);
 
-    // Phase 3 — Sec. The identity-table verifier emits its own audit
-    // record on the `audit_sink`; we still emit our phase markers on
-    // the diagnostic `log_sink` so the two streams stay aligned.
+    // Phase 3 — Sec. Build the compiled-in system identity (the OS-owned
+    // accounts and groups — kernel policy, tamper-proof as the kernel
+    // text) and publish it into the boot path's identity cell, so
+    // spawn-as-user and filesystem group resolution for the system
+    // accounts work from first boot, before any volume is mounted. The
+    // encrypted-root unlock later replaces the cell's table with the
+    // merged system∪human table. The verifier emits its own audit record
+    // on the `audit_sink`; we still emit our phase markers on the
+    // diagnostic `log_sink` so the two streams stay aligned. A boot path
+    // with no identity cell (a host harness) skips the install and every
+    // credential resolution stays fail-closed.
     phase_started(log_sink, Phase::Sec);
-    let identity_table = identity.verify(audit_sink).map_err(InitError::Sec)?;
+    if let Some(cell) = spawn_identity {
+        let table = crate::groups::system_identity_table(audit_sink).map_err(InitError::Sec)?;
+        // The cell is set-once: a refused install means the boot path
+        // published a table before the sec phase ran — a re-entry logic
+        // error surfaced fail-closed rather than silently kept.
+        cell.install(table)
+            .map_err(|_| InitError::Sec(rustos_abi::Errno::AlreadyExists))?;
+    }
     phase_ready(log_sink, Phase::Sec);
 
     // Phase 4 — Sched.
@@ -1173,7 +1187,6 @@ fn run_phases<A: KernelArch>(
     // primitive (`Scheduler`'s internal locks, `RwLock<CapTable>`)).
     let state: &'static KernelState<A> = Box::leak(Box::new(KernelState {
         frame_allocator,
-        identity_table,
         scheduler,
         caps: RwLock::new(CapTable::new()),
         ipc: RwLock::new(PortRegistry::new()),
@@ -1414,11 +1427,12 @@ fn run_phases<A: KernelArch>(
         // boot path can host runtime volumes.
         .with_volume_service(volume_service)
         // Resolve a spawn-as-user switch against the authoritative identity
-        // table the boot path installed (`PREREQUISITES.md` P-C) — the same
-        // table the filesystem service resolves caller groups against; the
-        // default `NULL_IDENTITY` keeps a switch fail-closed when no root was
-        // unlocked, and the default `spawn` (inherit) never consults it.
-        .with_identity(spawn_identity)
+        // table the sec phase installed into the boot path's cell — the same
+        // table the filesystem service resolves caller groups against; a
+        // boot path with no cell falls to the inert `NULL_IDENTITY`, which
+        // keeps a switch fail-closed, and the default `spawn` (inherit)
+        // never consults it.
+        .with_identity(spawn_identity.unwrap_or(&crate::syscalls::NULL_IDENTITY))
         // Serve `wall_time_get` / `wall_time_set` through the production
         // wall clock (`PREREQUISITES.md` P-D). It boots `Unset`; a trusted
         // time source drives it via `wall_time_set` under `CAP_TIME_SET`.
@@ -1572,8 +1586,6 @@ fn build_shared_mem_facility<A: KernelArch>(
 pub(crate) struct KernelState<A: KernelArch> {
     #[allow(dead_code)] // Stage 4 will wire the allocator into the driver host.
     pub(crate) frame_allocator: FrameAllocator,
-    #[allow(dead_code)] // Stage 5 will wire the table into the VFS.
-    pub(crate) identity_table: IdentityTable,
     pub(crate) scheduler: Scheduler<A>,
     /// Per-task capability registry. The `KernelDispatchHook` reads
     /// this on every syscall; future `cap_delegate` / `cap_revoke`
@@ -1687,7 +1699,6 @@ mod tests {
     use alloc::boxed::Box;
     use alloc::sync::Arc;
     use rustos_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE};
-    use rustos_kernel_sec::IdentityTableBuilder;
     use rustos_log::Level;
 
     fn make_memory_map() -> BootMemoryMap {
@@ -1726,7 +1737,6 @@ mod tests {
             1,
             "",
             memory_map,
-            IdentityTableBuilder::new(),
             SchedulerConfig::defaults_for(1),
             arch,
             log_sink,
@@ -1734,6 +1744,33 @@ mod tests {
             Level::Info,
             slot,
         )
+    }
+
+    #[test]
+    fn the_sec_phase_installs_the_compiled_identity_into_a_wired_cell() {
+        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let cell: &'static crate::fs::LateIdentity =
+            Box::leak(Box::new(crate::fs::LateIdentity::new()));
+        let boot = bootinfo_with(log_sink, audit_sink, make_memory_map()).with_spawn_identity(cell);
+
+        run_phases(boot, log_sink, audit_sink).expect("phases succeed");
+
+        // The compiled-in system identity is live before any volume
+        // exists: a spawn-as-user switch to a service account resolves its
+        // primary group and ceiling from the boot-installed table, while a
+        // human uid (no on-disk half yet) fails closed.
+        assert!(cell.is_installed());
+        let (gid, sups, ceiling) = cell
+            .resolve_credential(rustos_users::DEVMGR_UID.0)
+            .expect("the devmgr service account resolves");
+        assert_eq!(gid.0, rustos_users::SERVICES_GID.0);
+        assert!(sups.is_empty());
+        assert!(ceiling.contains(rustos_abi::CapabilityId::DRV_LOAD));
+        assert!(matches!(
+            cell.resolve_credential(1000),
+            Err(rustos_abi::Errno::PermissionDenied)
+        ));
     }
 
     #[test]

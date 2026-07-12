@@ -26,14 +26,24 @@
 //!
 //! * `console` — open the system console so the banner and later output have
 //!   somewhere to go. Takes no argument.
-//! * `session <path>` — the absolute path of the program `init` launches as
-//!   the user's session (the shell, today). The argument must be an absolute
-//!   path (bundle layout). Required exactly once.
-//! * `service <path>` — the absolute path of a long-running system service
-//!   `init` launches once at startup and supervises for the life of the
-//!   system (the device manager, today). The
-//!   argument must be an absolute path. Optional and **repeatable**, up to
-//!   [`MAX_SERVICES`]; the directives' order is the launch order.
+//! * `session <path> <account>` — the absolute path of the program `init`
+//!   launches as the user's session (the login service, today) and the
+//!   compiled-in system account it runs as. Required exactly once.
+//! * `service <path> <account>` — the absolute path of a long-running system
+//!   service `init` launches once at startup and supervises for the life of
+//!   the system, and the compiled-in system account it runs as. Optional and
+//!   **repeatable**, up to [`MAX_SERVICES`]; the directives' order is the
+//!   launch order.
+//!
+//! Every `session`/`service` directive names its account, and the parser
+//! resolves the name onto its uid **at parse time** through the compiled-in
+//! system identity (`rustos_users::system_account_uid`) — no volume, no
+//! syscall, no waiting. A directive naming an unknown account rejects the
+//! whole config ([`ConfigError::UnknownAccount`]): nothing is spawned from a
+//! config whose identities cannot all be resolved (fail closed). PID 1 then
+//! spawns each entry with that concrete `target_uid`, so every service runs
+//! as its own unprivileged service account from its first instruction
+//! (`plans/USERS.md`).
 
 use core::fmt;
 
@@ -65,15 +75,16 @@ pub const MAX_SERVICES: usize = 4;
 pub const DEFAULT_CONFIG: &str = "\
 # RustOS PID 1 startup configuration (plans/PI.md P6b / P11).
 # Open the system console, launch the System Information, device-manager,
-# and seat-manager services, and start the login service as the session.
+# and seat-manager services, and start the login service as the session —
+# each under its own compiled-in service account (plans/USERS.md).
 # `sysinfod` starts first so the introspection endpoint (`AGENTS.md` §16.6)
 # is published before any client queries it; `seatmgr` (plans/DISPLAY.md D3)
 # holds the seat-multiplexing authority.
 console
-service /System/Services/sysinfod.app/Run
-service /System/Services/devmgr.app/Run
-service /System/Services/seatmgr.app/Run
-session /System/Services/login.app/Run
+service /System/Services/sysinfod.app/Run sysinfod
+service /System/Services/devmgr.app/Run devmgr
+service /System/Services/seatmgr.app/Run seatmgr
+session /System/Services/login.app/Run login
 ";
 
 /// The version prefix of the banner `init` writes once it reaches user mode.
@@ -206,6 +217,11 @@ pub enum ConfigError {
     UnexpectedArgument,
     /// A `session` or `service` path was not absolute (did not begin with `/`).
     NotAbsolutePath,
+    /// A `session` or `service` directive named no account.
+    MissingAccount,
+    /// A `session` or `service` directive named an account outside the
+    /// compiled-in system identity, so no uid can be resolved for it.
+    UnknownAccount,
     /// The required `console` directive was absent.
     ConsoleRequired,
     /// The required `session` directive was absent.
@@ -223,12 +239,25 @@ impl fmt::Display for ConfigError {
             Self::MissingArgument => "a startup directive is missing its argument",
             Self::UnexpectedArgument => "a startup directive was given an unexpected argument",
             Self::NotAbsolutePath => "a startup path argument is not absolute",
+            Self::MissingAccount => "a startup directive names no account",
+            Self::UnknownAccount => "a startup directive names an unknown system account",
             Self::ConsoleRequired => "startup config omits the required `console` directive",
             Self::SessionRequired => "startup config omits the required `session` directive",
             Self::TooManyServices => "startup config declares too many `service` directives",
         };
         f.write_str(message)
     }
+}
+
+/// One validated launch entry: the program path and the uid of the
+/// compiled-in system account it runs as, resolved at parse time.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Launch<'a> {
+    /// The absolute path of the program to launch.
+    pub path: &'a str,
+    /// The concrete `target_uid` the entry is spawned with — the
+    /// compiled-in system account the directive named.
+    pub uid: u32,
 }
 
 /// A parsed, validated startup configuration borrowing from its source text.
@@ -239,10 +268,11 @@ impl fmt::Display for ConfigError {
 /// supplied and are valid for as long as that text lives.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct StartupConfig<'a> {
-    session: &'a str,
-    /// The declared `service` paths in declaration (launch) order; only the
-    /// first [`service_count`](Self::service_count) entries are populated.
-    services: [&'a str; MAX_SERVICES],
+    session: Launch<'a>,
+    /// The declared `service` entries in declaration (launch) order; only
+    /// the first [`service_count`](Self::service_count) entries are
+    /// populated.
+    services: [Launch<'a>; MAX_SERVICES],
     /// How many of [`services`](Self::services) are populated.
     service_count: usize,
 }
@@ -255,17 +285,20 @@ impl<'a> StartupConfig<'a> {
     /// Returns the matching [`ConfigError`] if `text` exceeds
     /// [`MAX_CONFIG_LEN`], contains an unknown or duplicated directive, gives a
     /// directive the wrong arguments, carries a non-absolute `session` /
-    /// `service` path, declares more than [`MAX_SERVICES`] services, or omits a
-    /// required directive. The parser fails closed: a config it cannot fully
-    /// understand yields no [`StartupConfig`].
+    /// `service` path, omits or fails to resolve an account name, declares
+    /// more than [`MAX_SERVICES`] services, or omits a required directive.
+    /// The parser fails closed: a config it cannot fully understand — or
+    /// whose identities it cannot fully resolve — yields no
+    /// [`StartupConfig`].
     pub fn parse(text: &'a str) -> Result<Self, ConfigError> {
+        const EMPTY: Launch<'_> = Launch { path: "", uid: 0 };
         if text.len() > MAX_CONFIG_LEN {
             return Err(ConfigError::TooLong);
         }
 
         let mut console = false;
-        let mut session: Option<&'a str> = None;
-        let mut services: [&'a str; MAX_SERVICES] = [""; MAX_SERVICES];
+        let mut session: Option<Launch<'a>> = None;
+        let mut services: [Launch<'a>; MAX_SERVICES] = [EMPTY; MAX_SERVICES];
         let mut service_count = 0usize;
 
         for raw in text.lines() {
@@ -289,26 +322,20 @@ impl<'a> StartupConfig<'a> {
                     console = true;
                 }
                 "session" => {
-                    let path = argument.ok_or(ConfigError::MissingArgument)?;
-                    if !path.starts_with('/') {
-                        return Err(ConfigError::NotAbsolutePath);
-                    }
+                    let launch = parse_launch(argument.ok_or(ConfigError::MissingArgument)?)?;
                     if session.is_some() {
                         return Err(ConfigError::DuplicateDirective);
                     }
-                    session = Some(path);
+                    session = Some(launch);
                 }
                 "service" => {
-                    let path = argument.ok_or(ConfigError::MissingArgument)?;
-                    if !path.starts_with('/') {
-                        return Err(ConfigError::NotAbsolutePath);
-                    }
+                    let launch = parse_launch(argument.ok_or(ConfigError::MissingArgument)?)?;
                     // `service` is repeatable; overflow fails closed rather
                     // than overrunning the fixed array.
                     if service_count >= MAX_SERVICES {
                         return Err(ConfigError::TooManyServices);
                     }
-                    services[service_count] = path;
+                    services[service_count] = launch;
                     service_count += 1;
                 }
                 _ => return Err(ConfigError::UnknownDirective),
@@ -326,19 +353,39 @@ impl<'a> StartupConfig<'a> {
         })
     }
 
-    /// The absolute path of the program to launch as the user's session.
+    /// The user-session launch entry: the program path and the resolved
+    /// uid of the account it runs as.
     #[must_use]
-    pub fn session(&self) -> &'a str {
+    pub fn session(&self) -> Launch<'a> {
         self.session
     }
 
-    /// The absolute paths of the long-running services `init` launches once
-    /// at startup and supervises, in declaration (launch) order. Empty when
-    /// the config declares none.
+    /// The long-running services `init` launches once at startup and
+    /// supervises, in declaration (launch) order — each entry the program
+    /// path plus its resolved account uid. Empty when the config declares
+    /// none.
     #[must_use]
-    pub fn services(&self) -> &[&'a str] {
+    pub fn services(&self) -> &[Launch<'a>] {
         &self.services[..self.service_count]
     }
+}
+
+/// Parse one `session`/`service` argument — `<path> <account>` — into a
+/// validated [`Launch`]: the path must be absolute, the account name must
+/// resolve against the compiled-in system identity, and nothing may
+/// follow the account.
+fn parse_launch(argument: &str) -> Result<Launch<'_>, ConfigError> {
+    let mut fields = argument.split_whitespace();
+    let path = fields.next().ok_or(ConfigError::MissingArgument)?;
+    let account = fields.next().ok_or(ConfigError::MissingAccount)?;
+    if fields.next().is_some() {
+        return Err(ConfigError::UnexpectedArgument);
+    }
+    if !path.starts_with('/') {
+        return Err(ConfigError::NotAbsolutePath);
+    }
+    let uid = rustos_users::system_account_uid(account).ok_or(ConfigError::UnknownAccount)?;
+    Ok(Launch { path, uid: uid.0 })
 }
 
 /// Return the portion of `line` before its first `#`, dropping an inline or
@@ -353,7 +400,7 @@ fn strip_comment(line: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfigError, StartupConfig, DEFAULT_CONFIG, MAX_CONFIG_LEN, MAX_SERVICES};
+    use super::{ConfigError, Launch, StartupConfig, DEFAULT_CONFIG, MAX_CONFIG_LEN, MAX_SERVICES};
 
     extern crate alloc;
     use alloc::format;
@@ -364,55 +411,117 @@ mod tests {
     fn default_config_parses_to_console_login_session_and_the_startup_services() {
         let config = StartupConfig::parse(DEFAULT_CONFIG).expect("default config parses");
         // Every service is a `<name>.app` bundle in the service store (a
-        // service is an app), so the config names each bundle's `Run` binary.
-        assert_eq!(config.session(), "/System/Services/login.app/Run");
+        // service is an app), so the config names each bundle's `Run`
+        // binary — and each entry's account resolves to the compiled-in
+        // service uid it runs as (`plans/USERS.md`).
+        assert_eq!(
+            config.session(),
+            Launch {
+                path: "/System/Services/login.app/Run",
+                uid: rustos_users::LOGIN_UID.0,
+            }
+        );
         // `sysinfod` is launched before `devmgr` so the introspection endpoint
         // is published before any client queries it.
         assert_eq!(
             config.services(),
             &[
-                "/System/Services/sysinfod.app/Run",
-                "/System/Services/devmgr.app/Run",
-                "/System/Services/seatmgr.app/Run",
+                Launch {
+                    path: "/System/Services/sysinfod.app/Run",
+                    uid: rustos_users::SYSINFOD_UID.0,
+                },
+                Launch {
+                    path: "/System/Services/devmgr.app/Run",
+                    uid: rustos_users::DEVMGR_UID.0,
+                },
+                Launch {
+                    path: "/System/Services/seatmgr.app/Run",
+                    uid: rustos_users::SEATMGR_UID.0,
+                },
             ],
         );
     }
 
     #[test]
     fn a_config_without_a_service_directive_has_no_services() {
-        let config = StartupConfig::parse("console\nsession /Apps/Shell.app/Run\n").unwrap();
+        let config = StartupConfig::parse("console\nsession /Apps/Shell.app/Run login\n").unwrap();
         assert!(config.services().is_empty());
     }
 
     #[test]
     fn service_directives_are_collected_in_declaration_order() {
         let config = StartupConfig::parse(
-            "console\nservice /System/Services/devmgr.app/Run\nservice /System/Services/netd\nsession /x\n",
+            "console\nservice /System/Services/devmgr.app/Run devmgr\nservice /System/Services/netd sysinfod\nsession /x login\n",
         )
         .expect("config parses");
         assert_eq!(
             config.services(),
-            &["/System/Services/devmgr.app/Run", "/System/Services/netd"],
+            &[
+                Launch {
+                    path: "/System/Services/devmgr.app/Run",
+                    uid: rustos_users::DEVMGR_UID.0,
+                },
+                Launch {
+                    path: "/System/Services/netd",
+                    uid: rustos_users::SYSINFOD_UID.0,
+                },
+            ],
         );
     }
 
     #[test]
     fn a_service_path_must_be_absolute() {
         assert_eq!(
-            StartupConfig::parse("console\nservice devmgr\nsession /x\n"),
+            StartupConfig::parse("console\nservice devmgr devmgr\nsession /x login\n"),
             Err(ConfigError::NotAbsolutePath),
         );
         assert_eq!(
-            StartupConfig::parse("console\nservice\nsession /x\n"),
+            StartupConfig::parse("console\nservice\nsession /x login\n"),
             Err(ConfigError::MissingArgument),
         );
     }
 
     #[test]
+    fn a_directive_without_an_account_fails_closed() {
+        assert_eq!(
+            StartupConfig::parse("console\nsession /x\n"),
+            Err(ConfigError::MissingAccount),
+        );
+        assert_eq!(
+            StartupConfig::parse(
+                "console\nservice /System/Services/devmgr.app/Run\nsession /x login\n"
+            ),
+            Err(ConfigError::MissingAccount),
+        );
+    }
+
+    #[test]
+    fn an_unknown_account_fails_closed() {
+        // Neither an arbitrary name nor a *human* account resolves: only
+        // the compiled-in system identity can run a boot service.
+        assert_eq!(
+            StartupConfig::parse("console\nsession /x nobody\n"),
+            Err(ConfigError::UnknownAccount),
+        );
+        assert_eq!(
+            StartupConfig::parse("console\nservice /svc root\nsession /x login\n"),
+            Err(ConfigError::UnknownAccount),
+        );
+    }
+
+    #[test]
+    fn trailing_fields_after_the_account_fail_closed() {
+        assert_eq!(
+            StartupConfig::parse("console\nsession /x login extra\n"),
+            Err(ConfigError::UnexpectedArgument),
+        );
+    }
+
+    #[test]
     fn more_than_max_services_fails_closed() {
-        let mut text = String::from("console\nsession /x\n");
+        let mut text = String::from("console\nsession /x login\n");
         for n in 0..=MAX_SERVICES {
-            let _ = writeln!(text, "service /System/Services/s{n}");
+            let _ = writeln!(text, "service /System/Services/s{n} devmgr");
         }
         assert_eq!(
             StartupConfig::parse(&text),
@@ -422,9 +531,9 @@ mod tests {
 
     #[test]
     fn exactly_max_services_is_accepted() {
-        let mut text = String::from("console\nsession /x\n");
+        let mut text = String::from("console\nsession /x login\n");
         for n in 0..MAX_SERVICES {
-            let _ = writeln!(text, "service /System/Services/s{n}");
+            let _ = writeln!(text, "service /System/Services/s{n} devmgr");
         }
         let config = StartupConfig::parse(&text).expect("exactly the bound parses");
         assert_eq!(config.services().len(), MAX_SERVICES);
@@ -436,23 +545,24 @@ mod tests {
 # a leading comment
 \t
 console   # open it
-session /Apps/Shell.app/Run   # the shell
+session /Apps/Shell.app/Run login   # the login service
 ";
         let config = StartupConfig::parse(text).expect("config parses");
-        assert_eq!(config.session(), "/Apps/Shell.app/Run");
+        assert_eq!(config.session().path, "/Apps/Shell.app/Run");
     }
 
     #[test]
     fn surrounding_whitespace_is_tolerated() {
         let config =
-            StartupConfig::parse("   console  \n   session    /Apps/Shell.app/Run   \n").unwrap();
-        assert_eq!(config.session(), "/Apps/Shell.app/Run");
+            StartupConfig::parse("   console  \n   session    /Apps/Shell.app/Run  login \n")
+                .unwrap();
+        assert_eq!(config.session().path, "/Apps/Shell.app/Run");
     }
 
     #[test]
     fn unknown_directive_fails_closed() {
         assert_eq!(
-            StartupConfig::parse("console\nsession /x\nlaunch /y\n"),
+            StartupConfig::parse("console\nsession /x login\nlaunch /y\n"),
             Err(ConfigError::UnknownDirective),
         );
     }
@@ -460,11 +570,11 @@ session /Apps/Shell.app/Run   # the shell
     #[test]
     fn duplicate_directive_is_rejected() {
         assert_eq!(
-            StartupConfig::parse("console\nconsole\nsession /x\n"),
+            StartupConfig::parse("console\nconsole\nsession /x login\n"),
             Err(ConfigError::DuplicateDirective),
         );
         assert_eq!(
-            StartupConfig::parse("console\nsession /x\nsession /y\n"),
+            StartupConfig::parse("console\nsession /x login\nsession /y login\n"),
             Err(ConfigError::DuplicateDirective),
         );
     }
@@ -472,7 +582,7 @@ session /Apps/Shell.app/Run   # the shell
     #[test]
     fn console_rejects_an_argument() {
         assert_eq!(
-            StartupConfig::parse("console now\nsession /x\n"),
+            StartupConfig::parse("console now\nsession /x login\n"),
             Err(ConfigError::UnexpectedArgument),
         );
     }
@@ -484,7 +594,7 @@ session /Apps/Shell.app/Run   # the shell
             Err(ConfigError::MissingArgument),
         );
         assert_eq!(
-            StartupConfig::parse("console\nsession System/Apps/elsh.app/Run\n"),
+            StartupConfig::parse("console\nsession System/Apps/elsh.app/Run login\n"),
             Err(ConfigError::NotAbsolutePath),
         );
     }
@@ -492,7 +602,7 @@ session /Apps/Shell.app/Run   # the shell
     #[test]
     fn a_required_directive_must_be_present() {
         assert_eq!(
-            StartupConfig::parse("session /Apps/Shell.app/Run\n"),
+            StartupConfig::parse("session /Apps/Shell.app/Run login\n"),
             Err(ConfigError::ConsoleRequired),
         );
         assert_eq!(
@@ -504,7 +614,7 @@ session /Apps/Shell.app/Run   # the shell
 
     #[test]
     fn an_oversized_config_is_refused_before_scanning() {
-        let mut text = String::from("console\nsession /Apps/Shell.app/Run\n");
+        let mut text = String::from("console\nsession /Apps/Shell.app/Run login\n");
         while text.len() <= MAX_CONFIG_LEN {
             text.push_str("# padding comment line\n");
         }

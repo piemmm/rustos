@@ -282,12 +282,21 @@ pub const USERS_TOOL_MANIFEST: &[CapabilityId] = &[
 ];
 
 /// PID 1 `init`'s manifest: `CAP_CONSOLE_WRITE` for its startup banner
-/// (`stream_write`) and `CAP_PROC_SPAWN` to launch the boot services and
-/// the per-console login supervisors. As a system program its manifest is
-/// also its ceiling (there is no users-db row for the system principal),
+/// (`stream_write`), `CAP_PROC_SPAWN` to launch the boot services and
+/// the per-console login supervisors, and `CAP_SPAWN_AS_USER` because
+/// every service and session it launches is switched onto its own
+/// compiled-in service account (`plans/USERS.md` — the startup config
+/// names the account, the kernel resolves the credential from the
+/// boot-installed identity table). As a system program its manifest is
+/// also its ceiling (there is no account row for the system principal),
 /// and each child it spawns is bounded by that child's *own* registered
-/// manifest, never by this set.
-pub const INIT_MANIFEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE, CapabilityId::PROC_SPAWN];
+/// manifest intersected with its service account's ceiling, never by
+/// this set.
+pub const INIT_MANIFEST: &[CapabilityId] = &[
+    CapabilityId::CONSOLE_WRITE,
+    CapabilityId::PROC_SPAWN,
+    CapabilityId::SPAWN_AS_USER,
+];
 
 #[cfg(test)]
 mod tests {
@@ -497,7 +506,11 @@ mod tests {
     fn init_manifest_is_pinned() {
         assert_eq!(
             set(INIT_MANIFEST),
-            set(&[CapabilityId::CONSOLE_WRITE, CapabilityId::PROC_SPAWN])
+            set(&[
+                CapabilityId::CONSOLE_WRITE,
+                CapabilityId::PROC_SPAWN,
+                CapabilityId::SPAWN_AS_USER,
+            ])
         );
     }
 

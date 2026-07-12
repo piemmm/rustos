@@ -1,35 +1,43 @@
-//! The canonical default system/service account and group set
+//! The compiled-in system identity: the OS-owned accounts and groups
 //! (`plans/USERS.md`).
 //!
-//! Every author of a fresh `/System/Security` pair seeds the same
-//! defaults: the image builder (`tools/mkimage`, both profiles), the
-//! installer's first-boot provisioning, and the QEMU test fixtures all
-//! import [`default_system_accounts`] / [`default_groups`] from here —
-//! one definition, never three hand-maintained copies.
+//! The system/service accounts are **kernel policy, not volume data**:
+//! their records are compiled into the kernel (via
+//! `kernel/core::groups`), never written to or read from a disk, so they
+//! are tamper-proof exactly as the kernel text is and are available from
+//! the first instruction of boot on every architecture — before any
+//! volume is mounted or unlocked. The on-disk databases under
+//! `/System/Security` hold only *human* accounts and their groups; the
+//! kernel merges the two halves into one identity table and refuses any
+//! on-disk record that collides with the compiled identity (a system-band
+//! id or a reserved name), fail closed.
 //!
-//! The set it defines:
+//! The set defined here:
 //!
-//! * `system` — the locked, non-authenticating uid 0 record. The kernel's
+//! * `system` — the non-authenticating uid 0 identity. The kernel's
 //!   compiled-in bootstrap credential is uid 0/gid 0 with **no**
-//!   capabilities; this record is merely the *name* the loaded registry
-//!   gives that identity, so `/System`'s owner resolves to `system` in
-//!   listings and audit output. Its ceiling is empty — powers come from
-//!   capabilities, and the boot floor holds none.
+//!   capabilities; this record is merely the *name* that identity
+//!   resolves to, so `/System`'s owner reads as `system` in listings and
+//!   audit output. Its ceiling is empty — powers come from capabilities,
+//!   and the boot floor holds none.
 //! * One account per system service (`devmgr`, `sysinfod`, `seatmgr`,
 //!   `login`), each with its own uid in the system range and primary
 //!   group [`SERVICES_GROUP`] — never a shared service user, so §19.4
 //!   per-service log partitioning, IPC peer attestation, and blast-radius
 //!   containment all key off a real per-service principal. Each carries
-//!   exactly its own service's ceiling ([`crate::grants`]).
-//! * The groups those records reference: `system`, `services`, and the
-//!   well-known removable-storage group ([`STORAGE_GROUP`]).
+//!   exactly its own service's ceiling ([`crate::grants`]), so the
+//!   ceiling∩manifest intersection does real work.
+//! * The groups those records reference: `system` and `services`. The
+//!   well-known removable-storage group ([`crate::STORAGE_GROUP`]) is
+//!   **not** part of the compiled identity: storage membership is
+//!   admin-managed data about human accounts, so that group lives in the
+//!   on-disk registry beside them (`plans/DEVICES.md` D3d).
 //!
 //! All five accounts are [`AccountState::NoLogin`]: no home, no shell,
 //! and the typed never-authenticates password marker — structurally
-//! incapable of a session. The uid/gid constants seed provisioning only;
-//! runtime consumers resolve accounts and groups **by name** against the
-//! loaded registry and fail closed if a record is missing (the
-//! [`STORAGE_GROUP`] precedent).
+//! incapable of a session. PID 1 resolves a startup-config account name
+//! onto its uid through [`system_account_uid`] (pure, allocation-free)
+//! and spawns each service with that concrete `target_uid`.
 
 use alloc::vec::Vec;
 
@@ -39,7 +47,7 @@ use rustos_caps::CapabilitySet;
 use crate::grants::{
     capability_set, DEVMGR_CEILING, LOGIN_CEILING, SEATMGR_CEILING, SYSINFOD_CEILING,
 };
-use crate::groups::{GroupRecord, STORAGE_GID, STORAGE_GROUP};
+use crate::groups::GroupRecord;
 use crate::password::StoredPassword;
 use crate::record::{AccountState, Gid, Identity, Uid, UserRecord};
 use crate::ParseError;
@@ -54,8 +62,7 @@ pub const SYSTEM_UID: Uid = Uid(0);
 /// Name of the system account's primary group.
 pub const SYSTEM_GROUP: &str = "system";
 
-/// The [`Gid`] provisioning seeds [`SYSTEM_GROUP`] with: the kernel's
-/// bootstrap gid, 0.
+/// The [`Gid`] of [`SYSTEM_GROUP`]: the kernel's bootstrap gid, 0.
 pub const SYSTEM_GID: Gid = Gid(0);
 
 /// Name of the shared service group every service account's primary gid
@@ -63,33 +70,130 @@ pub const SYSTEM_GID: Gid = Gid(0);
 /// service's authority stays its own account's ceiling.
 pub const SERVICES_GROUP: &str = "services";
 
-/// The [`Gid`] provisioning seeds [`SERVICES_GROUP`] with (system range,
-/// following the `storage:100` precedent).
+/// The [`Gid`] of [`SERVICES_GROUP`] (system range, following the
+/// `storage:100` precedent).
 pub const SERVICES_GID: Gid = Gid(101);
 
 /// Name of the device-manager service account.
 pub const DEVMGR_USERNAME: &str = "devmgr";
 
-/// The [`Uid`] provisioning seeds [`DEVMGR_USERNAME`] with.
+/// The [`Uid`] of [`DEVMGR_USERNAME`].
 pub const DEVMGR_UID: Uid = Uid(10);
 
 /// Name of the System Information broker service account.
 pub const SYSINFOD_USERNAME: &str = "sysinfod";
 
-/// The [`Uid`] provisioning seeds [`SYSINFOD_USERNAME`] with.
+/// The [`Uid`] of [`SYSINFOD_USERNAME`].
 pub const SYSINFOD_UID: Uid = Uid(11);
 
 /// Name of the seat-manager service account.
 pub const SEATMGR_USERNAME: &str = "seatmgr";
 
-/// The [`Uid`] provisioning seeds [`SEATMGR_USERNAME`] with.
+/// The [`Uid`] of [`SEATMGR_USERNAME`].
 pub const SEATMGR_UID: Uid = Uid(12);
 
 /// Name of the login service account.
 pub const LOGIN_USERNAME: &str = "login";
 
-/// The [`Uid`] provisioning seeds [`LOGIN_USERNAME`] with.
+/// The [`Uid`] of [`LOGIN_USERNAME`].
 pub const LOGIN_UID: Uid = Uid(13);
+
+/// One compiled-in account's specification: the single row both
+/// [`system_accounts`] and [`system_account_uid`] read, so the record
+/// set and the name→uid lookup can never diverge.
+struct SystemAccountSpec {
+    username: &'static str,
+    uid: Uid,
+    primary_gid: Gid,
+    display_name: &'static str,
+    ceiling: &'static [CapabilityId],
+}
+
+/// The compiled-in account table, in stable order: `system`, then one
+/// row per service.
+const SYSTEM_ACCOUNTS: &[SystemAccountSpec] = &[
+    SystemAccountSpec {
+        username: SYSTEM_USERNAME,
+        uid: SYSTEM_UID,
+        primary_gid: SYSTEM_GID,
+        display_name: "System",
+        ceiling: &[],
+    },
+    SystemAccountSpec {
+        username: DEVMGR_USERNAME,
+        uid: DEVMGR_UID,
+        primary_gid: SERVICES_GID,
+        display_name: "Device Manager",
+        ceiling: DEVMGR_CEILING,
+    },
+    SystemAccountSpec {
+        username: SYSINFOD_USERNAME,
+        uid: SYSINFOD_UID,
+        primary_gid: SERVICES_GID,
+        display_name: "System Information Service",
+        ceiling: SYSINFOD_CEILING,
+    },
+    SystemAccountSpec {
+        username: SEATMGR_USERNAME,
+        uid: SEATMGR_UID,
+        primary_gid: SERVICES_GID,
+        display_name: "Seat Manager",
+        ceiling: SEATMGR_CEILING,
+    },
+    SystemAccountSpec {
+        username: LOGIN_USERNAME,
+        uid: LOGIN_UID,
+        primary_gid: SERVICES_GID,
+        display_name: "Login Service",
+        ceiling: LOGIN_CEILING,
+    },
+];
+
+/// Resolve a compiled-in system account's name onto its [`Uid`].
+///
+/// Pure and allocation-free: PID 1's startup-config parser validates and
+/// resolves each `service`/`session` directive's account name through
+/// this lookup at parse time, so a config naming an unknown account is
+/// rejected before anything is spawned (fail closed). Returns `None` for
+/// any name outside the compiled table — human accounts are not
+/// resolvable here; they live in the on-disk database.
+#[must_use]
+pub fn system_account_uid(name: &str) -> Option<Uid> {
+    SYSTEM_ACCOUNTS
+        .iter()
+        .find(|spec| spec.username == name)
+        .map(|spec| spec.uid)
+}
+
+/// The compiled-in accounts' `(uid, username)` directory pairing, in
+/// stable table order — the rows the kernel's user-directory
+/// introspection serves ahead of the on-disk human records, so `ls -l`,
+/// `ps`, and `top` render a system uid's name without any volume being
+/// mounted. Carries no credential material.
+pub fn system_account_directory() -> impl Iterator<Item = (u32, &'static str)> {
+    SYSTEM_ACCOUNTS
+        .iter()
+        .map(|spec| (spec.uid.0, spec.username))
+}
+
+/// Whether `name` is a compiled-in system account's username.
+///
+/// The kernel's identity merge refuses an on-disk account carrying a
+/// reserved name, so a tampered or misprovisioned volume can never
+/// shadow a system identity.
+#[must_use]
+pub fn is_system_account_name(name: &str) -> bool {
+    system_account_uid(name).is_some()
+}
+
+/// Whether `name` is a compiled-in system group's name.
+///
+/// The kernel's identity merge refuses an on-disk group carrying a
+/// reserved name, exactly as [`is_system_account_name`] does for users.
+#[must_use]
+pub fn is_system_group_name(name: &str) -> bool {
+    name == SYSTEM_GROUP || name == SERVICES_GROUP
+}
 
 /// Build one no-login record: no home, no shell, the typed
 /// never-authenticates password, and exactly `ceiling` as its grants.
@@ -116,75 +220,47 @@ fn no_login_account(
     )
 }
 
-/// The default system/service accounts every image starts with, in
-/// stable file order: `system`, then one record per service.
+/// The compiled-in system accounts, in stable order: `system`, then one
+/// record per service.
 ///
-/// The debug image appends its interactive administrator account on top
-/// of these; the installer appends the operator's first user. Neither
-/// replaces or edits this set.
+/// Consumed by the kernel's identity-table build (`kernel/core`), never
+/// authored to disk: the on-disk `/System/Security/Users` database holds
+/// only human accounts.
 ///
 /// # Errors
 ///
-/// The matching [`ParseError`] should any seeded record violate the
-/// format invariants — unreachable by construction, but a provisioning
-/// author fails closed rather than panicking.
-pub fn default_system_accounts() -> Result<Vec<UserRecord>, ParseError> {
-    let services: &[(&'static str, Uid, &'static str, &[CapabilityId])] = &[
-        (
-            DEVMGR_USERNAME,
-            DEVMGR_UID,
-            "Device Manager",
-            DEVMGR_CEILING,
-        ),
-        (
-            SYSINFOD_USERNAME,
-            SYSINFOD_UID,
-            "System Information Service",
-            SYSINFOD_CEILING,
-        ),
-        (
-            SEATMGR_USERNAME,
-            SEATMGR_UID,
-            "Seat Manager",
-            SEATMGR_CEILING,
-        ),
-        (LOGIN_USERNAME, LOGIN_UID, "Login Service", LOGIN_CEILING),
-    ];
-    let mut records = Vec::with_capacity(services.len() + 1);
-    records.push(no_login_account(
-        SYSTEM_USERNAME,
-        SYSTEM_UID,
-        SYSTEM_GID,
-        "System",
-        CapabilitySet::empty(),
-    )?);
-    for (username, uid, display_name, ceiling) in services {
+/// The matching [`ParseError`] should any compiled record violate the
+/// format invariants — unreachable by construction (pinned by the tests
+/// below), but the consumer fails closed rather than panicking.
+pub fn system_accounts() -> Result<Vec<UserRecord>, ParseError> {
+    let mut records = Vec::with_capacity(SYSTEM_ACCOUNTS.len());
+    for spec in SYSTEM_ACCOUNTS {
         records.push(no_login_account(
-            username,
-            *uid,
-            SERVICES_GID,
-            display_name,
-            capability_set(ceiling),
+            spec.username,
+            spec.uid,
+            spec.primary_gid,
+            spec.display_name,
+            capability_set(spec.ceiling),
         )?);
     }
     Ok(records)
 }
 
-/// The default group registry every image starts with: `system`,
-/// `services`, and the well-known removable-storage group.
+/// The compiled-in system groups: `system` and `services` — exactly the
+/// groups the [`system_accounts`] reference.
 ///
-/// The debug image appends its administrator account's primary group on
-/// top of these; the installer appends the first user's.
+/// Consumed by the kernel's identity-table build beside
+/// [`system_accounts`]; the removable-storage group stays in the on-disk
+/// registry (`plans/DEVICES.md` D3d).
 ///
 /// # Errors
 ///
-/// As [`default_system_accounts`]: unreachable by construction, failed
-/// closed rather than panicked over.
-pub fn default_groups() -> Result<Vec<GroupRecord>, ParseError> {
+/// As [`system_accounts`]: unreachable by construction, failed closed
+/// rather than panicked over.
+pub fn system_groups() -> Result<Vec<GroupRecord>, ParseError> {
     Ok(alloc::vec![
         GroupRecord::new(SYSTEM_GROUP, SYSTEM_GID)?,
         GroupRecord::new(SERVICES_GROUP, SERVICES_GID)?,
-        GroupRecord::new(STORAGE_GROUP, STORAGE_GID)?,
     ])
 }
 
@@ -197,8 +273,8 @@ mod tests {
     use crate::AuthError;
 
     #[test]
-    fn the_default_account_set_is_pinned() {
-        let records = default_system_accounts().expect("valid defaults");
+    fn the_system_account_set_is_pinned() {
+        let records = system_accounts().expect("valid compiled identity");
         let summary: Vec<(&str, u32, u32)> = records
             .iter()
             .map(|r| (r.username(), r.uid().0, r.primary_gid().0))
@@ -225,7 +301,7 @@ mod tests {
 
     #[test]
     fn each_service_account_carries_exactly_its_own_ceiling() {
-        let records = default_system_accounts().expect("valid defaults");
+        let records = system_accounts().expect("valid compiled identity");
         let by_name = |name: &str| {
             records
                 .iter()
@@ -252,27 +328,52 @@ mod tests {
     }
 
     #[test]
-    fn the_default_group_registry_is_pinned_and_covers_every_reference() {
-        let groups = GroupsDb::new(default_groups().expect("valid defaults")).expect("valid db");
+    fn the_name_lookup_matches_the_record_set_exactly() {
+        // Both read the same table, so this pins the lookup honest.
+        for record in system_accounts().expect("valid compiled identity") {
+            assert_eq!(
+                system_account_uid(record.username()),
+                Some(record.uid()),
+                "{} resolves to its own uid",
+                record.username()
+            );
+            assert!(is_system_account_name(record.username()));
+        }
+        assert_eq!(system_account_uid("root"), None);
+        assert_eq!(system_account_uid(""), None);
+        assert!(!is_system_account_name("root"));
+    }
+
+    #[test]
+    fn the_group_name_guard_covers_exactly_the_compiled_groups() {
+        let groups = system_groups().expect("valid compiled identity");
+        for group in &groups {
+            assert!(is_system_group_name(group.name()));
+        }
+        assert!(!is_system_group_name("storage"));
+        assert!(!is_system_group_name("wheel"));
+        assert!(!is_system_group_name(""));
+    }
+
+    #[test]
+    fn the_system_groups_cover_every_compiled_reference() {
+        let groups = GroupsDb::new(system_groups().expect("valid compiled identity"))
+            .expect("valid registry");
         let summary: Vec<(&str, u32)> = groups
             .records()
             .iter()
             .map(|g| (g.name(), g.gid().0))
             .collect();
-        assert_eq!(
-            summary,
-            [("system", 0), ("services", 101), ("storage", 100)]
-        );
-        // Every gid a default account references exists in the registry.
-        for record in default_system_accounts().expect("valid defaults") {
+        assert_eq!(summary, [("system", 0), ("services", 101)]);
+        for record in system_accounts().expect("valid compiled identity") {
             assert!(groups.lookup_gid(record.primary_gid()).is_some());
         }
     }
 
     #[test]
-    fn the_default_accounts_form_a_valid_database_no_one_can_log_into() {
-        let db =
-            UsersDb::new(default_system_accounts().expect("valid defaults")).expect("valid db");
+    fn the_system_accounts_form_a_valid_database_no_one_can_log_into() {
+        let db = UsersDb::new(system_accounts().expect("valid compiled identity"))
+            .expect("valid database");
         let text = db.serialise();
         assert_eq!(UsersDb::parse(&text), Ok(db.clone()));
         for record in db.records() {

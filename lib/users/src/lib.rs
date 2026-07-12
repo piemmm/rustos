@@ -23,10 +23,12 @@
 //!   [`PasswordRecord`] (the salted PBKDF2-HMAC-SHA256 hash via
 //!   `lib/crypto`, verified in constant time with respect to the stored
 //!   hash), or the typed never-authenticates marker.
-//! * The canonical default system/service accounts and groups every
-//!   image author seeds ([`default_system_accounts`], [`default_groups`]),
-//!   defined once here and imported by the image builder, the installer,
-//!   and the test fixtures — never three hand-maintained copies.
+//! * The compiled-in system identity ([`system_accounts`],
+//!   [`system_groups`], [`system_account_uid`]): the OS-owned accounts
+//!   and groups are kernel policy, defined once here, compiled into the
+//!   kernel's identity table, and never written to disk — the on-disk
+//!   databases hold only human accounts, and the kernel's identity merge
+//!   refuses any on-disk record colliding with this set.
 //!
 //! The database text is untrusted input: every
 //! bound and field shape is validated and the first defect rejects the
@@ -63,9 +65,10 @@ pub use password::{
 };
 pub use policy::{default_home, next_id, IdRange, DEFAULT_SHELL, FIRST_USER_GID, FIRST_USER_UID};
 pub use provision::{
-    default_groups, default_system_accounts, DEVMGR_UID, DEVMGR_USERNAME, LOGIN_UID,
-    LOGIN_USERNAME, SEATMGR_UID, SEATMGR_USERNAME, SERVICES_GID, SERVICES_GROUP, SYSINFOD_UID,
-    SYSINFOD_USERNAME, SYSTEM_GID, SYSTEM_GROUP, SYSTEM_UID, SYSTEM_USERNAME,
+    is_system_account_name, is_system_group_name, system_account_directory, system_account_uid,
+    system_accounts, system_groups, DEVMGR_UID, DEVMGR_USERNAME, LOGIN_UID, LOGIN_USERNAME,
+    SEATMGR_UID, SEATMGR_USERNAME, SERVICES_GID, SERVICES_GROUP, SYSINFOD_UID, SYSINFOD_USERNAME,
+    SYSTEM_GID, SYSTEM_GROUP, SYSTEM_UID, SYSTEM_USERNAME,
 };
 pub use record::{
     AccountState, Gid, Identity, Uid, UserRecord, MAX_DISPLAY_NAME_LEN, MAX_PATH_LEN,

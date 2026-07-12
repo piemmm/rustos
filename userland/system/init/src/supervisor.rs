@@ -69,9 +69,13 @@ pub trait Sessions {
     /// `console_count`: how many text consoles are installed
     /// (non-negative), or `-errno`.
     fn console_count(&mut self) -> i64;
-    /// `spawn` with an explicit console selector: launch `path` attached
-    /// to installed console `console`, returning the PID or `-errno`.
-    fn spawn_at(&mut self, path: &[u8], console: u32) -> i64;
+    /// `spawn` with an explicit console selector and target user: launch
+    /// `path` attached to installed console `console`, switched onto the
+    /// concrete `uid` (a compiled-in service account resolved at config
+    /// parse time — the kernel gates the switch on `CAP_SPAWN_AS_USER`
+    /// and resolves the credential from its boot-installed identity
+    /// table), returning the PID or `-errno`.
+    fn spawn_at(&mut self, path: &[u8], console: u32, uid: u32) -> i64;
     /// `wait` with `WAIT_PID_ANY`: block until any child exits, reap it, and
     /// return its PID (writing the exit code to `status`), or `-errno`.
     fn wait_any(&mut self, status: &mut i32) -> i64;
@@ -102,14 +106,29 @@ pub enum Outcome {
     Exhausted,
 }
 
+/// One launch entry the caller configures: the program path and the
+/// concrete uid of the compiled-in service account it runs as (resolved
+/// by the startup-config parser at parse time).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Launch<'a> {
+    /// The program path to launch.
+    pub path: &'a [u8],
+    /// The concrete `target_uid` the entry is spawned with.
+    pub uid: u32,
+}
+
 /// One supervised entry's bookkeeping: the program to (re)launch, the
-/// console it attaches to, its live PID, and how many launches it has
-/// consumed. One slot per text console (a session) and one per configured
-/// service, all supervised uniformly in the wait-any loop.
+/// account it runs as, the console it attaches to, its live PID, and how
+/// many launches it has consumed. One slot per text console (a session)
+/// and one per configured service, all supervised uniformly in the
+/// wait-any loop.
 #[derive(Copy, Clone)]
 struct Slot<'a> {
     /// The program path to (re)launch this slot with.
     path: &'a [u8],
+    /// The concrete `target_uid` every (re)launch of this slot switches
+    /// the child onto.
+    uid: u32,
     /// The console index the program's standard streams attach to.
     console: u32,
     /// The live child's PID, or `-1` when the slot is abandoned.
@@ -124,6 +143,7 @@ impl Slot<'_> {
     const fn vacant() -> Self {
         Self {
             path: &[],
+            uid: 0,
             console: 0,
             pid: Self::ABANDONED,
             launches: 0,
@@ -164,8 +184,8 @@ impl Slot<'_> {
 /// an entry that ran long enough) awaits a clock/session-state ABI.
 pub fn supervise<'a, S: Sessions>(
     sys: &mut S,
-    session: &'a [u8],
-    services: &[&'a [u8]],
+    session: Launch<'a>,
+    services: &[Launch<'a>],
 ) -> Outcome {
     let count = sys.console_count();
     if count <= 0 {
@@ -185,11 +205,13 @@ pub fn supervise<'a, S: Sessions>(
     let mut slots = [Slot::vacant(); MAX_SUPERVISED_SERVICES + MAX_SUPERVISED_CONSOLES];
     let active = service_n + consoles;
     for (slot, &service) in slots[..service_n].iter_mut().zip(services) {
-        slot.path = service;
+        slot.path = service.path;
+        slot.uid = service.uid;
         slot.console = 0;
     }
     for (console, slot) in slots[service_n..active].iter_mut().enumerate() {
-        slot.path = session;
+        slot.path = session.path;
+        slot.uid = session.uid;
         // Console indices fit `u32`: the table is bounded far below it.
         #[allow(clippy::cast_possible_truncation)]
         {
@@ -197,7 +219,7 @@ pub fn supervise<'a, S: Sessions>(
         }
     }
     for slot in &mut slots[..active] {
-        let pid = sys.spawn_at(slot.path, slot.console);
+        let pid = sys.spawn_at(slot.path, slot.console, slot.uid);
         slot.launches = 1;
         if pid < 0 {
             // Fail loud, degrade gracefully: state the refusal and boot
@@ -240,7 +262,7 @@ pub fn supervise<'a, S: Sessions>(
         }
         let path = slot.path;
         let console = slot.console;
-        let pid = sys.spawn_at(path, console);
+        let pid = sys.spawn_at(path, console, slot.uid);
         if pid < 0 {
             // Same policy as the initial fan-out: report, abandon this
             // slot, keep the rest of the system up.
@@ -257,6 +279,24 @@ pub fn supervise<'a, S: Sessions>(
 mod tests {
     use super::*;
 
+    /// The session's fixture uid (the `login` service account's band).
+    const LOGIN_UID: u32 = 13;
+    /// The services' fixture uid.
+    const SVC_UID: u32 = 10;
+
+    /// A session [`Launch`] over `path` under [`LOGIN_UID`].
+    fn session(path: &'static [u8]) -> Launch<'static> {
+        Launch {
+            path,
+            uid: LOGIN_UID,
+        }
+    }
+
+    /// A service [`Launch`] over `path` under [`SVC_UID`].
+    fn svc(path: &'static [u8]) -> Launch<'static> {
+        Launch { path, uid: SVC_UID }
+    }
+
     /// Scripted [`Sessions`] double: hands out PIDs, records every spawn's
     /// `console` and `path`, and replays a scripted sequence of wait-any
     /// results.
@@ -265,6 +305,7 @@ mod tests {
         spawn_results: Vec<i64>,
         spawns: Vec<u32>,
         spawn_paths: Vec<Vec<u8>>,
+        spawn_uids: Vec<u32>,
         waits: Vec<i64>,
         reports: Vec<(Vec<u8>, u32, i64)>,
         next_spawn: usize,
@@ -278,6 +319,7 @@ mod tests {
                 spawn_results,
                 spawns: Vec::new(),
                 spawn_paths: Vec::new(),
+                spawn_uids: Vec::new(),
                 waits,
                 reports: Vec::new(),
                 next_spawn: 0,
@@ -290,9 +332,10 @@ mod tests {
         fn console_count(&mut self) -> i64 {
             self.count
         }
-        fn spawn_at(&mut self, path: &[u8], console: u32) -> i64 {
+        fn spawn_at(&mut self, path: &[u8], console: u32, uid: u32) -> i64 {
             self.spawns.push(console);
             self.spawn_paths.push(path.to_vec());
+            self.spawn_uids.push(uid);
             let result = self.spawn_results[self.next_spawn];
             self.next_spawn += 1;
             result
@@ -310,11 +353,17 @@ mod tests {
     #[test]
     fn zero_or_failed_console_count_is_no_consoles() {
         let mut none = ScriptedSessions::new(0, vec![], vec![]);
-        assert_eq!(supervise(&mut none, b"login", &[]), Outcome::NoConsoles);
+        assert_eq!(
+            supervise(&mut none, session(b"login"), &[]),
+            Outcome::NoConsoles
+        );
         assert!(none.spawns.is_empty());
 
         let mut err = ScriptedSessions::new(-7, vec![], vec![]);
-        assert_eq!(supervise(&mut err, b"login", &[]), Outcome::NoConsoles);
+        assert_eq!(
+            supervise(&mut err, session(b"login"), &[]),
+            Outcome::NoConsoles
+        );
         assert!(err.spawns.is_empty());
     }
 
@@ -330,7 +379,10 @@ mod tests {
             vec![10, 20, 11, 21, 12, 22],
             vec![10, 20, 11, 21, 12, 22],
         );
-        assert_eq!(supervise(&mut sys, b"login", &[]), Outcome::Exhausted);
+        assert_eq!(
+            supervise(&mut sys, session(b"login"), &[]),
+            Outcome::Exhausted
+        );
         assert_eq!(sys.spawns, vec![0, 1, 0, 1, 0, 1]);
     }
 
@@ -341,7 +393,10 @@ mod tests {
         // (3 launches) abandons that console and the next wait fails the
         // run out so the test terminates deterministically.
         let mut sys = ScriptedSessions::new(2, vec![10, 20, 21, 22], vec![20, 21, 22, -7]);
-        assert_eq!(supervise(&mut sys, b"login", &[]), Outcome::WaitFailed);
+        assert_eq!(
+            supervise(&mut sys, session(b"login"), &[]),
+            Outcome::WaitFailed
+        );
         assert_eq!(sys.spawns, vec![0, 1, 1, 1]);
     }
 
@@ -350,7 +405,10 @@ mod tests {
         // PID 99 is no supervised session (a reparented grandchild): it
         // is reaped without consuming any console's budget or spawning.
         let mut sys = ScriptedSessions::new(1, vec![10], vec![99, -7]);
-        assert_eq!(supervise(&mut sys, b"login", &[]), Outcome::WaitFailed);
+        assert_eq!(
+            supervise(&mut sys, session(b"login"), &[]),
+            Outcome::WaitFailed
+        );
         assert_eq!(sys.spawns, vec![0]);
     }
 
@@ -361,14 +419,17 @@ mod tests {
         // wait error ends the run deterministically) — one refused entry
         // never aborts PID 1.
         let mut at_start = ScriptedSessions::new(2, vec![10, -3], vec![-7]);
-        assert_eq!(supervise(&mut at_start, b"login", &[]), Outcome::WaitFailed);
+        assert_eq!(
+            supervise(&mut at_start, session(b"login"), &[]),
+            Outcome::WaitFailed
+        );
         assert_eq!(at_start.reports, vec![(b"login".to_vec(), 1, -3)]);
 
         // A refused *relaunch* abandons only that slot: with no other live
         // entry the supervisor then reports honest exhaustion.
         let mut at_relaunch = ScriptedSessions::new(1, vec![10, -3], vec![10]);
         assert_eq!(
-            supervise(&mut at_relaunch, b"login", &[]),
+            supervise(&mut at_relaunch, session(b"login"), &[]),
             Outcome::Exhausted
         );
         assert_eq!(at_relaunch.reports, vec![(b"login".to_vec(), 0, -3)]);
@@ -380,8 +441,11 @@ mod tests {
         // the supervisor returns `Exhausted` instead of waiting on
         // children it never had.
         let mut sys = ScriptedSessions::new(1, vec![-10, -10], vec![]);
-        let services: [&[u8]; 1] = [b"svc"];
-        assert_eq!(supervise(&mut sys, b"login", &services), Outcome::Exhausted);
+        let services = [svc(b"svc")];
+        assert_eq!(
+            supervise(&mut sys, session(b"login"), &services),
+            Outcome::Exhausted
+        );
         assert_eq!(sys.reports.len(), 2);
     }
 
@@ -393,9 +457,9 @@ mod tests {
         // manager (which autoloads the USB keyboard chain), the remaining
         // services, and the login session all still launch.
         let mut sys = ScriptedSessions::new(1, vec![-10, 20, 30, 40], vec![-7]);
-        let services: [&[u8]; 3] = [b"sysinfod", b"devmgr", b"seatmgr"];
+        let services = [svc(b"sysinfod"), svc(b"devmgr"), svc(b"seatmgr")];
         assert_eq!(
-            supervise(&mut sys, b"login", &services),
+            supervise(&mut sys, session(b"login"), &services),
             Outcome::WaitFailed
         );
         assert_eq!(
@@ -416,7 +480,10 @@ mod tests {
         // exits, then exhaustion — exactly the single-console behaviour
         // the pre-P11 supervisor had.
         let mut sys = ScriptedSessions::new(1, vec![10, 11, 12], vec![10, 11, 12]);
-        assert_eq!(supervise(&mut sys, b"login", &[]), Outcome::Exhausted);
+        assert_eq!(
+            supervise(&mut sys, session(b"login"), &[]),
+            Outcome::Exhausted
+        );
         assert_eq!(sys.spawns, vec![0, 0, 0]);
     }
 
@@ -430,7 +497,10 @@ mod tests {
         let spawn_results: Vec<i64> = (0..bound).map(|n| 100 + n).collect();
         let waits: Vec<i64> = spawn_results.clone();
         let mut sys = ScriptedSessions::new(64, spawn_results, waits);
-        assert_eq!(supervise(&mut sys, b"login", &[]), Outcome::Exhausted);
+        assert_eq!(
+            supervise(&mut sys, session(b"login"), &[]),
+            Outcome::Exhausted
+        );
         assert_eq!(sys.spawns.len(), launches);
         assert!(sys
             .spawns
@@ -448,13 +518,18 @@ mod tests {
             vec![10, 20, 11, 21, 12, 22],
             vec![10, 20, 11, 21, 12, 22],
         );
-        let services: [&[u8]; 1] = [b"devmgr"];
-        assert_eq!(supervise(&mut sys, b"login", &services), Outcome::Exhausted);
+        let services = [svc(b"devmgr")];
+        assert_eq!(
+            supervise(&mut sys, session(b"login"), &services),
+            Outcome::Exhausted
+        );
         // First spawn is the service, then the session; every spawn is on
-        // console 0 here.
+        // console 0 here, and each entry is spawned as its own account.
         assert_eq!(sys.spawns, vec![0, 0, 0, 0, 0, 0]);
         assert_eq!(sys.spawn_paths[0], b"devmgr");
         assert_eq!(sys.spawn_paths[1], b"login");
+        assert_eq!(sys.spawn_uids[0], SVC_UID);
+        assert_eq!(sys.spawn_uids[1], LOGIN_UID);
     }
 
     #[test]
@@ -465,13 +540,14 @@ mod tests {
         // budget (3 launches) it is abandoned, and the next wait error ends
         // the run deterministically.
         let mut sys = ScriptedSessions::new(1, vec![10, 20, 11, 12], vec![10, 11, 12, -7]);
-        let services: [&[u8]; 1] = [b"devmgr"];
+        let services = [svc(b"devmgr")];
         assert_eq!(
-            supervise(&mut sys, b"login", &services),
+            supervise(&mut sys, session(b"login"), &services),
             Outcome::WaitFailed
         );
         // Service (console 0), session (console 0), then two service
-        // relaunches (console 0).
+        // relaunches (console 0) — every relaunch keeps the slot's own
+        // account, so a crashed service never comes back as anyone else.
         assert_eq!(sys.spawns, vec![0, 0, 0, 0]);
         assert_eq!(
             sys.spawn_paths,
@@ -482,6 +558,7 @@ mod tests {
                 b"devmgr".to_vec(),
             ]
         );
+        assert_eq!(sys.spawn_uids, vec![SVC_UID, LOGIN_UID, SVC_UID, SVC_UID]);
     }
 
     #[test]
@@ -493,9 +570,9 @@ mod tests {
         // ends the run, proving the supervisor was still waiting (not
         // exhausted) because the perpetual service held a live slot.
         let mut sys = ScriptedSessions::new(1, vec![10, 20, 21, 22], vec![20, 21, 22, -7]);
-        let services: [&[u8]; 1] = [b"devmgr"];
+        let services = [svc(b"devmgr")];
         assert_eq!(
-            supervise(&mut sys, b"login", &services),
+            supervise(&mut sys, session(b"login"), &services),
             Outcome::WaitFailed
         );
     }
@@ -505,15 +582,15 @@ mod tests {
         // More services than `MAX_SUPERVISED_SERVICES`: only the first
         // `MAX_SUPERVISED_SERVICES` are launched (plus one session). The
         // run is ended by a wait error after the launches.
-        let service_list: Vec<&[u8]> = (0..MAX_SUPERVISED_SERVICES + 2)
-            .map(|_| b"svc".as_slice())
+        let service_list: Vec<Launch<'_>> = (0..MAX_SUPERVISED_SERVICES + 2)
+            .map(|_| svc(b"svc"))
             .collect();
         let total_launches = MAX_SUPERVISED_SERVICES + 1; // + one session
         let bound = i64::try_from(total_launches).expect("small test constant");
         let spawn_results: Vec<i64> = (0..bound).map(|n| 100 + n).collect();
         let mut sys = ScriptedSessions::new(1, spawn_results, vec![-7]);
         assert_eq!(
-            supervise(&mut sys, b"login", &service_list),
+            supervise(&mut sys, session(b"login"), &service_list),
             Outcome::WaitFailed
         );
         assert_eq!(sys.spawns.len(), total_launches);

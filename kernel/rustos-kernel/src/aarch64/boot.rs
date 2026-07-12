@@ -64,7 +64,6 @@ use rustos_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery, SchedulerAr
 use rustos_fdt::Fdt;
 use rustos_kernel_core::{kernel_main, BootInfo};
 use rustos_kernel_sched_api::SchedulerConfig;
-use rustos_kernel_sec::IdentityTableBuilder;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 use rustos_util::fmt::format_hex_u64;
 
@@ -977,7 +976,6 @@ fn enter_kernel_core(
         1,
         "",
         memory_map,
-        IdentityTableBuilder::new(),
         SchedulerConfig::defaults_for(1),
         arch,
         log_sink,

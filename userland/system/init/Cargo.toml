@@ -30,6 +30,11 @@ rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 # §19.4 structured audit log: every start, denial, skip, exit, and reaped
 # orphan is recorded through a `rustos_log::Sink`.
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The compiled-in system identity (`plans/USERS.md`): the startup-config
+# parser resolves each `service`/`session` directive's account name onto
+# its uid through `rustos_users::system_account_uid` at parse time, so
+# every boot service is spawned as its own service account.
+rustos-users = { path = "../../../lib/users", version = "=0.0.0" }
 
 # The pure-Rust userland runtime (`AGENTS.md` §1): `rustos-rt` provides the
 # `Run` binary's `_start`, stack canary, panic handler, and syscall wrappers.

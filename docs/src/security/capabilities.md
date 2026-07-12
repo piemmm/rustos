@@ -54,17 +54,22 @@ identity or grow its own set.
   the account's ceiling and `ps` ends up with just what its own manifest
   requests within it. A **system-principal** caller
   (`TaskCapabilities::user_ceiling()` answers `None`) hands no account
-  ceiling at all: PID 1's inherit-spawned boot services are system
-  programs too, each bounded by its *own* registered manifest — login
-  holds `CAP_USERS_READ`/`CAP_SPAWN_AS_USER` although init's manifest
-  never did — and the shape propagates to their own children.
-- **Spawn-as-user** (`CAP_SPAWN_AS_USER`, login only): the kernel
-  resolves the target account's full credential **and ceiling** from the
-  `IdentityTable` (`LateIdentity::resolve_credential`) and derives
-  `child manifest ∩ target ceiling`. The caller chooses *which* account;
-  it fabricates nothing. Before the table is installed the switch fails
-  closed with `NotImplemented`; an unknown uid is denied with
-  `PermissionDenied`, never a guessed identity.
+  ceiling at all: a system program's inherit-spawned children are system
+  programs too, each bounded by its *own* registered manifest, and the
+  shape propagates to their own children.
+- **Spawn-as-user** (`CAP_SPAWN_AS_USER` — held by PID 1 `init`, which
+  switches every boot service and the login session onto its own
+  compiled-in service account, and by `login`, which drops the
+  authenticated session into the target user — `plans/USERS.md`): the
+  kernel resolves the target account's full credential **and ceiling**
+  from the `IdentityTable` (`LateIdentity::resolve_credential`) and
+  derives `child manifest ∩ target ceiling`. The caller chooses *which*
+  account; it fabricates nothing. The table's system half is installed
+  by the boot `sec` phase (the compiled-in system identity), so the
+  service switches work before any volume exists; human accounts
+  resolve once the unlock publishes the merged table. With no table
+  installed the switch fails closed with `NotImplemented`; an unknown
+  uid is denied with `PermissionDenied`, never a guessed identity.
 
 Both shapes ride on `SpawnCredential`: the ceiling is an immutable
 kernel-side snapshot on the task record, never a caller-supplied value,

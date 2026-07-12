@@ -1,18 +1,17 @@
 # USERS.md — Default system/service accounts and process-identity separation
 
-This is the staged build plan for the default account set every image
-carries and the identity separation of system processes and services:
-system processes run as the `system` user (uid 0, group `system`),
-each system service runs as its **own** dedicated user with primary
-group `services`, and none of these accounts can log in or needs a home
-directory.
+This is the staged build plan for the OS-owned account set and the
+identity separation of system processes and services: system processes
+run as the `system` user (uid 0, group `system`), each system service
+runs as its **own** dedicated user with primary group `services`, and
+none of these accounts can log in or needs a home directory.
 
 `AGENTS.md` is binding — read it, `PLAN.md`, `plans/CAPABILITY_USE.md`
 (grants/ceilings), and `plans/SPAWN.md` (the spawn syscall this builds
 on) first. Every rule in this file is binding too. One fully-gated
 increment (one `U`-stage) per landing.
 
-Status: **U1–U2 done**; U3–U4 planned.
+Status: **U1–U3 done**; U4 planned.
 
 ---
 
@@ -30,25 +29,44 @@ Status: **U1–U2 done**; U3–U4 planned.
    compromised service cannot borrow a sibling's authority even if its
    manifest lied.
 
-2. **`system` is a locked, non-authenticating uid 0 record; the debug
-   human account lives off uid 0.** `system` (uid 0, primary group
-   `system` gid 0) is a no-login record, and the debug account `root`
-   is the first interactive user (uid `FIRST_USER_UID` = 1000, primary
-   group `wheel` gid `FIRST_USER_GID` = 1000, `tools/mkimage::DEBUG_UID`
-   / `DEBUG_PRIMARY_GID`) with the administrator ceiling. Nothing is
-   lost — powers come from capabilities, not uid (§5.1) — and §12 fixes
-   only the debug account's *name/password* (`root`/`root`), not its
-   uid. `/System` stays owned by uid 0, which visibly resolves to
-   `system` in `ls -l`, audit output, and `ps`.
+2. **The system identity is compiled into the kernel — never stored on,
+   or read from, a volume.** The OS-owned accounts (`system`, `devmgr`,
+   `sysinfod`, `seatmgr`, `login`) and groups (`system`, `services`) are
+   kernel policy, defined once in `lib/users/src/provision.rs`
+   (`system_accounts()` / `system_groups()`, built from one const spec
+   table) and compiled into the kernel's identity table. Rationale:
+   - **Tamper-proof by construction.** The records are protected exactly
+     as the kernel text is; there is no on-disk artefact to corrupt,
+     replace, or shadow. (The service *ceilings* are OS policy tied to
+     the shipped binaries — like the compiled-in program manifests —
+     not admin-editable data.)
+   - **Available from first boot on every architecture.** The users
+     volume is passphrase-encrypted and unlocks interactively, but
+     services must start (and drivers autoload — the discovered-tier
+     input driver *types* that passphrase, `plans/DEVICES.md`) before it
+     is readable. Storing service identity there would deadlock the
+     boot; compiling it in resolves the ordering with no waiting at all.
+   - The kernel's `sec` boot phase builds and verifies the compiled
+     table (`rustos_kernel_core::system_identity_table`) and installs it
+     into the port's identity cell (`BootInfo::with_spawn_identity`,
+     wired by every port boot), so spawn-as-user and filesystem group
+     resolution for system accounts work before any volume exists.
 
-3. **Reserved id ranges.** System uids/gids occupy 0–999; interactive
-   users start at 1000. `lib/users/src/policy.rs` defines
-   `FIRST_USER_UID` / `FIRST_USER_GID` and the range-aware
-   `next_id(IdRange, taken)` (system band for service accounts, user
-   band for `useradd`/`groupadd`/the installer/the `users` app).
-   Allocation ignores out-of-band ids, starts at the band's first id,
-   and fails closed on band exhaustion — never spilling into the
-   neighbouring band.
+3. **The on-disk databases hold human accounts only, inside the user
+   band — enforced fail-closed at the identity merge.** The
+   encrypted-root unlock replaces the boot table with the merge of the
+   compiled half and the loaded `/System/Security/{Users,Groups}`
+   records (`rustos_kernel_core::build_identity_table`, also the
+   `users_admin` engine's re-verification path). The merge refuses any
+   on-disk user outside `IdRange::User` (uid ≥ `FIRST_USER_UID` = 1000)
+   or carrying a reserved account name, and any on-disk group outside
+   the user band or carrying a reserved group name — so a tampered or
+   misprovisioned volume can never shadow, widen, or displace a system
+   identity. The sole system-band on-disk record is the well-known
+   removable-storage group, pinned to its exact `storage:100` pairing
+   (storage membership is admin-managed data about human accounts,
+   `plans/DEVICES.md` D3d); either half of that pairing repurposed is
+   refused.
 
 4. **No home, no shell — honestly absent, never faked.** A
    non-interactive account carries the explicit `none` spelling for
@@ -59,69 +77,69 @@ Status: **U1–U2 done**; U3–U4 planned.
 
 5. **No password record either — a typed never-authenticates marker.**
    A service account with a random throwaway hash would be a lie
-   waiting to be brute-forced or misread. The format carries an
+   waiting to be brute-forced or misread. The record carries the
    explicit typed "no password / never authenticates" marker (the
    principled `*` of `/etc/shadow`); `UsersDb::authenticate` treats it
    as an unconditional, timing-equalised refusal. Combined with the
-   dedicated no-login `AccountState` variant (intent stated explicitly,
-   not "administratively `Locked`"), a system/service account is
-   structurally incapable of starting a session — fail closed by
+   dedicated no-login `AccountState` variant, a system/service account
+   is structurally incapable of starting a session — fail closed by
    construction, not by configuration.
 
 6. **The kernel's compiled-in bootstrap credential stays.** The boot
    floor's uid 0 / gid 0 / no-capabilities credential
-   (`kernel/core/src/driver_store.rs::bootstrap_credentials`) cannot
-   depend on the databases: they live on the volume the floor is trying
-   to reach. The `system` record is merely the *name* the loaded
-   registry later gives that identity — the same resolve-by-name
-   pattern the `storage` group already uses (constants such as
-   `SYSTEM_UID` / `SERVICES_GID` seed provisioning only; runtime
-   consumers resolve by name against the loaded registry and fail
-   closed if the record is missing).
+   (`kernel/core/src/driver_store.rs::bootstrap_credentials`) is the
+   identity PID 1 and the boot readers run under; the compiled `system`
+   record is merely the *name* that identity resolves to in listings
+   and audit output, carrying the same gid 0 and an empty ceiling.
 
-7. **One provisioning definition, every author imports it (§2.2).** The
-   canonical "default system accounts + groups" set is defined once in
-   `lib/users` (beside `policy.rs` / `grants.rs`, which exist for
-   exactly this reason) and imported by all three authors: `tools/
-   mkimage` (both `ImageProfile`s), the installer's first-boot path
-   (§11 — it authors the defaults automatically before prompting for
-   the first human user), and the QEMU test fixtures
-   (`tests/integration/rustfs_image`). Never three hand-maintained
-   copies.
+7. **PID 1 resolves service accounts at config-parse time and spawns
+   with a concrete `target_uid`.** The startup config names each
+   entry's account (`service <path> <account>` / `session <path>
+   <account>`); the parser resolves the name through the pure,
+   allocation-free `rustos_users::system_account_uid()` and rejects the
+   whole config on an unknown or missing account
+   (`ConfigError::UnknownAccount` / `MissingAccount`) — nothing spawns
+   from a config whose identities cannot all be resolved. No syscall,
+   no waiting, no compiled-in kernel table of services: the account
+   name lives in the same config that names the service's path. `init`
+   holds `CAP_SPAWN_AS_USER` (its manifest:
+   `kernel/rustos-kernel/src/program_manifests.rs::INIT_MANIFEST`), and
+   the kernel resolves each switch's group set and capability ceiling
+   from the boot-installed identity table, failing closed on an
+   unresolvable uid (`resolve_spawn_credential`). The login *session*
+   is account-named too: `login` runs as its own unprivileged service
+   account and uses its ceiling's `CAP_SPAWN_AS_USER` to drop the
+   authenticated session into the target user — authority from
+   ceiling∩manifest, never from identity.
 
-8. **Services are spawned as their own user via the existing ABI.**
-   Identity is fixed at creation: `spawn` already takes a `target_uid`
-   (`rustos_abi::SPAWN_UID_INHERIT` or a concrete uid), gated by
-   `CAP_SPAWN_AS_USER`; there is no setuid-self. PID 1 `init` holds
-   `CAP_SPAWN_AS_USER` and spawns each `/System/Services/<name>.app`
-   with a concrete `target_uid` resolved **by name** from the loaded
-   identity table, the name coming from the same startup config that
-   already supplies the service's path — never a compiled-in kernel
-   table (§16.5/§18 discovery discipline). A service account missing
-   from the database is a fail-closed spawn refusal with a logged
-   event (§19.4), never a silent fall-back to uid 0.
+8. **The user directory lists both halves.** The ungated
+   `USER_DIRECTORY` introspection serves the compiled `(uid, username)`
+   rows first (`rustos_users::system_account_directory()`), then the
+   on-disk human records, so `ls -l`/`ps`/`top` render system-account
+   names with no volume mounted and nothing is fabricated beyond the
+   two real halves. The `users_admin` `ListUsers` view remains the
+   *editable* (on-disk, human) set only.
 
-## 1. The default account set
+## 1. The account set
 
-Seeded identically by the debug image, the installer image, and the
-installer's first-boot provisioning:
+Compiled into the kernel (`lib/users/src/provision.rs`):
 
 | Account | uid | primary group | state | home/shell | ceiling |
 |---|---|---|---|---|---|
 | `system` | 0 | `system` (gid 0) | no-login | none | empty |
-| `devmgr` | system range (1–999) | `services` | no-login | none | devmgr's needs only |
-| `sysinfod` | system range | `services` | no-login | none | sysinfo capabilities only |
-| `seatmgr` | system range | `services` | no-login | none | seat capabilities only |
-| `login` | system range | `services` | no-login | none | incl. `CAP_SPAWN_AS_USER` |
-| `root` (debug profile only) | 1000 | `wheel` (gid 1000) | active | `/Users/root`, `DEFAULT_SHELL` | administrator ceiling |
+| `devmgr` | 10 | `services` (gid 101) | no-login | none | devmgr's needs only |
+| `sysinfod` | 11 | `services` | no-login | none | sysinfo capabilities only |
+| `seatmgr` | 12 | `services` | no-login | none | seat capabilities only |
+| `login` | 13 | `services` | no-login | none | incl. `CAP_SPAWN_AS_USER` |
 
-Groups: `system:0`, `services:<SERVICES_GID>` (system range, following
-the `storage:100` precedent in `lib/users/src/groups.rs::STORAGE_GID`),
-`storage:100`, plus the debug account's primary group. `login` is the
-instructive shape: it needs `CAP_SPAWN_AS_USER` (to drop the
+Seeded on disk (human data): the debug image's `root` (uid
+`FIRST_USER_UID` = 1000, primary group `wheel` gid `FIRST_USER_GID` =
+1000, administrator ceiling, `tools/mkimage::DEBUG_UID`); the installer
+image seeds an empty users database (the first human user is a
+first-boot job). Both profiles seed the `storage:100` group. `login` is
+the instructive shape: it needs `CAP_SPAWN_AS_USER` (to drop the
 authenticated session into the user) while itself being an unprivileged
-no-login service account — authority from ceiling∩manifest, never from
-identity.
+no-login service account.
 
 ## 2. Stages
 
@@ -140,45 +158,41 @@ identity.
   - Per-service ceilings in `grants.rs` (`DEVMGR_CEILING`,
     `SYSINFOD_CEILING`, `SEATMGR_CEILING`, `LOGIN_CEILING`), pinned and
     sibling-disjoint by test; `capability_set` builds the stored set.
-  - The canonical provisioning definition in `provision.rs`:
-    `default_system_accounts()` (`system:0` empty ceiling, `devmgr:10`,
-    `sysinfod:11`, `seatmgr:12`, `login:13`, all no-login, primary group
-    `services`) and `default_groups()` (`system:0`, `services:101`,
-    `storage:100`), with pinning + round-trip + refuse-all-logins tests.
   - The `users_admin` `ListUsers` entry reports the truthful tri-state
     (`AccountStateCode::{Active, Locked, NoLogin}`, fail-closed decode)
     and spells absent home/shell as `none`; the `users` tool renders all
-    three states. Rustdoc + `docs/src/lib/users.md` +
-    `plans/CAPABILITY_USE.md` §4.3 updated.
+    three states.
 
-- **U2 — provisioning consumers.** Status: **done**. What now holds:
-  - `tools/mkimage` authors the U1 default set for **both** profiles
-    through the profile-keyed `users_db`/`groups_db`: the installer
-    image seeds exactly the no-login defaults, the debug image appends
-    the interactive `root` (uid `DEBUG_UID` = `FIRST_USER_UID`, primary
-    group `wheel` gid `DEBUG_PRIMARY_GID` = `FIRST_USER_GID`) and its
-    `wheel` group. `rootfs::build_root_partition` takes both database
-    texts unconditionally (no image ships without them) plus the seeded
-    interactive accounts' home directories, each provisioned
-    account-owned and owner-only (`/Users/root` on a debug image — a
-    recorded home is a real inode, never a dangling path); the
-    log-attestation key and machine-id stay debug-only.
-  - The QEMU disk fixture (`tests/integration/rustfs_image`, and via it
-    every `EncryptedRootDisk` vertical) imports the same
-    `default_system_accounts()`/`default_groups()` definition and
-    appends the same uid-1000 fixture `root`.
-  - Unit tests pin both profiles' seeded sets (defaults present and
-    no-login, debug root at uid 1000, installer with no login-capable
-    account and no `wheel`); `docs/src/lib/users.md` and
-    `docs/src/security/capabilities.md` reflect the seeding.
-  - The installer inherits the same definition when it lands (§11).
+- **U2 — the compiled system identity and human-only provisioning.**
+  Status: **done** (reworked in place by U3's design decision, §2.13).
+  What now holds:
+  - `lib/users/src/provision.rs` defines the compiled identity from one
+    const spec table: `system_accounts()`, `system_groups()`, the
+    alloc-free `system_account_uid()` name→uid lookup, the
+    `is_system_account_name()`/`is_system_group_name()` reserved-name
+    guards, and `system_account_directory()` — all pinned by tests
+    (record set, ceilings, lookup↔records agreement).
+  - `tools/mkimage` seeds human accounts only: debug ⇒ `root` + `wheel`
+    + `storage`; installer ⇒ empty users database + `storage`. The QEMU
+    disk fixture (`tests/integration/rustfs_image`) seeds the same
+    human-only shape; both are pinned by tests.
 
-- **U3 — spawn-side wiring.** `init`'s startup config names each
-  service's account; `init` resolves the uid by name from the loaded
-  identity table and spawns with a concrete `target_uid`; missing
-  account ⇒ fail-closed refusal + stable log event. Kernel identity-
-  table build resolves `system`/`services` by name (storage-group
-  pattern) and fails closed when absent. Status: planned.
+- **U3 — spawn-side wiring.** Status: **done**. What now holds:
+  - The kernel `sec` phase builds, verifies, and installs the compiled
+    identity into the port's cell on every architecture
+    (`kernel/core/src/init.rs`; `BootInfo.spawn_identity` is
+    `Option<&'static LateIdentity>`, wired by the aarch64/riscv64/x86_64
+    boots to `root_mount::LATE_IDENTITY`). The unlock **replaces** the
+    held table with the `build_identity_table` merge; the `users_admin`
+    engine's edits re-verify through the same merge, so the band/name
+    enforcement of §0.3 binds every path that can publish a table.
+  - `init`'s startup config names each entry's account and the parser
+    resolves it at parse time (§0.7); the supervisor's slots carry the
+    uid and every launch/relaunch spawns through `spawn_as` with the
+    slot's concrete `target_uid` — services and the login session run
+    as their own accounts from their first instruction.
+  - `INIT_MANIFEST` += `CAP_SPAWN_AS_USER` (pinned); the user directory
+    lists compiled + human halves with stable cross-half paging (§0.8).
 
 - **U4 — ceiling tightening.** With each service running as itself,
   shrink each service account's ceiling to exactly its needs and assert

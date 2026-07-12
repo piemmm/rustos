@@ -351,36 +351,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
     }
 
     fn user_directory(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
-        // A kernel holding no database (the root volume is not yet
-        // mounted/unlocked, or none is installed) answers with an empty
-        // directory — a truthful "no accounts known", never an error the
-        // broker would refuse ungated clients over and never a fabricated
-        // account. The held text was validated by the same fail-closed
-        // parser at load, so a re-parse failure is equally an empty answer.
-        let Ok(text) = self.users_db.text() else {
-            return Ok(Vec::new());
-        };
-        let Ok(text) = core::str::from_utf8(&text) else {
-            return Ok(Vec::new());
-        };
-        let Ok(db) = rustos_users::UsersDb::parse(text) else {
-            return Ok(Vec::new());
-        };
-        // Only the uid + username pairing crosses this boundary; password
-        // records, homes, shells, and grants stay behind the capability-
-        // gated `users_db_read` syscall. File order is stable across paged
-        // calls (the held text only changes through the audited admin path).
-        let mut out = Vec::new();
-        for record in db
-            .records()
-            .iter()
-            .skip(usize::try_from(offset).unwrap_or(usize::MAX))
-            .take(max_records)
-        {
-            let entry = UserDirectoryRecord::new(record.uid().0, record.username().as_bytes())?;
-            out.extend_from_slice(&entry.to_le_bytes());
-        }
-        Ok(out)
+        user_directory_page(self.users_db, offset, max_records)
     }
 
     fn cpu_times(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
@@ -542,6 +513,67 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
     }
 }
 
+/// Encode one page of the account directory: the concatenation of the two
+/// identity halves, in stable order — the compiled-in system accounts
+/// first (kernel policy, always present, no volume required), then the
+/// on-disk human records.
+///
+/// A kernel holding no human database (the root volume is not yet
+/// mounted/unlocked, or none is installed) truthfully lists just the
+/// compiled half — never an error the broker would refuse ungated clients
+/// over and never a fabricated account. The held text was validated by
+/// the same fail-closed parser at load, so a re-parse failure equally
+/// yields no human rows.
+///
+/// Only the uid + username pairing crosses this boundary; password
+/// records, homes, shells, and grants stay behind the capability-gated
+/// `users_db_read` syscall. Row order is stable across paged calls (the
+/// held text only changes through the audited admin path).
+fn user_directory_page(
+    users_db: &dyn UsersDbSource,
+    offset: u64,
+    max_records: usize,
+) -> Result<Vec<u8>, Errno> {
+    let humans = users_db.text().ok().and_then(|text| {
+        core::str::from_utf8(&text)
+            .ok()
+            .and_then(|text| rustos_users::UsersDb::parse(text).ok())
+    });
+    // Page across the concatenation with shared skip/take counters: the
+    // two halves borrow with different lifetimes, so a single chained
+    // iterator cannot express them.
+    let mut skip = usize::try_from(offset).unwrap_or(usize::MAX);
+    let mut remaining = max_records;
+    let mut out = Vec::new();
+    for (uid, username) in rustos_users::system_account_directory() {
+        if skip > 0 {
+            skip -= 1;
+            continue;
+        }
+        if remaining == 0 {
+            break;
+        }
+        let entry = UserDirectoryRecord::new(uid, username.as_bytes())?;
+        out.extend_from_slice(&entry.to_le_bytes());
+        remaining -= 1;
+    }
+    if let Some(db) = &humans {
+        for record in db.records() {
+            if skip > 0 {
+                skip -= 1;
+                continue;
+            }
+            if remaining == 0 {
+                break;
+            }
+            let entry = UserDirectoryRecord::new(record.uid().0, record.username().as_bytes())?;
+            out.extend_from_slice(&entry.to_le_bytes());
+            remaining -= 1;
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::counts_toward_load;
@@ -596,5 +628,88 @@ mod tests {
         // crept toward the query burst's size instead of zero.
         assert!(!counts_toward_load(TaskState::Running, 7, Some(7)));
         assert!(!counts_toward_load(TaskState::Ready, 7, Some(7)));
+    }
+
+    use super::user_directory_page;
+    use crate::users::{HeldUsersDbSource, LateUsersDb, NullUsersDbSource};
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    use rustos_abi::sysinfo::UserDirectoryRecord;
+
+    /// Decode a page's packed records into owned `(uid, name)` rows.
+    fn rows(bytes: &[u8]) -> Vec<(u32, String)> {
+        assert_eq!(bytes.len() % UserDirectoryRecord::WIRE_LEN, 0);
+        bytes
+            .chunks_exact(UserDirectoryRecord::WIRE_LEN)
+            .map(|chunk| {
+                let record = UserDirectoryRecord::from_bytes(chunk).expect("record decodes");
+                (
+                    record.uid,
+                    String::from(core::str::from_utf8(record.name_bytes()).expect("utf8")),
+                )
+            })
+            .collect()
+    }
+
+    /// A users cell holding one human account, mirroring the unlock's
+    /// install of the on-disk half.
+    fn human_db() -> LateUsersDb {
+        let record = rustos_users::UserRecord::with_password(
+            rustos_users::Identity {
+                username: "root",
+                uid: rustos_users::Uid(1000),
+                primary_gid: rustos_users::Gid(1000),
+                supplementary_gids: &[],
+                display_name: "",
+                home: Some("/Users/root"),
+                shell: Some("/System/Apps/elsh.app/Run"),
+                capabilities: rustos_caps::CapabilitySet::empty(),
+                state: rustos_users::AccountState::Active,
+            },
+            b"pw",
+            [0x42; 16],
+            rustos_users::MIN_ITERATIONS,
+        )
+        .expect("valid record");
+        let db = rustos_users::UsersDb::new(alloc::vec![record]).expect("valid db");
+        let cell = LateUsersDb::new();
+        cell.install(HeldUsersDbSource::new(db.serialise().into_bytes()))
+            .expect("fresh cell installs");
+        cell
+    }
+
+    #[test]
+    fn the_user_directory_lists_the_compiled_accounts_without_a_database() {
+        // No volume, no database: the compiled-in system identity still
+        // lists in full — the /etc/passwd-class public pairing exists from
+        // first boot, and nothing is fabricated beyond it.
+        let page = user_directory_page(&NullUsersDbSource, 0, 64).expect("page encodes");
+        let rows = rows(&page);
+        let expected: Vec<(u32, String)> = rustos_users::system_account_directory()
+            .map(|(uid, name)| (uid, String::from(name)))
+            .collect();
+        assert_eq!(rows, expected);
+    }
+
+    #[test]
+    fn the_user_directory_pages_across_the_compiled_and_human_halves() {
+        let cell = human_db();
+        // The whole directory: compiled rows first, then the human half.
+        let all = rows(&user_directory_page(&cell, 0, 64).expect("page encodes"));
+        assert_eq!(all.len(), 6);
+        assert_eq!(all[0], (0, String::from("system")));
+        assert_eq!(all[5], (1000, String::from("root")));
+        // A page straddling the seam carries the tail of the compiled half
+        // and the head of the human half.
+        let seam = rows(&user_directory_page(&cell, 4, 2).expect("page encodes"));
+        assert_eq!(
+            seam,
+            alloc::vec![
+                (rustos_users::LOGIN_UID.0, String::from("login")),
+                (1000, String::from("root")),
+            ]
+        );
+        // An offset past the end is the empty paging terminator.
+        assert!(rows(&user_directory_page(&cell, 6, 64).expect("page encodes")).is_empty());
     }
 }

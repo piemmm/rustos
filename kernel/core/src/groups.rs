@@ -12,16 +12,31 @@
 //! bounded `uid 0` read is the one shared with [`crate::users`]
 //! (`crate::fs`'s bootstrap-file reader), so neither file copies it.
 //!
-//! [`build_identity_table`] is the bridge from the on-disk databases to the
-//! in-kernel [`IdentityTable`]: it pushes one
-//! [`rustos_kernel_sec::GroupRecord`] per group and one
-//! [`rustos_kernel_sec::UserRecord`] per user — carrying only the
-//! `(uid, primary gid, supplementary gids, capability grants)` the kernel
-//! consults, never any password material — and runs the verifying
-//! [`IdentityTableBuilder`], which fails closed if a user references a group
-//! that has no registry record (referential integrity) or any other
-//! invariant is violated. The verifier emits the single
-//! [`rustos_kernel_sec::AuditEvent`] outcome record.
+//! [`build_identity_table`] is the **merge** of the two identity halves
+//! into the in-kernel [`IdentityTable`]: the compiled-in system identity
+//! (`rustos_users::system_accounts` / `system_groups` — kernel policy,
+//! tamper-proof as the kernel text, never read from a volume) plus the
+//! on-disk human records. It pushes one [`rustos_kernel_sec::GroupRecord`]
+//! per group and one [`rustos_kernel_sec::UserRecord`] per user — carrying
+//! only the `(uid, primary gid, supplementary gids, capability grants)`
+//! the kernel consults, never any password material — and runs the
+//! verifying [`IdentityTableBuilder`], which fails closed if a user
+//! references a group that has no registry record (referential integrity)
+//! or any other invariant is violated. Before the verifier runs, the merge
+//! enforces the identity bands: an on-disk user must sit in the user band
+//! (uid ≥ `FIRST_USER_UID`) under an unreserved name, and an on-disk group
+//! must sit in the user band under an unreserved name — the sole exception
+//! being the well-known removable-storage group, pinned to its
+//! `storage:100` pairing (`plans/DEVICES.md` D3d). A colliding or
+//! band-violating record rejects the whole registry (fail closed, audited
+//! with a stable cause), so a tampered or misprovisioned volume can never
+//! shadow, widen, or displace a system identity. The verifier emits the
+//! single [`rustos_kernel_sec::AuditEvent`] outcome record.
+//!
+//! [`system_identity_table`] builds the compiled halves alone — the table
+//! every boot installs before any volume exists, so spawn-as-user and
+//! filesystem group resolution for the system accounts work from first
+//! boot on every architecture.
 //!
 //! Every load outcome is audited with a stable event id
 //! ([`AuditEvent::GroupsDbLoaded`] / [`AuditEvent::GroupsDbRejected`]); every
@@ -35,7 +50,10 @@ use rustos_kernel_sec::{
     GroupId, GroupRecord, IdentityTable, IdentityTableBuilder, UserId, UserRecord,
 };
 use rustos_log::{Field, Level, Sink};
-use rustos_users::{GroupsDb, ParseError, UsersDb, MAX_GROUPS_DB_LEN};
+use rustos_users::{
+    is_system_account_name, is_system_group_name, GroupsDb, IdRange, ParseError, UsersDb,
+    MAX_GROUPS_DB_LEN, STORAGE_GID, STORAGE_GROUP,
+};
 use rustos_util::fmt::format_usize;
 
 use crate::audit::{emit, AuditEvent};
@@ -122,34 +140,65 @@ where
     parsed
 }
 
-/// Build the kernel's authoritative [`IdentityTable`] from the on-disk user
-/// and group databases.
+/// Build the kernel's authoritative [`IdentityTable`]: the compiled-in
+/// system identity merged with the on-disk human user and group
+/// databases.
 ///
-/// Pushes one [`GroupRecord`] per group and one [`UserRecord`] per user
-/// (carrying only the kernel-consulted `(uid, primary gid, supplementary
-/// gids, capability grants)`), then runs the verifying [`IdentityTableBuilder`].
-/// The verifier enforces referential integrity — a user referencing a group
-/// with no registry record fails the build — and uniqueness, and emits the
-/// single [`rustos_kernel_sec::AuditEvent`] outcome record.
+/// Pushes the compiled system accounts and groups first, then one
+/// [`GroupRecord`] / [`UserRecord`] per on-disk record (carrying only the
+/// kernel-consulted `(uid, primary gid, supplementary gids, capability
+/// grants)`), enforcing the identity bands on the on-disk half, and runs
+/// the verifying [`IdentityTableBuilder`]. The verifier enforces
+/// referential integrity — a user referencing a group with no registry
+/// record fails the build — and uniqueness, and emits the single
+/// [`rustos_kernel_sec::AuditEvent`] outcome record.
 ///
 /// # Errors
 ///
-/// The [`Errno`] the verifier raises ([`Errno::BadMagic`] for a duplicate id,
-/// [`Errno::NotFound`] for a dangling group reference,
-/// [`Errno::LengthOutOfRange`] for an over-large supplementary set), failing
-/// closed with no table.
+/// * [`Errno::PermissionDenied`] — an on-disk record collides with the
+///   compiled identity: a system-band uid/gid, a reserved name, or a
+///   mis-paired storage group. The refusal is audited with a stable
+///   cause and no table exists (fail closed).
+/// * The [`Errno`] the verifier raises ([`Errno::BadMagic`] for a
+///   duplicate id, [`Errno::NotFound`] for a dangling group reference,
+///   [`Errno::LengthOutOfRange`] for an over-large supplementary set),
+///   failing closed with no table.
 pub fn build_identity_table(
     users: &UsersDb,
     groups: &GroupsDb,
     audit: &dyn Sink,
 ) -> Result<IdentityTable, Errno> {
-    let mut builder = IdentityTableBuilder::new();
+    let mut builder = system_identity_builder(audit)?;
     for group in groups.records() {
+        // The storage group is the one system-band record the on-disk
+        // registry legitimately carries; its name↔gid pairing is pinned
+        // so neither half can be repurposed. Every other on-disk group
+        // must sit in the user band under an unreserved name.
+        let storage_name = group.name() == STORAGE_GROUP;
+        let storage_gid = group.gid() == STORAGE_GID;
+        let storage = storage_name && storage_gid;
+        if (storage_name != storage_gid)
+            || (!storage && !IdRange::User.contains(group.gid().0))
+            || is_system_group_name(group.name())
+        {
+            audit_reserved(audit, AuditEvent::GroupsDbRejected, GROUPS_DB_PATH);
+            return Err(Errno::PermissionDenied);
+        }
         builder.push_group(GroupRecord {
             gid: GroupId(group.gid().0),
         });
     }
     for user in users.records() {
+        // Every on-disk account is a human account: user band only,
+        // never a reserved system name.
+        if !IdRange::User.contains(user.uid().0) || is_system_account_name(user.username()) {
+            audit_reserved(
+                audit,
+                AuditEvent::UsersDbRejected,
+                crate::users::USERS_DB_PATH,
+            );
+            return Err(Errno::PermissionDenied);
+        }
         builder.push_user(UserRecord {
             uid: UserId(user.uid().0),
             primary_gid: GroupId(user.primary_gid().0),
@@ -162,6 +211,77 @@ pub fn build_identity_table(
         });
     }
     builder.verify(audit)
+}
+
+/// Build and verify the compiled-in system identity alone — the table the
+/// boot path installs before any volume is mounted, so the system and
+/// service accounts resolve (spawn-as-user, filesystem groups) from first
+/// boot on every architecture. The encrypted-root unlock later replaces it
+/// with the [`build_identity_table`] merge of this same half and the
+/// on-disk human records.
+///
+/// # Errors
+///
+/// As [`build_identity_table`]'s verifier errors; the compiled set is
+/// pinned valid by `lib/users`' tests, so a failure here is a build
+/// defect surfaced fail-closed rather than panicked over.
+pub fn system_identity_table(audit: &dyn Sink) -> Result<IdentityTable, Errno> {
+    system_identity_builder(audit)?.verify(audit)
+}
+
+/// An [`IdentityTableBuilder`] pre-loaded with the compiled-in system
+/// accounts and groups — the shared first half of both
+/// [`system_identity_table`] and the [`build_identity_table`] merge.
+fn system_identity_builder(audit: &dyn Sink) -> Result<IdentityTableBuilder, Errno> {
+    // Construction of the compiled set cannot fail (pinned by `lib/users`'
+    // tests); a failure is surfaced fail-closed as a malformed-identity
+    // refusal rather than panicked over.
+    let (Ok(accounts), Ok(groups)) = (
+        rustos_users::system_accounts(),
+        rustos_users::system_groups(),
+    ) else {
+        audit_reserved(audit, AuditEvent::UsersDbRejected, "<compiled>");
+        return Err(Errno::BadMagic);
+    };
+    let mut builder = IdentityTableBuilder::new();
+    for group in &groups {
+        builder.push_group(GroupRecord {
+            gid: GroupId(group.gid().0),
+        });
+    }
+    for account in &accounts {
+        builder.push_user(UserRecord {
+            uid: UserId(account.uid().0),
+            primary_gid: GroupId(account.primary_gid().0),
+            supplementary_gids: account
+                .supplementary_gids()
+                .iter()
+                .map(|gid| GroupId(gid.0))
+                .collect(),
+            capability_grants: account.capabilities(),
+        });
+    }
+    Ok(builder)
+}
+
+/// Emit the fail-closed refusal record for an on-disk registry that
+/// collides with the compiled-in system identity.
+fn audit_reserved(audit: &dyn Sink, event: AuditEvent, path: &'static str) {
+    emit(
+        audit,
+        Level::Error,
+        event,
+        &[
+            Field {
+                key: "path",
+                value: rustos_log::FieldValue::Str(path),
+            },
+            Field {
+                key: "cause",
+                value: rustos_log::FieldValue::Str("reserved_identity"),
+            },
+        ],
+    );
 }
 
 /// Emit the single shared load outcome record: [`AuditEvent::GroupsDbLoaded`]

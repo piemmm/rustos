@@ -181,7 +181,9 @@ pub use fs::{
     MountedFilesystemService, NullFilesystemService, Path, Vfs, VfsError, VolumeForest,
     VolumePublishError, VolumeService, NULL_FILESYSTEM, NULL_VOLUME_FOREST, NULL_VOLUME_SERVICE,
 };
-pub use groups::{build_identity_table, load_groups_db, GroupsLoadError, GROUPS_DB_PATH};
+pub use groups::{
+    build_identity_table, load_groups_db, system_identity_table, GroupsLoadError, GROUPS_DB_PATH,
+};
 pub use hwtree::{HwTreeSource, NullHwTreeSource, NULL_HW_TREE};
 pub use init::{kernel_main, InitError, KernelInitSpawner, Phase};
 pub use introspect::{IntrospectSource, NullIntrospectSource, NULL_INTROSPECT};

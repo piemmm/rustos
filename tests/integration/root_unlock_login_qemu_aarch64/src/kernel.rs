@@ -96,11 +96,19 @@ fn root_unlock_login(
     // state.
     let late = LateUsersDb::new();
     // A fresh identity-table cell stands in for the boot-wired
-    // `rustos_kernel::root_mount::LATE_IDENTITY`: the unlock builds and
-    // installs the verified user/group identity table into it from the
-    // planted root's `/System/Security/{Users,Groups}` in the same step it
-    // installs the users database.
+    // `rustos_kernel::root_mount::LATE_IDENTITY`, pre-loaded with the
+    // compiled-in system identity exactly as the boot sec phase installs
+    // it: the unlock then *replaces* the held table with the merged
+    // system∪human table built from the planted root's
+    // `/System/Security/{Users,Groups}` in the same step it installs the
+    // users database.
     let late_identity = LateIdentity::new();
+    late_identity
+        .install(
+            rustos_kernel_core::system_identity_table(env.audit_sink())
+                .map_err(|_| "compiled identity build")?,
+        )
+        .map_err(|_| "compiled identity install")?;
     let input = ScriptedPassphrase::new();
 
     // `NullConsole` swallows the prompt bytes (the test asserts the unlock

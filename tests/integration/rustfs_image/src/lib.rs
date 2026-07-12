@@ -110,15 +110,16 @@ pub const USERS_FIXTURE_ITERATIONS: u32 = rustos_users::MIN_ITERATIONS;
 const USERS_FIXTURE_SALT: Salt = [0xa5; rustos_users::SALT_LEN];
 
 /// Serialise the users-root volume's `/System/Security/Users` database:
-/// the canonical default system/service account set
-/// (`rustos_users::default_system_accounts`, `plans/USERS.md`) plus the
-/// active [`USERS_FIXTURE_USERNAME`] account (uid
+/// the active [`USERS_FIXTURE_USERNAME`] account (uid
 /// [`rustos_users::FIRST_USER_UID`]) granted the shared administrator
 /// capability ceiling (`rustos_users::administrator_ceiling` — the session
 /// baseline plus the administrative set), exactly as the real debug
 /// image's `tools/mkimage` seeding lays it down, so the end-to-end session
 /// vertical exercises the same grant the shipped debug profile carries
-/// (`plans/CAPABILITY_USE.md` CU3).
+/// (`plans/CAPABILITY_USE.md` CU3). The on-disk database holds **human**
+/// accounts only: the system/service identity is compiled into the kernel
+/// (`rustos_users::system_accounts`, `plans/USERS.md`) and the kernel's
+/// identity merge refuses any on-disk record colliding with it.
 ///
 /// # Errors
 ///
@@ -126,8 +127,7 @@ const USERS_FIXTURE_SALT: Salt = [0xa5; rustos_users::SALT_LEN];
 /// `users-v1` bounds — a programming error in this fixture, surfaced
 /// rather than panicked.
 pub fn users_db_text() -> Result<String, ParseError> {
-    let mut records = rustos_users::default_system_accounts()?;
-    records.push(UserRecord::with_password(
+    let records = vec![UserRecord::with_password(
         Identity {
             username: USERS_FIXTURE_USERNAME,
             uid: Uid(rustos_users::FIRST_USER_UID),
@@ -142,20 +142,21 @@ pub fn users_db_text() -> Result<String, ParseError> {
         USERS_FIXTURE_PASSWORD.as_bytes(),
         USERS_FIXTURE_SALT,
         USERS_FIXTURE_ITERATIONS,
-    )?);
+    )?];
     Ok(UsersDb::new(records)?.serialise())
 }
 
 /// Serialise the users-root volume's `/System/Security/Groups` registry:
-/// the canonical default groups (`rustos_users::default_groups` —
-/// `system`, `services`, and the well-known removable-storage group whose
-/// by-name resolution arms the hotplug-volume identity map) plus the
+/// the well-known removable-storage group (whose by-name resolution arms
+/// the hotplug-volume identity map, `plans/DEVICES.md` D3d) plus the
 /// `wheel` group (gid [`rustos_users::FIRST_USER_GID`]) the planted
 /// [`USERS_FIXTURE_USERNAME`] account names as its primary group — so the
-/// kernel's boot-time identity table build
-/// (`rustos_kernel_core::build_identity_table`) resolves every account's
-/// gid against a real registry rather than failing closed on a dangling
-/// reference — exactly as `tools/mkimage` seeds the shipped debug profile.
+/// kernel's identity merge (`rustos_kernel_core::build_identity_table`)
+/// resolves every on-disk account's gid against a real registry rather
+/// than failing closed on a dangling reference — exactly as
+/// `tools/mkimage` seeds the shipped debug profile. The `system` and
+/// `services` groups are compiled into the kernel beside the system
+/// accounts and never written to disk.
 ///
 /// # Errors
 ///
@@ -163,11 +164,10 @@ pub fn users_db_text() -> Result<String, ParseError> {
 /// `groups-v1` bounds — a programming error in this fixture, surfaced
 /// rather than panicked.
 pub fn groups_db_text() -> Result<String, ParseError> {
-    let mut records = rustos_users::default_groups()?;
-    records.push(GroupRecord::new(
-        "wheel",
-        Gid(rustos_users::FIRST_USER_GID),
-    )?);
+    let records = vec![
+        GroupRecord::new(rustos_users::STORAGE_GROUP, rustos_users::STORAGE_GID)?,
+        GroupRecord::new("wheel", Gid(rustos_users::FIRST_USER_GID))?,
+    ];
     Ok(GroupsDb::new(records)?.serialise())
 }
 
@@ -432,14 +432,13 @@ mod tests {
         let sink = DiscardSink;
         let db = rustos_kernel_core::load_users_db(&mut fs, &sink)
             .expect("the kernel loader reads /System/Security/Users");
-        // The canonical defaults plus the appended interactive account.
-        let defaults = rustos_users::default_system_accounts().expect("valid defaults");
-        assert_eq!(db.records().len(), defaults.len() + 1);
-        for default in &defaults {
-            let seeded = db
-                .lookup(default.username())
-                .expect("every default account is seeded");
-            assert_eq!(seeded.state(), AccountState::NoLogin);
+        // The one interactive human account and nothing else: the
+        // system/service identity is compiled into the kernel
+        // (`rustos_users::system_accounts`), never seeded to disk, and the
+        // identity merge would refuse any colliding record here.
+        assert_eq!(db.records().len(), 1);
+        for account in rustos_users::system_accounts().expect("valid compiled identity") {
+            assert!(db.lookup(account.username()).is_none());
         }
 
         let record = db

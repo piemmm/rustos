@@ -84,19 +84,27 @@ its identity table (`rustos_kernel_core::groups::build_identity_table`): a
 user naming a group with no registry record is refused, fail closed
 (referential integrity, `AGENTS.md` §5.4).
 
-One principal is kernel-defined rather than database-defined: the **system
-principal** (`uid 0`). It exists before any table can be read (PID 1 and
-the boot services load their `/System` store bundles before the encrypted
-root is unlocked), so the kernel's filesystem group resolution falls back
-to the capability-less bootstrap identity (`gid 0`, no supplementary
-groups) whenever the table is absent or holds no `uid 0` record — a table
-record for `uid 0` wins when present. Every image seeds that record: the
-no-login `system` account (`default_system_accounts()`, below) is merely
-the *name* the loaded registry gives the bootstrap identity, carrying the
-same gid 0 and an empty ceiling. The fallback grants no
-ambient power (`AGENTS.md` §5.1): every per-inode owner/mode/ACL and
-mount-flag check still applies, non-zero uids stay strictly fail-closed,
-and a spawn-as-user *switch* always requires the installed table.
+The **system identity is compiled in, not stored on disk**
+(`plans/USERS.md`): `system_accounts()` / `system_groups()` define the
+OS-owned records — the no-login `system` account naming uid 0 plus one
+no-login account per system service — as kernel policy, tamper-proof
+exactly as the kernel text is. The kernel's sec boot phase builds and
+installs that half into the live identity cell before any volume exists
+(`rustos_kernel_core::system_identity_table`), so spawn-as-user and
+filesystem group resolution for the system accounts work from first boot
+on every architecture; the encrypted-root unlock later replaces the held
+table with the merge of the same compiled half and the on-disk human
+records (`build_identity_table`). The merge **fails closed on any on-disk
+record that collides with the compiled identity** — a system-band uid or
+gid (`IdRange::System`), a reserved account or group name, or a
+repurposed storage-group pairing — so a tampered or misprovisioned volume
+can never shadow, widen, or displace a system identity. The kernel's
+filesystem group resolution still falls back to the capability-less
+bootstrap identity (`gid 0`, no supplementary groups) for `uid 0` when no
+table is installed (a host harness); the fallback grants no ambient power
+(`AGENTS.md` §5.1): every per-inode owner/mode/ACL and mount-flag check
+still applies, non-zero uids stay strictly fail-closed, and a
+spawn-as-user *switch* always requires the installed table.
 
 One group name is **well-known**: `STORAGE_GROUP` (`"storage"`, seeded as
 gid `STORAGE_GID` = 100 by the image builder and the installer). At root
@@ -136,12 +144,13 @@ deriving anything — a work-factor bound, not a capacity (`AGENTS.md`
 `UserRecord::with_password` hashes a fresh password under a caller-supplied
 random salt (the crate stays deterministic; entropy belongs to the caller),
 and `UsersDb::new` enforces the whole-database invariants over records
-built in memory. `tools/mkimage` uses exactly this path: both profiles
-seed the canonical default system/service set (below), and a **debug**
-image appends the interactive `root`/`root` bring-up administrator (uid
-`FIRST_USER_UID`, primary group `wheel` gid `FIRST_USER_GID`); an
-**installer** image seeds no login-capable account (the §11 installer
-authors the first human user on first boot).
+built in memory. `tools/mkimage` uses exactly this path, seeding **human
+accounts only** (the system identity is compiled into the kernel, never
+written to disk): a **debug** image seeds the interactive `root`/`root`
+bring-up administrator (uid `FIRST_USER_UID`, primary group `wheel` gid
+`FIRST_USER_GID`); an **installer** image seeds an *empty* database (the
+§11 installer authors the first human user on first boot). Both profiles
+seed the storage group into the on-disk registry beside them.
 
 The shared **account-authoring policy** lives beside the format so every
 author agrees on it (`AGENTS.md` §2.2): `DEFAULT_SHELL` (the default
@@ -157,16 +166,20 @@ interactive `users` session, the one-shot `useradd`/`groupadd` command
 apps (user range), and the image builder all import these definitions
 rather than carrying private copies.
 
-The canonical **default account set** (`plans/USERS.md`) is defined here
-too: `default_system_accounts()` — the no-login `system` record (uid 0,
-group `system` gid 0, empty ceiling; the *name* the loaded registry gives
-the kernel's bootstrap identity) plus one no-login account per system
-service (`devmgr` 10, `sysinfod` 11, `seatmgr` 12, `login` 13, primary
-group `services` gid 101), each carrying exactly its own service's grant
-ceiling (`DEVMGR_CEILING`, `SYSINFOD_CEILING`, `SEATMGR_CEILING`,
+The compiled-in **system identity** (`plans/USERS.md`) is defined here
+too: `system_accounts()` — the no-login `system` record (uid 0, group
+`system` gid 0, empty ceiling; the *name* the kernel's bootstrap identity
+resolves to) plus one no-login account per system service (`devmgr` 10,
+`sysinfod` 11, `seatmgr` 12, `login` 13, primary group `services` gid
+101), each carrying exactly its own service's grant ceiling
+(`DEVMGR_CEILING`, `SYSINFOD_CEILING`, `SEATMGR_CEILING`,
 `LOGIN_CEILING`) so the §5.2 ceiling∩manifest intersection does real
-work — and `default_groups()` (`system:0`, `services:101`,
-`storage:100`). Every author of a fresh `/System/Security` pair imports
-this one definition; the uid/gid constants seed provisioning only, and
-runtime consumers resolve accounts and groups by name, failing closed
-when a record is missing (the `storage` precedent).
+work — and `system_groups()` (`system:0`, `services:101`). The kernel is
+the sole consumer: the set is compiled into its identity table, never
+authored to a volume. PID 1 resolves a startup-config account name onto
+its uid through the pure, allocation-free `system_account_uid()` at
+config-parse time and spawns each service with that concrete
+`target_uid`; `is_system_account_name()` / `is_system_group_name()` back
+the kernel merge's reserved-name refusals, and
+`system_account_directory()` supplies the `(uid, username)` rows the
+user-directory introspection lists ahead of the on-disk half.

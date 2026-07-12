@@ -42,7 +42,7 @@ mod program {
     use rustos_rt::io::{Stderr, Stdout, Write};
 
     use crate::startup::{render_banner, StartupConfig, BANNER_MAX, DEFAULT_CONFIG, MAX_SERVICES};
-    use crate::supervisor::{supervise, Outcome, Sessions};
+    use crate::supervisor::{supervise, Launch, Outcome, Sessions};
 
     /// Exit code when the compiled-in startup config does not parse. A
     /// reserved, fail-closed value; the default config is
@@ -77,8 +77,13 @@ mod program {
         fn console_count(&mut self) -> i64 {
             rustos_rt::console_count()
         }
-        fn spawn_at(&mut self, path: &[u8], console: u32) -> i64 {
-            rustos_rt::spawn_at(path, console)
+        fn spawn_at(&mut self, path: &[u8], console: u32, uid: u32) -> i64 {
+            // Switch the child onto its own service account at creation
+            // (there is no setuid-self): the kernel gates the switch on
+            // init's `CAP_SPAWN_AS_USER` and resolves the account's group
+            // set and capability ceiling from the boot-installed identity
+            // table, failing closed on an unknown uid.
+            rustos_rt::spawn_as(path, u64::from(console), uid)
         }
         fn wait_any(&mut self, status: &mut i32) -> i64 {
             rustos_rt::wait_exit(rustos_abi::WAIT_PID_ANY, status)
@@ -115,6 +120,7 @@ mod program {
     /// fall to the last-resort halt spin: with no console and no wait-set
     /// there is nothing left to park on or report to.
     fn main() -> i32 {
+        const VACANT: Launch<'_> = Launch { path: b"", uid: 0 };
         let Ok(config) = StartupConfig::parse(DEFAULT_CONFIG) else {
             return EXIT_CONFIG_INVALID;
         };
@@ -161,19 +167,28 @@ mod program {
         // perpetual `devmgr` parks off the run queue without starving a
         // single-CPU system.
         //
-        // The service paths arrive as `&str` from the parsed config; PID 1
-        // re-borrows them as bytes into a fixed stack array (no heap,
-        // `plans/SPAWN.md` SP5b) bounded by `MAX_SERVICES`, which the parser
-        // already enforces, so the slice is never truncated.
+        // The launch entries arrive as `&str` paths plus parse-time-resolved
+        // account uids from the config; PID 1 re-borrows them as bytes into
+        // a fixed stack array (no heap, `plans/SPAWN.md` SP5b) bounded by
+        // `MAX_SERVICES`, which the parser already enforces, so the slice is
+        // never truncated. Every entry is spawned as its own compiled-in
+        // service account (`plans/USERS.md`).
         let services = config.services();
-        let mut service_bytes: [&[u8]; MAX_SERVICES] = [b""; MAX_SERVICES];
-        for (dst, path) in service_bytes.iter_mut().zip(services) {
-            *dst = path.as_bytes();
+        let mut service_launches: [Launch<'_>; MAX_SERVICES] = [VACANT; MAX_SERVICES];
+        for (dst, entry) in service_launches.iter_mut().zip(services) {
+            *dst = Launch {
+                path: entry.path.as_bytes(),
+                uid: entry.uid,
+            };
         }
+        let session = Launch {
+            path: config.session().path.as_bytes(),
+            uid: config.session().uid,
+        };
         match supervise(
             &mut RtSessions,
-            config.session().as_bytes(),
-            &service_bytes[..services.len()],
+            session,
+            &service_launches[..services.len()],
         ) {
             Outcome::NoConsoles => EXIT_NO_CONSOLES,
             Outcome::WaitFailed => EXIT_WAIT_FAILED,
@@ -203,7 +218,7 @@ impl supervisor::Sessions for NoSessions {
     fn console_count(&mut self) -> i64 {
         0
     }
-    fn spawn_at(&mut self, _path: &[u8], _console: u32) -> i64 {
+    fn spawn_at(&mut self, _path: &[u8], _console: u32, _uid: u32) -> i64 {
         -1
     }
     fn wait_any(&mut self, _status: &mut i32) -> i64 {
@@ -223,7 +238,14 @@ fn main() {
         );
     }
     assert_eq!(
-        supervisor::supervise(&mut NoSessions, b"session", &[]),
+        supervisor::supervise(
+            &mut NoSessions,
+            supervisor::Launch {
+                path: b"session",
+                uid: 0,
+            },
+            &[],
+        ),
         supervisor::Outcome::NoConsoles
     );
 }

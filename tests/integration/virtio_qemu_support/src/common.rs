@@ -481,11 +481,11 @@ pub fn users_db_load<Tr: Transport>(
 
     let db = rustos_kernel_core::load_users_db(&mut fs, env.audit_sink())
         .map_err(|_| "users database load")?;
-    // The canonical no-login defaults plus the appended interactive
-    // fixture account, derived from the shared definition so the guest
-    // check and the fixture cannot drift.
-    let defaults = rustos_users::default_system_accounts().map_err(|_| "default account set")?;
-    if db.records().len() != defaults.len() + 1 {
+    // Exactly the planted interactive fixture account: the on-disk
+    // database holds human accounts only — the system/service identity is
+    // compiled into the kernel (`rustos_users::system_accounts`), never
+    // seeded to disk.
+    if db.records().len() != 1 {
         return Err("users database record count mismatch");
     }
     env.log("virtio-qemu: users database loaded");

@@ -79,8 +79,11 @@ vocabulary the rest of the plan uses.
 5. **No setuid-self, no runtime raise** — a running process can never
    change its own identity or grow its own capability set. The only place
    authority is assigned is **process creation**; the only privileged
-   identity transition is a `CAP_SPAWN_AS_USER` spawn (login), which
-   resolves the target credential from the kernel identity table.
+   identity transition is a `CAP_SPAWN_AS_USER` spawn (PID 1 switching
+   the boot services and the login session onto their own service
+   accounts, and login dropping the authenticated session into the target
+   user — `plans/USERS.md`), which resolves the target credential from
+   the kernel identity table.
 6. **Fail closed, audit the decision** — every denial is a typed
    `PermissionDenied`, never a fallback, and every security-relevant grant
    or refusal is logged with a stable event ID (`AGENTS.md` §5.4, §19.4).
@@ -91,26 +94,35 @@ vocabulary the rest of the plan uses.
 
 The life of a capability, from disk to exercise to revocation:
 
-1. **Grant (at rest).** An account's ceiling lives in its
-   `/System/Security/Users` record (`users-v1` `capabilities` field). It is
+1. **Grant (at rest).** A *human* account's ceiling lives in its
+   `/System/Security/Users` record (`users-v1` `capabilities` field),
    authored by the image builder (debug), the installer (first user), or a
-   `CAP_USER_ADMIN` holder (user management, CU4). The *system* principal
-   (PID 1 `init` and the boot services it launches) has no users-db row; its
-   ceiling is defined in-kernel per program (§4.1).
-2. **Install (at boot).** The kernel reads and verifies the users/groups
-   databases while mounting root, builds the immutable `IdentityTable`, and
-   installs it exactly once (`LateIdentity`). Before the table is installed
-   every identity resolution fails closed.
+   `CAP_USER_ADMIN` holder (user management, CU4). A *system/service*
+   account's ceiling is compiled into the kernel with its record
+   (`rustos_users::system_accounts`, `plans/USERS.md`) — OS policy,
+   tamper-proof as the kernel text, never volume data. The *system*
+   principal (PID 1 `init`) has no account ceiling; its manifest is its
+   ceiling (§4.1).
+2. **Install (at boot + unlock).** The kernel's `sec` boot phase builds,
+   verifies, and installs the compiled system identity into the live
+   `LateIdentity` cell before any volume exists; the encrypted-root unlock
+   then replaces the held table with the verified merge of that compiled
+   half and the on-disk human records — refusing, fail-closed, any on-disk
+   record that collides with the compiled identity (a system-band id or a
+   reserved name, `plans/USERS.md`). With no table installed every
+   identity resolution fails closed.
 3. **Delegate (at spawn).** Spawn is the **only** delegation point:
    - *Inherit spawn* (no target uid): the child keeps the caller's
      credential **and the caller's user ceiling**; its effective set is
      `child manifest ∩ that ceiling`. A shell that launches `ps` hands it
      the user's ceiling, and `ps` ends up with just what its own manifest
      requests within it — never the shell's effective set, never more.
-   - *Spawn-as-user* (`CAP_SPAWN_AS_USER`, login only): the kernel resolves
-     the target account's full credential **and ceiling** from the
-     `IdentityTable` and derives `child manifest ∩ target ceiling`. The
-     caller chooses *which* account; it fabricates nothing.
+   - *Spawn-as-user* (`CAP_SPAWN_AS_USER` — PID 1 for the boot services
+     and the login session, login for the authenticated user's session):
+     the kernel resolves the target account's full credential **and
+     ceiling** from the `IdentityTable` and derives `child manifest ∩
+     target ceiling`. The caller chooses *which* account; it fabricates
+     nothing.
    Delegation can only narrow (`AGENTS.md` §5.2): the ceiling travels with
    the credential as an immutable kernel-side snapshot on the task record,
    never a caller-supplied value.
@@ -148,9 +160,10 @@ The life of a capability, from disk to exercise to revocation:
   `CapabilitySet` grant (`lib/users`), verified and installed into the
   kernel `IdentityTable` (whose `UserRecord.capability_grants` documents
   itself as "the maximum capability set this user may ever exercise").
-- Login as the sole `CAP_SPAWN_AS_USER`/`CAP_USERS_READ` holder;
-  `resolve_credential` resolving the target's groups **and capability
-  ceiling** from the table, fail closed before install / on unknown uid.
+- `CAP_SPAWN_AS_USER` held only by PID 1 and login (and `CAP_USERS_READ`
+  only by login); `resolve_credential` resolving the target's groups
+  **and capability ceiling** from the table, fail closed with no table /
+  on unknown uid.
 - Per-inode owner/mode/ACL enforcement under kernel-attested credentials in
   the secured VFS; capability-gated dispatch on every syscall.
 - The user ceiling threaded through spawn (CU1): `SpawnCredential` carries

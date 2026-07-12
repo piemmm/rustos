@@ -288,11 +288,13 @@ pub const fn console_baud_for(profile: ImageProfile) -> u32 {
 
 /// Build the profile's `/System/Security/Users` text.
 ///
-/// Both profiles start from the canonical default system/service account
-/// set (`rustos_users::default_system_accounts`, `plans/USERS.md`): the
-/// locked, non-authenticating `system` record naming uid 0 plus one
-/// no-login account per system service, each carrying exactly its own
-/// service's ceiling. The debug profile appends the interactive
+/// The on-disk database holds **human** accounts only: the system/service
+/// identity is compiled into the kernel (`rustos_users::system_accounts`,
+/// `plans/USERS.md`) and the kernel's identity merge refuses any on-disk
+/// record colliding with it, so neither profile writes those records to
+/// disk. The installer profile therefore seeds an *empty* database (its
+/// first human account is created by the installer's first-boot
+/// provisioning); the debug profile seeds the interactive
 /// [`DEBUG_USERNAME`] administrator (uid [`DEBUG_UID`], its password
 /// salted from `entropy` and hashed at the default PBKDF2 cost) granted
 /// the administrator capability ceiling
@@ -303,8 +305,7 @@ fn users_db(
     profile: ImageProfile,
     entropy: &mut dyn EntropySource,
 ) -> Result<String, MkimageError> {
-    let mut records = rustos_users::default_system_accounts()
-        .map_err(|e| MkimageError::UsersDb(format!("default system accounts: {e}")))?;
+    let mut records = Vec::new();
     if profile == ImageProfile::Debug {
         let mut salt: Salt = [0u8; rustos_users::SALT_LEN];
         entropy
@@ -337,20 +338,21 @@ fn users_db(
 
 /// Build the profile's `/System/Security/Groups` text.
 ///
-/// Both profiles start from the canonical default group registry
-/// (`rustos_users::default_groups`, `plans/USERS.md`): `system`,
-/// `services`, and the well-known removable-storage group
-/// ([`rustos_users::STORAGE_GROUP`]) the unlock resolves by name to arm the
-/// hotplug-volume identity map (`plans/DEVICES.md` D3d). The debug
-/// profile appends the [`DEBUG_GROUP`] group (gid [`DEBUG_PRIMARY_GID`])
-/// the seeded administrator's primary gid references — so the kernel's
-/// boot-time identity-table build resolves that reference against a real
-/// registry rather than failing closed on a dangling group. Membership is
-/// not stored here — it lives in the user records; this is only the
-/// authoritative name↔gid set.
+/// Both profiles seed the well-known removable-storage group
+/// ([`rustos_users::STORAGE_GROUP`]) the unlock resolves by name to arm
+/// the hotplug-volume identity map (`plans/DEVICES.md` D3d) — storage
+/// membership is admin-managed data about human accounts, so it lives on
+/// disk beside them. The `system` and `services` groups are compiled into
+/// the kernel with the system accounts (`plans/USERS.md`) and never
+/// written to disk. The debug profile appends the [`DEBUG_GROUP`] group
+/// (gid [`DEBUG_PRIMARY_GID`]) the seeded administrator's primary gid
+/// references — so the kernel's identity merge resolves that reference
+/// against a real registry rather than failing closed on a dangling
+/// group. Membership is not stored here — it lives in the user records;
+/// this is only the authoritative name↔gid set.
 fn groups_db(profile: ImageProfile) -> Result<String, MkimageError> {
-    let mut records = rustos_users::default_groups()
-        .map_err(|e| MkimageError::GroupsDb(format!("default groups: {e}")))?;
+    let mut records = vec![GroupRecord::new(rustos_users::STORAGE_GROUP, STORAGE_GID)
+        .map_err(|e| MkimageError::GroupsDb(format!("storage group record: {e}")))?];
     if profile == ImageProfile::Debug {
         records.push(
             GroupRecord::new(DEBUG_GROUP, DEBUG_PRIMARY_GID)
@@ -1081,17 +1083,11 @@ mod tests {
             db.lookup(STORAGE_GROUP).map(GroupRecord::gid),
             Some(STORAGE_GID)
         );
-        // The default `system` and `services` groups ship beneath the debug
-        // group, so every default account's primary gid resolves too.
-        assert_eq!(
-            db.lookup(rustos_users::SYSTEM_GROUP).map(GroupRecord::gid),
-            Some(rustos_users::SYSTEM_GID)
-        );
-        assert_eq!(
-            db.lookup(rustos_users::SERVICES_GROUP)
-                .map(GroupRecord::gid),
-            Some(rustos_users::SERVICES_GID)
-        );
+        // The `system` and `services` groups are compiled into the kernel
+        // with the system accounts, never seeded to disk — a reserved
+        // record here would be refused by the kernel's identity merge.
+        assert!(db.lookup(rustos_users::SYSTEM_GROUP).is_none());
+        assert!(db.lookup(rustos_users::SERVICES_GROUP).is_none());
     }
 
     #[test]

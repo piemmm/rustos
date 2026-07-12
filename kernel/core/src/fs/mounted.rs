@@ -432,7 +432,7 @@ impl LateIdentity {
     /// resolves to the same capability-less bootstrap identity the boot
     /// readers use (`gid 0`, no supplementary groups) whenever the table is
     /// absent or holds no `uid 0` record; a table record for `uid 0` (the
-    /// debug image's seeded administrator) wins when present. The fallback
+    /// compiled-in `system` account) wins when present. The fallback
     /// grants no ambient power: every per-inode owner/mode/ACL and
     /// mount-flag check still applies, and `uid 0` tasks exist only through
     /// kernel-attested spawn.

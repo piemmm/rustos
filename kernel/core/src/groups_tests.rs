@@ -55,8 +55,8 @@ fn without_groups() -> RwMockFs {
 
 fn valid_groups_text() -> String {
     GroupsDb::new(alloc::vec![
-        GroupRecord::new("wheel", Gid(0)).expect("valid"),
-        GroupRecord::new("ada", Gid(1000)).expect("valid"),
+        GroupRecord::new("wheel", Gid(1000)).expect("valid"),
+        GroupRecord::new("ada", Gid(1001)).expect("valid"),
     ])
     .expect("valid db")
     .serialise()
@@ -92,7 +92,7 @@ fn a_valid_registry_loads_and_is_audited() {
 
     let db = load_groups_db(&mut fs, &sink).expect("valid registry loads");
     assert_eq!(db.records().len(), 2);
-    assert_eq!(db.lookup("wheel").map(GroupRecord::gid), Some(Gid(0)));
+    assert_eq!(db.lookup("wheel").map(GroupRecord::gid), Some(Gid(1000)));
 
     let events = sink.snapshot();
     assert_eq!(events.len(), 1);
@@ -155,20 +155,32 @@ fn non_utf8_bytes_are_rejected_fail_closed() {
 }
 
 #[test]
-fn the_identity_table_builds_from_users_and_groups() {
+fn the_identity_table_merges_the_compiled_half_with_the_on_disk_records() {
     let sink = TestSink::new();
     let groups = GroupsDb::new(alloc::vec![
-        GroupRecord::new("wheel", Gid(0)).expect("valid"),
-        GroupRecord::new("ada", Gid(1000)).expect("valid"),
+        GroupRecord::new("wheel", Gid(1000)).expect("valid"),
+        GroupRecord::new("ada", Gid(1001)).expect("valid"),
     ])
     .expect("valid groups");
-    let users = UsersDb::new(alloc::vec![user("ada", 1000, 1000, &[Gid(0)])]).expect("valid users");
+    let users =
+        UsersDb::new(alloc::vec![user("ada", 1000, 1001, &[Gid(1000)])]).expect("valid users");
 
     let table = build_identity_table(&users, &groups, &sink).expect("table verifies");
+    // The on-disk human record resolves…
     let record = table.user(UserId(1000)).expect("user present");
-    assert_eq!(record.primary_gid, GroupId(1000));
-    assert_eq!(record.supplementary_gids, alloc::vec![GroupId(0)]);
+    assert_eq!(record.primary_gid, GroupId(1001));
+    assert_eq!(record.supplementary_gids, alloc::vec![GroupId(1000)]);
     assert!(record.capability_grants.contains(CapabilityId::PROC_SPAWN));
+    // …and so does the compiled-in system identity: `system` (uid 0,
+    // empty ceiling) and every service account with exactly its own
+    // ceiling, available with no volume mounted.
+    let system = table.user(UserId(0)).expect("system present");
+    assert!(system.capability_grants.is_empty());
+    let devmgr = table
+        .user(UserId(rustos_users::DEVMGR_UID.0))
+        .expect("devmgr present");
+    assert!(devmgr.capability_grants.contains(CapabilityId::DRV_LOAD));
+    assert_eq!(devmgr.primary_gid, GroupId(rustos_users::SERVICES_GID.0));
     // The verifier emits exactly one IdentityTableLoaded record.
     assert_eq!(sink.snapshot().len(), 1);
 }
@@ -176,13 +188,13 @@ fn the_identity_table_builds_from_users_and_groups() {
 #[test]
 fn a_user_referencing_an_unknown_group_fails_closed() {
     let sink = TestSink::new();
-    // The registry declares only gid 0; the user names gid 1000 as its
+    // The registry declares only gid 1000; the user names gid 2000 as its
     // primary group, so referential integrity must reject the table.
     let groups = GroupsDb::new(alloc::vec![
-        GroupRecord::new("wheel", Gid(0)).expect("valid")
+        GroupRecord::new("wheel", Gid(1000)).expect("valid")
     ])
     .expect("ok");
-    let users = UsersDb::new(alloc::vec![user("ada", 1000, 1000, &[])]).expect("valid users");
+    let users = UsersDb::new(alloc::vec![user("ada", 1000, 2000, &[])]).expect("valid users");
 
     let err = build_identity_table(&users, &groups, &sink).expect_err("dangling group rejected");
     assert_eq!(err, Errno::NotFound);
@@ -192,11 +204,12 @@ fn a_user_referencing_an_unknown_group_fails_closed() {
 fn a_user_supplementary_group_must_also_resolve() {
     let sink = TestSink::new();
     let groups = GroupsDb::new(alloc::vec![
-        GroupRecord::new("wheel", Gid(0)).expect("valid")
+        GroupRecord::new("wheel", Gid(1000)).expect("valid")
     ])
     .expect("ok");
-    // Primary gid 0 resolves, but supplementary gid 7 does not.
-    let users = UsersDb::new(alloc::vec![user("ada", 1000, 0, &[Gid(7)])]).expect("valid users");
+    // Primary gid 1000 resolves, but supplementary gid 2000 does not.
+    let users =
+        UsersDb::new(alloc::vec![user("ada", 1000, 1000, &[Gid(2000)])]).expect("valid users");
 
     let err =
         build_identity_table(&users, &groups, &sink).expect_err("dangling supplementary rejected");
@@ -204,13 +217,112 @@ fn a_user_supplementary_group_must_also_resolve() {
 }
 
 #[test]
-fn an_empty_database_pair_builds_an_empty_table() {
+fn an_empty_database_pair_builds_exactly_the_compiled_identity() {
     let sink = TestSink::new();
     let groups = GroupsDb::new(Vec::new()).expect("empty groups");
     let users = UsersDb::new(Vec::new()).expect("empty users");
 
-    let table = build_identity_table(&users, &groups, &sink).expect("empty table verifies");
-    assert_eq!(table.user_count(), 0);
-    assert_eq!(table.group_count(), 0);
-    assert!(table.user(UserId(0)).is_err());
+    let merged = build_identity_table(&users, &groups, &sink).expect("merged table verifies");
+    let compiled = crate::groups::system_identity_table(&sink).expect("compiled table verifies");
+    for table in [&merged, &compiled] {
+        assert_eq!(table.user_count(), 5);
+        assert_eq!(table.group_count(), 2);
+        assert!(table.user(UserId(0)).is_ok());
+        assert!(table.user(UserId(rustos_users::LOGIN_UID.0)).is_ok());
+        assert!(table.user(UserId(1000)).is_err());
+    }
+}
+
+#[test]
+fn an_on_disk_user_in_the_system_band_is_rejected() {
+    let sink = TestSink::new();
+    let groups = GroupsDb::new(alloc::vec![
+        GroupRecord::new("wheel", Gid(1000)).expect("valid")
+    ])
+    .expect("ok");
+    // uid 999 is in the reserved system band: a tampered volume must not
+    // be able to plant a system-band principal.
+    let users = UsersDb::new(alloc::vec![user("imposter", 999, 1000, &[])]).expect("valid users");
+
+    let err = build_identity_table(&users, &groups, &sink).expect_err("system-band uid rejected");
+    assert_eq!(err, Errno::PermissionDenied);
+    let events = sink.snapshot();
+    assert!(events.iter().any(|e| e.id.0 == 4041
+        && e.fields
+            .iter()
+            .any(|(k, v)| k == "cause" && v == "reserved_identity")));
+}
+
+#[test]
+fn an_on_disk_user_with_a_reserved_name_is_rejected() {
+    let sink = TestSink::new();
+    let groups = GroupsDb::new(alloc::vec![
+        GroupRecord::new("wheel", Gid(1000)).expect("valid")
+    ])
+    .expect("ok");
+    // A user-band uid under a reserved name must not shadow the compiled
+    // `devmgr` identity in listings or name lookups.
+    let users = UsersDb::new(alloc::vec![user("devmgr", 1500, 1000, &[])]).expect("valid users");
+
+    let err = build_identity_table(&users, &groups, &sink).expect_err("reserved name rejected");
+    assert_eq!(err, Errno::PermissionDenied);
+}
+
+#[test]
+fn an_on_disk_group_in_the_system_band_is_rejected() {
+    let sink = TestSink::new();
+    let groups =
+        GroupsDb::new(alloc::vec![GroupRecord::new("hack", Gid(5)).expect("valid")]).expect("ok");
+    let users = UsersDb::new(Vec::new()).expect("empty users");
+
+    let err = build_identity_table(&users, &groups, &sink).expect_err("system-band gid rejected");
+    assert_eq!(err, Errno::PermissionDenied);
+    let events = sink.snapshot();
+    assert!(events.iter().any(|e| e.id.0 == 4044
+        && e.fields
+            .iter()
+            .any(|(k, v)| k == "cause" && v == "reserved_identity")));
+}
+
+#[test]
+fn an_on_disk_group_with_a_reserved_name_is_rejected() {
+    let sink = TestSink::new();
+    let groups = GroupsDb::new(alloc::vec![
+        GroupRecord::new("services", Gid(1500)).expect("valid")
+    ])
+    .expect("ok");
+    let users = UsersDb::new(Vec::new()).expect("empty users");
+
+    let err = build_identity_table(&users, &groups, &sink).expect_err("reserved name rejected");
+    assert_eq!(err, Errno::PermissionDenied);
+}
+
+#[test]
+fn the_storage_group_is_accepted_only_under_its_pinned_pairing() {
+    // The well-known pairing is the one system-band record the on-disk
+    // registry legitimately carries…
+    let sink = TestSink::new();
+    let groups = GroupsDb::new(alloc::vec![GroupRecord::new(
+        rustos_users::STORAGE_GROUP,
+        rustos_users::STORAGE_GID
+    )
+    .expect("valid")])
+    .expect("ok");
+    let users = UsersDb::new(Vec::new()).expect("empty users");
+    let table = build_identity_table(&users, &groups, &sink).expect("storage pairing accepted");
+    assert!(table.group(GroupId(rustos_users::STORAGE_GID.0)).is_ok());
+
+    // …but neither half of the pairing may be repurposed: the name under
+    // another gid, or the gid under another name, both reject.
+    for (name, gid) in [
+        (rustos_users::STORAGE_GROUP, Gid(555)),
+        ("media", rustos_users::STORAGE_GID),
+    ] {
+        let groups =
+            GroupsDb::new(alloc::vec![GroupRecord::new(name, gid).expect("valid")]).expect("ok");
+        let users = UsersDb::new(Vec::new()).expect("empty users");
+        let err = build_identity_table(&users, &groups, &sink)
+            .expect_err("a repurposed storage pairing is rejected");
+        assert_eq!(err, Errno::PermissionDenied);
+    }
 }

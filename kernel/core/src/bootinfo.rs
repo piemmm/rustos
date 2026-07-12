@@ -29,7 +29,6 @@ use rustos_arch_api::{ContextSwitch, PlatformEntropy};
 use crate::sched::{CpuId, SchedulerArch, SchedulerConfig};
 use rustos_kernel_irq::{IrqController, IrqTable, UNSUPPORTED_CONTROLLER};
 use rustos_kernel_mem::BootMemoryMap;
-use rustos_kernel_sec::IdentityTableBuilder;
 use rustos_log::{Level, Sink};
 
 use crate::console::{ConsoleDevice, NO_CONSOLES};
@@ -546,14 +545,6 @@ where
     /// that can vouch for this and is reviewed accordingly.
     pub memory_map: BootMemoryMap,
 
-    /// Initial identity table to install during the `sec` init phase.
-    ///
-    /// Built from `/System/Security/Users` and `/System/Security/Groups`
-    /// (or the installer-supplied bootstrap records on first boot). The builder
-    /// is consumed and verified by [`crate::kernel_main`]; a rejected
-    /// table aborts boot, (fail closed).
-    pub identity: IdentityTableBuilder,
-
     /// Static scheduler configuration.
     ///
     /// # SAFETY-INVARIANT
@@ -783,24 +774,28 @@ where
     /// like the filesystem service.
     pub volume_service: &'static (dyn VolumeService + 'static),
 
-    /// The authoritative identity table the `spawn` handler resolves a
-    /// spawn-as-user switch against (`PREREQUISITES.md` P-C).
+    /// The boot path's authoritative identity cell: the `spawn` handler
+    /// resolves a spawn-as-user switch against it, and the filesystem
+    /// service resolves caller groups against the *same* cell — one
+    /// authoritative table, no second copy.
     ///
-    /// Distinct from the build-time [`identity`](Self::identity)
-    /// ([`IdentityTableBuilder`]) verified during the `sec` phase: this is the
-    /// **runtime** cell the encrypted-root unlock publishes the on-disk
-    /// accounts into, the *same* `&'static LateIdentity` the filesystem
-    /// service resolves caller groups against — one authoritative table, no
-    /// second copy. Defaults to [`crate::syscalls::NULL_IDENTITY`], whose
-    /// [`LateIdentity::resolve_credential`] fails closed with
-    /// [`rustos_abi::Errno::NotImplemented`]: a boot path with no unlocked
-    /// root leaves this default and a spawn-as-user switch is refused. A boot
-    /// path that unlocked the root installs it through
-    /// [`Self::with_spawn_identity`]; `kernel_main` threads it into the
-    /// production dispatch hook. The default `spawn` (inherit) never consults
-    /// it. Held `'static` because the table lives for the running kernel's
-    /// lifetime.
-    pub spawn_identity: &'static LateIdentity,
+    /// During the `sec` phase [`crate::kernel_main`] builds the
+    /// compiled-in system identity (the OS-owned accounts and groups,
+    /// kernel policy — `rustos_users::system_accounts`) and installs it
+    /// into this cell, so the system and service accounts resolve from
+    /// first boot on every architecture, before any volume exists. The
+    /// encrypted-root unlock later replaces the held table with the merge
+    /// of that same compiled half and the on-disk human accounts.
+    ///
+    /// Defaults to `None`: a boot path (or host harness) that wires no
+    /// identity cell gets no install, `kernel_main` threads the inert
+    /// [`crate::syscalls::NULL_IDENTITY`] into the dispatch hook, and
+    /// every credential resolution fails closed with
+    /// [`rustos_abi::Errno::NotImplemented`]. A production port installs
+    /// its cell through [`Self::with_spawn_identity`]. The default
+    /// `spawn` (inherit) never consults it. Held `'static` because the
+    /// cell lives for the running kernel's lifetime.
+    pub spawn_identity: Option<&'static LateIdentity>,
 
     /// Committed size, in bytes, of the kernel heap region — reported as
     /// [`rustos_abi::sysinfo::KernelMemoryStats::kernel_heap_bytes`] by the
@@ -851,7 +846,6 @@ where
         cpu_count: u32,
         command_line: &'a str,
         memory_map: BootMemoryMap,
-        identity: IdentityTableBuilder,
         scheduler_config: SchedulerConfig,
         arch: Arc<A>,
         log_sink: &'static (dyn Sink + Sync),
@@ -864,7 +858,6 @@ where
             cpu_count,
             command_line,
             memory_map,
-            identity,
             scheduler_config,
             arch,
             log_sink,
@@ -917,11 +910,12 @@ where
             // `with_volume_service` (`plans/DEVICES.md` D3b): every
             // attach/detach fails closed through `NULL_VOLUME_SERVICE`.
             volume_service: &NULL_VOLUME_SERVICE,
-            // Identity table unwired until a boot path unlocks the root and
-            // installs it through `with_spawn_identity` (`PREREQUISITES.md`
-            // P-C): a spawn-as-user switch fails closed through
-            // `NULL_IDENTITY`.
-            spawn_identity: &crate::syscalls::NULL_IDENTITY,
+            // No identity cell until the port installs one through
+            // `with_spawn_identity` (`PREREQUISITES.md` P-C): the sec phase
+            // then has nowhere to publish the compiled-in system identity
+            // and every credential resolution fails closed through the
+            // inert `NULL_IDENTITY`.
+            spawn_identity: None,
             // Kernel heap size unaccounted until the binding kernel threads
             // its committed `rustos_kalloc::HEAP_BYTES` through
             // `with_kernel_heap_bytes`; reported as `0` until then.
@@ -1156,21 +1150,24 @@ where
         self
     }
 
-    /// Install the authoritative identity table the `spawn` handler resolves
-    /// a spawn-as-user switch against, consuming and returning `self`
+    /// Install the boot path's identity cell — the one the `sec` phase
+    /// publishes the compiled-in system identity into, the `spawn` handler
+    /// resolves a spawn-as-user switch against, and the filesystem service
+    /// resolves caller groups against — consuming and returning `self`
     /// (`PREREQUISITES.md` P-C).
     ///
-    /// Called by the boot path that unlocked the encrypted root, handing the
-    /// **same** `&'static LateIdentity` the filesystem service resolves caller
-    /// groups against (one authoritative table, no second copy). Until this is
-    /// called the handover holds [`crate::syscalls::NULL_IDENTITY`] and a
-    /// spawn-as-user switch fails closed with
+    /// Every production port hands the **same** `&'static LateIdentity` the
+    /// encrypted-root unlock later replaces with the merged system∪human
+    /// table (one authoritative table, no second copy). Until this is
+    /// called the handover carries `None`: nothing is installed, the
+    /// dispatch hook falls to the inert [`crate::syscalls::NULL_IDENTITY`],
+    /// and a spawn-as-user switch fails closed with
     /// [`rustos_abi::Errno::NotImplemented`]; the default `spawn` (inherit)
-    /// never consults it. The table must be `'static`: it lives for the
+    /// never consults it. The cell must be `'static`: it lives for the
     /// lifetime of the running kernel, exactly like the filesystem service.
     #[must_use]
     pub const fn with_spawn_identity(mut self, spawn_identity: &'static LateIdentity) -> Self {
-        self.spawn_identity = spawn_identity;
+        self.spawn_identity = Some(spawn_identity);
         self
     }
 
@@ -1281,7 +1278,6 @@ mod tests {
             1,
             "",
             BootMemoryMap::new(),
-            IdentityTableBuilder::new(),
             SchedulerConfig::defaults_for(1),
             arch,
             empty_sink(),
