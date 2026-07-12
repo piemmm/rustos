@@ -2304,6 +2304,33 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::SIGNAL_INTAKE,
+        name: "signal_intake",
+        arg_count: 1,
+        args: [
+            // The `SignalIntakeOp` discriminant; the dispatcher rejects an
+            // unknown value before the handler runs (fail closed).
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the value-or-negative-errno convention: `Take`
+        // returns the drained signal's wire discriminant, the other ops 0.
+        ret: AbiType::U64,
+        // Own-process signal disposition grants no authority over any other
+        // principal (the `stream_input_mode` tier), so no capability is
+        // required. It IS audited per call — changing one's own
+        // termination-signal disposition and draining an observed delivery
+        // are security-relevant process-lifecycle decisions, exactly as
+        // `signal` is audited — so the trail carries the opt-in, the
+        // opt-out, and every observed delivery's drain.
+        required_capability: None,
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -2797,6 +2824,20 @@ mod tests {
         assert!(unpin.audit, "mem_unpin must be audited");
         assert_eq!(unpin.name, "mem_unpin");
         assert_eq!(unpin.arg_count, 0);
+    }
+
+    #[test]
+    fn signal_intake_capability_requirements_are_frozen() {
+        // Own-process signal disposition grants no authority over any other
+        // principal, so the call is ungated; it is audited per call like
+        // `signal` itself so the trail carries the opt-in, the opt-out, and
+        // each observed delivery's drain. Lock this down so a refactor
+        // cannot gate the unprivileged tier or drop the audit.
+        let spec = spec_for(SyscallNumber::SIGNAL_INTAKE).unwrap();
+        assert_eq!(spec.required_capability, None);
+        assert!(spec.audit, "signal_intake must be audited");
+        assert_eq!(spec.name, "signal_intake");
+        assert_eq!(spec.arg_count, 1);
     }
 
     #[test]

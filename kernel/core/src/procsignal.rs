@@ -18,7 +18,7 @@
 //! [`KernelProcessSignal`] (`plans/SPAWN.md` `SP7b`), installed at boot in
 //! place of the fail-closed floor.
 
-use alloc::collections::BTreeSet;
+use alloc::collections::{BTreeMap, BTreeSet};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use rustos_abi::{Errno, Signal};
@@ -48,6 +48,120 @@ static STOPPED_TASKS: SpinLock<BTreeSet<u64>> = SpinLock::new(BTreeSet::new());
 #[must_use]
 pub fn task_is_stopped(task: u64) -> bool {
     STOPPED_TASKS.lock().contains(&task)
+}
+
+/// Per-task signal-intake state (`plans/STRESSTEST.md` ST3): key present
+/// means the task opted in through `signal_intake` (`SignalIntakeOp::Enable`),
+/// and the value is its **one** pending observed termination-request signal
+/// (`Interrupt`/`Terminate`), `None` while nothing is pending.
+///
+/// A single slot, not a queue, by design: while one observed signal is
+/// pending undrained, a second termination-request signal **escalates to
+/// the default terminate path** ([`try_intake`] declines it), so an
+/// opted-in process that stops draining stays killable with a plain
+/// `^C ^C`. Entries are cleared on task teardown ([`clear_intake`], driven
+/// by the shared reclaim) and never inherited: a fresh task id is never in
+/// the map. Grows with the number of concurrently opted-in tasks, never a
+/// fixed ceiling.
+static SIGNAL_INTAKE: SpinLock<BTreeMap<u64, Option<Signal>>> = SpinLock::new(BTreeMap::new());
+
+/// Opt `task` into observable delivery of its own `Interrupt`/`Terminate`.
+/// Idempotent: enabling an already-enabled intake keeps its pending slot
+/// (a recorded signal is never discarded by a re-enable).
+pub fn intake_enable(task: u64) {
+    SIGNAL_INTAKE.lock().entry(task).or_insert(None);
+}
+
+/// Restore `task`'s default terminate disposition.
+///
+/// Idempotent: already disabled is success. Refused with
+/// [`Errno::WouldBlock`] while an observed signal is pending undrained — a
+/// recorded termination request is never silently discarded; the caller
+/// drains it ([`intake_take`]) and acts on it first.
+///
+/// # Errors
+///
+/// [`Errno::WouldBlock`] when a pending observed signal is undrained.
+pub fn intake_disable(task: u64) -> Result<(), Errno> {
+    let mut intake = SIGNAL_INTAKE.lock();
+    match intake.get(&task) {
+        Some(Some(_)) => Err(Errno::WouldBlock),
+        Some(None) => {
+            intake.remove(&task);
+            Ok(())
+        }
+        None => Ok(()),
+    }
+}
+
+/// Drain `task`'s one pending observed signal.
+///
+/// # Errors
+///
+/// [`Errno::NotFound`] when the intake was never enabled;
+/// [`Errno::WouldBlock`] when nothing is pending (the intake stays
+/// enabled — the caller parks on its wait-set member, never a poll loop).
+pub fn intake_take(task: u64) -> Result<Signal, Errno> {
+    match SIGNAL_INTAKE.lock().get_mut(&task) {
+        Some(pending) => pending.take().ok_or(Errno::WouldBlock),
+        None => Err(Errno::NotFound),
+    }
+}
+
+/// Whether `task` has opted into signal observation — the `waitset_ctl`
+/// add-time check for a `WaitSourceKind::Signal` member (without the
+/// opt-in there is no intake to observe).
+#[must_use]
+pub fn intake_enabled(task: u64) -> bool {
+    SIGNAL_INTAKE.lock().contains_key(&task)
+}
+
+/// Whether `task` has an observed signal pending undrained — the
+/// non-consuming `waitset_wait` readiness peek for a
+/// `WaitSourceKind::Signal` member (the woken owner drains through
+/// [`intake_take`], never the wait).
+#[must_use]
+pub fn intake_ready(task: u64) -> bool {
+    matches!(SIGNAL_INTAKE.lock().get(&task), Some(Some(_)))
+}
+
+/// Drop `task`'s intake state on teardown. Idempotent; driven by the one
+/// shared task-reclaim path so an exited or killed task leaves no stale
+/// opt-in or pending slot behind (task ids are never reused, so a leaked
+/// entry could never be reclaimed later).
+pub fn clear_intake(task: u64) {
+    SIGNAL_INTAKE.lock().remove(&task);
+}
+
+/// Try to record a termination-request `signal` as `target`'s observable
+/// pending event instead of terminating it.
+///
+/// Returns `true` when the signal was recorded (the delivery is complete:
+/// the target's wait-set waiter is woken and will drain it). Returns
+/// `false` when the default terminate path must run instead — the target
+/// never opted in, or its pending slot is already occupied (the
+/// escalation rule: a second undrained termination request kills, so an
+/// unresponsive opted-in program stays terminable with plain `^C ^C`).
+///
+/// Only `Interrupt`/`Terminate` are ever offered here; `Kill` is
+/// unconditionally fatal and unmaskable, so no caller routes it through
+/// the intake. `pub(crate)` solely so the `waitset_wait` host tests can
+/// stage a pending observation; production deliveries flow only through
+/// [`KernelProcessSignal`].
+pub(crate) fn try_intake(target: u64, signal: Signal) -> bool {
+    let recorded = match SIGNAL_INTAKE.lock().get_mut(&target) {
+        Some(pending @ None) => {
+            *pending = Some(signal);
+            true
+        }
+        Some(Some(_)) | None => false,
+    };
+    if recorded {
+        // Wake the target's parked wait-set waiter (if any) outside the
+        // intake lock; the wake is targeted, so unrelated waiters sleep on.
+        crate::waitq::signal_intake_wake(target);
+    }
+    recorded
 }
 
 /// The one place a foreground `^C`/`^Z` signal is actually delivered.
@@ -397,7 +511,21 @@ where
         let child = self.wait.authorise_child(sender, pid)?;
         match signal {
             Signal::Continue => self.resume(child),
-            Signal::Terminate | Signal::Kill | Signal::Interrupt => self.terminate(child, signal),
+            // A termination *request* is observable: an opted-in child with
+            // a free pending slot records it instead of dying (the recorded
+            // delivery is complete — the child's waiter is woken to drain
+            // it). A child that never opted in, or whose slot is already
+            // occupied (the escalation rule), terminates by default.
+            Signal::Terminate | Signal::Interrupt => {
+                if try_intake(child.0, signal) {
+                    Ok(())
+                } else {
+                    self.terminate(child, signal)
+                }
+            }
+            // `Kill` is unconditionally fatal and unmaskable: it is never
+            // offered to the intake.
+            Signal::Kill => self.terminate(child, signal),
             Signal::Stop => self.stop(child),
         }
     }
@@ -415,7 +543,18 @@ where
         // owner's standing instruction. The delivery itself still fails
         // closed on a target the scheduler no longer knows.
         match signal {
-            Signal::Interrupt => self.terminate(target, Signal::Interrupt),
+            // The foreground `^C` is a termination *request* like a
+            // parent's `Terminate`: an opted-in target with a free pending
+            // slot observes it; otherwise (never opted in, or a second `^C`
+            // while one is pending undrained — the escalation rule) the
+            // default terminate runs.
+            Signal::Interrupt => {
+                if try_intake(target.0, Signal::Interrupt) {
+                    Ok(())
+                } else {
+                    self.terminate(target, Signal::Interrupt)
+                }
+            }
             Signal::Stop => self.stop(target),
             // The line discipline maps only `^C`/`^Z`; any other signal on
             // this path is a programming error refused outright.
@@ -826,6 +965,173 @@ mod tests {
             wait.authorise_child(TaskId(7), child_pid),
             Ok(TaskId(child))
         );
+    }
+
+    /// Serialises host tests that touch the process-global signal-intake
+    /// map ([`SIGNAL_INTAKE`]): it is keyed by numeric task id, and each
+    /// test's own leaked scheduler hands out the same small ids, so two
+    /// tests observing "their" intake in parallel would read and clear
+    /// each other's entries. Every test that enables, drains, or delivers
+    /// through an intake takes this lock and clears its ids on entry.
+    fn intake_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        // A panicking holder does not corrupt the `()` state; continue.
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[test]
+    fn intake_lifecycle_is_idempotent_and_fail_closed() {
+        let _intake = intake_test_lock();
+        clear_intake(4001);
+        // Take and disable before any opt-in: no intake exists.
+        assert_eq!(intake_take(4001), Err(Errno::NotFound));
+        assert!(!intake_enabled(4001));
+        assert!(!intake_ready(4001));
+        assert_eq!(intake_disable(4001), Ok(()));
+        // Enable is idempotent; nothing is pending yet.
+        intake_enable(4001);
+        intake_enable(4001);
+        assert!(intake_enabled(4001));
+        assert!(!intake_ready(4001));
+        assert_eq!(intake_take(4001), Err(Errno::WouldBlock));
+        // A recorded signal is observable, drains exactly once, and a
+        // re-enable never discards it.
+        assert!(try_intake(4001, Signal::Interrupt));
+        intake_enable(4001);
+        assert!(intake_ready(4001));
+        assert_eq!(intake_take(4001), Ok(Signal::Interrupt));
+        assert_eq!(intake_take(4001), Err(Errno::WouldBlock));
+        // Disable removes the opt-in; a later delivery goes default again.
+        assert_eq!(intake_disable(4001), Ok(()));
+        assert!(!try_intake(4001, Signal::Terminate));
+        clear_intake(4001);
+    }
+
+    #[test]
+    fn disable_with_a_pending_signal_is_refused_until_drained() {
+        let _intake = intake_test_lock();
+        clear_intake(4002);
+        intake_enable(4002);
+        assert!(try_intake(4002, Signal::Terminate));
+        // A recorded termination request is never silently discarded.
+        assert_eq!(intake_disable(4002), Err(Errno::WouldBlock));
+        assert!(intake_enabled(4002));
+        assert_eq!(intake_take(4002), Ok(Signal::Terminate));
+        assert_eq!(intake_disable(4002), Ok(()));
+        clear_intake(4002);
+    }
+
+    #[test]
+    fn a_second_pending_termination_request_is_declined_for_escalation() {
+        let _intake = intake_test_lock();
+        clear_intake(4003);
+        intake_enable(4003);
+        assert!(try_intake(4003, Signal::Interrupt));
+        // The slot is occupied: the second request is declined so the
+        // caller escalates to the default terminate path (`^C ^C` kills).
+        assert!(!try_intake(4003, Signal::Interrupt));
+        assert!(!try_intake(4003, Signal::Terminate));
+        // The first observation is still intact for the drain.
+        assert_eq!(intake_take(4003), Ok(Signal::Interrupt));
+        clear_intake(4003);
+    }
+
+    #[test]
+    fn opted_in_interrupt_is_observed_not_fatal_and_kill_still_kills() {
+        let _overlay = stopped_overlay_test_lock();
+        let _intake = intake_test_lock();
+        let (wait, scheduler) = scaffold();
+        let (child, child_pid) = spawn_child(scheduler);
+        clear_intake(child);
+        wait.register_child(TaskId(7), TaskId(child));
+        let signaller = KernelProcessSignal::new(wait, scheduler);
+
+        intake_enable(child);
+        // The interrupt is recorded, not delivered as a termination: the
+        // child stays live and nothing becomes reapable.
+        assert_eq!(
+            signaller.signal(TaskId(7), child_pid, Signal::Interrupt),
+            Ok(())
+        );
+        assert_eq!(scheduler.live_task_count(), 1);
+        assert_eq!(
+            wait.poll(TaskId(7), rustos_abi::WAIT_PID_ANY, WaitFlags::NONBLOCK),
+            Err(Errno::WouldBlock)
+        );
+        assert_eq!(intake_take(child), Ok(Signal::Interrupt));
+        // `Kill` is unconditionally fatal regardless of the opt-in and
+        // reaps with SIGKILL's familiar 137.
+        assert_eq!(signaller.signal(TaskId(7), child_pid, Signal::Kill), Ok(()));
+        assert_eq!(scheduler.live_task_count(), 0);
+        assert_eq!(
+            wait.wait(TaskId(7), rustos_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            Ok(WaitedChild {
+                pid: u32::try_from(child).expect("host task id fits u32"),
+                status: WaitStatus::Exited(137)
+            })
+        );
+        clear_intake(child);
+    }
+
+    #[test]
+    fn a_second_interrupt_escalates_to_the_default_terminate() {
+        let _overlay = stopped_overlay_test_lock();
+        let _intake = intake_test_lock();
+        let (wait, scheduler) = scaffold();
+        let (child, child_pid) = spawn_child(scheduler);
+        clear_intake(child);
+        wait.register_child(TaskId(7), TaskId(child));
+        let signaller = KernelProcessSignal::new(wait, scheduler);
+
+        intake_enable(child);
+        assert_eq!(
+            signaller.signal(TaskId(7), child_pid, Signal::Interrupt),
+            Ok(())
+        );
+        assert_eq!(scheduler.live_task_count(), 1);
+        // The second interrupt finds the slot occupied and terminates the
+        // child with the `^C` 130 — an unresponsive opted-in program stays
+        // killable with plain `^C ^C`.
+        assert_eq!(
+            signaller.signal(TaskId(7), child_pid, Signal::Interrupt),
+            Ok(())
+        );
+        assert_eq!(scheduler.live_task_count(), 0);
+        assert_eq!(
+            wait.wait(TaskId(7), rustos_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            Ok(WaitedChild {
+                pid: u32::try_from(child).expect("host task id fits u32"),
+                status: WaitStatus::Exited(130)
+            })
+        );
+        clear_intake(child);
+    }
+
+    #[test]
+    fn foreground_interrupt_reaches_an_opted_in_target_without_killing_it() {
+        let _overlay = stopped_overlay_test_lock();
+        let _intake = intake_test_lock();
+        let (wait, scheduler) = scaffold();
+        let (child, _child_pid) = spawn_child(scheduler);
+        clear_intake(child);
+        wait.register_child(TaskId(7), TaskId(child));
+        let signaller = KernelProcessSignal::new(wait, scheduler);
+
+        intake_enable(child);
+        // The console `^C` is observed, not fatal …
+        assert_eq!(signaller.deliver(TaskId(child), Signal::Interrupt), Ok(()));
+        assert_eq!(scheduler.live_task_count(), 1);
+        assert_eq!(intake_take(child), Ok(Signal::Interrupt));
+        // … and `^Z` still stops the opted-in target (only termination
+        // requests are observable; `Stop` stays scheduler-side).
+        assert_eq!(signaller.deliver(TaskId(child), Signal::Stop), Ok(()));
+        assert!(task_is_stopped(child));
+        // Lift the overlay so the shared set holds no stale entry.
+        assert_eq!(signaller.deliver(TaskId(child), Signal::Interrupt), Ok(()));
+        assert_eq!(intake_take(child), Ok(Signal::Interrupt));
+        STOPPED_TASKS.lock().remove(&child);
+        clear_intake(child);
     }
 
     #[test]

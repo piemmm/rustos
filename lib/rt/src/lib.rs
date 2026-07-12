@@ -60,8 +60,8 @@ use rustos_abi::input::{KeyInput, PointerInput};
 use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
 use rustos_abi::{
     BootFacts, BootId, FileStat, HwNode, InputMode, LimitKind, MapFlags, OpenFlags, Origin,
-    ResourceLimit, Signal, SyscallNumber, TerminalSize, Time64, WaitFlags, WaitStatus,
-    WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, ORIGIN_WIRE_LEN,
+    ResourceLimit, Signal, SignalIntakeOp, SyscallNumber, TerminalSize, Time64, WaitFlags,
+    WaitStatus, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, ORIGIN_WIRE_LEN,
     SPAWN_UID_INHERIT, STDERR, STDIN, STDINFO, STDOUT, TERMINAL_SIZE_WIRE_LEN,
 };
 use rustos_abi_trap::raw_syscall;
@@ -108,6 +108,8 @@ const NUM_MEM_UNMAP: u64 = SyscallNumber::MEM_UNMAP.as_u16() as u64;
 
 /// `mem_pin` syscall number (as above).
 const NUM_MEM_PIN: u64 = SyscallNumber::MEM_PIN.as_u16() as u64;
+/// `signal_intake` syscall number (as above).
+const NUM_SIGNAL_INTAKE: u64 = SyscallNumber::SIGNAL_INTAKE.as_u16() as u64;
 
 /// `mem_unpin` syscall number (as above).
 const NUM_MEM_UNPIN: u64 = SyscallNumber::MEM_UNPIN.as_u16() as u64;
@@ -1401,6 +1403,36 @@ pub fn mem_unpin() -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke — the kernel only
     // clears the caller's own pin mark. No user pointer is passed.
     let ret = unsafe { raw_syscall(NUM_MEM_UNPIN, [0; 6]) };
+    ret as i64
+}
+
+/// Operate on the calling process's own signal intake — the fail-closed
+/// signal-observation opt-in (`SyscallNumber::SIGNAL_INTAKE`,
+/// `plans/STRESSTEST.md` ST3).
+///
+/// With the intake enabled ([`SignalIntakeOp::Enable`]), a
+/// termination-request signal (`Interrupt`/`Terminate`) delivered to the
+/// process is recorded as one pending observable event instead of
+/// terminating it; the process parks on a wait-set member of kind
+/// [`rustos_abi::WaitSourceKind::Signal`] ([`waitset_ctl`], id `0`) and
+/// drains with [`SignalIntakeOp::Take`], which returns the drained
+/// signal's wire discriminant. `Kill` stays unconditionally fatal, and a
+/// second termination request while one is pending undrained escalates to
+/// the default terminate path (`^C ^C` still kills). Unprivileged and
+/// audited per call.
+///
+/// Returns the non-negative op result (`0`, or `Take`'s drained
+/// discriminant) or `-errno` (recover the [`rustos_abi::Errno`]
+/// discriminant as `-ret`): `WouldBlock` for a `Take` with nothing
+/// pending or a `Disable` with an undrained observation, `NotFound` for a
+/// `Take` without the opt-in. The wrapper hides no error.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 value-result encoding (≥ 0, else -errno).
+pub fn signal_intake(op: SignalIntakeOp) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel
+    // validates the op and acts only on the caller's own intake. No user
+    // pointer is passed.
+    let ret = unsafe { raw_syscall(NUM_SIGNAL_INTAKE, [u64::from(op.as_u32()), 0, 0, 0, 0, 0]) };
     ret as i64
 }
 
@@ -4601,6 +4633,33 @@ mod tests {
         });
         assert_eq!(number, NUM_MEM_PIN);
         assert_eq!(&args, &[0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn signal_intake_marshals_each_op() {
+        for op in [
+            SignalIntakeOp::Enable,
+            SignalIntakeOp::Disable,
+            SignalIntakeOp::Take,
+        ] {
+            let (number, args) = capture(0, || {
+                assert_eq!(signal_intake(op), 0);
+            });
+            assert_eq!(number, NUM_SIGNAL_INTAKE);
+            assert_eq!(args[0], u64::from(op.as_u32()));
+            assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn signal_intake_surfaces_negative_errno_encoding() {
+        // An empty intake's `Take` surfaces the typed non-blocking answer
+        // unchanged so the caller parks on its wait-set, never a poll loop.
+        let want = -i64::from(rustos_abi::Errno::WouldBlock.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(signal_intake(SignalIntakeOp::Take), want);
+        });
     }
 
     #[test]

@@ -78,6 +78,7 @@ const NUM_MEM_MAP: u64 = SyscallNumber::MEM_MAP.as_u16() as u64;
 const NUM_MEM_UNMAP: u64 = SyscallNumber::MEM_UNMAP.as_u16() as u64;
 const NUM_MEM_PIN: u64 = SyscallNumber::MEM_PIN.as_u16() as u64;
 const NUM_MEM_UNPIN: u64 = SyscallNumber::MEM_UNPIN.as_u16() as u64;
+const NUM_SIGNAL_INTAKE: u64 = SyscallNumber::SIGNAL_INTAKE.as_u16() as u64;
 const NUM_FILE_MAP: u64 = SyscallNumber::FILE_MAP.as_u16() as u64;
 const NUM_FILE_UNMAP: u64 = SyscallNumber::FILE_UNMAP.as_u16() as u64;
 const NUM_VOLUME_ATTACH: u64 = SyscallNumber::VOLUME_ATTACH.as_u16() as u64;
@@ -881,6 +882,32 @@ pub extern "C" fn sys_mem_unpin() -> i32 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
     // kernel only clears the caller's own pin mark.
     unsafe { ret_i32(raw_syscall(NUM_MEM_UNPIN, [0; 6])) }
+}
+
+/// `signal_intake`: operate on the calling process's own signal intake —
+/// the fail-closed signal-observation opt-in (`SyscallNumber::SIGNAL_INTAKE`,
+/// `plans/STRESSTEST.md` ST3). `op` is a `ROS_SIGNAL_INTAKE_OP_*`
+/// discriminant: enable (0) opts `Interrupt`/`Terminate` into observable
+/// delivery, disable (1) restores the default terminate disposition, and
+/// take (2) drains the one pending observed signal. Returns the
+/// non-negative op result (`0`, or take's drained `ROS_SIGNAL_*`
+/// discriminant); an error is reported as a `ROS_E_*` code reinterpreted
+/// into the result (`ROS_E_WOULD_BLOCK` for a take with nothing pending or
+/// a disable with an undrained observation — a recorded termination
+/// request is never silently discarded — and `ROS_E_NOT_FOUND` for a take
+/// without the opt-in).
+///
+/// Kernel-side the pending event is waitable through a wait-set member of
+/// kind signal (id `0`); `ROS_SIGNAL_KILL` is never observable or
+/// maskable, and a second termination request while one is pending
+/// undrained escalates to the default terminate path, so an opted-in
+/// process that stops draining stays killable.
+#[must_use]
+#[export_name = "ros_sys_signal_intake"]
+pub extern "C" fn sys_signal_intake(op: u32) -> u64 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
+    // kernel validates the op and acts only on the caller's own intake.
+    unsafe { raw_syscall(NUM_SIGNAL_INTAKE, [u64::from(op), 0, 0, 0, 0, 0]) }
 }
 
 /// `file_map`: map `len` bytes of the open, readable, filesystem-backed
@@ -2363,6 +2390,7 @@ mod tests {
         (NUM_FD_REDEEM, "fd_redeem", 1),
         (NUM_MEM_PIN, "mem_pin", 0),
         (NUM_MEM_UNPIN, "mem_unpin", 0),
+        (NUM_SIGNAL_INTAKE, "signal_intake", 1),
     ];
 
     #[test]

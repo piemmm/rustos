@@ -117,6 +117,7 @@ extern "C" {
 #define ROS_SYS_FD_REDEEM 91u
 #define ROS_SYS_MEM_PIN 92u
 #define ROS_SYS_MEM_UNPIN 93u
+#define ROS_SYS_SIGNAL_INTAKE 94u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns ROS_E_WOULD_BLOCK when a
@@ -205,6 +206,31 @@ typedef struct ros_spawn_attach {
 #define ROS_SIGNAL_KILL 3u
 #define ROS_SIGNAL_INTERRUPT 4u
 #define ROS_SIGNAL_STOP 5u
+
+/* signal_intake() operations (the `op` argument, uint32_t). A value outside
+* this set is rejected with ROS_E_OUT_OF_RANGE. With the intake enabled, a
+* pending observed signal is waited on through a wait-set member of kind
+* ROS_WAIT_SOURCE_SIGNAL (id 0) and drained with the take operation, which
+* returns the drained ROS_SIGNAL_* discriminant. ROS_SIGNAL_KILL is never
+* observable; a second termination request while one is pending undrained
+* escalates to the default terminate path. */
+#define ROS_SIGNAL_INTAKE_OP_ENABLE 0u
+#define ROS_SIGNAL_INTAKE_OP_DISABLE 1u
+#define ROS_SIGNAL_INTAKE_OP_TAKE 2u
+
+/* waitset_ctl() operations (the `op` argument, uint32_t) and member source
+* kinds (the `kind` argument, uint32_t). A value outside either set is
+* rejected with ROS_E_OUT_OF_RANGE; every member is owner-checked against the
+* calling task when it is added. */
+#define ROS_WAITSET_OP_ADD 0u
+#define ROS_WAITSET_OP_DEL 1u
+#define ROS_WAIT_SOURCE_ENDPOINT 0u
+#define ROS_WAIT_SOURCE_IRQ 1u
+#define ROS_WAIT_SOURCE_CHILD 2u
+#define ROS_WAIT_SOURCE_SEAT_INPUT 3u
+#define ROS_WAIT_SOURCE_PORT 4u
+#define ROS_WAIT_SOURCE_STREAM 5u
+#define ROS_WAIT_SOURCE_SIGNAL 6u
 
 /* Syscall entry points, implemented by the user-space stub library. */
 void ros_sys_yield(void);
@@ -301,6 +327,7 @@ uint64_t ros_sys_fd_grant(uint32_t a0, uint64_t a1);
 uint64_t ros_sys_fd_redeem(uint64_t a0);
 int32_t ros_sys_mem_pin(void);
 int32_t ros_sys_mem_unpin(void);
+uint64_t ros_sys_signal_intake(uint32_t a0);
 
 #ifdef __cplusplus
 } /* extern "C" */

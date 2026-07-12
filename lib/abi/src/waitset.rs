@@ -121,6 +121,19 @@ pub enum WaitSourceKind {
     /// AW4: the windowed terminal parks here for its shell's output,
     /// never a poll loop).
     Stream = 5,
+    /// The caller's **own** signal intake (its `id` is always `0`: a
+    /// process has exactly one intake and can only ever observe its own).
+    /// Adding the member requires the caller to have opted in through
+    /// [`crate::SyscallNumber::SIGNAL_INTAKE`]
+    /// ([`crate::SignalIntakeOp::Enable`]); without the opt-in there is no
+    /// intake to observe and the add fails closed with the same
+    /// oracle-free `NotFound` the other kinds use. Ready when an observed
+    /// termination-request signal (`Interrupt`/`Terminate`) is pending
+    /// undrained; readiness is a non-consuming peek — the woken owner
+    /// drains through [`crate::SignalIntakeOp::Take`], never the wait
+    /// (`plans/STRESSTEST.md` ST3: the stress controller parks here to
+    /// catch `^C` and tear its workers down).
+    Signal = 6,
 }
 
 impl WaitSourceKind {
@@ -144,6 +157,7 @@ impl WaitSourceKind {
             3 => Ok(Self::SeatInput),
             4 => Ok(Self::Port),
             5 => Ok(Self::Stream),
+            6 => Ok(Self::Signal),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -171,10 +185,11 @@ mod tests {
             WaitSourceKind::SeatInput,
             WaitSourceKind::Port,
             WaitSourceKind::Stream,
+            WaitSourceKind::Signal,
         ] {
             assert_eq!(WaitSourceKind::from_u32(kind.as_u32()), Ok(kind));
         }
-        assert_eq!(WaitSourceKind::from_u32(6), Err(Errno::OutOfRange));
+        assert_eq!(WaitSourceKind::from_u32(7), Err(Errno::OutOfRange));
         assert_eq!(WaitSourceKind::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -188,6 +203,7 @@ mod tests {
         assert_eq!(WaitSourceKind::SeatInput.as_u32(), 3);
         assert_eq!(WaitSourceKind::Port.as_u32(), 4);
         assert_eq!(WaitSourceKind::Stream.as_u32(), 5);
+        assert_eq!(WaitSourceKind::Signal.as_u32(), 6);
         assert_eq!(WAITSET_CHILD_ANY, u64::MAX);
     }
 }

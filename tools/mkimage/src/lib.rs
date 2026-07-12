@@ -941,7 +941,8 @@ mod tests {
             .authenticate(DEBUG_USERNAME, DEBUG_PASSWORD.as_bytes())
             .expect("root/root authenticates");
         // The debug administrator is an ordinary user-band principal: uid 0
-        // belongs to the no-login `system` record below.
+        // belongs to the compiled-in `system` identity, never to a record
+        // on disk.
         assert_eq!(record.uid(), DEBUG_UID);
         assert_eq!(record.shell(), Some("/System/Apps/elsh.app/Run"));
         // The seeded grant is exactly the shared administrator ceiling

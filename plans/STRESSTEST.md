@@ -1,6 +1,6 @@
 # STRESSTEST.md — System stress testing and live kernel monitoring
 
-Status: ST1–ST2 done; ST3–ST6 planned
+Status: ST1–ST3 done; ST4–ST6 planned
 Target: RustOS
 Primary code areas: `lib/abi`, `kernel/mem`, `kernel/core`, `userland/system/sysinfod`, `lib/procinfo`, `userland/apps/`
 Secondary code areas: `lib/rt`, `lib/curses`, `userland/shell/sysinfo`, `kernel/sched`, `docs/src/`
@@ -542,16 +542,65 @@ implementation fixed):
   the tier-driving pressure assertion stays with the §0
   restartable-user-fault prerequisite.
 
-### ST3 — Signal observation
+### ST3 — Signal observation — **done**
 
-Deliverables: `signal_intake`, the waitset `Signal` source kind, the
-double-`Interrupt` escalation rule, `lib/rt` wrappers, docs on the
-disposition model.
-Tests: opted-in `Interrupt` is observed not fatal; `Kill` still kills an
-opted-in process; second pending `Interrupt` escalates to terminate;
-un-opted process keeps SP9 behaviour byte-for-byte; foreground `^C`
-through the real console line discipline reaches the intake (QEMU
-vertical); audit events.
+What now holds (the deliverables of §5, with the reconciliations the
+implementation fixed):
+
+- `signal_intake` (94, ungated — own-process disposition, the
+  `stream_input_mode` tier — and audited per call) ships in the abi table
+  with a closed op argument, `SignalIntakeOp` (`Enable` = 0, `Disable` =
+  1, `Take` = 2), and the value-or-negative-errno `U64` return (`Take`
+  yields the drained signal's wire discriminant). `lib/rt::signal_intake`
+  and the `ros_sys_signal_intake` stub follow; the C header additionally
+  gained `ROS_SIGNAL_INTAKE_OP_*` **and** the previously-unemitted
+  `ROS_WAITSET_OP_*` / `ROS_WAIT_SOURCE_*` vocabulary (a `waitset_ctl`
+  caller had no symbolic constants — a pre-existing C-surface gap fixed
+  in the same change).
+- The intake state is a per-task entry in `kernel/core::procsignal`
+  (present = opted in; value = the **one** pending observed signal).
+  `KernelProcessSignal` intercepts `Interrupt`/`Terminate` in both
+  delivery paths (a parent's `signal`, the console line discipline's
+  foreground `deliver`) before `terminate()`: a free slot records the
+  signal and wakes the target; `Kill` is never offered.
+  **Reconciliation — the escalation is any second termination request**,
+  not only a second `Interrupt`: an occupied slot declines the intercept
+  and the default terminate runs, which is strictly stronger killability
+  than the plan's minimum (`^C ^C` still kills).
+- **Reconciliation — `Disable` with a pending undrained observation
+  refuses `WouldBlock`** (drain it and act on it): a recorded termination
+  request is never silently discarded. `Take` with nothing pending is
+  `WouldBlock` (park on the wait-set, retry); `Take` without the opt-in
+  is `NotFound`. Enable/Disable are idempotent; a re-`Enable` never drops
+  a pending observation. The opt-in is never inherited across spawn and
+  is cleared by the one shared task reclaim on every death path.
+- `WaitSourceKind::Signal` (= 6) joins the waitset vocabulary: `id` is
+  always 0 (one intake per process, own-process only), the add is
+  admitted only for an opted-in caller (oracle-free `NotFound`
+  otherwise), readiness is the non-consuming pending peek, and the wake
+  is the **targeted** `SIGNAL_INTAKE_WAITQ` (joined only by sets holding
+  a `Signal` member; the intake-record path wakes exactly the opted-in
+  task).
+- Audit: every `signal_intake` call is dispatcher-audited (the opt-in,
+  the opt-out, and each observed delivery's drain), and both delivery
+  routes into the intake are audited at their source (the sender's
+  audited `signal`; the console line discipline acting on the foreground
+  owner's standing instruction) — parity with `signal` itself.
+- Docs: `docs/src/architecture/syscalls.md` (table row, waitset member,
+  the `signal_intake` disposition-model section, handler-table row) —
+  RustOS deliberately ships no user-mode handler trampoline; observation
+  is event-shaped.
+- Tests per §10's signal-observation rows: procsignal host tests (intake
+  lifecycle, disable-with-pending, escalation decline, opted-in
+  `Interrupt` observed not fatal + `Kill` still kills, second-`Interrupt`
+  escalation to the 130 reap, foreground path, un-opted tests unchanged),
+  waitset add/ready/drain handler tests, dispatcher gate/audit +
+  unknown-op tests, fuzz/proptest harness rows, `lib/rt` marshalling
+  tests, and the **extended `signal_qemu_aarch64` vertical** (no second
+  crate): a third fixture role opts in, a real `ConsoleDevice`
+  cooked-mode `^C` is observed and drained, and two further undrained
+  `^C`s escalate to the default terminate reaped as 130 under a synthetic
+  supervisor.
 
 ### ST4 — `sysmon`
 
@@ -587,7 +636,7 @@ the query hot paths (paging cost bounded); README support-matrix rows
 where per-arch state varies; `docs/src/` pages current; `PLAN.md`
 STRESSTEST section moved to done-state summaries.
 
-Stage order is binding: ST4 depends on ST1+ST2; ST5 on ST1+ST2+ST3+ST4
+Stage order is binding: ST4 depends on ST1+ST2; ST5 on ST1–ST4
 (for `--monitor`); ST6 on all. The ST5/ST6 assertions that `RAMZIP_STATS`
 counters move additionally depend on the restartable-user-page-fault
 prerequisite (§0); until it lands those verticals assert the pressure and

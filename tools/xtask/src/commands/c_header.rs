@@ -53,11 +53,12 @@ use rustos_abi::{
     MapFlags, MountAvailability, MountListRequest, MountRecord, NamedKeyCode, NeededLibrary,
     OpenFlags, PointerButtonCode, PointerInput, PortName, ProcessListRequest, ProcessRecord,
     ProcessStartHeader, ProcessState, RandomFlags, ResourceLimit, ResourceLimitRecord,
-    RxePermission, Segment, Severity, Signal, StdInfoKind, StringSlot, SysinfoQueryId,
-    SysinfoRequestHeader, SystemIdentity, Time64, UnlinkFlags, Uptime, UserDirectoryRecord,
-    UserDirectoryRequest, WaitFlags, ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES,
-    APPINFO_MAX_MIME, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE,
-    CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DRIVER_MANIFEST_MAGIC,
+    RxePermission, Segment, Severity, Signal, SignalIntakeOp, StdInfoKind, StringSlot,
+    SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64, UnlinkFlags, Uptime,
+    UserDirectoryRecord, UserDirectoryRequest, WaitFlags, WaitSetOp, WaitSourceKind,
+    ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX,
+    BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX,
+    COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DRIVER_MANIFEST_MAGIC,
     DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_REGISTER_REPLY_MAGIC,
     DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
     ENCODED_QUERY_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, HOSTNAME_MAX,
@@ -2184,7 +2185,25 @@ fn generate_syscall() -> String {
     emit_wait_contract(&mut out);
     emit_spawn_attach_contract(&mut out);
     emit_fs_contract(&mut out);
+    emit_signal_contract(&mut out);
+    emit_waitset_contract(&mut out);
 
+    out.push_str("/* Syscall entry points, implemented by the user-space stub library. */\n");
+    for spec in SYSCALLS {
+        let _ = writeln!(out, "{}", prototype(spec));
+    }
+    out.push('\n');
+
+    out.push_str("#ifdef __cplusplus\n} /* extern \"C\" */\n#endif\n\n");
+    out.push_str("#endif /* ROS_SYSCALL_H */\n");
+    out
+}
+
+/// Emit the signal-call contract items into `rustos_syscall.h`: the
+/// `signal()` control-signal discriminants and the `signal_intake()`
+/// operations, every value read from `lib/abi` and never re-typed.
+fn emit_signal_contract(out: &mut String) {
+    use std::fmt::Write as _;
     out.push_str(
         "/* signal() control signals (the `signal` argument, uint32_t). 0 is reserved and\n\
          * never valid; a value outside this set is rejected with ROS_E_OUT_OF_RANGE. */\n",
@@ -2208,15 +2227,90 @@ fn generate_syscall() -> String {
     let _ = writeln!(out, "#define ROS_SIGNAL_STOP {}u", Signal::Stop.as_u32());
     out.push('\n');
 
-    out.push_str("/* Syscall entry points, implemented by the user-space stub library. */\n");
-    for spec in SYSCALLS {
-        let _ = writeln!(out, "{}", prototype(spec));
-    }
+    out.push_str(
+        "/* signal_intake() operations (the `op` argument, uint32_t). A value outside\n\
+         * this set is rejected with ROS_E_OUT_OF_RANGE. With the intake enabled, a\n\
+         * pending observed signal is waited on through a wait-set member of kind\n\
+         * ROS_WAIT_SOURCE_SIGNAL (id 0) and drained with the take operation, which\n\
+         * returns the drained ROS_SIGNAL_* discriminant. ROS_SIGNAL_KILL is never\n\
+         * observable; a second termination request while one is pending undrained\n\
+         * escalates to the default terminate path. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_SIGNAL_INTAKE_OP_ENABLE {}u",
+        SignalIntakeOp::Enable.as_u32()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_SIGNAL_INTAKE_OP_DISABLE {}u",
+        SignalIntakeOp::Disable.as_u32()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_SIGNAL_INTAKE_OP_TAKE {}u",
+        SignalIntakeOp::Take.as_u32()
+    );
     out.push('\n');
+}
 
-    out.push_str("#ifdef __cplusplus\n} /* extern \"C\" */\n#endif\n\n");
-    out.push_str("#endif /* ROS_SYSCALL_H */\n");
-    out
+/// Emit the wait-set contract items into `rustos_syscall.h`: the
+/// `waitset_ctl()` operations and member source kinds, every value read
+/// from `lib/abi` and never re-typed.
+fn emit_waitset_contract(out: &mut String) {
+    use std::fmt::Write as _;
+    out.push_str(
+        "/* waitset_ctl() operations (the `op` argument, uint32_t) and member source\n\
+         * kinds (the `kind` argument, uint32_t). A value outside either set is\n\
+         * rejected with ROS_E_OUT_OF_RANGE; every member is owner-checked against the\n\
+         * calling task when it is added. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_WAITSET_OP_ADD {}u",
+        WaitSetOp::Add.as_u32()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_WAITSET_OP_DEL {}u",
+        WaitSetOp::Del.as_u32()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_WAIT_SOURCE_ENDPOINT {}u",
+        WaitSourceKind::Endpoint.as_u32()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_WAIT_SOURCE_IRQ {}u",
+        WaitSourceKind::Irq.as_u32()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_WAIT_SOURCE_CHILD {}u",
+        WaitSourceKind::Child.as_u32()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_WAIT_SOURCE_SEAT_INPUT {}u",
+        WaitSourceKind::SeatInput.as_u32()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_WAIT_SOURCE_PORT {}u",
+        WaitSourceKind::Port.as_u32()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_WAIT_SOURCE_STREAM {}u",
+        WaitSourceKind::Stream.as_u32()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_WAIT_SOURCE_SIGNAL {}u",
+        WaitSourceKind::Signal.as_u32()
+    );
+    out.push('\n');
 }
 
 /// Emit the filesystem-call contract items into `rustos_syscall.h`: the

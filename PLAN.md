@@ -4697,7 +4697,7 @@ per-increment guarantees.
 
 ## STRESSTEST — stress testing + live kernel monitoring (`plans/STRESSTEST.md`)
 
-**Status: ST1–ST2 done; ST3–ST6 planned.** Makes RustOS's behaviour under
+**Status: ST1–ST3 done; ST4–ST6 planned.** Makes RustOS's behaviour under
 load observable and provokable with first-party tools. ST1 (done) exports the
 counters the kernel keeps — the `kernel/mem` pressure gauge, reclaim ledger,
 and `ramzip` accounting, plus per-CPU load — as four audited
@@ -4721,10 +4721,18 @@ footprint (mapped address space + committed stack) at `mem_pin`,
 (installed RAM / 8) installed as the registry default limit set,
 `CAP_MEM_PIN` in the administrative ceiling, and the aggregate observable
 as `RamzipStats.pinned_bytes` / `stats:mem/pinned` (proved end to end by
-the `mem_pin_qemu_aarch64` vertical). ST3 adds `signal_intake` — a
-fail-closed opt-in that turns `Interrupt`/`Terminate` into a waitset-drainable
-event (`Kill` stays unmaskable; a second pending `Interrupt` escalates to
-terminate). ST4 is `sysmon`, the fullscreen curses kernel-memory monitor
+the `mem_pin_qemu_aarch64` vertical). ST3 (done) landed signal observation:
+`signal_intake` (94, ungated, audited; ops `Enable`/`Disable`/`Take`) opts
+the caller's own `Interrupt`/`Terminate` out of default-terminate into one
+pending observable event held in `kernel/core::procsignal`, waitable through
+the new `WaitSourceKind::Signal` member (id 0, opt-in-checked at add,
+targeted `SIGNAL_INTAKE_WAITQ` wake) and drained by `Take`; `Kill` stays
+unmaskable, a second pending termination request escalates to the default
+terminate (`^C ^C` kills), `Disable` refuses `WouldBlock` while an
+observation is undrained, the opt-in is never inherited and is cleared by
+the shared task reclaim, and the console-`^C`-to-intake path is proved end
+to end by the extended `signal_qemu_aarch64` vertical. ST4 is `sysmon`, the
+fullscreen curses kernel-memory monitor
 (pinned, event-driven, per-panel graceful degradation); ST5 is `stress`, the
 stress-ng-style load generator (pinned controller + swappable cpu/vm/io/hdd/
 cache workers, `--overcommit`, `--timeout`, `--quiet`, `--background`,

@@ -392,6 +392,34 @@ pub fn pipe_wake() {
     }
 }
 
+/// The wait-queue holding `waitset_wait` callers whose set observes their
+/// own **signal intake** (`plans/STRESSTEST.md` ST3 — the
+/// `WaitSourceKind::Signal` member). A process that opted into signal
+/// observation (`signal_intake`) parks here off the run queue (**no** busy
+/// yield) until a termination-request signal is recorded as its pending
+/// observable event; it is woken by [`signal_intake_wake`] with a
+/// **targeted** wake (only its own intake can ever concern it, so
+/// unrelated waiters sleep on — wake-one, never a thundering herd). The
+/// woken owner's scan re-peeks its intake and drains through
+/// `signal_intake(Take)`; the check-then-park race is closed by the
+/// scheduler's wake-pending token, exactly as the sibling queues rely on.
+/// Joined only by a set that actually holds a `Signal` member, so signal
+/// traffic never touches an unrelated waitset waiter.
+pub static SIGNAL_INTAKE_WAITQ: WaitQueue = WaitQueue::new();
+
+/// Wake exactly the opted-in task `task` parked on [`SIGNAL_INTAKE_WAITQ`]
+/// because a termination-request signal was just recorded as its pending
+/// observable event. A target that is not parked is running and will
+/// observe the pending signal on its own next wait/drain, so the miss is
+/// benign. Runs in dispatcher/task context (the signal producer), never an
+/// ISR, so the unpark is direct. A fail-safe no-op before the arch hook is
+/// installed.
+pub fn signal_intake_wake(task: TaskId) {
+    if let Some(arch) = wait_arch() {
+        let _ = SIGNAL_INTAKE_WAITQ.wake_task(arch, task);
+    }
+}
+
 /// The wait-queue holding `irq_wait` callers (Design D — the user-space
 /// device-driver IRQ path). A task that bound an IRQ line with `irq_bind`
 /// and called `irq_wait` parks here off the run queue (no busy yield) and is woken by [`irq_wake`] the instant the device-IRQ

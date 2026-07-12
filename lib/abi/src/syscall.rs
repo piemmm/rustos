@@ -1738,6 +1738,38 @@ impl SyscallNumber {
     /// of every pin window.
     pub const MEM_UNPIN: Self = Self(93);
 
+    /// Operate on the calling process's own **signal intake** — the
+    /// fail-closed signal-observation opt-in (`plans/STRESSTEST.md` ST3).
+    ///
+    /// Arguments: `op` (a [`crate::SignalIntakeOp`] discriminant; an unknown
+    /// value fails closed with [`Errno::OutOfRange`]). Returns a
+    /// value-or-negative-errno `u64`: `Enable`/`Disable` return `0`, `Take`
+    /// returns the drained signal's wire discriminant
+    /// ([`crate::Signal::as_u32`]).
+    ///
+    /// With the intake enabled, a termination-request signal
+    /// ([`crate::Signal::Interrupt`] or [`crate::Signal::Terminate`])
+    /// delivered to the process — by a parent's [`Self::SIGNAL`] or by the
+    /// console line discipline's foreground `^C` — is recorded as one
+    /// pending observable event instead of terminating it. The pending
+    /// event is waitable through a wait-set member of kind
+    /// [`crate::WaitSourceKind::Signal`] and drained with
+    /// [`crate::SignalIntakeOp::Take`], so the observer stays event-driven
+    /// (never a poll loop). The signals stay honest: [`crate::Signal::Kill`]
+    /// is never observable or maskable, `Stop`/`Continue` stay
+    /// scheduler-side, and a **second** termination-request signal arriving
+    /// while one is pending undrained escalates to the default terminate
+    /// path — an opted-in process that stops draining stays killable with a
+    /// plain `^C ^C`, no capability, no privileged override.
+    ///
+    /// Own-process disposition needs no capability (the same tier as
+    /// [`Self::STREAM_INPUT_MODE`]); every call is audited like
+    /// [`Self::SIGNAL`] itself, so the trail carries the opt-in, the
+    /// opt-out, and each observed delivery's drain. The opt-in is
+    /// process-scoped state: never inherited across [`Self::SPAWN`] and
+    /// cleared on exit.
+    pub const SIGNAL_INTAKE: Self = Self(94);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

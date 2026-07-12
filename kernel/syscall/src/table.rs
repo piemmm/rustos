@@ -10,8 +10,9 @@
 
 use rustos_abi::{
     spec_for, AbiType, CallRecvFlags, CapabilityId, Errno, IrqHandle, MapFlags, OpenFlags,
-    RandomFlags, Signal, SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags, ENCODED_TABLE,
-    FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
+    RandomFlags, Signal, SignalIntakeOp, SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags,
+    ENCODED_TABLE, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, PROC_ID_HEX_LEN,
+    SYSCALL_MAX_ARGS,
 };
 use rustos_crypto::{sha256, Sha256Digest};
 use rustos_kernel_sec::{TaskCapabilities, TaskId};
@@ -591,6 +592,28 @@ pub trait SyscallHandlers {
     /// [`Errno::NotImplemented`]; the bookkeeping is installed in
     /// `kernel/core`.
     fn mem_unpin(&self, _caller: &CallerContext<'_>) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Operate on the calling process's own signal intake — the fail-closed
+    /// signal-observation opt-in (`plans/STRESSTEST.md` ST3).
+    ///
+    /// The dispatcher has already validated `op` against the closed
+    /// [`SignalIntakeOp`] set and emitted the audit record. The
+    /// implementation acts only on the caller's own intake, keyed by the
+    /// kernel-trusted caller id: `Enable` opts the caller's
+    /// `Interrupt`/`Terminate` disposition into observable delivery
+    /// (idempotent), `Disable` restores the default (idempotent; refused
+    /// [`Errno::WouldBlock`] while an observed signal is pending
+    /// undrained), and `Take` drains the one pending observed signal,
+    /// returning its wire discriminant ([`Errno::WouldBlock`] when nothing
+    /// is pending, [`Errno::NotFound`] when never enabled).
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]: a kernel build with no intake bookkeeping
+    /// wired never pretends a disposition changed. The bookkeeping is
+    /// installed in `kernel/core`.
+    fn signal_intake(&self, _caller: &CallerContext<'_>, _op: SignalIntakeOp) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
@@ -2355,6 +2378,13 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             }
             SyscallNumber::MEM_PIN => self.handlers.mem_pin(caller),
             SyscallNumber::MEM_UNPIN => self.handlers.mem_unpin(caller),
+            SyscallNumber::SIGNAL_INTAKE => {
+                // args[0] is the `SignalIntakeOp` discriminant, rejected
+                // before dispatch if it is not one of the closed set (fail
+                // closed on an unknown or out-of-range value).
+                let op = SignalIntakeOp::from_u32(decode_u32(args.0[0]))?;
+                self.handlers.signal_intake(caller, op)
+            }
             SyscallNumber::WAIT => {
                 // `validate_arg` guarantees args[0] is a sign-extended
                 // `i32`; recover it by truncating the low 32 bits (the
@@ -3359,6 +3389,13 @@ mod tests {
         fn mem_unpin(&self, _c: &CallerContext<'_>) -> SyscallResult {
             self.record("mem_unpin");
             Ok(0)
+        }
+        fn signal_intake(&self, _c: &CallerContext<'_>, op: SignalIntakeOp) -> SyscallResult {
+            self.record("signal_intake");
+            // Echo the decoded op back so the reachability test can assert
+            // the dispatcher validated and decoded it without wiring the
+            // real intake bookkeeping here.
+            Ok(u64::from(op.as_u32()))
         }
         fn users_db_read(&self, _c: &CallerContext<'_>, _buf: u64, len: usize) -> SyscallResult {
             self.record("users_db_read");
@@ -5297,6 +5334,58 @@ mod tests {
         );
         assert_eq!(h.last(), Some("mem_unpin"));
         assert_eq!(sink.ids(), [AuditEvent::SyscallInvoked.id().0]);
+    }
+
+    #[test]
+    fn signal_intake_is_ungated_audited_and_decodes_every_op() {
+        // Own-process signal disposition needs no capability, but every
+        // call is audited so the trail carries the opt-in, the opt-out,
+        // and each observed delivery's drain. The dispatcher decodes each
+        // closed-set op and hands it through.
+        for op in [
+            SignalIntakeOp::Enable,
+            SignalIntakeOp::Disable,
+            SignalIntakeOp::Take,
+        ] {
+            let sink = RecordingSink::new();
+            let caps = build_caps(&[], &sink);
+            let ctx = CallerContext {
+                task_id: TaskId(7),
+                caps: &caps,
+            };
+            let h = MockHandlers::default();
+            let d = Dispatcher::new(&h, &sink);
+            let mut args = RawArgs::ZERO;
+            args.0[0] = u64::from(op.as_u32());
+            // The Mock echoes the decoded op back.
+            assert_eq!(
+                d.dispatch(&ctx, SyscallNumber::SIGNAL_INTAKE.as_u16(), args),
+                Ok(u64::from(op.as_u32()))
+            );
+            assert_eq!(h.last(), Some("signal_intake"));
+            assert_eq!(sink.ids(), [AuditEvent::SyscallInvoked.id().0]);
+        }
+    }
+
+    #[test]
+    fn signal_intake_rejects_an_unknown_op_before_the_handler() {
+        // An op outside the closed set fails closed in the dispatch arm;
+        // the handler is never reached.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 3; // one past the closed set
+        assert_eq!(
+            d.dispatch(&ctx, SyscallNumber::SIGNAL_INTAKE.as_u16(), args),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(h.last(), None, "handler must not be reached");
     }
 
     #[test]

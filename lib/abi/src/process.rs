@@ -906,6 +906,63 @@ impl Signal {
     }
 }
 
+/// The operation [`crate::SyscallNumber::SIGNAL_INTAKE`] performs on the
+/// calling process's own signal intake (`plans/STRESSTEST.md` ST3).
+///
+/// The intake is the fail-closed signal-observation opt-in: a process that
+/// enables it has its termination-request signals ([`Signal::Interrupt`] and
+/// [`Signal::Terminate`] only — never [`Signal::Kill`]) recorded as one
+/// pending observable event instead of terminating it, waitable through a
+/// wait-set member of kind [`crate::WaitSourceKind::Signal`] and drained
+/// with [`Self::Take`]. A second termination-request signal arriving while
+/// one is already pending undrained **escalates to the default terminate
+/// path**, so an opted-in process that stops draining stays killable with a
+/// plain `^C ^C` — no capability, no privileged override. The discriminant
+/// is the `u32` carried in the syscall's `op` register; an unknown value
+/// fails closed.
+#[repr(u32)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum SignalIntakeOp {
+    /// Opt the calling process's `Interrupt`/`Terminate` disposition out of
+    /// default-terminate and into observable delivery. Idempotent: already
+    /// enabled is success. The opt-in is process-scoped, never inherited
+    /// across [`crate::SyscallNumber::SPAWN`], and cleared on exit.
+    Enable = 0,
+    /// Restore the default terminate disposition. Idempotent: already
+    /// disabled is success. Refused with [`Errno::WouldBlock`] while an
+    /// observed signal is pending undrained — a recorded termination
+    /// request is never silently discarded; drain it first and act on it.
+    Disable = 1,
+    /// Drain the one pending observed signal, returning its wire
+    /// discriminant ([`Signal::as_u32`]). Fails with
+    /// [`Errno::WouldBlock`] when nothing is pending and with
+    /// [`Errno::NotFound`] when the intake was never enabled.
+    Take = 2,
+}
+
+impl SignalIntakeOp {
+    /// The discriminant carried on the wire.
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+
+    /// Recover an operation from its wire discriminant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Errno::OutOfRange`] for any value that is not a defined
+    /// operation (fail closed on a malformed argument).
+    pub const fn from_u32(value: u32) -> Result<Self, Errno> {
+        match value {
+            0 => Ok(Self::Enable),
+            1 => Ok(Self::Disable),
+            2 => Ok(Self::Take),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
 /// The event a completed [`wait`](crate::SyscallNumber::WAIT) reports about
 /// a child, decoded from the [`WaitStatusRecord`] the kernel wrote.
 ///
@@ -1205,11 +1262,11 @@ impl Default for DescriptorTable {
 mod tests {
     extern crate alloc;
     use super::{
-        DescriptorTable, FdWire, ProcessStart, ProcessStartHeader, Signal, SpawnAttach, StreamMode,
-        StringSlot, WaitStatus, WaitStatusRecord, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS,
-        PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN, SPAWN_ATTACH_LEN,
-        SPAWN_ATTACH_VERSION, SPAWN_FLAGS_ALL, SPAWN_FLAG_SANDBOX, STDERR, STDIN, STDINFO, STDOUT,
-        STD_STREAM_COUNT, WAIT_STATUS_KIND_EXITED, WAIT_STATUS_KIND_STOPPED,
+        DescriptorTable, FdWire, ProcessStart, ProcessStartHeader, Signal, SignalIntakeOp,
+        SpawnAttach, StreamMode, StringSlot, WaitStatus, WaitStatusRecord, PROCESS_START_MAGIC,
+        PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN,
+        SPAWN_ATTACH_LEN, SPAWN_ATTACH_VERSION, SPAWN_FLAGS_ALL, SPAWN_FLAG_SANDBOX, STDERR, STDIN,
+        STDINFO, STDOUT, STD_STREAM_COUNT, WAIT_STATUS_KIND_EXITED, WAIT_STATUS_KIND_STOPPED,
     };
     use crate::{Errno, ABI_VERSION_CURRENT};
     use alloc::vec::Vec;
@@ -1403,6 +1460,27 @@ mod tests {
         for signal in [Signal::Interrupt, Signal::Terminate, Signal::Kill] {
             assert!(signal.termination_status().expect("terminating") > 128);
         }
+    }
+
+    #[test]
+    fn signal_intake_op_discriminants_are_frozen() {
+        // The discriminants are the on-wire op values; do not renumber.
+        assert_eq!(SignalIntakeOp::Enable.as_u32(), 0);
+        assert_eq!(SignalIntakeOp::Disable.as_u32(), 1);
+        assert_eq!(SignalIntakeOp::Take.as_u32(), 2);
+    }
+
+    #[test]
+    fn signal_intake_op_round_trips_and_rejects_unknown() {
+        for op in [
+            SignalIntakeOp::Enable,
+            SignalIntakeOp::Disable,
+            SignalIntakeOp::Take,
+        ] {
+            assert_eq!(SignalIntakeOp::from_u32(op.as_u32()), Ok(op));
+        }
+        assert_eq!(SignalIntakeOp::from_u32(3), Err(Errno::OutOfRange));
+        assert_eq!(SignalIntakeOp::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
     #[test]

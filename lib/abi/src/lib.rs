@@ -122,8 +122,8 @@ pub use origin::{
 };
 pub use process::{
     encoded_len as process_start_encoded_len, write_into as process_start_write_into,
-    DescriptorTable, FdWire, ProcessStart, ProcessStartHeader, Signal, SpawnAttach, StreamMode,
-    StringSlot, WaitStatus, WaitStatusRecord, CONSOLE_INDEX_MAX, CONSOLE_INHERIT,
+    DescriptorTable, FdWire, ProcessStart, ProcessStartHeader, Signal, SignalIntakeOp, SpawnAttach,
+    StreamMode, StringSlot, WaitStatus, WaitStatusRecord, CONSOLE_INDEX_MAX, CONSOLE_INHERIT,
     FD_WIRE_KIND_CLOSED, FD_WIRE_KIND_HANDLE, FD_WIRE_KIND_INHERIT, FD_WIRE_KIND_INHERIT_SLOT,
     PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
     PROCESS_START_MAX_TOTAL_LEN, SPAWN_ATTACH_LEN, SPAWN_ATTACH_VERSION, SPAWN_FLAGS_ALL,

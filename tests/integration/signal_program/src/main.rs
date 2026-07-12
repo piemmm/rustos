@@ -9,6 +9,13 @@
 //! * the **child** runs forever, giving up the CPU with the `yield` syscall on
 //!   each iteration (never exiting on its own), so it only ever ends when its
 //!   parent terminates it with a signal;
+//! * the **intake** role (`plans/STRESSTEST.md` ST3) opts into signal
+//!   observation (`signal_intake(Enable)`), drains its intake with a
+//!   `Take`/`yield` loop until the first observed `Interrupt` arrives —
+//!   proving a foreground `^C` delivered through the real console line
+//!   discipline is *observed, not fatal* — then deliberately stops draining
+//!   and yields forever, so the vertical can prove the second-pending
+//!   `Interrupt` escalates to the default terminate path (the 130 reap);
 //! * the **parent** reads the child's PID from its inherited startup argument
 //!   (`arg(1)`, which the vertical fills in), then drives the full job-control
 //!   sequence through the real syscalls (`plans/SPAWN.md` `SP7b`/`SP9`):
@@ -47,6 +54,13 @@ mod program {
         None => false,
     };
 
+    /// `true` when this build is the intake role (`plans/STRESSTEST.md` ST3),
+    /// selected by `RUSTOS_SIGNAL_ROLE == "intake"`.
+    const IS_INTAKE: bool = match option_env!("RUSTOS_SIGNAL_ROLE") {
+        Some(s) => bytes_eq(s.as_bytes(), b"intake"),
+        None => false,
+    };
+
     /// Compile-time byte-string equality (no `core::cmp` in `const`).
     const fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
         if a.len() != b.len() {
@@ -80,13 +94,54 @@ mod program {
         Some(acc)
     }
 
+    /// The intake role's body: opt in, observe the first `Interrupt`, then
+    /// stop draining so the vertical can prove the escalation rule. Returns
+    /// a diagnostic only on a failure — the success path never returns (the
+    /// program ends terminated by the escalated second `^C`).
+    fn run_intake() -> i32 {
+        use rustos_abi::{Errno, SignalIntakeOp};
+        // Opt in: with the intake enabled a foreground `^C` is recorded as
+        // an observable event instead of terminating this process.
+        if rustos_rt::signal_intake(SignalIntakeOp::Enable) != 0 {
+            return 30;
+        }
+        // Drain until the first observed Interrupt arrives. `WouldBlock`
+        // means nothing is pending yet — give up the CPU and re-check (the
+        // fixture chassis is a cooperative single-CPU slice; production
+        // callers park on a wait-set `Signal` member instead).
+        loop {
+            let ret = rustos_rt::signal_intake(SignalIntakeOp::Take);
+            if ret == i64::from(rustos_abi::Signal::Interrupt.as_u32()) {
+                break;
+            }
+            if ret == -i64::from(Errno::WouldBlock.as_i32()) {
+                rustos_rt::yield_now();
+                continue;
+            }
+            // Any other outcome (a different signal, a decode error) is a
+            // distinct failure diagnostic.
+            return 31;
+        }
+        // Observed, not fatal: this program is still running after the
+        // `^C`. Now deliberately stop draining — the next `^C` is recorded
+        // pending, and the one after that finds the slot occupied and
+        // escalates to the default terminate (the vertical reaps 130).
+        loop {
+            rustos_rt::yield_now();
+        }
+    }
+
     /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime is
     /// set up and routes its return value through the `exit` syscall.
     ///
     /// The child yields forever (it is terminated by the parent's signal, so
-    /// this never returns). The parent reads the child's PID, signals it, reaps
-    /// it, and verifies the reaped termination status.
+    /// this never returns). The intake role runs [`run_intake`]. The parent
+    /// reads the child's PID, signals it, reaps it, and verifies the reaped
+    /// termination status.
     fn main() -> i32 {
+        if IS_INTAKE {
+            return run_intake();
+        }
         if !IS_PARENT {
             // Child: never exit on our own — give up the CPU each iteration and
             // wait to be terminated by the parent's signal. A tight spin would

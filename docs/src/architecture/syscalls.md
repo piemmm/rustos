@@ -137,6 +137,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  91 | `fd_redeem`    | `Handle` (grant)                        | `u64` (fd)    | —             | yes   |
 |  92 | `mem_pin`      | —                                       | `errno`       | `CAP_MEM_PIN` | yes   |
 |  93 | `mem_unpin`    | —                                       | `errno`       | —             | yes   |
+|  94 | `signal_intake` | `u32 op`                               | `u64` (value) | —             | yes   |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -691,6 +692,19 @@ instead of parking forever. The wake rides the seat registry's inject and
 revoke paths; only sets that contain a `SeatInput` member join the seat
 wake queue, so pointer-rate wakes never touch unrelated waiters.
 
+It accepts a `Signal` member (`plans/STRESSTEST.md` ST3): `id` is always
+`0` — a process has exactly one signal intake and can only ever observe
+its **own** — and the add is admitted only for a caller that has opted
+into signal observation through `signal_intake` (a nonzero `id` or a
+missing opt-in refuses with the same oracle-free `NotFound` at add). The
+member is ready while an observed termination-request signal is pending
+undrained; readiness is a non-consuming peek — the woken owner drains
+through `signal_intake(Take)`, so a still-pending intake re-reports on
+the next wait. The wake rides the intake-record path and is **targeted**
+at the opted-in task (only its own intake can concern it); only sets
+that contain a `Signal` member join the signal wake queue, so signal
+traffic never touches unrelated waiters.
+
 It also accepts a `Stream` member (`plans/APPWIN.md` AW4): `id` names a
 descriptor of the **caller's own open table** holding a pipe end opened
 for reading (a write end, a path- or resource-backed descriptor, an
@@ -845,7 +859,12 @@ status share a single definition — and the live scheduler, and delivers by
 driving it: `Continue` resumes a stopped child (`SchedulerPolicy::unpark`, a
 no-op for a running one, also clearing the stop overlay and any unobserved
 stop), `Terminate` / `Kill` / `Interrupt` terminate the child
-(`SchedulerPolicy::exit`) and record the signal's POSIX-familiar
+(`SchedulerPolicy::exit`) — unless the target has opted its
+termination-request signals into observable delivery through
+`signal_intake` (below), in which case a `Terminate`/`Interrupt` with a
+free pending slot is *recorded* as the target's observable event instead
+of terminating it (`Kill` is never observable) — and record the signal's
+POSIX-familiar
 termination status (`Signal::termination_status`: `Interrupt` → 130,
 `Kill` → 137, `Terminate` → 143 — the `128 + n` codes a shell user already
 scripts against, deliberately not our wire discriminants) so the parent's
@@ -858,6 +877,44 @@ first-party Rust wrapper is
 `rustos_rt::signal`; the C stub is `ros_sys_signal` and the header defines
 `ROS_SIGNAL_CONTINUE` / `ROS_SIGNAL_TERMINATE` / `ROS_SIGNAL_KILL` /
 `ROS_SIGNAL_INTERRUPT` / `ROS_SIGNAL_STOP`.
+
+`signal_intake` (no. 94) operates on the calling process's own **signal
+intake** — the fail-closed signal-observation opt-in (`plans/STRESSTEST.md`
+ST3). RustOS deliberately ships **no** user-installed signal handlers: a
+handler trampoline (asynchronous user-mode re-entry) has no other consumer
+and a large attack surface, so observation is event-shaped instead. `op`
+is a closed `rustos_abi::SignalIntakeOp` discriminant (`Enable` = 0,
+`Disable` = 1, `Take` = 2); any other value fails closed with `OutOfRange`
+before dispatch. `Enable` opts the caller's termination-request signals —
+`Interrupt` (the console `^C`) and `Terminate`, **only** — out of
+default-terminate and into delivery as one pending observable event, held
+in a single per-task slot in `kernel/core::procsignal`. The pending event
+is waited on through a wait-set member of kind `WaitSourceKind::Signal`
+(id `0`, above) and drained with `Take`, which returns the drained
+signal's wire discriminant — the event-driven shape every other waiter has
+(`AGENTS.md` §2.23), never a poll loop. The signals stay honest: `Kill`
+is never observable or maskable, `Stop`/`Continue` stay scheduler-side,
+and a **second** termination-request signal arriving while one is pending
+undrained **escalates to the default terminate path** — an opted-in
+process that stops draining stays killable with a plain `^C ^C`, no
+capability, no privileged override. `Disable` restores the default
+disposition but refuses `WouldBlock` while an observation is pending
+undrained — a recorded termination request is never silently discarded;
+drain it and act on it. `Take` with nothing pending is `WouldBlock` (park
+on the wait-set, then retry); `Take` without the opt-in is `NotFound`.
+The opt-in is process-scoped: never inherited across `spawn` (a child
+starts with the default disposition) and cleared by the shared task
+reclaim on every death path. Own-process disposition needs no capability
+(the `stream_input_mode` tier); every call **is** audited like `signal`
+itself, so the trail carries the opt-in, the opt-out, and each observed
+delivery's drain — and both delivery routes into the intake are already
+audited at their source (the sender's audited `signal` call; the console
+line discipline acting on the terminal owner's standing foreground
+instruction). The first-party Rust wrapper is `rustos_rt::signal_intake`;
+the C stub is `ros_sys_signal_intake` and the header defines
+`ROS_SIGNAL_INTAKE_OP_ENABLE` / `ROS_SIGNAL_INTAKE_OP_DISABLE` /
+`ROS_SIGNAL_INTAKE_OP_TAKE` beside the `ROS_WAITSET_OP_*` and
+`ROS_WAIT_SOURCE_*` member vocabulary.
 
 `console_foreground` (no. 72) grants (or releases, `pid = 0`) the
 **controlling ownership** of the console behind readable descriptor `fd`
@@ -1193,6 +1250,7 @@ re-validates arguments — the dispatcher does that first.
 | `mem_unmap`     | rejects a zero `len`, then hands `(base, len)` to the same `MemMap` producer, which zeroes the frames it reclaims (`AGENTS.md` §4) and fails closed when the range does not name a region the caller mapped | `len == 0` → `LengthOutOfRange`. No producer wired → `NotImplemented`. Range not mapped by the caller → producer errno. Otherwise `Ok(0)`. |
 | `mem_pin`       | checks the caller's pinned footprint (mapped address space + committed stack, the one shared accounting) against its effective `pinned-memory-bytes` soft bound under one registry write guard, then stores the pin mark against the kernel-trusted caller id — idempotent: an already-pinned caller is in the requested state | Footprint past the soft bound → `OutOfRange`. Otherwise `Ok(0)`. |
 | `mem_unpin`     | clears the caller's pin mark — idempotent: an already-unpinned caller is in the requested state | Always `Ok(0)`. |
+| `signal_intake` | acts only on the caller's own intake in `kernel/core::procsignal` (keyed by the kernel-trusted caller id): `Enable` inserts the opt-in (idempotent, pending slot preserved), `Disable` removes it unless an observation is pending undrained, `Take` drains the one pending observed signal and returns its wire discriminant | Unknown `op` → `OutOfRange` (before dispatch). `Disable` with a pending observation → `WouldBlock`. `Take` with nothing pending → `WouldBlock`; without the opt-in → `NotFound`. Otherwise `Ok(value)`. |
 | `wait`          | decodes `flags` through `WaitFlags::from_bits`, then hands `(caller.task_id, pid)` to the installed `ProcessWait` producer (`with_process_wait`; default `NULL_PROCESS_WAIT`) which validates the parent/child relationship and reaps a reapable child; blocking (`flags` clear) parks until one is reapable, `NONBLOCK` polls via the same `ProcessTable::reap` and returns `WouldBlock` for a still-running child without parking; on a reap the exit code is copied out to `status` through `copy_to_user` and the child's PID returned (`plans/SPAWN.md` SP6) | Reserved flag bit → `OutOfRange`. No producer wired → `NotImplemented`. `pid` not a child of the caller → `NotFound`. `NONBLOCK` with a still-running child → `WouldBlock` (`status` untouched). Faulting `status` / no registered address space → `BadAddress`. Otherwise `Ok(pid)`. |
 | `rlimit_get`    | validates `kind` against `LimitKind`, then reads the caller's effective limit from the installed resource-limit service and copies the encoded `ResourceLimit` out to the user buffer through `copy_to_user` (`AGENTS.md` §24.3). The default trait method fails closed until the L2 enforcement is installed | Unassigned `kind` → `OutOfRange`. No service wired → `NotImplemented`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(0)`. |
 | `rlimit_set`    | copies the encoded `ResourceLimit` in through `copy_from_user`, validates `kind` + the `soft <= hard` pair, and — when the request raises a hard bound above the inherited ceiling — refuses unless the caller holds `CAP_RLIMIT_RAISE` (`AGENTS.md` §24.3). The default trait method fails closed until L2 | Unassigned `kind` / malformed pair → `OutOfRange`. Raising a hard bound without the capability → `PermissionDenied`. No service wired → `NotImplemented`. Faulting buffer → `BadAddress`. Otherwise `Ok(0)`. |

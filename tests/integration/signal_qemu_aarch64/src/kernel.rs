@@ -1,8 +1,13 @@
-//! The freestanding aarch64 test kernel: build a child and a parent EL0
-//! program, install a `KernelProcessSignal` producer over the shared
-//! `KernelProcessWait` bookkeeping and the live scheduler, and prove the parent
-//! terminates its own child with a signal and reaps the signalled status
-//! (`plans/SPAWN.md` `SP7b`).
+//! The freestanding aarch64 test kernel: build child, parent, and intake EL0
+//! programs, install a `KernelProcessSignal` producer over the shared
+//! `KernelProcessWait` bookkeeping and the live scheduler, and prove
+//!
+//! * the parent terminates its own child with a signal and reaps the
+//!   signalled status (`plans/SPAWN.md` `SP7b`), and
+//! * a foreground `^C` pushed through the **real console line discipline**
+//!   reaches an opted-in process's signal intake as an observable event
+//!   instead of terminating it, while a second undrained `^C` escalates to
+//!   the default terminate and reaps 130 (`plans/STRESSTEST.md` ST3).
 
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -12,8 +17,8 @@ use alloc::sync::Arc;
 
 use rustos_abi::rxe::LoadImage;
 use rustos_abi::{
-    CapabilityId, CapabilityQuery, Errno, Signal, SyscallNumber, WaitFlags, WaitStatus,
-    WaitStatusRecord, SYSCALL_MAX_ARGS,
+    CapabilityId, CapabilityQuery, Errno, Signal, SignalIntakeOp, SyscallNumber, WaitFlags,
+    WaitStatus, WaitStatusRecord, SYSCALL_MAX_ARGS,
 };
 use rustos_arch_aarch64::context_hal::ContextSwitchHal;
 use rustos_arch_aarch64::kernel_arch::timer_frequency_hz;
@@ -29,8 +34,10 @@ use rustos_arch_api::{CpuId, EnterUser};
 use rustos_fdt::Fdt;
 use rustos_kalloc::FreeListAllocator;
 use rustos_kernel_core::{
-    reschedule_current, spawn_image, spawn_user_kthread, KernelProcessSignal, KernelProcessWait,
-    ProcessSignal, ProcessWait, RescheduleAction, SpawnRequest, Yielder,
+    drain_pending_foreground, install_foreground_signal, intake_enable, intake_take,
+    reschedule_current, spawn_image, spawn_user_kthread, ConsoleDevice, ConsoleInput,
+    KernelProcessSignal, KernelProcessWait, ProcessSignal, ProcessWait, RescheduleAction,
+    SpawnRequest, Yielder, NULL_CONSOLE, NULL_CONSOLE_READ,
 };
 use rustos_kernel_mem::{
     copy_out, AddressSpace, DirectPhysMap, Frame, PhysAddr, PhysMap, UserAddressSpace, UserStack,
@@ -63,8 +70,8 @@ const USER_BLOCK_BASE: u64 = USER_BIAS + 0x30_0000;
 /// Per-process stack-canary seed handed to each program.
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 
-/// Physical frames the test hands each spawn build.
-const FRAME_COUNT: usize = 256;
+/// Physical frames the test hands each spawn build (three EL0 spaces).
+const FRAME_COUNT: usize = 384;
 
 /// Cooperative-loop watchdog: maximum `step` iterations before the test
 /// declares the workload deadlocked. Sized generously for QEMU TCG.
@@ -89,14 +96,45 @@ const FAIL_UNEXPECTED_SYSCALL: u16 = 10;
 const FAIL_COPY_STATUS: u16 = 11;
 const FAIL_PARENT_BAD_EXIT: u16 = 12;
 const FAIL_NO_PRODUCER: u16 = 13;
+const FAIL_INTAKE_SELF_EXIT: u16 = 14;
+const FAIL_INTAKE_BAD_REAP: u16 = 15;
+const FAIL_INTAKE_INCOMPLETE: u16 = 16;
+const FAIL_FOREGROUND: u16 = 17;
 
 /// Set once the parent reaped a child carrying the expected signalled status.
 static REAP_OK: AtomicBool = AtomicBool::new(false);
 /// Set once a `WaitFlags::STOPPED` wait reported the child stopped — the
 /// SP9 half of the vertical (stop overlay + stopped wait report).
 static STOP_OBSERVED: AtomicBool = AtomicBool::new(false);
+/// Set once the parent exited 0 with both flags above verified.
+static PARENT_OK: AtomicBool = AtomicBool::new(false);
 /// Scheduler task id of the parent (the program that sends the signal + waits).
 static PARENT_TID: AtomicU64 = AtomicU64::new(u64::MAX);
+/// Scheduler task id of the intake role (`plans/STRESSTEST.md` ST3).
+static INTAKE_TID: AtomicU64 = AtomicU64::new(u64::MAX);
+/// Set once the intake role's `signal_intake(Enable)` syscall landed — the
+/// gate before the first `^C` is pushed (a `^C` before the opt-in would
+/// terminate the program the test is about to observe with).
+static INTAKE_ENABLED: AtomicBool = AtomicBool::new(false);
+/// Set once the intake role's `Take` drained the first observed `Interrupt`
+/// — the proof the `^C` was observed, not fatal.
+static INTAKE_OBSERVED: AtomicBool = AtomicBool::new(false);
+/// The `^C` saga's progress: bytes pushed through the console so far (0–3).
+static CTRL_C_SENT: AtomicU64 = AtomicU64::new(0);
+/// Set once the escalated intake role was reaped with `Exited(130)`.
+static INTAKE_REAPED: AtomicBool = AtomicBool::new(false);
+
+/// Synthetic supervisor task id the intake role is registered under, so the
+/// chassis can reap its escalated termination through the shared wait
+/// bookkeeping. Never admitted on the scheduler, so it collides with no
+/// real task.
+const SUPERVISOR: u64 = 0xF00D;
+
+/// The console the `^C` saga pushes through: a real [`ConsoleDevice`] whose
+/// cooked-mode input filter (the production line discipline) maps the
+/// interrupt byte to a queued foreground [`Signal::Interrupt`]. Write/read
+/// are the null devices — only the input filter is under test.
+static CONSOLE: ConsoleDevice = ConsoleDevice::new(&NULL_CONSOLE, &NULL_CONSOLE_READ);
 
 /// Size of the test's bump heap. Lives in `.bss` (zeroed by the trampoline).
 const HEAP_SIZE: usize = 2 * 1024 * 1024;
@@ -118,6 +156,7 @@ static ALLOCATOR: FreeListAllocator =
 /// Per-space page-table pools (one per EL0 address space).
 static PAGE_TABLES_CHILD: PageTablePool = PageTablePool::new();
 static PAGE_TABLES_PARENT: PageTablePool = PageTablePool::new();
+static PAGE_TABLES_INTAKE: PageTablePool = PageTablePool::new();
 
 /// Physical-frame backing store the spawn builders allocate user pages from.
 #[repr(C, align(4096))]
@@ -284,6 +323,33 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             }
             Err(err) => encode(Err(err)),
         }
+    } else if raw == SyscallNumber::SIGNAL_INTAKE.as_u16() {
+        // Route through the real kernel-core intake bookkeeping — the same
+        // functions the production handler drives — keyed by the
+        // kernel-trusted current task id. The chassis flags gate the `^C`
+        // saga on the fixture's actual progress.
+        #[allow(clippy::cast_possible_truncation)]
+        let op = match SignalIntakeOp::from_u32(args[0] as u32) {
+            Ok(op) => op,
+            Err(err) => return encode(Err(err)),
+        };
+        match op {
+            SignalIntakeOp::Enable => {
+                intake_enable(cur);
+                INTAKE_ENABLED.store(true, Ordering::SeqCst);
+                0
+            }
+            SignalIntakeOp::Disable => encode(rustos_kernel_core::intake_disable(cur).map(|()| 0)),
+            SignalIntakeOp::Take => match intake_take(cur) {
+                Ok(signal) => {
+                    if signal == Signal::Interrupt {
+                        INTAKE_OBSERVED.store(true, Ordering::SeqCst);
+                    }
+                    encode(Ok(u64::from(signal.as_u32())))
+                }
+                Err(err) => encode(Err(err)),
+            },
+        }
     } else if raw == SyscallNumber::YIELD.as_u16() {
         // The child gives up the CPU each iteration; reschedule it and resume
         // on the next dispatch (until the parent terminates it).
@@ -295,15 +361,21 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
         if cur == PARENT_TID.load(Ordering::SeqCst) {
             // The parent stopped and resumed the child (observing the stop
             // through a STOPPED wait), then terminated it, verified the
-            // signalled status, and returned 0.
+            // signalled status, and returned 0. The overall PASS also needs
+            // the intake saga (raised from the step loop), so only record
+            // the parent half here and reap the parent.
             if code == 0 && REAP_OK.load(Ordering::SeqCst) && STOP_OBSERVED.load(Ordering::SeqCst) {
-                note(
-                    TEST_PASS,
-                    "signal test: parent stopped, resumed, terminated, and reaped the child, and exited 0",
-                );
-                qemu_exit::exit_success();
+                PARENT_OK.store(true, Ordering::SeqCst);
+                let _ = reschedule_current(BOOT_CPU, RescheduleAction::Exit);
+                return 0;
             }
             qemu_exit::exit_failure(FAIL_PARENT_BAD_EXIT);
+        }
+        if cur == INTAKE_TID.load(Ordering::SeqCst) {
+            // The intake role never exits on its own (its success path ends
+            // in the escalated termination); a self-exit is a distinct
+            // fixture diagnostic (30/31) — fail loudly.
+            qemu_exit::exit_failure(FAIL_INTAKE_SELF_EXIT);
         }
         // Any other task exiting on its own is unexpected (the child is
         // terminated by the signal, not by a self-exit): reap it and continue.
@@ -444,6 +516,66 @@ fn u64_to_decimal(mut value: u64, buf: &mut [u8; 20]) -> &[u8] {
     &buf[i..]
 }
 
+/// Drive the ST3 `^C` saga one step from the cooperative loop (dispatcher
+/// context — exactly where the production dispatch loop drains deferred
+/// foreground deliveries).
+///
+/// The saga is gated on the fixture's actual progress so no `^C` can race
+/// the opt-in: (1) once the intake role has **enabled** its intake, push
+/// the first `^C` byte through the real console line discipline and drain
+/// the deferred delivery — the opted-in target records it, observably and
+/// non-fatally; (2) once the fixture **drained** that observation (and, no
+/// longer draining, went quiet), push the second `^C` — recorded pending;
+/// (3) push the third `^C` — the occupied slot escalates to the default
+/// terminate; (4) poll the shared wait bookkeeping under the synthetic
+/// supervisor until the escalated 130 reap lands. A wrong reaped status
+/// fails the test loudly.
+fn drive_intake_saga(wait_producer: &KernelProcessWait<Aarch64Arch>) {
+    if INTAKE_REAPED.load(Ordering::SeqCst) {
+        return;
+    }
+    let sent = CTRL_C_SENT.load(Ordering::SeqCst);
+    let push_ctrl_c = |stage: u64| {
+        // The interrupt byte, through the production cooked-mode input
+        // filter (foreground set, producer installed), then the deferred
+        // dispatcher-context delivery drain — the real `^C` path end to end.
+        let _ = ConsoleInput::push(&CONSOLE, &[0x03]);
+        let _ = drain_pending_foreground();
+        CTRL_C_SENT.store(stage, Ordering::SeqCst);
+    };
+    match sent {
+        0 if INTAKE_ENABLED.load(Ordering::SeqCst) => push_ctrl_c(1),
+        1 if INTAKE_OBSERVED.load(Ordering::SeqCst) => push_ctrl_c(2),
+        2 => push_ctrl_c(3),
+        3 => {
+            let intake_tid = INTAKE_TID.load(Ordering::SeqCst);
+            let Ok(pid) = i32::try_from(intake_tid) else {
+                qemu_exit::exit_failure(FAIL_INTAKE_BAD_REAP);
+            };
+            match wait_producer.poll(TaskId(SUPERVISOR), pid, WaitFlags::NONBLOCK) {
+                Ok(reported) => {
+                    if reported.status
+                        == WaitStatus::Exited(match Signal::Interrupt.termination_status() {
+                            Some(code) => code,
+                            None => qemu_exit::exit_failure(FAIL_INTAKE_BAD_REAP),
+                        })
+                    {
+                        INTAKE_REAPED.store(true, Ordering::SeqCst);
+                    } else {
+                        // Terminated, but not by the escalated Interrupt —
+                        // a wrong disposition is a loud failure.
+                        qemu_exit::exit_failure(FAIL_INTAKE_BAD_REAP);
+                    }
+                }
+                // Still running (the escalation has not landed yet) — poll
+                // again on the next loop iteration.
+                Err(_) => {}
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Boot entry point — the symbol the arch crate's `boot.s` trampoline calls.
 #[no_mangle]
 pub extern "C" fn kernel_main(_dtb: u64) -> ! {
@@ -515,20 +647,58 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     let parent_tid = admit(sched, parent_root, parent_entry);
     PARENT_TID.store(parent_tid, Ordering::SeqCst);
     wait_producer.register_child(TaskId(parent_tid), TaskId(child_tid));
-    note(TEST_SPAWNED, "aarch64 signal test: parent + child spawned");
 
-    // Cooperative dispatch loop. The parent's verified `exit(0)` is the PASS
-    // (raised from the dispatch callback). A never-draining loop times out.
+    // The ST3 intake role: admitted like the others, registered under the
+    // synthetic supervisor so its escalated termination is reapable, and
+    // marked foreground on the real console so the cooked line discipline
+    // intercepts the pushed `^C` bytes for it.
+    let (intake_root, intake_entry) =
+        build_el0_space(&PAGE_TABLES_INTAKE, INTAKE_RXE, &[b"signal"]);
+    let intake_tid = admit(sched, intake_root, intake_entry);
+    INTAKE_TID.store(intake_tid, Ordering::SeqCst);
+    wait_producer.register_child(TaskId(SUPERVISOR), TaskId(intake_tid));
+    // The foreground delivery hook: the same producer the `signal` syscall
+    // uses, installed exactly as the production boot path installs it.
+    if install_foreground_signal(signal_producer).is_err() {
+        qemu_exit::exit_failure(FAIL_FOREGROUND);
+    }
+    if CONSOLE
+        .grant_foreground(TaskId(SUPERVISOR), TaskId(intake_tid))
+        .is_err()
+    {
+        qemu_exit::exit_failure(FAIL_FOREGROUND);
+    }
+    note(
+        TEST_SPAWNED,
+        "aarch64 signal test: parent + child + intake spawned",
+    );
+
+    // Cooperative dispatch loop, driving the `^C` saga between steps (the
+    // dispatcher-context slot where the production loop drains deferred
+    // foreground deliveries). A never-draining loop times out.
     let mut steps = 0u64;
     while sched.live_task_count() != 0 && steps < MAX_STEPS {
         let _ = sched.step(BOOT_CPU);
+        drive_intake_saga(wait_producer);
         steps += 1;
     }
-
-    // Reaching here means the workload drained without the parent's verified
-    // exit raising PASS — a missed reap or a stall.
     if steps >= MAX_STEPS {
         qemu_exit::exit_failure(FAIL_DEADLOCK);
     }
-    qemu_exit::exit_failure(FAIL_PARENT_BAD_EXIT);
+    // Every task is gone; the escalated reap may land on this final poll.
+    drive_intake_saga(wait_producer);
+
+    // PASS needs both halves: the parent's verified SP7b/SP9 script and the
+    // ST3 intake saga (observed `^C`, then the escalated 130 reap).
+    if PARENT_OK.load(Ordering::SeqCst) && INTAKE_REAPED.load(Ordering::SeqCst) {
+        note(
+            TEST_PASS,
+            "signal test: parent script verified; foreground ^C observed by the intake and the second undrained ^C escalated to the 130 reap",
+        );
+        qemu_exit::exit_success();
+    }
+    if !PARENT_OK.load(Ordering::SeqCst) {
+        qemu_exit::exit_failure(FAIL_PARENT_BAD_EXIT);
+    }
+    qemu_exit::exit_failure(FAIL_INTAKE_INCOMPLETE);
 }

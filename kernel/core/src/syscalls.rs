@@ -83,9 +83,9 @@ use rustos_abi::sysinfo::{
 use rustos_abi::{
     decode_log_record, BootFacts, BootId, CallRecvFlags, CapabilityId, DescriptorTable, DirEntry,
     Errno, FdWire, FileStat, InputMode, IntrospectDomain, IrqHandle, LimitKind, MapFlags,
-    OpenFlags, PortName, ProcId, ProcessStart, RandomFlags, ResourceLimit, Signal, SpawnAttach,
-    StreamMode, SyscallNumber, Time64, UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind,
-    WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_ATTR_KEY_MAX,
+    OpenFlags, PortName, ProcId, ProcessStart, RandomFlags, ResourceLimit, Signal, SignalIntakeOp,
+    SpawnAttach, StreamMode, SyscallNumber, Time64, UnlinkFlags, WaitFlags, WaitSetOp,
+    WaitSourceKind, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_ATTR_KEY_MAX,
     FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX,
     PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES,
     RESOURCE_REF_MAX, SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN,
@@ -1683,6 +1683,11 @@ where
         // lines, reclaimed around here), so dropping the sets is the
         // whole reclamation.
         crate::waitset::release_owned_by(task.0);
+        // Drop the task's signal-intake state (its opt-in and any pending
+        // observed signal): a dead task's intake must never linger, and
+        // task ids are never reused, so a leaked entry could never be
+        // reclaimed later.
+        crate::procsignal::clear_intake(task.0);
         // Release any console foreground ownership the dead task holds,
         // so the console returns to its open state the moment the owner
         // is gone rather than waiting for a reader to prove the owner
@@ -1697,6 +1702,55 @@ where
         // stale entry outlives the task (task ids are never reused, so a
         // leaked entry could never be reclaimed later).
         self.aspaces.write().withdraw(task);
+    }
+
+    /// Whether one wait-set member is ready, as a **non-consuming peek**
+    /// re-checked against the kernel-trusted caller on every scan — a member
+    /// whose resource was torn down (or never owned) simply is not ready,
+    /// and the woken owner's own drain (recv / reap / read / take), never
+    /// the wait, consumes the event.
+    fn waitset_member_ready(&self, caller: &CallerContext<'_>, m: &crate::waitset::Member) -> bool {
+        let sched_task = caller.task_id.0;
+        match m.kind {
+            WaitSourceKind::Endpoint => crate::callreg::lookup(EndpointId(m.id))
+                .is_some_and(|ep| ep.owner() == sched_task && ep.has_pending()),
+            // The IRQ ready flag is *peeked* (`ready_for`), not consumed,
+            // so a faulting `token_out` after the scan never drops a
+            // delivered edge.
+            WaitSourceKind::Irq => {
+                let handle = IrqHandle::from_raw(m.id);
+                self.irq.line_for(handle, caller.task_id).is_some() && self.irq.ready_for(handle)
+            }
+            // The reapable zombie stays in the table for the non-blocking
+            // `wait` that follows, so the scan can never steal a reap.
+            WaitSourceKind::Child => child_selector(m.id).is_some_and(|selector| {
+                self.process_wait.child_state(caller.task_id, selector) == ChildPeek::Reapable
+            }),
+            // A queued keyboard/pointer record for the live owner, or the
+            // loss of the lease itself (revoked, released, seat destroyed)
+            // — the woken owner drains and observes the typed refusal.
+            WaitSourceKind::SeatInput => {
+                self.seat_registry.input_ready(m.id, SeatOwner(sched_task))
+            }
+            // A delivered message waiting in the owner's mailbox — the
+            // woken owner's `ipc_recv` performs the dequeue.
+            WaitSourceKind::Port => self
+                .ipc
+                .read()
+                .lookup(EndpointId(m.id))
+                .is_some_and(|port| port.owner() == sched_task && port.has_pending()),
+            // Buffered bytes (or end-of-stream) on the caller's own pipe
+            // read end — the woken owner's read performs the drain,
+            // re-resolved against the open table so a descriptor closed or
+            // replaced mid-wait simply stops reporting.
+            WaitSourceKind::Stream => u32::try_from(m.id)
+                .is_ok_and(|fd| self.aspaces.read().stream_readable(caller.task_id, fd)),
+            // An observed termination-request signal pending undrained on
+            // the caller's own intake — the woken owner drains through
+            // `signal_intake(Take)`, so a still-pending intake re-reports
+            // on the next wait.
+            WaitSourceKind::Signal => m.id == 0 && crate::procsignal::intake_ready(sched_task),
+        }
     }
 
     /// The one console foreground-owner gate `stream_read` and
@@ -4442,6 +4496,30 @@ where
         Ok(0)
     }
 
+    fn signal_intake(&self, caller: &CallerContext<'_>, op: SignalIntakeOp) -> SyscallResult {
+        // The dispatcher already validated `op` against the closed set and
+        // audited the call. Every operation acts only on the caller's own
+        // intake, keyed by the kernel-trusted `caller.task_id` — there is no
+        // way to name another process, so own-process disposition needs no
+        // capability (the `stream_input_mode` tier).
+        match op {
+            SignalIntakeOp::Enable => {
+                crate::procsignal::intake_enable(caller.task_id.0);
+                Ok(0)
+            }
+            // Refused `WouldBlock` while an observed signal is pending
+            // undrained: a recorded termination request is never silently
+            // discarded (drain it and act on it first).
+            SignalIntakeOp::Disable => {
+                crate::procsignal::intake_disable(caller.task_id.0).map(|()| 0)
+            }
+            // Returns the drained signal's wire discriminant; `WouldBlock`
+            // when nothing is pending, `NotFound` when never enabled.
+            SignalIntakeOp::Take => crate::procsignal::intake_take(caller.task_id.0)
+                .map(|signal| u64::from(signal.as_u32())),
+        }
+    }
+
     fn rlimit_get(&self, caller: &CallerContext<'_>, kind: u32, out: u64) -> SyscallResult {
         // validate `kind` against the closed abi-v1 set before
         // touching any state. An unassigned discriminant fails closed with
@@ -5899,6 +5977,18 @@ where
                             return Err(Errno::NotFound);
                         }
                     }
+                    WaitSourceKind::Signal => {
+                        // A wait-set may observe only the caller's **own**
+                        // signal intake: the id is always 0 (a process has
+                        // exactly one intake) and the caller must have opted
+                        // in through `signal_intake` — without the opt-in
+                        // there is no intake to observe. Both refusals
+                        // collapse to the same oracle-free `NotFound` the
+                        // other kinds use.
+                        if id != 0 || !crate::procsignal::intake_enabled(caller.task_id.0) {
+                            return Err(Errno::NotFound);
+                        }
+                    }
                 }
                 crate::waitset::add(
                     caller.task_id.0,
@@ -5949,6 +6039,10 @@ where
         // between unrelated processes never wakes an unrelated waitset
         // waiter.
         let observes_stream = members.iter().any(|m| m.kind == WaitSourceKind::Stream);
+        // `SIGNAL_INTAKE_WAITQ` is likewise joined only by a set that
+        // actually holds a `Signal` member, and its wake is targeted at the
+        // opted-in task, so signal traffic never disturbs another waiter.
+        let observes_signal = members.iter().any(|m| m.kind == WaitSourceKind::Signal);
         crate::waitq::SERVE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         crate::waitq::IRQ_WAITQ.register(sched_task, deadline_ns);
         crate::waitq::PROCWAIT_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
@@ -5958,60 +6052,22 @@ where
         if observes_stream {
             crate::waitq::PIPE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         }
+        if observes_signal {
+            crate::waitq::SIGNAL_INTAKE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
+        }
 
         // `(kind, id, token)` of the ready member; `id`/`kind` drive the
         // post-write IRQ-edge consume.
         let outcome: Result<(WaitSourceKind, u64, u64), Errno> = loop {
             let now = self.arch.monotonic_ns(cpu);
             let mut ready: Option<(WaitSourceKind, u64, u64)> = None;
-            // Scan in registration order; first ready wins. The IRQ ready
-            // flag is *peeked* (`ready_for`), not consumed, here so a faulting
-            // `token_out` below never drops a delivered edge. Each member is
-            // re-checked against the caller as it is scanned, so a member whose
-            // resource was torn down simply is not ready.
+            // Scan in registration order; first ready wins. Each member's
+            // readiness is the non-consuming, caller-re-checked peek of
+            // `waitset_member_ready`, so a faulting `token_out` below never
+            // drops a delivered event and a torn-down resource simply is
+            // not ready.
             for m in &members {
-                let is_ready = match m.kind {
-                    WaitSourceKind::Endpoint => crate::callreg::lookup(EndpointId(m.id))
-                        .is_some_and(|ep| ep.owner() == sched_task && ep.has_pending()),
-                    WaitSourceKind::Irq => {
-                        let handle = IrqHandle::from_raw(m.id);
-                        self.irq.line_for(handle, caller.task_id).is_some()
-                            && self.irq.ready_for(handle)
-                    }
-                    // A non-consuming peek: the reapable zombie stays in the
-                    // table for the non-blocking `wait` that follows, so the
-                    // scan can never steal a reap.
-                    WaitSourceKind::Child => child_selector(m.id).is_some_and(|selector| {
-                        self.process_wait.child_state(caller.task_id, selector)
-                            == ChildPeek::Reapable
-                    }),
-                    // A non-consuming peek: a queued keyboard/pointer record
-                    // for the live owner, or the loss of the lease itself
-                    // (revoked, released, seat destroyed) — the woken owner
-                    // drains and observes the typed refusal.
-                    WaitSourceKind::SeatInput => {
-                        self.seat_registry.input_ready(m.id, SeatOwner(sched_task))
-                    }
-                    // A non-consuming peek: a delivered message waiting in
-                    // the owner's mailbox — the woken owner's `ipc_recv`
-                    // performs the dequeue. Re-checked against the owner on
-                    // every scan, so a port torn down (or never owned)
-                    // simply is not ready.
-                    WaitSourceKind::Port => self
-                        .ipc
-                        .read()
-                        .lookup(EndpointId(m.id))
-                        .is_some_and(|port| port.owner() == sched_task && port.has_pending()),
-                    // A non-consuming peek: buffered bytes (or end-of-
-                    // stream) on the caller's own pipe read end — the woken
-                    // owner's read performs the drain. Re-resolved against
-                    // the caller's open table on every scan, so a
-                    // descriptor closed or replaced mid-wait simply is not
-                    // ready.
-                    WaitSourceKind::Stream => u32::try_from(m.id)
-                        .is_ok_and(|fd| self.aspaces.read().stream_readable(caller.task_id, fd)),
-                };
-                if is_ready {
+                if self.waitset_member_ready(caller, m) {
                     ready = Some((m.kind, m.id, m.token));
                     break;
                 }
@@ -6062,6 +6118,9 @@ where
         }
         if observes_stream {
             crate::waitq::PIPE_WAITQ.deregister(sched_task);
+        }
+        if observes_signal {
+            crate::waitq::SIGNAL_INTAKE_WAITQ.deregister(sched_task);
         }
         // Re-point the one-shot at the nearest deadline any remaining waiter
         // on *any* timed wait-queue needs (or clear it) so a finished wait
@@ -21962,6 +22021,124 @@ mod tests {
             .expect("seat released");
     }
 
+    /// Adding a `Signal` wait-set member requires the caller's own intake
+    /// opt-in and the fixed id 0; every refusal is the same oracle-free
+    /// `NotFound` the other member kinds use (`plans/STRESSTEST.md` ST3).
+    #[test]
+    fn waitset_signal_member_requires_the_intake_opt_in() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        // Task id unique to this test: the wait-set registry and the
+        // signal-intake map are process-global.
+        let caps = make_caps_record(0x570B, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x570B),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        let ws = h.waitset_create(&ctx).expect("wait-set minted");
+        // Without the opt-in there is no intake to observe.
+        assert_eq!(
+            h.waitset_ctl(&ctx, ws, WS_OP_ADD, WS_KIND_SIGNAL, 0, 0xA),
+            Err(Errno::NotFound)
+        );
+        // The opt-in admits the member — but only at the fixed id 0.
+        assert_eq!(h.signal_intake(&ctx, SignalIntakeOp::Enable), Ok(0));
+        assert_eq!(
+            h.waitset_ctl(&ctx, ws, WS_OP_ADD, WS_KIND_SIGNAL, 1, 0xA),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(
+            h.waitset_ctl(&ctx, ws, WS_OP_ADD, WS_KIND_SIGNAL, 0, 0xA),
+            Ok(0)
+        );
+        // Cleanup: the registries are process-global.
+        assert_eq!(crate::waitset::release_owned_by(0x570B), 1);
+        crate::procsignal::clear_intake(0x570B);
+    }
+
+    /// A pending observed signal makes `waitset_wait` report the `Signal`
+    /// member's token as a non-consuming peek; `signal_intake(Take)` is
+    /// what drains it (`plans/STRESSTEST.md` ST3).
+    #[test]
+    fn waitset_wait_reports_a_pending_signal_member_and_take_drains_it() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(0x570C), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(0x570C, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x570C),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        assert_eq!(h.signal_intake(&ctx, SignalIntakeOp::Enable), Ok(0));
+        let set = h.waitset_create(&ctx).expect("create");
+        h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_SIGNAL, 0, 0x51)
+            .expect("add signal member");
+
+        // Nothing pending: a zero-timeout wait expires.
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+        // Draining an empty intake is the typed non-blocking answer.
+        assert_eq!(
+            h.signal_intake(&ctx, SignalIntakeOp::Take),
+            Err(Errno::WouldBlock)
+        );
+
+        // A delivery records the pending observation; the member reports
+        // ready and its token is written out.
+        assert!(crate::procsignal::try_intake(0x570C, Signal::Interrupt));
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+        let token_bytes = read_reply_page(
+            aspaces
+                .read()
+                .resolve(SecTaskId(0x570C))
+                .expect("registered")
+                .1,
+            8,
+        );
+        assert_eq!(
+            u64::from_le_bytes(token_bytes.try_into().expect("8 bytes")),
+            0x51
+        );
+        // The peek is non-consuming: the member stays ready until drained.
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+        assert_eq!(
+            h.signal_intake(&ctx, SignalIntakeOp::Take),
+            Ok(u64::from(Signal::Interrupt.as_u32()))
+        );
+        // Drained: the next wait expires again.
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+        // Cleanup: the registries are process-global.
+        assert_eq!(crate::waitset::release_owned_by(0x570C), 1);
+        crate::procsignal::clear_intake(0x570C);
+    }
+
     /// `shm_create` on a build with no shared-memory facility wired fails
     /// closed with `NotImplemented`, never fabricating a region.
     #[test]
@@ -22000,6 +22177,7 @@ mod tests {
     const WS_KIND_CHILD: u32 = rustos_abi::WaitSourceKind::Child as u32;
     const WS_KIND_PORT: u32 = rustos_abi::WaitSourceKind::Port as u32;
     const WS_KIND_STREAM: u32 = rustos_abi::WaitSourceKind::Stream as u32;
+    const WS_KIND_SIGNAL: u32 = rustos_abi::WaitSourceKind::Signal as u32;
 
     /// A [`ProcessWait`] test double over the real [`ProcessTable`]
     /// bookkeeping, so the wait-set `Child` tests exercise the same matcher

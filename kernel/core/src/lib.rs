@@ -203,7 +203,8 @@ pub use pipe::{Pipe, PipeEnd, PipeRole, PIPE_CAPACITY};
 pub use preempt::{note_preempt_tick, take_preempt_pending};
 pub use proc_id::{mint_proc_id, mint_proc_id_bootstrap};
 pub use procsignal::{
-    drain_pending_foreground, foreground_signal_installed, install_foreground_signal,
+    clear_intake, drain_pending_foreground, foreground_signal_installed, install_foreground_signal,
+    intake_disable, intake_enable, intake_enabled, intake_ready, intake_take,
     queue_foreground_signal, task_is_stopped, ForegroundSignal, ForegroundSignalAlreadyInstalled,
     KernelProcessSignal, NullProcessSignal, ProcessSignal, NULL_PROCESS_SIGNAL,
 };
