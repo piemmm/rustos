@@ -421,8 +421,15 @@ mod program {
                         }
                         WindowEvent::CloseRequested { .. } => return EventOutcome::End,
                         // Focus changes and pointer events repaint
-                        // nothing today; the screen is shell-driven.
-                        WindowEvent::Focus { .. } | WindowEvent::Pointer { .. } => {}
+                        // nothing today; the screen is shell-driven. The
+                        // terminal never requests a pick, so a pick
+                        // conclusion is a session bug and is ignored (an
+                        // unredeemed delegation is reclaimed by the
+                        // kernel at exit).
+                        WindowEvent::Focus { .. }
+                        | WindowEvent::Pointer { .. }
+                        | WindowEvent::FilePicked { .. }
+                        | WindowEvent::PickCancelled { .. } => {}
                     }
                 }
                 Err(err) if errno_from(err) == Errno::WouldBlock => return EventOutcome::Continue,

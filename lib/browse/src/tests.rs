@@ -382,6 +382,59 @@ fn a_browser_navigates_the_vfs_source_end_to_end() {
 }
 
 #[test]
+fn entry_index_at_mirrors_the_rendered_rows() {
+    use crate::render::{entry_index_at, row_height};
+
+    let browser = Browser::open_root(MockFs::fixture()).expect("root opens");
+    let row = row_height();
+    let viewport_height = row * 4; // the path bar plus three entry rows
+
+    // The path bar resolves to no entry; the first list row is entry 0.
+    assert_eq!(entry_index_at(&browser, viewport_height, 0), None);
+    assert_eq!(entry_index_at(&browser, viewport_height, row - 1), None);
+    assert_eq!(entry_index_at(&browser, viewport_height, row), Some(0));
+    assert_eq!(
+        entry_index_at(&browser, viewport_height, row * 2 + row / 2),
+        Some(1)
+    );
+    // A row past the listing's end and a coordinate outside the viewport
+    // resolve to nothing rather than a clamped guess.
+    let last = u32::try_from(browser.entries().len()).expect("a tiny fixture listing");
+    assert_eq!(
+        entry_index_at(&browser, row * (last + 2), row * (last + 1)),
+        None
+    );
+    assert_eq!(
+        entry_index_at(&browser, viewport_height, viewport_height),
+        None
+    );
+    // A degenerate viewport (path bar only) has no clickable rows.
+    assert_eq!(entry_index_at(&browser, row, row), None);
+}
+
+#[test]
+fn entry_index_at_accounts_for_the_scroll_anchor() {
+    use crate::render::{entry_index_at, row_height};
+
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root opens");
+    let row = row_height();
+    // Two visible entry rows; select the last entry so the list scrolls.
+    let viewport_height = row * 3;
+    let last = browser.entries().len() - 1;
+    browser.select(last).expect("selectable");
+    // The bottom visible row is the selected (last) entry; the row above
+    // it is its predecessor — exactly what `render` draws.
+    assert_eq!(
+        entry_index_at(&browser, viewport_height, row * 2),
+        Some(last)
+    );
+    assert_eq!(
+        entry_index_at(&browser, viewport_height, row),
+        Some(last - 1)
+    );
+}
+
+#[test]
 fn a_missing_directory_surfaces_the_fetch_refusal() {
     let mut source = tree_source(BTreeMap::new());
     assert_eq!(

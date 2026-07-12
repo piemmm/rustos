@@ -5,8 +5,9 @@
 //! # What the program wires (and what stays in the libraries)
 //!
 //! Everything with behaviour worth testing lives in host-tested crates —
-//! the browser engine and its validated path spelling (`rustos_files`),
-//! the themed listing renderer (`rustos_files::render`), and the window
+//! the shared browser engine and its validated path spelling
+//! (`rustos_browse`), the themed listing renderer
+//! (`rustos_browse::render`), and the window
 //! channel's client half (`rustos_window`). This binary only composes
 //! them over the live syscalls:
 //!
@@ -36,14 +37,13 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    extern crate alloc;
 
     use rustos_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
     use rustos_abi::input::{KeyInput, KeyValue, NamedKeyCode};
     use rustos_abi::window_ipc::{WindowEvent, WINDOW_ENDPOINT};
     use rustos_abi::{Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN};
-    use rustos_files::render::render;
-    use rustos_files::{Browser, VfsDirectorySource, WIN_HEIGHT, WIN_WIDTH};
+    use rustos_browse::render::render;
+    use rustos_browse::{Browser, VfsDirectorySource, WIN_HEIGHT, WIN_WIDTH};
     use rustos_geometry::Rect;
     use rustos_theme::ThemeRegistry;
     use rustos_window::{EventSource, WindowClient, WindowEvents, WindowTransport};
@@ -179,7 +179,7 @@ mod program {
         mode: &DisplayMode,
     ) -> Result<(), Errno>
     where
-        S: rustos_files::DirectorySource,
+        S: rustos_browse::DirectorySource,
         T: WindowTransport,
     {
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
@@ -198,7 +198,7 @@ mod program {
     /// Apply one delivered event to the browser, reporting whether the
     /// listing changed (and must re-present) and whether the app should
     /// end (the desktop asked the window to close).
-    fn apply_event<S: rustos_files::DirectorySource>(
+    fn apply_event<S: rustos_browse::DirectorySource>(
         browser: &mut Browser<S>,
         event: &WindowEvent,
     ) -> (bool, bool) {
@@ -228,10 +228,15 @@ mod program {
             },
             WindowEvent::CloseRequested { .. } => (false, true),
             // Focus changes, key releases, and pointer events repaint
-            // nothing today; the selection model is keyboard-driven.
-            WindowEvent::Key { .. } | WindowEvent::Focus { .. } | WindowEvent::Pointer { .. } => {
-                (false, false)
-            }
+            // nothing today; the selection model is keyboard-driven. The
+            // browser never requests a pick, so a pick conclusion is a
+            // session bug and is ignored rather than acted on (an
+            // unredeemed delegation is reclaimed by the kernel at exit).
+            WindowEvent::Key { .. }
+            | WindowEvent::Focus { .. }
+            | WindowEvent::Pointer { .. }
+            | WindowEvent::FilePicked { .. }
+            | WindowEvent::PickCancelled { .. } => (false, false),
         }
     }
 

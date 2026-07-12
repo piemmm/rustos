@@ -603,6 +603,114 @@ mod tests {
         }
     }
 
+    // The store-only file tools' expected request: the console pair for
+    // their prompts/diagnostics plus filesystem reach, which *is* their
+    // job. They ship purely as discovered on-disk bundles — the boot
+    // floor never grows — so no `spawn_layout` row or manifest constant
+    // exists for them and their `AppInfo.toml` is pinned here directly.
+    const FILE_TOOL_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::CONSOLE_READ,
+        CapabilityId::FS_ACCESS,
+    ];
+
+    // A file tool that additionally re-spawns its own binary as its
+    // parser-sandbox worker (fstree's disassembly viewer decodes
+    // every container and instruction window there, never in-process):
+    // the file-tool request plus `CAP_PROC_SPAWN`.
+    const SANDBOXED_FILE_TOOL_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::CONSOLE_READ,
+        CapabilityId::FS_ACCESS,
+        CapabilityId::PROC_SPAWN,
+    ];
+
+    // The store-only pure text tools' expected request: console write
+    // for their output and the filesystem gate their short-help read
+    // needs — they touch no operand path and never prompt. They ship
+    // purely as discovered on-disk bundles — the boot floor never
+    // grows — so no `spawn_layout` row or manifest constant exists for
+    // them and their `AppInfo.toml` is pinned here directly.
+    const PURE_TOOL_REQUEST: &[CapabilityId] =
+        &[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS];
+
+    // The desktop graphical-session service (plans/DISPLAY.md D7c,
+    // plans/APPWIN.md AW3/AW5): the boot seat's revocable lease
+    // (CAP_DISPLAY), the owner-gated seat input drains
+    // (CAP_INPUT_READ), the zero-copy frame regions it creates for
+    // the display service and maps from each served app window
+    // (CAP_SHM), the start menu's app launchers (CAP_PROC_SPAWN),
+    // and the trusted file picker (CAP_FS_ACCESS — the session lists
+    // directories and opens the user's chosen file under its own
+    // identity, then delegates that one file one-shot over fd_grant;
+    // plans/CAPABILITY_USE.md CU6). Binding the seat-scoped window
+    // rendezvous needs no capability: the kernel authorises it by the
+    // session's live seat lease. It ships purely as a discovered
+    // on-disk bundle — the boot floor never grows — so no
+    // `spawn_layout` row or manifest constant exists for it and its
+    // `AppInfo.toml` is pinned here directly.
+    const DESKTOP_SESSION_REQUEST: &[CapabilityId] = &[
+        CapabilityId::DISPLAY,
+        CapabilityId::INPUT_READ,
+        CapabilityId::SHM,
+        CapabilityId::PROC_SPAWN,
+        CapabilityId::FS_ACCESS,
+    ];
+
+    // The device-inventory listing tools `lspci` and `lsusb`
+    // (plans/DEVICES.md DEVICE1): the pure-tool request plus
+    // `CAP_SYSINFO_HW` for the `HARDWARE_TREE` query they render. Not
+    // embedded spawn-floor programs, so the list lives only in this pin.
+    const HW_LIST_TOOL_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::FS_ACCESS,
+        CapabilityId::SYSINFO_HW,
+    ];
+
+    // The windowed file browser `files` (plans/APPWIN.md AW3): console
+    // write for its fail-loud diagnostics, filesystem reach for the
+    // listings it browses, and CAP_SHM to create and grant the
+    // zero-copy window frame region the desktop session maps. Not an
+    // embedded spawn-floor program, so the list lives only in this pin.
+    const FILES_BROWSER_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::FS_ACCESS,
+        CapabilityId::SHM,
+    ];
+
+    // The windowed terminal `terminal` (plans/APPWIN.md AW4): console
+    // write for its fail-loud diagnostics, CAP_PROC_SPAWN to host the
+    // user's shell as its own child over pipes, and CAP_SHM to create
+    // and grant the zero-copy window frame region the desktop session
+    // maps. Not an embedded spawn-floor program, so the list lives
+    // only in this pin.
+    const TERMINAL_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::PROC_SPAWN,
+        CapabilityId::SHM,
+    ];
+
+    // The windowed file viewer `viewer` (plans/APPWIN.md AW5): console
+    // write for its fail-loud diagnostics and CAP_SHM to create and
+    // grant the zero-copy window frame region the desktop session
+    // maps — and deliberately NO filesystem capability: its only reach
+    // into the filesystem is the one file the user hands it through
+    // the session's trusted picker (the CU6 one-shot fd_grant
+    // delegation, redeemed with the unprivileged fd_redeem). Not an
+    // embedded spawn-floor program, so the list lives only in this pin.
+    const VIEWER_REQUEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE, CapabilityId::SHM];
+
+    // The volume-detach tool `unmount` (plans/DEVICES.md D4b): the
+    // pure-tool request plus `CAP_FS_MOUNT`, which *is* its job — the
+    // kernel's `volume_detach` path re-checks it and audits every
+    // decision. Not an embedded spawn-floor program, so the list lives
+    // only in this pin.
+    const UNMOUNT_TOOL_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::FS_ACCESS,
+        CapabilityId::FS_MOUNT,
+    ];
+
     /// Every program crate's on-disk `AppInfo.toml` manifest source
     /// requests exactly the capability set this registry embeds, and the
     /// two program inventories are identical (`plans/APPS.md` deliverable
@@ -612,99 +720,6 @@ mod tests {
     #[test]
     fn appinfo_sources_match_the_embedded_registry() {
         use rustos_itest_harness::app_image::{discover_app_manifests, AppKind};
-
-        // The store-only file tools' expected request: the console pair for
-        // their prompts/diagnostics plus filesystem reach, which *is* their
-        // job. They ship purely as discovered on-disk bundles — the boot
-        // floor never grows — so no `spawn_layout` row or manifest constant
-        // exists for them and their `AppInfo.toml` is pinned here directly.
-        const FILE_TOOL_REQUEST: &[CapabilityId] = &[
-            CapabilityId::CONSOLE_WRITE,
-            CapabilityId::CONSOLE_READ,
-            CapabilityId::FS_ACCESS,
-        ];
-
-        // A file tool that additionally re-spawns its own binary as its
-        // parser-sandbox worker (fstree's disassembly viewer decodes
-        // every container and instruction window there, never in-process):
-        // the file-tool request plus `CAP_PROC_SPAWN`.
-        const SANDBOXED_FILE_TOOL_REQUEST: &[CapabilityId] = &[
-            CapabilityId::CONSOLE_WRITE,
-            CapabilityId::CONSOLE_READ,
-            CapabilityId::FS_ACCESS,
-            CapabilityId::PROC_SPAWN,
-        ];
-
-        // The store-only pure text tools' expected request: console write
-        // for their output and the filesystem gate their short-help read
-        // needs — they touch no operand path and never prompt. They ship
-        // purely as discovered on-disk bundles — the boot floor never
-        // grows — so no `spawn_layout` row or manifest constant exists for
-        // them and their `AppInfo.toml` is pinned here directly.
-        const PURE_TOOL_REQUEST: &[CapabilityId] =
-            &[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS];
-
-        // The desktop graphical-session service (plans/DISPLAY.md D7c,
-        // plans/APPWIN.md AW3): the boot seat's revocable lease
-        // (CAP_DISPLAY), the owner-gated seat input drains
-        // (CAP_INPUT_READ), the zero-copy frame regions it creates for
-        // the display service and maps from each served app window
-        // (CAP_SHM), and the start menu's app launchers (CAP_PROC_SPAWN).
-        // Binding the seat-scoped window rendezvous needs no capability:
-        // the kernel authorises it by the session's live seat lease.
-        // It ships purely as a discovered on-disk bundle — the boot floor
-        // never grows — so no `spawn_layout` row or manifest constant
-        // exists for it and its `AppInfo.toml` is pinned here directly.
-        const DESKTOP_SESSION_REQUEST: &[CapabilityId] = &[
-            CapabilityId::DISPLAY,
-            CapabilityId::INPUT_READ,
-            CapabilityId::SHM,
-            CapabilityId::PROC_SPAWN,
-        ];
-
-        // The device-inventory listing tools `lspci` and `lsusb`
-        // (plans/DEVICES.md DEVICE1): the pure-tool request plus
-        // `CAP_SYSINFO_HW` for the `HARDWARE_TREE` query they render. Not
-        // embedded spawn-floor programs, so the list lives only in this pin.
-        const HW_LIST_TOOL_REQUEST: &[CapabilityId] = &[
-            CapabilityId::CONSOLE_WRITE,
-            CapabilityId::FS_ACCESS,
-            CapabilityId::SYSINFO_HW,
-        ];
-
-        // The windowed file browser `files` (plans/APPWIN.md AW3): console
-        // write for its fail-loud diagnostics, filesystem reach for the
-        // listings it browses, and CAP_SHM to create and grant the
-        // zero-copy window frame region the desktop session maps. Not an
-        // embedded spawn-floor program, so the list lives only in this pin.
-        const FILES_BROWSER_REQUEST: &[CapabilityId] = &[
-            CapabilityId::CONSOLE_WRITE,
-            CapabilityId::FS_ACCESS,
-            CapabilityId::SHM,
-        ];
-
-        // The windowed terminal `terminal` (plans/APPWIN.md AW4): console
-        // write for its fail-loud diagnostics, CAP_PROC_SPAWN to host the
-        // user's shell as its own child over pipes, and CAP_SHM to create
-        // and grant the zero-copy window frame region the desktop session
-        // maps. Not an embedded spawn-floor program, so the list lives
-        // only in this pin.
-        const TERMINAL_REQUEST: &[CapabilityId] = &[
-            CapabilityId::CONSOLE_WRITE,
-            CapabilityId::PROC_SPAWN,
-            CapabilityId::SHM,
-        ];
-
-        // The volume-detach tool `unmount` (plans/DEVICES.md D4b): the
-        // pure-tool request plus `CAP_FS_MOUNT`, which *is* its job — the
-        // kernel's `volume_detach` path re-checks it and audits every
-        // decision. Not an embedded spawn-floor program, so the list lives
-        // only in this pin.
-        const UNMOUNT_TOOL_REQUEST: &[CapabilityId] = &[
-            CapabilityId::CONSOLE_WRITE,
-            CapabilityId::FS_ACCESS,
-            CapabilityId::FS_MOUNT,
-        ];
 
         let userland = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../userland");
         let discovered = discover_app_manifests(&userland).expect("discovery walks");
@@ -754,14 +769,30 @@ mod tests {
             ("unmount", AppKind::Command, UNMOUNT_TOOL_REQUEST),
             ("useradd", AppKind::Command, ADMIN_TOOL_REQUEST),
             ("users", AppKind::Command, USERS_TOOL_MANIFEST),
+            ("viewer", AppKind::Command, VIEWER_REQUEST),
             ("vim", AppKind::Command, FILE_TOOL_REQUEST),
             ("wc", AppKind::Command, FILE_TOOL_REQUEST),
             ("whoami", AppKind::Command, PURE_TOOL_REQUEST),
             ("yes", AppKind::Command, PURE_TOOL_REQUEST),
         ];
 
+        assert_registry_matches(&discovered, embedded);
+    }
+
+    /// Assert the discovered on-disk `AppInfo.toml` inventory and the
+    /// embedded registry agree entry for entry — name, kind, and exact
+    /// capability set. Split from the pin test so the (long) inventory
+    /// table stays readable in one place.
+    fn assert_registry_matches(
+        discovered: &[rustos_itest_harness::app_image::DiscoveredApp],
+        embedded: &[(
+            &str,
+            rustos_itest_harness::app_image::AppKind,
+            &[CapabilityId],
+        )],
+    ) {
         assert_eq!(discovered.len(), embedded.len());
-        for ((name, kind, caps), found) in embedded.iter().zip(&discovered) {
+        for ((name, kind, caps), found) in embedded.iter().zip(discovered) {
             assert_eq!(found.manifest.name, *name, "inventory drift");
             assert_eq!(found.manifest.kind, *kind, "{name}: store drift");
             assert_eq!(

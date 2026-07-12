@@ -133,6 +133,8 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  86 | `fs_attr_list` | `user_ptr` (path), `len`, `u64 index`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
 |  87 | `fs_attr_remove` | `user_ptr` (path), `len`, `user_ptr` (key), `len` | `errno` | `CAP_FS_ACCESS` | yes |
 |  89 | `boot_facts_get` | `user_ptr` (out), `len`                | `u64` (bytes) | —             | no    |
+|  90 | `fd_grant`     | `u32 fd`, `u64 pid`                     | `u64` (handle) | `CAP_FS_ACCESS` | yes  |
+|  91 | `fd_redeem`    | `Handle` (grant)                        | `u64` (fd)    | —             | yes   |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -651,6 +653,31 @@ byte length — the kernel's own record of the region, never the granting
 task's claim — so a server sizes its view of the shared bytes from the
 kernel's answer (`plans/DISPLAY.md` D7b). Wrapper `rustos_rt::shm_map`;
 C stub `ros_sys_shm_map`.
+
+`fd_grant` (no. 90) and `fd_redeem` (no. 91) are the one-shot,
+user-mediated **file** delegation (`plans/CAPABILITY_USE.md` CU6,
+`plans/APPWIN.md` AW5 — the desktop's trusted-picker hand-off).
+`fd_grant(fd, pid)` requires `CAP_FS_ACCESS` and delegates the caller's
+**own** plain read-only, non-directory filesystem descriptor to the live
+task `pid` (taken from a kernel-attested source such as
+`call_peer_origin`; task ids are never reused, so the grant lands on
+exactly the intended process or fails closed `NotFound`). A pipe,
+resource, writable, directory, or already-delegated descriptor is
+refused — delegation is read-only by construction, never widens, and
+never chains. The kernel captures the *grantor's* uid and effective
+capability set beside the resolved path and mints a recipient-owner-bound
+handle the grantor forwards in-band (a window-channel `FilePicked`
+event); the number is useless to a bystander, and every mint is audited.
+`fd_redeem(handle)` is **ungated** — receiving user-mediated,
+already-checked authority is the point — and consumes the grant exactly
+once, atomically (a descriptor-table-full refusal leaves it intact),
+installing a delegated descriptor whose every read is re-authorised
+through the secured VFS under the **grantor's** captured identity, so a
+permission change against the grantor revokes the delegation's reach
+too; every other operation on the descriptor refuses, and an exited
+recipient's unredeemed grants are reclaimed with its records. Wrappers
+`rustos_rt::fd_grant` / `rustos_rt::fd_redeem`; C stubs
+`ros_sys_fd_grant` / `ros_sys_fd_redeem`.
 
 The wait-set (`waitset_ctl`, no. 44) additionally accepts a `SeatInput`
 member (`plans/DISPLAY.md` D7a): `id` names a seat whose **live lease the

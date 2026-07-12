@@ -139,6 +139,29 @@ impl<T: WindowTransport> WindowClient<T> {
         self.status_call(&request)
     }
 
+    /// Ask the session to run its trusted file picker for window
+    /// `window_id` (`plans/CAPABILITY_USE.md` CU6).
+    ///
+    /// A success is only the acceptance: the pick concludes
+    /// asynchronously with a [`WindowEvent::FilePicked`] (carrying the
+    /// one-shot `fd_redeem` handle) or a [`WindowEvent::PickCancelled`]
+    /// on the app's event endpoint, so the app keeps parking on its
+    /// ordinary event wait.
+    ///
+    /// # Errors
+    ///
+    /// The session's typed refusal ([`Errno::AlreadyExists`] while a pick
+    /// is already pending on the window; [`Errno::NotFound`] for a window
+    /// the caller does not own), a transport failure, or a corrupt status
+    /// frame.
+    ///
+    /// [`WindowEvent::FilePicked`]: rustos_abi::window_ipc::WindowEvent::FilePicked
+    /// [`WindowEvent::PickCancelled`]: rustos_abi::window_ipc::WindowEvent::PickCancelled
+    pub fn pick_file(&mut self, window_id: u64) -> Result<(), Errno> {
+        let request = WindowRequest::PickFile { window_id }.to_le_bytes();
+        self.status_call(&request)
+    }
+
     /// Issue `request` and decode the shared status reply.
     fn status_call(&mut self, request: &[u8]) -> Result<(), Errno> {
         let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];

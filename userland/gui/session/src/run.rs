@@ -68,14 +68,16 @@ mod program {
     use rustos_abi::seat::SEAT_PRIMARY;
     use rustos_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST};
     use rustos_abi::{
-        DriverError, Errno, Origin, ProcId, WaitFlags, WaitSetOp, WaitSourceKind, WaitStatus,
-        ORIGIN_WIRE_LEN, WAIT_PID_ANY,
+        DriverError, Errno, OpenFlags, Origin, ProcId, WaitFlags, WaitSetOp, WaitSourceKind,
+        WaitStatus, ORIGIN_WIRE_LEN, WAIT_PID_ANY,
     };
+    use rustos_browse::{DirectorySource, VfsDirectorySource};
     use rustos_caps::CapabilitySet;
     use rustos_desktop_session::{
-        DesktopShell, DeviceInputSource, KeyboardInputSource, SeatEventReader, SeatInputChannel,
-        SessionWindows, ShellWindowHost, APPEARANCE_LABEL, FILES_LABEL, FILES_LAUNCHER,
-        FILES_RUN_PATH, TERMINAL_LABEL, TERMINAL_LAUNCHER, TERMINAL_RUN_PATH,
+        ConcludedPick, DesktopShell, DeviceInputSource, KeyboardInputSource, PickConclusion,
+        SeatEventReader, SeatInputChannel, SessionPicker, SessionWindows, ShellWindowHost,
+        APPEARANCE_LABEL, FILES_LABEL, FILES_LAUNCHER, FILES_RUN_PATH, TERMINAL_LABEL,
+        TERMINAL_LAUNCHER, TERMINAL_RUN_PATH, VIEWER_LABEL, VIEWER_LAUNCHER, VIEWER_RUN_PATH,
     };
     use rustos_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use rustos_taskbar::{MenuAction, TaskbarConfig, TaskbarResponse};
@@ -238,6 +240,18 @@ mod program {
         fn take_by_pid(&mut self, pid: u64) -> Option<ProcId> {
             self.peers.remove(&pid)
         }
+
+        /// The kernel task id the attested client `id` called as, if it
+        /// has called this session. The delegation target of a concluded
+        /// pick: the pid came from `call_peer_origin`, never a wire claim,
+        /// and task ids are never reused, so `fd_grant` lands on exactly
+        /// the process whose window asked.
+        fn pid_of(&self, id: ProcId) -> Option<u64> {
+            self.peers
+                .iter()
+                .find(|(_, proc_id)| **proc_id == id)
+                .map(|(pid, _)| *pid)
+        }
     }
 
     impl CallerIdentity for RtWindowIdentity {
@@ -391,6 +405,11 @@ mod program {
             .taskbar_mut()
             .start_menu_mut()
             .add_launcher(TERMINAL_LAUNCHER, TERMINAL_LABEL);
+        let _ = shell
+            .session_mut()
+            .taskbar_mut()
+            .start_menu_mut()
+            .add_launcher(VIEWER_LAUNCHER, VIEWER_LABEL);
 
         // First frame: place the bar and push the whole surface once; every
         // later present carries only the composited damage.
@@ -476,6 +495,15 @@ mod program {
         let mut identity = RtWindowIdentity::new();
         let mut sink = RtEventSink;
         let mut focused: Option<u64> = None;
+        // The trusted file picker (AW5/CU6): the one shared browser engine
+        // over the session's own capability-checked listing call. Every
+        // pick starts from a fresh root listing under the session's
+        // authority; the app never lists anything itself.
+        let mut picker = SessionPicker::new(|| {
+            VfsDirectorySource::new(|path: &str| {
+                rustos_rt::read_dir_all(path.as_bytes()).map_err(errno_from)
+            })
+        });
 
         let mut token = 0u64;
         loop {
@@ -506,6 +534,7 @@ mod program {
                             shell: &mut shell,
                             compositor: &mut compositor,
                             windows: &mut windows,
+                            picker: &mut picker,
                         };
                         server.serve(
                             &mut bridge,
@@ -538,6 +567,7 @@ mod program {
                             shell: &mut shell,
                             compositor: &mut compositor,
                             windows: &mut windows,
+                            picker: &mut picker,
                         };
                         server.client_exited(&mut bridge, client);
                         if focused.is_some_and(|id| server.owner_of(id).is_none()) {
@@ -566,6 +596,8 @@ mod program {
                         &mut windows,
                         &mut server,
                         &mut sink,
+                        &mut identity,
+                        &mut picker,
                     );
                 }
                 loop {
@@ -582,6 +614,8 @@ mod program {
                                 &mut windows,
                                 &mut server,
                                 &mut sink,
+                                &mut identity,
+                                &mut picker,
                             );
                         }
                         Err(err) => return drain_fault(err),
@@ -599,10 +633,11 @@ mod program {
 
     /// Route one shell outcome onward: mirror focus changes and pointer
     /// presses to the owning app over the window channel, hand the raw
-    /// key record to the focused served window, and spawn the launcher
-    /// selection. Everything else is complete inside the shell.
+    /// key record to the focused served window (or the showing picker),
+    /// and spawn the launcher selection. Everything else is complete
+    /// inside the shell.
     #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
-    fn route_outcome(
+    fn route_outcome<S: DirectorySource, F: FnMut() -> S>(
         outcome: rustos_desktop_session::ShellOutcome,
         key: Option<KeyInput>,
         focused: &mut Option<u64>,
@@ -611,6 +646,8 @@ mod program {
         windows: &mut SessionWindows,
         server: &mut WindowServer<RtShmMapper>,
         sink: &mut RtEventSink,
+        identity: &RtWindowIdentity,
+        picker: &mut SessionPicker<S, F>,
     ) {
         use rustos_desktop_session::{SessionEvent, ShellOutcome};
         match outcome {
@@ -628,6 +665,7 @@ mod program {
                                 shell,
                                 compositor,
                                 windows,
+                                picker,
                                 &WindowEvent::Focus {
                                     window_id: old,
                                     focused: false,
@@ -641,6 +679,7 @@ mod program {
                                 shell,
                                 compositor,
                                 windows,
+                                picker,
                                 &WindowEvent::Focus {
                                     window_id: id,
                                     focused: true,
@@ -661,6 +700,7 @@ mod program {
                             shell,
                             compositor,
                             windows,
+                            picker,
                             &WindowEvent::Pointer {
                                 window_id: id,
                                 x,
@@ -671,6 +711,18 @@ mod program {
                             },
                         );
                     }
+                    // A press on the showing picker window navigates it:
+                    // the row hit-test, descent, and choose rules are the
+                    // shared engine's, and a concluded pick delegates (or
+                    // cancels) below.
+                    if picker.wm_id() == Some(window) {
+                        if let Some(concluded) = picker.handle_click(local, shell, compositor) {
+                            conclude_pick(
+                                concluded, server, sink, shell, compositor, windows, identity,
+                                picker,
+                            );
+                        }
+                    }
                 }
                 InputResponse::DesktopPressed => {
                     if let Some(old) = focused.take() {
@@ -680,6 +732,7 @@ mod program {
                             shell,
                             compositor,
                             windows,
+                            picker,
                             &WindowEvent::Focus {
                                 window_id: old,
                                 focused: false,
@@ -688,13 +741,26 @@ mod program {
                     }
                 }
                 InputResponse::Key { window, .. } => {
-                    if let (Some(id), Some(record)) = (windows.ipc_id(window), key) {
+                    if picker.wm_id() == Some(window) {
+                        // The focused picker consumes its own keys; a
+                        // concluded pick delegates (or cancels) below and
+                        // the key never reaches a served window.
+                        if let Some(record) = key {
+                            if let Some(concluded) = picker.handle_key(&record, shell, compositor) {
+                                conclude_pick(
+                                    concluded, server, sink, shell, compositor, windows, identity,
+                                    picker,
+                                );
+                            }
+                        }
+                    } else if let (Some(id), Some(record)) = (windows.ipc_id(window), key) {
                         deliver(
                             server,
                             sink,
                             shell,
                             compositor,
                             windows,
+                            picker,
                             &WindowEvent::Key {
                                 window_id: id,
                                 key: record,
@@ -729,19 +795,82 @@ mod program {
                     let _ = rustos_rt::stderr(b"desktop: terminal launch refused\n");
                 }
             }
+            ShellOutcome::Session(SessionEvent::Forward(TaskbarResponse::MenuEntrySelected {
+                action: MenuAction::Launch(launcher),
+                ..
+            })) if launcher == VIEWER_LAUNCHER => {
+                // The file viewer, exactly as the apps above: spawned from
+                // the on-disk store bundle, refusal reported, desktop
+                // carries on.
+                if rustos_rt::spawn(VIEWER_RUN_PATH) < 0 {
+                    let _ = rustos_rt::stderr(b"desktop: viewer launch refused\n");
+                }
+            }
             _ => {}
         }
     }
 
-    /// Deliver one app-ward event, tearing the owner's windows down when
-    /// the kernel proves the owner is gone (its event port was reclaimed,
-    /// so the send finds nothing).
-    fn deliver(
+    /// Conclude a pick: delegate the chosen file one-shot to the
+    /// requesting window's attested owner and deliver `FilePicked`, or
+    /// deliver `PickCancelled` when the user dismissed — or when any step
+    /// of the delegation refuses (a vanished owner, a refused open or
+    /// grant): nothing was delegated, so the cancellation is the honest,
+    /// fail-closed conclusion, stated on `stderr` for the operator.
+    #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
+    fn conclude_pick<S: DirectorySource, F: FnMut() -> S>(
+        concluded: ConcludedPick,
         server: &mut WindowServer<RtShmMapper>,
         sink: &mut RtEventSink,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
         windows: &mut SessionWindows,
+        identity: &RtWindowIdentity,
+        picker: &mut SessionPicker<S, F>,
+    ) {
+        let window_id = concluded.for_window;
+        let event = match concluded.conclusion {
+            PickConclusion::Cancelled => WindowEvent::PickCancelled { window_id },
+            PickConclusion::Chosen(path) => match delegate(&path, window_id, server, identity) {
+                Some(handle) => WindowEvent::FilePicked { window_id, handle },
+                None => {
+                    let _ = rustos_rt::stderr(b"desktop: picker delegation refused\n");
+                    WindowEvent::PickCancelled { window_id }
+                }
+            },
+        };
+        deliver(server, sink, shell, compositor, windows, picker, &event);
+    }
+
+    /// Open `path` read-only under the session's own authority and mint a
+    /// one-shot delegation to the attested owner of window `window_id`,
+    /// returning the `fd_redeem` handle. The session's descriptor is
+    /// closed either way — the delegation record is self-contained — and
+    /// every refusal answers `None` (fail closed, nothing delegated).
+    fn delegate(
+        path: &str,
+        window_id: u64,
+        server: &WindowServer<RtShmMapper>,
+        identity: &RtWindowIdentity,
+    ) -> Option<u64> {
+        let owner = server.owner_of(window_id)?;
+        let pid = identity.pid_of(owner)?;
+        let fd = rustos_rt::fs_open(path.as_bytes(), OpenFlags::READ);
+        let fd = u32::try_from(fd).ok()?;
+        let handle = rustos_rt::fd_grant(fd, pid);
+        let _ = rustos_rt::fs_close(fd);
+        u64::try_from(handle).ok().filter(|&handle| handle != 0)
+    }
+
+    /// Deliver one app-ward event, tearing the owner's windows down when
+    /// the kernel proves the owner is gone (its event port was reclaimed,
+    /// so the send finds nothing).
+    fn deliver<S: DirectorySource, F: FnMut() -> S>(
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        picker: &mut SessionPicker<S, F>,
         event: &WindowEvent,
     ) {
         let Some(owner) = server.owner_of(event.window_id()) else {
@@ -756,6 +885,7 @@ mod program {
                 shell,
                 compositor,
                 windows,
+                picker,
             };
             server.client_exited(&mut bridge, owner);
         }

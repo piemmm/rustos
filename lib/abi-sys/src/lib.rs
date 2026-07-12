@@ -152,6 +152,8 @@ const NUM_FS_GETCWD: u64 = SyscallNumber::FS_GETCWD.as_u16() as u64;
 const NUM_RESOURCE_OPEN: u64 = SyscallNumber::RESOURCE_OPEN.as_u16() as u64;
 const NUM_SELF_ORIGIN: u64 = SyscallNumber::SELF_ORIGIN.as_u16() as u64;
 const NUM_PIPE_CREATE: u64 = SyscallNumber::PIPE_CREATE.as_u16() as u64;
+const NUM_FD_GRANT: u64 = SyscallNumber::FD_GRANT.as_u16() as u64;
+const NUM_FD_REDEEM: u64 = SyscallNumber::FD_REDEEM.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -2173,6 +2175,53 @@ pub extern "C" fn sys_resource_open(
     }
 }
 
+/// `fd_grant`: delegate the caller's own read-only filesystem descriptor
+/// `fd` to the live task `pid` as a one-shot grant
+/// (`SyscallNumber::FD_GRANT`). Returns the minted, unforgeable grant
+/// handle (>= 1), or a `ROS_E_*` code reinterpreted into the result.
+///
+/// The kernel requires `ROS_CAP_FS_ACCESS`, confirms the caller itself
+/// holds `fd` as a plain read-only, non-directory filesystem descriptor
+/// (a pipe, resource, writable, or already-delegated descriptor is
+/// refused — delegation never widens and never chains), captures the
+/// caller's identity and effective capability set with the descriptor's
+/// path, and confirms the recipient task is live (task ids are never
+/// reused, so a pid from a kernel-attested source lands on exactly the
+/// intended process). The caller forwards the handle in-band; it
+/// resolves only through the recipient's own [`sys_fd_redeem`], so the
+/// number is useless to a bystander. Audited.
+#[must_use]
+#[export_name = "ros_sys_fd_grant"]
+pub extern "C" fn sys_fd_grant(fd: u32, pid: u64) -> u64 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced; the kernel
+    // validates the capability, the caller's own descriptor, and the
+    // recipient's liveness before minting anything.
+    unsafe { raw_syscall(NUM_FD_GRANT, [u64::from(fd), pid, 0, 0, 0, 0]) }
+}
+
+/// `fd_redeem`: redeem an `fd_grant` handle minted to the calling task,
+/// installing the delegated file into the caller's own open table
+/// (`SyscallNumber::FD_REDEEM`). Returns the fresh per-process descriptor
+/// (at or above `ROS_STD_STREAM_COUNT`), or a `ROS_E_*` code
+/// reinterpreted into the result.
+///
+/// Needs no capability: receiving user-mediated, already-checked
+/// authority is the point of the delegation, and every later read of the
+/// descriptor is still authorised kernel-side under the grantor's
+/// captured identity. One-shot: the grant is consumed only when the
+/// descriptor allocation succeeds, so a refused redemption leaves it
+/// intact and a redeemed handle can never be redeemed twice. A handle
+/// minted to another task fails closed with `ROS_E_NOT_FOUND`,
+/// indistinguishable from one that never existed. The descriptor is read
+/// with `ros_sys_fs_read` and released with `ros_sys_fs_close`. Audited.
+#[must_use]
+#[export_name = "ros_sys_fd_redeem"]
+pub extern "C" fn sys_fd_redeem(handle: u64) -> u64 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced; the kernel
+    // resolves the handle owner-bound before installing anything.
+    unsafe { raw_syscall(NUM_FD_REDEEM, [handle, 0, 0, 0, 0, 0]) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2277,6 +2326,8 @@ mod tests {
         (NUM_PORT_RESOLVE, "port_resolve", 2),
         (NUM_POINTER_INJECT, "pointer_inject", 3),
         (NUM_POINTER_READ, "pointer_read", 3),
+        (NUM_FD_GRANT, "fd_grant", 2),
+        (NUM_FD_REDEEM, "fd_redeem", 1),
     ];
 
     #[test]
@@ -2894,6 +2945,27 @@ mod tests {
         assert_eq!(args[0], 42);
         assert_eq!(args[1], 0xD15_1001);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn fd_grant_marshals_descriptor_and_recipient() {
+        let (number, args) = capture(7, || {
+            assert_eq!(sys_fd_grant(4, 0x2A), 7);
+        });
+        assert_eq!(number, NUM_FD_GRANT);
+        assert_eq!(args[0], 4);
+        assert_eq!(args[1], 0x2A);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn fd_redeem_marshals_the_handle() {
+        let (number, args) = capture(5, || {
+            assert_eq!(sys_fd_redeem(7), 5);
+        });
+        assert_eq!(number, NUM_FD_REDEEM);
+        assert_eq!(args[0], 7);
+        assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
     }
 
     #[test]

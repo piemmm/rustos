@@ -1,0 +1,30 @@
+[package]
+name = "rustos-browse"
+description = "RustOS shared directory-browser engine: the transactional navigation model and themed listing renderer the files app's Run binary and the desktop session's trusted file picker both compose (§2.2, §6 — plans/APPWIN.md AW5)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The frozen `Errno` the directory source reports failures with; the browser
+# invents no parallel error set for the kernel boundary (§2.2) and never links
+# a kernel or driver crate (§17.4).
+rustos-abi = { path = "../abi", version = "=0.0.0" }
+# Shared integer screen geometry (`Point`/`Rect`) — the same vocabulary the
+# window manager and taskbar use (§17.4, §2.2).
+rustos-geometry = { path = "../geometry", version = "=0.0.0" }
+# The single shared theme definition (§10): the browser takes its colours from
+# the active theme so it stays consistent with the window manager and taskbar.
+rustos-theme = { path = "../theme", version = "=0.0.0" }
+# Shared software rasteriser (`Color`/`Surface`) — the same premultiplied-alpha
+# primitives the window manager paints with (§17.4, §2.2).
+rustos-raster = { path = "../raster", version = "=0.0.0" }
+# Shared text rasterisation: the built-in bitmap face and glyph blitter the
+# path bar and entry names are drawn with (§16.4, §17.4).
+rustos-font = { path = "../font", version = "=0.0.0" }
+
+[lints]
+workspace = true

@@ -71,6 +71,21 @@ kernel-side snapshot on the task record, never a caller-supplied value,
 so delegation can only narrow. Every derivation emits the
 `TaskCapabilitiesDerived` audit event carrying the derived count.
 
+The one **object-grained** delegation beside spawn is the user-mediated
+file hand-off (`fd_grant`/`fd_redeem`, `plans/CAPABILITY_USE.md` CU6,
+`plans/APPWIN.md` AW5): a holder of `CAP_FS_ACCESS` — in practice the
+desktop session's trusted picker — delegates one of its **own** plain
+read-only file descriptors, one-shot, to a kernel-attested recipient
+task. The kernel captures the grantor's uid and effective set with the
+path and re-authorises every delegated read under *that* identity, the
+recipient-owner-bound handle redeems exactly once through the
+unprivileged `fd_redeem`, the delegation can never chain or widen (a
+writable, directory, pipe, resource, or already-delegated descriptor is
+refused at mint), and the audited grant dies unredeemed with its
+recipient. This is how an app with **no** filesystem capability (the
+`viewer.app` consumer) reads exactly the one file the user chose — and
+nothing else — without any new capability entering the vocabulary.
+
 ## Exercise, release, revoke
 
 - **Exercise.** Every syscall/IPC dispatch checks the caller's effective
@@ -133,7 +148,8 @@ exactly `administrator_ceiling()` (`plans/CAPABILITY_USE.md` CU3). The
 baseline is a **ceiling**, never a program's manifest: the shell
 requests its own exercised set (`SHELL_MANIFEST` — the console pair,
 `CAP_FS_ACCESS`, `CAP_PROC_SPAWN`), the desktop session requests the
-graphical class, and every
+graphical class plus `CAP_PROC_SPAWN` (its start-menu launchers) and
+`CAP_FS_ACCESS` (its trusted file picker), and every
 program's manifest is sized to every gated syscall the program has
 a code path to issue — **including capability-gated optional features
 that degrade gracefully when the intersection strips them** — and to

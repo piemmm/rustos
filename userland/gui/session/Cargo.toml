@@ -37,6 +37,11 @@ rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # composes `WindowServer` over the `WindowHost` bridge in `src/windows.rs`,
 # serving app windows from the reserved WINDOW_ENDPOINT into the compositor.
 rustos-window = { path = "../../../lib/window", version = "=0.0.0" }
+# The one shared directory-browser engine (plans/APPWIN.md AW5): the trusted
+# file picker in `src/picker.rs` composes the same `Browser`/`render` the
+# files app drives, so the picker and the file manager can never diverge in
+# navigation semantics, listing policy, or look (§2.2, §6).
+rustos-browse = { path = "../../../lib/browse", version = "=0.0.0" }
 
 # The package is both the desktop-session glue library (above) and the `Run`
 # entry-point binary of the desktop session service (`plans/DISPLAY.md` D7c):

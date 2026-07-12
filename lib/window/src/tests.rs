@@ -113,13 +113,16 @@ impl CallerIdentity for MockIdentity {
     }
 }
 
-/// A host recording every bridge call, optionally refusing opens.
+/// A host recording every bridge call, optionally refusing opens and
+/// picker requests.
 #[derive(Default)]
 struct RecordingHost {
     opened: Vec<(u64, DisplayMode, String)>,
     presented: Vec<(u64, Vec<u8>, DamageRect)>,
     closed: Vec<u64>,
+    picks: Vec<u64>,
     refuse_open: bool,
+    refuse_pick: Option<Errno>,
 }
 
 impl WindowHost for RecordingHost {
@@ -149,6 +152,14 @@ impl WindowHost for RecordingHost {
 
     fn window_closed(&mut self, window_id: u64) {
         self.closed.push(window_id);
+    }
+
+    fn pick_requested(&mut self, window_id: u64) -> Result<(), Errno> {
+        if let Some(err) = self.refuse_pick {
+            return Err(err);
+        }
+        self.picks.push(window_id);
+        Ok(())
     }
 }
 
@@ -498,7 +509,7 @@ fn events_reach_the_owning_endpoint_and_decode_through_the_client() {
     ];
     let mut sink = QueueSink::default();
     {
-        let inner = loopback.borrow();
+        let mut inner = loopback.borrow_mut();
         for event in &events {
             inner
                 .server
@@ -545,7 +556,7 @@ fn event_routing_fails_closed() {
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
 
     let mut sink = QueueSink::default();
-    let inner = loopback.borrow();
+    let mut inner = loopback.borrow_mut();
     // An unknown window routes nowhere.
     assert_eq!(
         inner
@@ -567,7 +578,103 @@ fn event_routing_fails_closed() {
         ),
         Err(Errno::OutOfRange)
     );
+    // A pick conclusion no request preceded is a session bug, refused
+    // rather than delivered — for both conclusions.
+    assert_eq!(
+        inner.server.deliver_event(
+            &mut sink,
+            &WindowEvent::FilePicked {
+                window_id: window,
+                handle: 7,
+            }
+        ),
+        Err(Errno::OutOfRange)
+    );
+    assert_eq!(
+        inner
+            .server
+            .deliver_event(&mut sink, &WindowEvent::PickCancelled { window_id: window }),
+        Err(Errno::OutOfRange)
+    );
     assert!(sink.delivered.is_empty());
+}
+
+#[test]
+fn pick_file_is_owner_bound_single_pending_and_concluded_by_delivery() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+
+    // A window the caller does not own answers exactly like one that
+    // never existed.
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(client.pick_file(window), Err(Errno::NotFound));
+    loopback.borrow_mut().ticket = TICKET_A;
+
+    // The owner's request reaches the host and pends; a second request
+    // while pending is refused without touching the host again.
+    client.pick_file(window).expect("pick accepted");
+    assert_eq!(loopback.borrow().host.picks, alloc::vec![window]);
+    assert_eq!(client.pick_file(window), Err(Errno::AlreadyExists));
+    assert_eq!(loopback.borrow().host.picks, alloc::vec![window]);
+
+    // The conclusion delivers to the owner's endpoint and clears the
+    // pending pick, so the app may ask again.
+    let mut sink = QueueSink::default();
+    loopback
+        .borrow_mut()
+        .server
+        .deliver_event(
+            &mut sink,
+            &WindowEvent::FilePicked {
+                window_id: window,
+                handle: 9,
+            },
+        )
+        .expect("conclusion delivered");
+    assert_eq!(sink.delivered.len(), 1);
+    assert_eq!(sink.delivered[0].0, EVENTS_A);
+    // Exactly one conclusion follows each acceptance: a second one is
+    // refused until a new pick is accepted.
+    assert_eq!(
+        loopback
+            .borrow_mut()
+            .server
+            .deliver_event(&mut sink, &WindowEvent::PickCancelled { window_id: window }),
+        Err(Errno::OutOfRange)
+    );
+    client.pick_file(window).expect("a fresh pick is accepted");
+    loopback
+        .borrow_mut()
+        .server
+        .deliver_event(&mut sink, &WindowEvent::PickCancelled { window_id: window })
+        .expect("the cancel conclusion delivers");
+}
+
+#[test]
+fn a_refused_picker_leaves_no_pending_pick() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+
+    // The host cannot run a picker (its one slot is taken, or it holds
+    // no filesystem authority): the refusal is relayed verbatim and no
+    // pick pends — a conclusion is still refused, and a later request
+    // (once the host recovers) is accepted.
+    loopback.borrow_mut().host.refuse_pick = Some(Errno::AlreadyExists);
+    assert_eq!(client.pick_file(window), Err(Errno::AlreadyExists));
+    let mut sink = QueueSink::default();
+    assert_eq!(
+        loopback
+            .borrow_mut()
+            .server
+            .deliver_event(&mut sink, &WindowEvent::PickCancelled { window_id: window }),
+        Err(Errno::OutOfRange)
+    );
+    loopback.borrow_mut().host.refuse_pick = None;
+    client
+        .pick_file(window)
+        .expect("accepted once the host can");
 }
 
 #[test]

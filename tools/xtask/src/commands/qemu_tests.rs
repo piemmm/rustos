@@ -4387,8 +4387,8 @@ fn assert_files_window_screendump(
     let origin = rustos_desktop_session::windows::CASCADE_ORIGIN;
     #[allow(clippy::cast_sign_loss)] // The cascade origin is a positive screen offset.
     let (left, top) = (origin as u32 + INSET_PX, origin as u32 + INSET_PX);
-    let right = left + rustos_files::WIN_WIDTH - 2 * INSET_PX;
-    let bottom = top + rustos_files::WIN_HEIGHT - 2 * INSET_PX;
+    let right = left + rustos_browse::WIN_WIDTH - 2 * INSET_PX;
+    let bottom = top + rustos_browse::WIN_HEIGHT - 2 * INSET_PX;
     let mut total = 0u64;
     let mut covered = 0u64;
     for y in top..bottom {
@@ -4459,7 +4459,7 @@ fn autoload_desktop_pointer_script() -> Result<Vec<rustos_qemu::PointerStep>, St
     use rustos_desktop_session::windows::cascade_origin_for;
     use rustos_desktop_session::{
         DesktopShell, APPEARANCE_LABEL, FILES_LABEL, FILES_LAUNCHER, TERMINAL_LABEL,
-        TERMINAL_LAUNCHER,
+        TERMINAL_LAUNCHER, VIEWER_LABEL, VIEWER_LAUNCHER,
     };
     use rustos_geometry::{Point, Rect, Scale};
     use rustos_qemu::{MouseButton, PointerAction, PointerStep};
@@ -4481,6 +4481,11 @@ fn autoload_desktop_pointer_script() -> Result<Vec<rustos_qemu::PointerStep>, St
         .taskbar_mut()
         .start_menu_mut()
         .add_launcher(TERMINAL_LAUNCHER, TERMINAL_LABEL);
+    let _ = shell
+        .session_mut()
+        .taskbar_mut()
+        .start_menu_mut()
+        .add_launcher(VIEWER_LAUNCHER, VIEWER_LABEL);
 
     let centre = |rect: Rect, what: &str| -> Result<Point, String> {
         if rect.is_empty() {
@@ -4520,8 +4525,8 @@ fn autoload_desktop_pointer_script() -> Result<Vec<rustos_qemu::PointerStep>, St
         Rect::new(
             files_origin.x,
             files_origin.y,
-            rustos_files::WIN_WIDTH,
-            rustos_files::WIN_HEIGHT,
+            rustos_browse::WIN_WIDTH,
+            rustos_browse::WIN_HEIGHT,
         ),
         "files window",
     )?;

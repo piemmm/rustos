@@ -590,6 +590,7 @@ mod tests {
                 "unmount",
                 "useradd",
                 "users",
+                "viewer",
                 "vim",
                 "wc",
                 "whoami",

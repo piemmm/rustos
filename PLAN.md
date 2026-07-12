@@ -3045,7 +3045,21 @@ transfer, landed in increments:
   `CAP_SHM`) spawned from the start menu's `Terminal` entry, and the
   autoload vertical's typed-command tail (guest PASS latches a
   `ProcessSpawned` at/after the Enter press's delivery — the shell round
-  trip, kernel-attested). Remaining: AW5 CU6 picker descriptors.
+  trip, kernel-attested). **AW5 is done (code + host coverage):** the
+  kernel's one-shot read-only file delegation (`fd_grant`/`fd_redeem`,
+  in-place `abi-v1` additions: recipient-owner-bound handles, grantor uid +
+  effective set captured and re-checked by the secured VFS on every
+  delegated read, audited, one-shot-atomic, reclaimed with the recipient),
+  the window channel's `PickFile` request + `FilePicked`/`PickCancelled`
+  conclusions (engine-enforced one conclusion per accepted pick), the
+  browser engine hoisted to `lib/browse` (its second consumer), the
+  session's trusted picker (`SessionPicker`, one slot, session-authority
+  listings, key+click navigation over the shared hit-test; the session
+  manifest gained `CAP_FS_ACCESS`), and the `viewer.app` consumer holding
+  **no** filesystem capability — it reads exactly the one user-chosen file
+  through the redeemed delegation. Remaining (staged in `plans/APPWIN.md`
+  AW5): the autoload QEMU vertical's picker stage, which shifts the
+  AW3/AW4 interaction contract's delivery counts and reply indices.
 - The platform-RNG `EntropySource` that seeds the reserve — **DONE**
   (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `rustos_arch_api::entropy`
   slice (x86_64 `RDSEED`/`RDRAND`, aarch64 `RNDR` `Supported`; riscv64 `Zkr` /
@@ -5032,8 +5046,7 @@ VM mechanism, `kernel/mem::ramzip`;
 
 ## CAPABILITY_USE — the capability lifecycle: login → session → administration (`plans/CAPABILITY_USE.md`)
 
-**Status: CU1–CU5 and CU7 done; CU6's session/ceiling slice live, its
-picker work remaining.** The full capability lifecycle is
+**Status: CU1–CU7 done.** The full capability lifecycle is
 wired: the kernel computes *effective = user grant ∩ manifest request*
 (`TaskCapabilities::derive`), the runtime spawn path threads the account's
 `capability_grants` ceiling through `SpawnCredential` into that intersection
@@ -5068,9 +5081,10 @@ interactive **session baseline**, the **administrator** as a grant set (no
 uid-0 power, no wheel group), spawn as the only delegation point (narrowing
 only), next-spawn revocation, and elevation as re-authenticated
 spawn-as-user through the session service — never setuid or a runtime raise.
-Remaining: CU6's picker-issued one-shot descriptors (with the desktop
-app-window work; the session/ceiling slice landed with `plans/DISPLAY.md`
-D7d) and the installer
+CU6 is complete: the session/ceiling slice landed with `plans/DISPLAY.md`
+D7d and the picker-issued one-shot descriptors with `plans/APPWIN.md` AW5
+(the kernel `fd_grant`/`fd_redeem` read-only delegation redeemed by a
+consumer holding no filesystem capability). Remaining: the installer
 first-user flow (with the installer work). See `plans/CAPABILITY_USE.md`
 for the binding design and staging.
 

@@ -31,3 +31,14 @@ pub const TERMINAL_LABEL: &str = "Terminal";
 /// The terminal bundle's entry-point path in the system app store (an
 /// OS-provided app, discovered on disk like every other bundle).
 pub const TERMINAL_RUN_PATH: &[u8] = b"/System/Apps/terminal.app/Run";
+
+/// The start menu's file-viewer launcher: its menu identity. Selecting
+/// the entry spawns [`VIEWER_RUN_PATH`].
+pub const VIEWER_LAUNCHER: LauncherId = LauncherId(3);
+
+/// Label of the file-viewer launcher entry.
+pub const VIEWER_LABEL: &str = "Viewer";
+
+/// The file-viewer bundle's entry-point path in the system app store (an
+/// OS-provided app, discovered on disk like every other bundle).
+pub const VIEWER_RUN_PATH: &[u8] = b"/System/Apps/viewer.app/Run";

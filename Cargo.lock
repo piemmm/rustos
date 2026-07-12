@@ -556,6 +556,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-browse"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-font",
+ "rustos-geometry",
+ "rustos-raster",
+ "rustos-theme",
+]
+
+[[package]]
 name = "rustos-caps"
 version = "0.0.0"
 dependencies = [
@@ -697,6 +708,7 @@ name = "rustos-desktop-session"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-browse",
  "rustos-caps",
  "rustos-cursor",
  "rustos-display",
@@ -1100,9 +1112,8 @@ name = "rustos-files"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
- "rustos-font",
+ "rustos-browse",
  "rustos-geometry",
- "rustos-raster",
  "rustos-rt",
  "rustos-theme",
  "rustos-window",
@@ -3642,6 +3653,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-viewer"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-font",
+ "rustos-raster",
+ "rustos-rt",
+ "rustos-theme",
+ "rustos-window",
+]
+
+[[package]]
 name = "rustos-vim"
 version = "0.0.0"
 dependencies = [
@@ -3724,6 +3747,7 @@ name = "rustos-xtask"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-browse",
  "rustos-cc",
  "rustos-crypto",
  "rustos-desktop-session",
@@ -3737,7 +3761,6 @@ dependencies = [
  "rustos-drv-input-virtio-input",
  "rustos-drv-storage-usb-msd",
  "rustos-drv-storage-volmgr",
- "rustos-files",
  "rustos-fsmeta",
  "rustos-fuzzseed",
  "rustos-fwcfg",

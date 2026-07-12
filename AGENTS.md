@@ -554,6 +554,14 @@ rustos/
 │   │                    #   fstree disassembly viewer and objdump-class
 │   │                    #   tools. Never executes or loads; fuzzed (§19.6);
 │   │                    #   decode runs in the §19.5 parser sandbox.
+│   ├── browse/          # Shared directory-browser engine (plans/APPWIN.md
+│   │                    #   AW5): the one transactional navigation model
+│   │                    #   (Browser over the DirectorySource seam), themed
+│   │                    #   listing renderer + row hit-test, and validated
+│   │                    #   path spelling that the files app's Run binary
+│   │                    #   and the desktop session's trusted file picker
+│   │                    #   both compose, so the file manager and the CU6
+│   │                    #   picker can never diverge (§2.2).
 │   ├── caps/            # Capability primitives.
 │   ├── cmdres/          # Shared command-word resolution policy (plans/
 │   │                    #   APPS.md §8–§9): the one pure definition of the

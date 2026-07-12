@@ -22,6 +22,7 @@ use rustos_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
 use rustos_abi::Errno;
 use rustos_wm::{Color, Compositor, Point, Surface, WindowId};
 
+use crate::picker::PickerSlot;
 use crate::shell::DesktopShell;
 
 /// The freshly opened window's fill until the app's first present lands:
@@ -114,7 +115,8 @@ pub fn cascade_origin_for(opened: u64) -> Point {
 }
 
 /// The [`WindowHost`] bridge one serve pass borrows: the desktop shell,
-/// the compositor, and the session's window table.
+/// the compositor, the session's window table, and the trusted picker
+/// slot a validated `PickFile` opens.
 ///
 /// [`WindowHost`]: rustos_window::WindowHost
 pub struct ShellWindowHost<'a> {
@@ -124,6 +126,11 @@ pub struct ShellWindowHost<'a> {
     pub compositor: &'a mut Compositor,
     /// The session's served-window bookkeeping.
     pub windows: &'a mut SessionWindows,
+    /// The session's single trusted-picker slot
+    /// ([`SessionPicker`](crate::SessionPicker) in production): a
+    /// validated `PickFile` opens it, and a closing window takes its own
+    /// pick down with it.
+    pub picker: &'a mut dyn PickerSlot,
 }
 
 impl rustos_window::WindowHost for ShellWindowHost<'_> {
@@ -189,10 +196,23 @@ impl rustos_window::WindowHost for ShellWindowHost<'_> {
     }
 
     fn window_closed(&mut self, window_id: u64) {
+        // A window that dies mid-pick takes its picker down with it: the
+        // engine already dropped the pending pick with the record, so no
+        // conclusion is (or could be) delivered.
+        self.picker
+            .abort_for(window_id, self.shell, self.compositor);
         if let Some(record) = self.windows.records.remove(&window_id) {
             self.windows.by_wm.remove(&record.wm);
             let _ = self.shell.close_window(self.compositor, record.wm);
         }
+    }
+
+    fn pick_requested(&mut self, window_id: u64) -> Result<(), Errno> {
+        // The engine already validated ownership and the per-window
+        // single-pending rule; the slot enforces the session's own
+        // modality (one picker at a time) and brings the UI up under the
+        // session's authority, refusing fail-closed when it cannot.
+        self.picker.begin(window_id, self.shell, self.compositor)
     }
 }
 
@@ -273,17 +293,49 @@ mod tests {
         (shell, compositor)
     }
 
+    /// A picker slot recording the bridge's calls: these tests exercise
+    /// the window lifecycle, not the picker (which has its own suite in
+    /// `crate::tests`), so the slot only observes.
+    #[derive(Default)]
+    struct RecordingSlot {
+        begun: alloc::vec::Vec<u64>,
+        aborted: alloc::vec::Vec<u64>,
+    }
+
+    impl crate::picker::PickerSlot for RecordingSlot {
+        fn begin(
+            &mut self,
+            for_window: u64,
+            _shell: &mut DesktopShell,
+            _compositor: &mut Compositor,
+        ) -> Result<(), Errno> {
+            self.begun.push(for_window);
+            Ok(())
+        }
+
+        fn abort_for(
+            &mut self,
+            window_id: u64,
+            _shell: &mut DesktopShell,
+            _compositor: &mut Compositor,
+        ) {
+            self.aborted.push(window_id);
+        }
+    }
+
     /// An accepted open composes a focused desktop window, records both
     /// id mappings, and cascades successive origins.
     #[test]
     fn open_composes_a_window_and_maps_both_ids() {
         let (mut shell, mut compositor) = desktop();
         let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
         {
             let mut host = ShellWindowHost {
                 shell: &mut shell,
                 compositor: &mut compositor,
                 windows: &mut windows,
+                picker: &mut picker,
             };
             host.window_opened(7, &mode(64, 48, DisplayFormat::Rgba8888), "files")
                 .expect("opens");
@@ -318,12 +370,14 @@ mod tests {
         ] {
             let (mut shell, mut compositor) = desktop();
             let mut windows = SessionWindows::new();
+            let mut picker = RecordingSlot::default();
             let m = mode(4, 4, format);
             {
                 let mut host = ShellWindowHost {
                     shell: &mut shell,
                     compositor: &mut compositor,
                     windows: &mut windows,
+                    picker: &mut picker,
                 };
                 host.window_opened(1, &m, "w").expect("opens");
                 // One frame with the probe pixel at (2, 1).
@@ -357,10 +411,12 @@ mod tests {
     fn present_refuses_bad_damage_short_frames_and_unknown_windows() {
         let (mut shell, mut compositor) = desktop();
         let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
         let mut host = ShellWindowHost {
             shell: &mut shell,
             compositor: &mut compositor,
             windows: &mut windows,
+            picker: &mut picker,
         };
         let m = mode(4, 4, DisplayFormat::Rgba8888);
         host.window_opened(1, &m, "w").expect("opens");
@@ -404,10 +460,12 @@ mod tests {
     fn close_removes_the_window_and_its_mappings() {
         let (mut shell, mut compositor) = desktop();
         let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
         let mut host = ShellWindowHost {
             shell: &mut shell,
             compositor: &mut compositor,
             windows: &mut windows,
+            picker: &mut picker,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         host.window_opened(1, &m, "w").expect("opens");
@@ -418,5 +476,26 @@ mod tests {
         assert!(host.compositor.window(wm).is_none());
         host.window_closed(1);
         assert!(host.windows.is_empty());
+    }
+
+    /// The bridge forwards a validated pick request to the slot and
+    /// aborts the window's pick when the window closes.
+    #[test]
+    fn pick_requests_and_closures_reach_the_picker_slot() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let mut host = ShellWindowHost {
+            shell: &mut shell,
+            compositor: &mut compositor,
+            windows: &mut windows,
+            picker: &mut picker,
+        };
+        let m = mode(8, 8, DisplayFormat::Rgba8888);
+        host.window_opened(1, &m, "w").expect("opens");
+        host.pick_requested(1).expect("slot accepts");
+        host.window_closed(1);
+        assert_eq!(picker.begun, alloc::vec![1]);
+        assert_eq!(picker.aborted, alloc::vec![1]);
     }
 }

@@ -1670,6 +1670,43 @@ impl SyscallNumber {
     /// capability-gated System Information API.
     pub const BOOT_FACTS_GET: Self = Self(89);
 
+    /// Delegate one of the caller's own open **filesystem** descriptors to
+    /// another live process as a one-shot grant
+    /// (`plans/CAPABILITY_USE.md` CU6 — the user-mediated file picker's
+    /// hand-off).
+    ///
+    /// Arguments: `fd` (a descriptor of the caller's own open table backed
+    /// by a filesystem path — a pipe, resource, or already-delegated
+    /// descriptor is refused, so delegation never chains) and `pid` (the
+    /// recipient's kernel task id, taken from a kernel-attested source such
+    /// as `call_peer_origin` — task ids are never reused, so the grant can
+    /// never land on a recycled identity). The kernel captures the
+    /// *caller's* identity and effective capability set with the
+    /// descriptor's path and open flags, and mints the recipient an
+    /// unforgeable handle that resolves only when presented by the
+    /// recipient itself ([`Self::FD_REDEEM`]). The handle value travels
+    /// back to the caller, who forwards it in-band (e.g. over the window
+    /// channel); the number is useless to a bystander. Delegation never
+    /// widens authority: the redeemed descriptor's every operation is
+    /// re-authorised through the secured VFS under the *grantor's* captured
+    /// identity, exactly as the grantor's own descriptor would be.
+    pub const FD_GRANT: Self = Self(90);
+
+    /// Redeem a [`Self::FD_GRANT`] handle minted to the calling task,
+    /// installing the delegated file into the caller's own open table.
+    ///
+    /// Arguments: `handle` (the grant handle received in-band). The
+    /// redemption is **one-shot**: the grant record is consumed only when
+    /// the descriptor allocation succeeds, so a table-full refusal leaves
+    /// the grant intact for a retry and a redeemed handle can never be
+    /// redeemed twice. A handle minted to another task resolves to nothing
+    /// (`NotFound`), indistinguishable from a handle that never existed.
+    /// The call is unprivileged: receiving user-mediated, already-checked
+    /// authority is the point of the delegation, and every later operation
+    /// on the descriptor is still VFS-checked under the grantor's captured
+    /// identity.
+    pub const FD_REDEEM: Self = Self(91);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

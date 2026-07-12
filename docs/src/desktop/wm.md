@@ -205,8 +205,20 @@ event sink — a dead client's kernel-reclaimed port tears its windows
 down. The first windowed app is the files browser
 (`userland/apps/files`), spawned from the start menu and proven end to
 end by the autoload QEMU vertical's click-through (three verified
-screendumps: desktop, served window, re-themed desktop). The terminal
-lands with AW4.
+screendumps: desktop, served window, re-themed desktop); the terminal
+landed with AW4.
+
+The channel also carries the desktop's **trusted file picker**
+(`plans/APPWIN.md` AW5, `plans/CAPABILITY_USE.md` CU6):
+`WindowRequest::PickFile` asks the session to browse on the app's
+behalf, and the engine keys the pick to the attested window owner,
+enforces one pending pick per window, and requires exactly one
+conclusion — a `WindowEvent::FilePicked` carrying the kernel's one-shot,
+recipient-owner-bound `fd_grant` delegation handle, or a
+`WindowEvent::PickCancelled` — per accepted request. The picker UI is a
+session-owned window driving the same shared `lib/browse` engine as the
+files app; the requesting app receives only the redeemable handle, never
+a path or any browsing authority of its own.
 
 ## Tests
 

@@ -1992,6 +1992,33 @@ where
             }
             OpenBacking::Resource(backing) => self.resource_read(caller, *backing, buf, len),
             OpenBacking::Pipe(end) => self.pipe_read(caller, end, buf, len, timeout_ns),
+            // A delegated descriptor wired behind a standard stream reads
+            // under the *grantor's* captured identity at the shared
+            // description cursor — the same authority rule as the
+            // `fs_read` delegated arm, the same cursor rule as the
+            // path-backed stream arm.
+            OpenBacking::Delegated(file) => {
+                if !file.caps.contains(CapabilityId::FS_ACCESS) {
+                    return Err(Errno::PermissionDenied);
+                }
+                let mut data = vec![0u8; len];
+                let offset = entry.cursor();
+                let n = self
+                    .filesystem
+                    .read(file.uid, &file.caps, &file.path, offset, &mut data)?;
+                match self.with_caller_aspace(caller, |space, physmap| {
+                    copy_out(space, physmap, VirtAddr::new(buf), &data[..n])
+                }) {
+                    Some(Ok(())) => {
+                        // Advance only after the bytes reached the caller,
+                        // so a faulting buffer re-reads rather than skips.
+                        entry.advance_cursor(n as u64);
+                        Ok(n as u64)
+                    }
+                    Some(Err(err)) => Err(copy_fault_errno(err)),
+                    None => Err(Errno::BadAddress),
+                }
+            }
         }
     }
 
@@ -2036,6 +2063,10 @@ where
             }
             OpenBacking::Resource(backing) => Self::resource_write(*backing, len),
             OpenBacking::Pipe(end) => self.pipe_write(caller, end, buf, len),
+            // Unreachable by construction — a delegation is minted
+            // read-only, so the `is_write` gate above already refused —
+            // but fail closed rather than trust the construction.
+            OpenBacking::Delegated(_) => Err(Errno::PermissionDenied),
         }
     }
 
@@ -6052,6 +6083,75 @@ where
         }
     }
 
+    fn fd_grant(&self, caller: &CallerContext<'_>, fd: u32, pid: u64) -> SyscallResult {
+        // Step 2 (capability) was enforced by the dispatcher: the
+        // `fd_grant` spec carries `CAP_FS_ACCESS`, and the mint is
+        // dispatcher-audited. Step 3 (validate every input): resolve `fd`
+        // against the **caller's own** open table (`caller.task_id` is
+        // kernel-trusted), so a foreign or unopened descriptor is refused
+        // before any state is read.
+        let handle = self
+            .aspaces
+            .read()
+            .open_file_entry(caller.task_id, fd)
+            .ok_or(Errno::NotFound)?;
+        // Only a plain filesystem descriptor is delegatable: a pipe or
+        // resource has its own authority model, and a delegated backing
+        // never re-delegates (a chain would obscure whose captured
+        // authority is exercised — delegation must never widen).
+        let OpenBacking::Path(path) = &handle.backing else {
+            return Err(Errno::OutOfRange);
+        };
+        // The delegation conveys exactly "read this file's content": a
+        // descriptor that is not read-only, or that names a directory, is
+        // outside the designed delegation surface and is refused — the
+        // minted capability can never carry more than the picker's
+        // user-mediated choice meant to hand over.
+        if !handle.flags.is_read()
+            || handle.flags.is_write()
+            || handle.flags.contains(OpenFlags::DIRECTORY)
+        {
+            return Err(Errno::OutOfRange);
+        }
+        // Capture the *grantor's* kernel-attested identity beside the
+        // path: every later operation on the redeemed descriptor is
+        // re-authorised under exactly this, never the holder's identity
+        // and never anything claimed on a wire.
+        let file = crate::aspace::DelegatedFile {
+            path: path.clone(),
+            uid: caller.caps.owner().0,
+            caps: *caller.caps.effective(),
+        };
+        // Confirm the recipient is a live task and mint under the same
+        // write lock, so the grant cannot land on a task that exited
+        // between check and mint. Task ids are never reused, so a pid
+        // taken from a kernel-attested source (`call_peer_origin`)
+        // resolves to the intended process or to nothing — never to a
+        // recycled identity. An unknown recipient is the same `NotFound`
+        // as an unopened descriptor, so the reply shape confirms nothing
+        // about foreign task ids.
+        let recipient = SecTaskId(pid);
+        let mut registry = self.aspaces.write();
+        if !registry.contains(recipient) {
+            return Err(Errno::NotFound);
+        }
+        Ok(registry.mint_fd_delegation(recipient, file, OpenFlags::READ))
+    }
+
+    fn fd_redeem(&self, caller: &CallerContext<'_>, handle: u64) -> SyscallResult {
+        // Ungated at the dispatcher: receiving user-mediated,
+        // already-checked authority is the point of the delegation. The
+        // registry resolves `handle` only among the delegations minted
+        // **to the calling task** (`caller.task_id` is kernel-trusted) and
+        // consumes it only once the descriptor allocation succeeds —
+        // one-shot, atomic, fail closed.
+        let fd = self
+            .aspaces
+            .write()
+            .redeem_fd_delegation(caller.task_id, handle)?;
+        Ok(u64::from(fd))
+    }
+
     fn fs_read(
         &self,
         caller: &CallerContext<'_>,
@@ -6109,6 +6209,30 @@ where
             // pipe is empty with a live writer (no timeout on the handle
             // path — the reader waits for its producer).
             OpenBacking::Pipe(end) => self.pipe_read(caller, end, buf, len, 0),
+            // A delegated descriptor reads under the *grantor's* captured
+            // identity — the delegation is the authority, established by
+            // the grantor's user-mediated choice — so the holder needs no
+            // filesystem capability of its own. The same coarse gate the
+            // grantor's own read would face is applied against the
+            // captured set, and the secured VFS re-authorises the path
+            // under the captured uid on every read (a permission change
+            // for the grantor revokes the delegation's reach too).
+            OpenBacking::Delegated(file) => {
+                if !file.caps.contains(CapabilityId::FS_ACCESS) {
+                    return Err(Errno::PermissionDenied);
+                }
+                let mut data = vec![0u8; len];
+                let n = self
+                    .filesystem
+                    .read(file.uid, &file.caps, &file.path, offset, &mut data)?;
+                match self.with_caller_aspace(caller, |space, physmap| {
+                    copy_out(space, physmap, VirtAddr::new(buf), &data[..n])
+                }) {
+                    Some(Ok(())) => Ok(n as u64),
+                    Some(Err(err)) => Err(copy_fault_errno(err)),
+                    None => Err(Errno::BadAddress),
+                }
+            }
         }
     }
 
@@ -6165,6 +6289,10 @@ where
             // is full with a live reader and fails closed with `BrokenPipe`
             // when none remains.
             OpenBacking::Pipe(end) => self.pipe_write(caller, end, buf, len),
+            // Unreachable by construction — a delegation is minted
+            // read-only, so the `is_write` gate above already refused —
+            // but fail closed rather than trust the construction.
+            OpenBacking::Delegated(_) => Err(Errno::PermissionDenied),
         }
     }
 
@@ -21006,6 +21134,259 @@ mod tests {
         // (owner-checked at `shm_map`; the number is useless to a bystander).
         assert_eq!(aspaces.read().grant(SecTaskId(9), handle), None);
         crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// `fd_grant` delegates only a descriptor the caller itself holds, only
+    /// a plain read-only, non-directory filesystem backing, and only to a
+    /// live recipient task (`plans/CAPABILITY_USE.md` CU6).
+    #[test]
+    fn fd_grant_delegates_only_a_held_readonly_path_descriptor() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"/f");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        // An unopened descriptor is refused before any state is read.
+        assert_eq!(h.fd_grant(&ctx, 99, 3), Err(Errno::NotFound));
+
+        // A writable descriptor is outside the read-only delegation
+        // surface, as is a directory handle and a pipe end.
+        let wo = u32::try_from(
+            h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::WRITE)
+                .expect("open write-only"),
+        )
+        .unwrap();
+        assert_eq!(h.fd_grant(&ctx, wo, 3), Err(Errno::OutOfRange));
+        let dir = u32::try_from(
+            h.fs_open(
+                &ctx,
+                0x1000,
+                "/f".len(),
+                OpenFlags::READ.union(OpenFlags::DIRECTORY),
+            )
+            .expect("open directory"),
+        )
+        .unwrap();
+        assert_eq!(h.fd_grant(&ctx, dir, 3), Err(Errno::OutOfRange));
+        let (pipe_read, _pipe_write) = aspaces
+            .write()
+            .open_pipe(SecTaskId(2))
+            .expect("pipe allocates");
+        assert_eq!(h.fd_grant(&ctx, pipe_read, 3), Err(Errno::OutOfRange));
+
+        // A read-only file descriptor delegates — but only to a live
+        // recipient task; an unknown pid is the same `NotFound` as an
+        // unopened descriptor.
+        let fd = u32::try_from(
+            h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::READ)
+                .expect("open read-only"),
+        )
+        .unwrap();
+        assert_eq!(h.fd_grant(&ctx, fd, 99), Err(Errno::NotFound));
+        let (rspace, rphysmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"");
+        aspaces
+            .write()
+            .register(SecTaskId(3), rspace, rphysmap)
+            .expect("recipient registers");
+        let handle = h.fd_grant(&ctx, fd, 3).expect("grant mints a handle");
+        assert!(handle >= 1, "handle 0 is the reserved invalid value");
+    }
+
+    /// An `fd_grant` handle redeems only for the recipient it was minted
+    /// to, exactly once, into a read-only delegated descriptor.
+    #[test]
+    fn fd_redeem_is_owner_bound_and_one_shot() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"/f");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let (rspace, rphysmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"");
+        aspaces
+            .write()
+            .register(SecTaskId(3), rspace, rphysmap)
+            .expect("recipient registers");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        let fd = u32::try_from(
+            h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::READ)
+                .expect("open read-only"),
+        )
+        .unwrap();
+        let handle = h.fd_grant(&ctx, fd, 3).expect("grant mints a handle");
+
+        // The grantor itself cannot redeem the handle it minted for the
+        // recipient — a foreign handle answers exactly like one that never
+        // existed.
+        assert_eq!(h.fd_redeem(&ctx, handle), Err(Errno::NotFound));
+
+        // The recipient redeems once: the installed descriptor is a
+        // read-only delegated backing carrying the grantor's identity.
+        let recipient_caps = TaskCapabilities::derive(
+            SecTaskId(3),
+            UserId(2000),
+            caps_with(&[]),
+            caps_with(&[]),
+            sink,
+        );
+        let rctx = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &recipient_caps,
+        };
+        let rfd = u32::try_from(h.fd_redeem(&rctx, handle).expect("redeem installs")).unwrap();
+        let entry = aspaces
+            .read()
+            .open_file_entry(SecTaskId(3), rfd)
+            .expect("descriptor recorded");
+        assert_eq!(entry.flags, OpenFlags::READ);
+        match &entry.backing {
+            crate::aspace::OpenBacking::Delegated(file) => {
+                assert_eq!(file.path, "/f");
+                assert_eq!(file.uid, 1000, "the grantor's uid was captured");
+            }
+            other => panic!("expected a delegated backing, got {other:?}"),
+        }
+
+        // One-shot: a second redemption of the same handle is refused.
+        assert_eq!(h.fd_redeem(&rctx, handle), Err(Errno::NotFound));
+    }
+
+    /// A redeemed delegation reads under the **grantor's** captured
+    /// identity — the holder needs no filesystem capability of its own —
+    /// and can never write through the delegated descriptor.
+    #[test]
+    fn delegated_read_runs_under_the_grantors_identity() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"/f");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        // The recipient's own memory must be writable for the read's
+        // copy-out; its page also holds a path for the contrast open below.
+        let (rspace, rphysmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/f");
+        aspaces
+            .write()
+            .register(SecTaskId(3), rspace, rphysmap)
+            .expect("recipient registers");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let grantor_caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let gctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &grantor_caps,
+        };
+        // The recipient runs as a different user and holds **no**
+        // capability at all.
+        let recipient_caps = TaskCapabilities::derive(
+            SecTaskId(3),
+            UserId(2000),
+            caps_with(&[]),
+            caps_with(&[]),
+            sink,
+        );
+        let rctx = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &recipient_caps,
+        };
+        let mut mock = RecordingFs::new();
+        mock.read_data = b"hello".to_vec();
+        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        let fd = u32::try_from(
+            h.fs_open(&gctx, 0x1000, "/f".len(), OpenFlags::READ)
+                .expect("grantor opens"),
+        )
+        .unwrap();
+        let handle = h.fd_grant(&gctx, fd, 3).expect("grant mints a handle");
+        let rfd = u32::try_from(h.fd_redeem(&rctx, handle).expect("redeem installs")).unwrap();
+
+        // The delegated read succeeds for the capability-less holder and
+        // runs through the VFS under the grantor's uid, never the
+        // holder's.
+        let n = h.fs_read(&rctx, rfd, 0, 0x1000, 5).expect("delegated read");
+        assert_eq!(n, 5);
+        assert!(
+            fs.calls()
+                .iter()
+                .any(|c| c.contains("read uid=1000 path=/f")),
+            "the read was authorised under the grantor's captured identity: {:?}",
+            fs.calls()
+        );
+
+        // The delegation is read-only: a write through it is refused by
+        // the descriptor's own flags before the filesystem is touched
+        // (the holder's absent `CAP_FS_ACCESS` never enters it — nothing
+        // beyond the one delegated file was widened, which the
+        // dispatcher's own capability gate enforces for every path-opening
+        // syscall the holder might try).
+        assert_eq!(
+            h.fs_write(&rctx, rfd, 0, 0x1000, 2),
+            Err(Errno::PermissionDenied)
+        );
+
+        // An exited recipient's pending delegations are reclaimed with the
+        // rest of its records: a second grant minted to the recipient dies
+        // with it and can never be redeemed by a later task.
+        let second = h.fd_grant(&gctx, fd, 3).expect("second grant mints");
+        aspaces.write().withdraw(SecTaskId(3));
+        assert_eq!(
+            aspaces.write().redeem_fd_delegation(SecTaskId(3), second),
+            Err(Errno::NotFound),
+            "withdraw reclaimed the pending delegation"
+        );
     }
 
     /// `call_peer_seat` answers only while the ticket is in service, only

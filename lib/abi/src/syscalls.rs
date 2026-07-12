@@ -2208,6 +2208,60 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::FD_GRANT,
+        name: "fd_grant",
+        arg_count: 2,
+        args: [
+            // The caller's own path-backed descriptor, then the recipient's
+            // kernel task id (from a kernel-attested source; task ids are
+            // never reused).
+            AbiType::U32,
+            AbiType::U64,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the minted grant handle (or a negated errno) back to
+        // the caller, who forwards it in-band; the handle resolves only when
+        // presented by the recipient task (`fd_redeem`), so the value is
+        // useless to a bystander — the `shm_grant` shape.
+        ret: AbiType::U64,
+        // Delegating filesystem authority is gated exactly as acquiring it:
+        // the same `CAP_FS_ACCESS` the descriptor's `fs_open` required. The
+        // mint is audited — a user-mediated, security-relevant grant of
+        // authority to another process, and low-volume (once per picker
+        // choice), so the record cannot drown the log.
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FD_REDEEM,
+        name: "fd_redeem",
+        arg_count: 1,
+        args: [
+            // The grant handle minted to the calling task by `fd_grant`.
+            AbiType::Handle,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the freshly installed descriptor number (or a
+        // negated errno), like `fs_open`.
+        ret: AbiType::U64,
+        // Ungated: receiving user-mediated, already-checked authority is the
+        // point of the delegation — the recipient may hold no filesystem
+        // capability at all, and every later operation on the descriptor is
+        // still VFS-checked under the grantor's captured identity. The
+        // redemption is audited so the grant's consumption is attributable
+        // in the same trail as its mint; it is one-shot, so the volume is
+        // bounded by the audited mints.
+        required_capability: None,
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

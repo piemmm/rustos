@@ -1562,3 +1562,211 @@ fn aw3_click_through_produces_the_staged_outcomes() {
         "post-toggle window click must activate the window, got {outcomes:?}"
     );
 }
+
+// --- The trusted file picker (plans/APPWIN.md AW5, CU6) -----------------
+
+use crate::picker::{PickConclusion, PickerSlot, SessionPicker, PICKER_ORIGIN};
+use rustos_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode};
+use rustos_browse::render::row_height;
+use rustos_browse::{DirectorySource, Entry};
+
+/// An in-memory directory tree keyed by the joined component path, the
+/// picker's stand-in for the session-authority VFS listing.
+struct TreeSource {
+    dirs: alloc::collections::BTreeMap<String, Vec<Entry>>,
+}
+
+impl TreeSource {
+    /// `/` holding `Docs/` (with `notes.txt`) and the file `readme.md`.
+    fn fixture() -> Self {
+        let mut dirs = alloc::collections::BTreeMap::new();
+        dirs.insert(
+            String::new(),
+            vec![Entry::directory("Docs"), Entry::file("readme.md")],
+        );
+        dirs.insert(String::from("Docs"), vec![Entry::file("notes.txt")]);
+        Self { dirs }
+    }
+}
+
+impl DirectorySource for TreeSource {
+    fn list(&mut self, components: &[String]) -> Result<Vec<Entry>, Errno> {
+        let key = components.join("/");
+        self.dirs.get(&key).cloned().ok_or(Errno::NotFound)
+    }
+}
+
+/// A source refusing every listing, standing in for a session whose
+/// filesystem reach was stripped.
+struct RefusingSource;
+
+impl DirectorySource for RefusingSource {
+    fn list(&mut self, _components: &[String]) -> Result<Vec<Entry>, Errno> {
+        Err(Errno::PermissionDenied)
+    }
+}
+
+fn picker_desktop() -> (DesktopShell, Compositor) {
+    let shell = DesktopShell::new(TaskbarConfig::bottom_bar(640, 480), LABEL);
+    let mode = DisplayMode {
+        width_px: 640,
+        height_px: 480,
+        stride_bytes: 640 * 4,
+        format: DisplayFormat::Rgba8888,
+    };
+    let compositor = Compositor::new(mode, Color::rgb(0, 0, 0)).expect("compositor builds");
+    (shell, compositor)
+}
+
+fn pressed(key: KeyValue) -> KeyInput {
+    KeyInput::Pressed {
+        key,
+        modifiers: Modifiers::default(),
+    }
+}
+
+/// `begin` opens the picker window at its fixed origin; the single slot
+/// refuses a second pick while one is showing.
+#[test]
+fn picker_begin_opens_one_window_and_enforces_the_single_slot() {
+    let (mut shell, mut comp) = picker_desktop();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    let wm = picker.wm_id().expect("a picker window is showing");
+    assert_eq!(
+        comp.window(wm).expect("live").origin(),
+        PICKER_ORIGIN,
+        "the picker is placed at its one deterministic origin"
+    );
+    assert_eq!(
+        picker.begin(9, &mut shell, &mut comp),
+        Err(Errno::AlreadyExists),
+        "one picker at a time"
+    );
+}
+
+/// A refused root listing refuses the pick verbatim and leaves the slot
+/// idle for a later request.
+#[test]
+fn picker_begin_fails_closed_when_the_listing_is_refused() {
+    let (mut shell, mut comp) = picker_desktop();
+    let mut picker = SessionPicker::new(|| RefusingSource);
+    assert_eq!(
+        picker.begin(7, &mut shell, &mut comp),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(picker.wm_id(), None, "nothing half-open remains");
+}
+
+/// Enter descends into a selected directory and chooses a selected file,
+/// concluding with the shared absolute-path spelling and closing the
+/// picker window.
+#[test]
+fn picker_keys_navigate_and_choose_the_selected_file() {
+    let (mut shell, mut comp) = picker_desktop();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    let wm = picker.wm_id().expect("showing");
+
+    // Enter on the selected `Docs/` descends; Enter on `notes.txt`
+    // concludes the pick.
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    assert_eq!(picker.handle_key(&enter, &mut shell, &mut comp), None);
+    let concluded = picker
+        .handle_key(&enter, &mut shell, &mut comp)
+        .expect("choosing a file concludes");
+    assert_eq!(concluded.for_window, 7);
+    assert_eq!(
+        concluded.conclusion,
+        PickConclusion::Chosen(String::from("/Docs/notes.txt"))
+    );
+    assert_eq!(picker.wm_id(), None, "the picker window is closed");
+    assert!(comp.window(wm).is_none(), "and gone from the compositor");
+}
+
+/// Down then Enter chooses the second root entry (the file) without
+/// descending; Backspace climbs back up after a descent.
+#[test]
+fn picker_selection_and_climb_track_the_browser() {
+    let (mut shell, mut comp) = picker_desktop();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+
+    let down = pressed(KeyValue::Named(NamedKeyCode::Down));
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    assert_eq!(picker.handle_key(&down, &mut shell, &mut comp), None);
+    let concluded = picker
+        .handle_key(&enter, &mut shell, &mut comp)
+        .expect("the root file concludes");
+    assert_eq!(
+        concluded.conclusion,
+        PickConclusion::Chosen(String::from("/readme.md"))
+    );
+}
+
+/// A primary click resolves through the one shared hit-test: the first
+/// entry row descends into `Docs/`, and the file row inside concludes.
+#[test]
+fn picker_clicks_resolve_rows_through_the_shared_hit_test() {
+    let (mut shell, mut comp) = picker_desktop();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+
+    let row = i32::try_from(row_height()).expect("a small row height");
+    // The first entry row sits directly below the path bar.
+    let first_row = Point::new(4, row);
+    assert_eq!(
+        picker.handle_click(first_row, &mut shell, &mut comp),
+        None,
+        "a directory row descends without concluding"
+    );
+    let concluded = picker
+        .handle_click(first_row, &mut shell, &mut comp)
+        .expect("the file row concludes");
+    assert_eq!(
+        concluded.conclusion,
+        PickConclusion::Chosen(String::from("/Docs/notes.txt"))
+    );
+    // A click on the path bar concludes nothing.
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    assert_eq!(
+        picker.handle_click(Point::new(4, 0), &mut shell, &mut comp),
+        None
+    );
+}
+
+/// Escape cancels: the conclusion is `Cancelled`, the window is closed,
+/// and the slot is free for the next pick.
+#[test]
+fn picker_escape_cancels_and_frees_the_slot() {
+    let (mut shell, mut comp) = picker_desktop();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    let escape = pressed(KeyValue::Named(NamedKeyCode::Escape));
+    let concluded = picker
+        .handle_key(&escape, &mut shell, &mut comp)
+        .expect("escape concludes");
+    assert_eq!(concluded.for_window, 7);
+    assert_eq!(concluded.conclusion, PickConclusion::Cancelled);
+    assert_eq!(picker.wm_id(), None);
+    picker
+        .begin(9, &mut shell, &mut comp)
+        .expect("the slot is free again");
+}
+
+/// `abort_for` takes the picker down only for its own requesting window,
+/// delivering no conclusion.
+#[test]
+fn picker_abort_is_scoped_to_the_requesting_window() {
+    let (mut shell, mut comp) = picker_desktop();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+
+    // A different window's death leaves the pick showing.
+    picker.abort_for(9, &mut shell, &mut comp);
+    assert!(picker.wm_id().is_some());
+    // The requesting window's death takes it down.
+    picker.abort_for(7, &mut shell, &mut comp);
+    assert_eq!(picker.wm_id(), None);
+}

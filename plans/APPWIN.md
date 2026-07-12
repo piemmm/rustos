@@ -193,12 +193,71 @@ Done. What now holds:
   round trip (the interaction contract lives in the test crate's lib
   target).
 
-### AW5 — CU6 picker-issued one-shot descriptors `[ ]`
+### AW5 — CU6 picker-issued one-shot descriptors `[x]`
 
-- The user-mediated file picker: the session (the trusted UI) opens the
-  chosen file under *its* authority delegated one-shot to the requesting
-  app across the window channel — the CU6 remainder, designed against the
-  then-live AW2/AW3 machinery (`plans/CAPABILITY_USE.md` CU6).
+Done (code + host coverage). What now holds:
+
+- **Kernel one-shot read delegation** (`fd_grant` 90 / `fd_redeem` 91,
+  in-place `abi-v1` additions): `fd_grant(fd, pid)` delegates the
+  caller's **own** plain read-only, non-directory filesystem descriptor
+  to a live task (pid from a kernel-attested source; task ids never
+  reused), capturing the grantor's uid + effective capability set beside
+  the path; the recipient-owner-bound handle travels in-band and
+  `fd_redeem` consumes it **once** (atomically — only after the
+  descriptor allocation succeeds) into an
+  `OpenBacking::Delegated` entry. Delegated reads (`fs_read` and the
+  wired stream arm) are re-authorised through the secured VFS under the
+  **grantor's** captured identity on every call; the delegation is
+  read-only by construction (write/readdir/stat/truncate/sync/file_map
+  and re-delegation all refuse), the grant is dispatcher-audited with
+  `CAP_FS_ACCESS`, redemption is unprivileged and audited, and an
+  exited recipient's pending delegations are reclaimed. `lib/rt`
+  wrappers, `lib/abi-sys` `ros_sys_*` stubs, and the regenerated C
+  header carry the surface.
+- **Protocol**: `WindowRequest::PickFile { window_id }` (op 4, status
+  reply = acceptance only) and the conclusions
+  `WindowEvent::FilePicked { window_id, handle }` (kind 5, non-zero
+  handle) / `WindowEvent::PickCancelled` (kind 6). The `lib/window`
+  engine keys the pick to the attested owner, enforces one pending pick
+  per window (`AlreadyExists`), forwards acceptance through the new
+  `WindowHost::pick_requested` bridge (a refusal records nothing), and
+  `deliver_event` requires-and-clears the pending pick on a conclusion
+  so exactly one conclusion follows each acceptance; the client half is
+  `WindowClient::pick_file`.
+- **The shared browser engine moved to `lib/browse`** (`rustos-browse`):
+  the AW1 model/renderer/path-spelling hoisted out of the files app (its
+  package is now the `Run` binary only) because the picker is its second
+  consumer, plus the renderer-mirroring row hit-test
+  (`render::entry_index_at`/`row_height`) the picker's clicks resolve
+  through.
+- **The session's trusted picker** (`rustos_desktop_session::picker`):
+  `SessionPicker` — one picker slot at a time, a fresh root listing under
+  the session's own authority per pick (a refused listing refuses the
+  pick), a session-owned window at the deterministic `PICKER_ORIGIN`,
+  key (`Down`/`Up`/`Enter`/`Backspace`/`Escape`) and click (shared
+  hit-test) navigation, conclusions delivered by the `Run` binary's
+  privileged tail (`fs_open` → `fd_grant` to the owner's attested pid →
+  `fs_close` → `FilePicked`, any refusal honestly `PickCancelled`), and
+  a requesting window's death aborts its pick via the
+  `ShellWindowHost` bridge. The session's manifest gained
+  `CAP_FS_ACCESS` (AppInfo + kernel pin) — the CU6 trusted-UI widening.
+- **The consumer**: `userland/apps/viewer` (`viewer.app`, start-menu
+  `Viewer` entry), manifest `CAP_CONSOLE_WRITE` + `CAP_SHM` and
+  deliberately **no filesystem capability** — it window-creates, asks
+  `pick_file` at startup, redeems the delegated handle, reads at most
+  `CONTENT_MAX` bytes through the delegated descriptor, and renders the
+  sanitised text (host-tested `content_lines` + themed renderers);
+  `Enter` re-picks, cancellation shows a notice.
+- Coverage: kernel grant/redeem/delegated-read/withdraw unit tests, the
+  window-protocol round-trip/fail-closed tests (decoders remain in
+  `fuzz_decode`), the `lib/window` loopback pick suite, the `lib/browse`
+  hit-test tests, the session picker suite, and the viewer engine tests.
+- **Remaining:** extending the autoload QEMU vertical with a
+  picker-driven stage (menu → `Viewer` → picker clicks → delegated read,
+  gated on the `fd_grant`/`fd_redeem` audit records before the typing
+  gate) — every delivery count, reply index, and cascade slot in the
+  AW3/AW4 interaction contract shifts, so it is staged as its own
+  increment rather than landed blind.
 
 ## 2. Documentation
 

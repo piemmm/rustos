@@ -12,10 +12,12 @@ Tagline: Stable surfaces. Live edges. Clear intent. Confident actions.
 ## Assumptions
 
 - This document specifies RustOS graphical controls, not kernel behavior and not a new system-call surface.
-- The implementation belongs in the RustOS graphical userland and shared Rust crates already described by the charter: `userland/gui/wm`, `userland/gui/taskbar`, `userland/gui/session`, `lib/theme`, `lib/geometry`, `lib/raster`, `lib/icon`, `lib/input`, and application crates that render their own GUI controls.
+- The implementation belongs in the RustOS graphical userland and shared Rust crates already described by the charter: `userland/gui/wm`, `userland/gui/taskbar`, `userland/gui/session`, `lib/window`, `lib/theme`, `lib/geometry`, `lib/raster`, `lib/icon`, `lib/input`, and application crates that render their own GUI controls.
 - Theme values, metrics, motion timings, and semantic colors are shared data. They are not duplicated per application.
 - Controls render state and suggest actions, but authority remains enforced by the existing capability-checked syscall and IPC paths.
 - Exact public Rust item names are established during implementation review. The Rust identifiers used here are specification vocabulary and must not be treated as committed API names until they are added to the tree with tests and documentation.
+- The window manager owns outer window-frame and furniture rendering, hit testing, pointer capture, move and resize behavior, stacking actions, minimization, and size-state transitions. Applications provide typed metadata and receive typed events through the existing window path; they do not paint over or intercept window-manager chrome.
+- A root client viewport may expose window-level scrollbars composed by the window manager. Nested scrollbars inside application content remain application controls. Both forms use the same theme tokens, range invariants, and orientation-independent behavior rather than separate vertical, horizontal, window-manager, and application recipes.
 
 ---
 
@@ -31,7 +33,7 @@ A Reactive Alloy control communicates three things at a glance:
 2. What surrounding state makes that action relevant.
 3. Whether the action is safe, recommended, delayed, privileged, or destructive.
 
-Switchboard is the flagship example because it exposes live task, job, recovery, and system state, but this specification is deliberately broader. The same language applies to buttons, toggles, sliders, fields, menus, tables, toolbars, taskbar items, notifications, dialogs, and application controls.
+Switchboard is the flagship example because it exposes live task, job, recovery, and system state, but this specification is deliberately broader. The same language applies to buttons, toggles, sliders, fields, menus, tables, toolbars, taskbar items, notifications, dialogs, window frames, title bars, window furniture, scrollbars, and application controls.
 
 ---
 
@@ -100,7 +102,8 @@ Reactive Alloy should be implemented as shared control behavior and theme data, 
 | Premultiplied-alpha surfaces, fills, polygons, blits | `lib/raster` |
 | Shared icons and vector glyphs | `lib/icon` and curated asset pipeline |
 | Pointer and keyboard input vocabulary | `lib/input` |
-| Compositing, clipping, window surfaces, rounded windows | `userland/gui/wm` |
+| Compositing, clipping, window surfaces, rounded windows, frame furniture, activation, stacking, move, and resize | `userland/gui/wm` |
+| Typed window metadata, close requests, constraints, and root viewport exchange | `lib/window`, the owning application, and `userland/gui/wm` |
 | Taskbar items, notification area, session controls | `userland/gui/taskbar` |
 | Application-specific control composition | owning application crate |
 | Shared system information client state | existing ABI and client helper crates |
@@ -135,6 +138,11 @@ pub enum ControlKind {
     Card,
     Panel,
     DialogAction,
+    WindowFrame,
+    TitleBar,
+    WindowControl,
+    ResizeGrabber,
+    ScrollBar,
     TaskbarItem,
     TraySignal,
     Notification,
@@ -161,6 +169,48 @@ pub struct ControlState {
     pub pressure: PressureState,
     pub recovery: RecoveryState,
 }
+
+pub enum WindowControlKind {
+    Close,
+    Minimize,
+    PutToBack,
+    SizeToggle,
+}
+
+pub enum WindowActivationState {
+    Active,
+    Inactive,
+    AttentionRequested,
+}
+
+pub enum WindowSizeState {
+    Restored,
+    Maximized,
+}
+
+pub enum ScrollOrientation {
+    Vertical,
+    Horizontal,
+}
+
+pub struct WindowFurnitureState {
+    pub activation: WindowActivationState,
+    pub size: WindowSizeState,
+    pub movable: bool,
+    pub resizable: bool,
+}
+
+pub struct ScrollRange {
+    pub content_extent: u64,
+    pub viewport_extent: u64,
+    pub offset: u64,
+}
+
+pub struct ScrollModel {
+    pub range: ScrollRange,
+    pub line_step: u64,
+    pub page_step: u64,
+}
 ```
 
 State composition is preferred over one enormous enum. A disabled destructive recovery button and a focused non-destructive primary button are different combinations of small typed fields, not unrelated custom code paths.
@@ -177,6 +227,19 @@ State composition is preferred over one enormous enum. A disabled destructive re
 | `ActivityState` | Idle, working, progress known, progress indeterminate, complete. |
 | `PressureState` | CPU, memory, disk, network, power, thermal, or none. |
 | `RecoveryState` | None, recoverable, hung, restart recommended, force action. |
+
+### Window-furniture-specific state
+
+| State | Meaning |
+|---|---|
+| `WindowActivationState` | Whether a frame is active, inactive, or requesting attention without stealing focus. |
+| `WindowSizeState` | Restored or maximized. Fullscreen is a separate application/session mode and is not represented by the size-toggle control. |
+| `WindowControlKind` | The exact window-manager command represented by a furniture button. |
+| `ScrollOrientation` | Vertical or horizontal layout over one shared behavioral implementation. |
+| `ScrollRange` | Content extent, viewport extent, and clamped offset used to derive thumb size and position. |
+| `ScrollModel` | A validated range plus line-step and page-step distances in the same logical scroll unit. |
+
+A `SizeToggle` renders the action that will occur next: `Maximize` while restored and `Restore` while maximized. A `ScrollRange` is normalized before painting or hit testing: when the viewport covers the content, the offset is zero; otherwise the offset cannot exceed `content_extent - viewport_extent`. Content extent, viewport extent, offset, line step, and page step use the same logical scroll unit declared by the owning viewport; they are not mixed implicitly between pixels, rows, or application records. Invalid, overflowing, or stale range data fails closed to a non-draggable, zero-offset scrollbar rather than producing out-of-bounds geometry.
 
 ---
 
@@ -199,13 +262,16 @@ pub struct Theme {
 
 | Theme value | Examples |
 |---|---|
-| Palette roles | `surface`, `surface_elevated`, `surface_pressed`, `text`, `text_muted`, `rim`, `rim_active`, `accent`, `danger`. |
+| Palette roles | `surface`, `surface_elevated`, `surface_pressed`, `text`, `text_muted`, `rim`, `rim_active`, `accent`, `danger`, active and inactive window-frame roles, scroll track, and scroll thumb. |
 | Semantic signal roles | `cpu_pressure`, `memory_pressure`, `disk_pressure`, `network_activity`, `recovery`, `success`, `warning`, `denied`. |
-| Metrics | Control height, inset, gap, corner radius, border width, seam thickness, rail thickness, bead size. |
-| Typography | Font family token, label size, caption size, numeric size, weight roles. |
-| Motion | Open duration, hover duration, press duration, progress tick cadence, reduced-motion policy. |
+| Metrics | Control height, inset, gap, corner radius, border width, seam thickness, rail thickness, bead size, title-bar height, frame inset, window-control extent, resize-grabber extent, scrollbar breadth, minimum thumb length, and invisible hit slop. |
+| Typography | Font family token, label size, caption size, numeric size, weight roles, active title weight, and inactive title weight. |
+| Motion | Open duration, hover duration, press duration, progress tick cadence, window activation, minimize and size-toggle transitions, scrollbar wake timing, and reduced-motion policy. |
+| Window furniture | Leading or trailing control placement, control order, title alignment, active/inactive treatment, frame profile, scrollbar placement, and grip geometry. |
 | Density | Compact, normal, comfortable. |
 | Contrast | Normal, high contrast, monochrome-safe signal shape fallback. |
+
+A theme may place the window-control group on the leading or trailing side and may change its visual order, but it cannot change command meaning. The visible glyph, tooltip, accessibility name, and keyboard command for each control must continue to identify `Close`, `Minimize`, `PutToBack`, or the next `SizeToggle` action unambiguously.
 
 ### Theme variants
 
@@ -247,6 +313,9 @@ A theme may map multiple semantic roles to the same hue only if it also provides
 | Trace Line | A short-lived cause-and-effect connector. |
 | Action Warmth | A stronger edge treatment for the recommended action. |
 | Authority Mark | A locked, denied, or capability-required marker. |
+| Frame Rim | The window-manager-owned active or inactive perimeter around a client surface. |
+| Grip Teeth | A repeated notch shape that marks a resize grabber without relying on color. |
+| Scroll Channel | The quiet track, page regions, and thumb that expose viewport position and extent. |
 
 These are not separate widgets. They are rendering layers that any control can use when the control state requires them.
 
@@ -270,6 +339,21 @@ A Reactive Alloy control paints in ordered layers. Each layer is optional, but t
 
 All alpha values are premultiplied. All geometry passes through shared logical-to-physical scaling. Every clipped rounded edge uses the shared compositor/raster path.
 
+### Window composition stack
+
+A top-level window uses a second fixed composition order owned by `userland/gui/wm`:
+
+1. Paint the window shadow or occlusion region.
+2. Paint the frame plate and Frame Rim.
+3. Blit the application surface into the client clip only.
+4. Paint the title bar, title text, and application identity glyph.
+5. Paint window-control buttons and their independent hover, press, focus, and disabled states.
+6. Paint vertical and horizontal scrollbars when the root viewport exposes them.
+7. Paint the scroll corner or ResizeGrabber above the scrollbar junction.
+8. Paint the active-window focus treatment and transient attention signals.
+
+The application surface cannot cover, clip, or receive pointer events from the outer frame, title bar, window controls, scrollbars owned by the root viewport, or resize grabber. The window manager maintains a separate furniture hit map so an application-drawn lookalike inside the client area cannot impersonate or intercept the actual frame controls.
+
 ---
 
 ## 9. Motion Model
@@ -290,6 +374,9 @@ Controls may lift, compress, brighten, or expose a seam. They must not wobble, s
 | Menu open | 120-180 ms |
 | Job progress pulse | 120-180 ms, event driven |
 | Recovery latch reveal | 180-260 ms |
+| Window activate or deactivate | 90-140 ms |
+| Minimize, restore, or size toggle | 160-240 ms |
+| Scrollbar wake or settle | 70-120 ms |
 | Theme switch repaint | One coherent frame sequence, no mixed half-theme frame |
 
 ### Reduced motion
@@ -299,6 +386,8 @@ The active `MotionTheme` must include a reduced-motion mode. In reduced motion, 
 ### Event-driven animation
 
 Animation starts from state changes: pointer input, focus change, progress update, theme switch, or typed system state update. Controls must not run idle decorative loops.
+
+Pointer-coupled movement is not animated behind the pointer. Window move, window resize, and scrollbar-thumb drag update geometry on the next available frame with no easing or delayed interpolation. A short release transition is permitted only for an explicit snap, maximize, restore, or minimize result, and it must be removed in reduced-motion mode.
 
 ---
 
@@ -330,6 +419,38 @@ ControlBounds
 - Signal Beads reserve space only when persistent. Transient beads overlay inside the existing trailing inset.
 - Focus rings are visible in every theme and do not rely on color alone.
 - Destructive controls remain readable before and during confirmation.
+
+### Window furniture anatomy
+
+The order below is illustrative. A theme may place or reorder the command group while preserving command identity.
+
+```text
+WindowFrame
+  FrameRim
+  TitleBar
+    ApplicationGlyph (optional)
+    TitleText
+    DragRegion
+    WindowControls
+      PutToBack
+      Minimize
+      SizeToggle
+      Close
+  ClientViewport
+    ClientSurface
+    VerticalScrollBar
+    HorizontalScrollBar
+    ScrollCorner or ResizeGrabber
+```
+
+### Required window-anatomy rules
+
+- The title text truncates before it displaces a window control or removes the minimum drag region.
+- Visible glyph size and pointer hit-target size are separate theme metrics; compact glyphs still receive a usable target.
+- Hover, active, inactive, maximized, and attention states do not change the client origin or measured frame extents.
+- A ResizeGrabber never overlaps a scrollbar thumb or client content. At a two-scrollbar junction, the corner cell belongs to the grabber or a neutral ScrollCorner.
+- Vertical and horizontal scrollbars are one behavioral component parameterized by orientation. Their separate names exist for layout, accessibility, and testing, not as duplicated implementations.
+- Root-viewport scrollbar visibility follows one declared policy: reserved gutter or overlay. The policy must not switch while the pointer is captured or while doing so would move content under an active interaction.
 
 ---
 
@@ -470,7 +591,100 @@ Cards group state and actions.
 
 Panels are containers with stable layout. A panel may have a Focus Field, header state, grouped actions, and scrollable content. A panel opening from a taskbar or tray item should retain an anchor notch or route line to its invoker while open.
 
-### 11.17 Dialog
+### 11.17 WindowFrame
+
+A `WindowFrame` is the window-manager-owned boundary around one client viewport.
+
+- The active frame uses the active Frame Rim, stronger title contrast, and a non-color focus distinction such as a double rim or title-weight change.
+- The inactive frame remains legible and structurally complete, but its accent treatment is quieter.
+- An attention request adds a bounded Signal Bead or rim segment. It does not steal focus and does not pulse indefinitely.
+- Client pixels are clipped to the client viewport and never paint into the title bar, borders, root scrollbars, or resize grabber.
+- Frame activation, theme change, and hover do not change the client origin or outer dimensions.
+- Maximized geometry uses the session work area and therefore respects taskbars, reserved screen edges, and the current logical scale.
+- The frame owns the hit map for move, resize, command buttons, and any root-viewport scrollbars.
+
+### 11.18 TitleBar
+
+The title bar combines application identity, title text, a stable drag region, and the window-control group.
+
+- The title text uses a single line and truncates with an ellipsis before it overlaps controls or removes the minimum drag region.
+- Pressing an inactive title bar activates the window. Movement beyond the theme drag threshold begins a move and captures the pointer until release or cancel.
+- A title-bar drag follows the pointer without easing. Snap previews may appear as container-owned overlays without moving the pointer target.
+- A double-click or equivalent gesture may invoke `SizeToggle` only when session policy enables it. The explicit size-toggle button remains required.
+- The title bar exposes the application name and current window title to accessibility tools even when the visible title is truncated.
+- Window titles are untrusted application data: the window manager bounds their length, renders them as plain text, rejects or replaces control characters, and applies the text engine's directional-isolation rules rather than interpreting markup.
+- Attention state is shown with a bounded bead or rim segment, not a decorative loop.
+
+#### Shared window-control states
+
+The close, minimize, put-to-back, and size-toggle controls are compact `WindowControl` instances built from the shared `IconButton` behavior.
+
+| State | Rendering and behavior |
+|---|---|
+| Idle, active frame | Quiet plate, readable glyph, and frame-consistent rim. |
+| Idle, inactive frame | Lower contrast than the active frame while remaining legible. |
+| Hover | Glyph and local rim brighten without changing title-bar geometry. |
+| Pressed | Firm compression and captured press state until release or cancel. |
+| Keyboard focus | Visible focus ring distinct from hover and window activation. |
+| Disabled | Muted plate and glyph, no command dispatch, and an inspectable reason. |
+
+Pressing a window control on an inactive frame activates that frame and arms the same control in one interaction. Releasing over the armed control invokes it; moving away or cancelling does not. The press is never forwarded into the client surface.
+
+### 11.19 CloseButton
+
+The close button represents `WindowControlKind::Close` and is not a force-termination control.
+
+- Activation sends a typed cooperative close request to the owning application.
+- The application may close immediately, reject the request with a user-facing reason, or present an unsaved-work decision surface while keeping the window open.
+- A non-responsive application remains a recovery case. `Force Action` or process termination uses the separate destructive recovery path and its capability checks.
+- The close glyph and accessible label identify `Close <window title>`. A theme may use danger emphasis on hover or press, but the idle button need not appear permanently destructive.
+- A non-closable surface retains the control slot and renders it disabled with an explanation. Close availability must not shift neighboring title-bar controls.
+
+### 11.20 MinimizeButton
+
+The minimize button represents `WindowControlKind::Minimize`.
+
+- Activation removes the window from the current workspace view while keeping the application, task, and background work alive.
+- The corresponding taskbar item remains available and exposes the minimized state. Restoring through the taskbar returns the same window rather than creating a new one.
+- The restored rectangle is preserved independently of the maximized rectangle.
+- A minimize transition may route visually toward the taskbar when motion is enabled. Reduced-motion mode changes state immediately without a travel animation.
+- Minimize is distinct from `PutToBack`: minimized windows are hidden from the workspace; put-to-back windows remain visible when not covered.
+
+### 11.21 PutToBackButton
+
+The put-to-back button represents `WindowControlKind::PutToBack`.
+
+- Activation moves the window to the bottom of the normal stacking order for its current workspace and activates the next eligible window.
+- The window remains mapped, visible where not occluded, and represented by the same taskbar item. Its process and jobs are unaffected.
+- The glyph uses stacked plates with a backward or downward cue, and the accessible label is `Put window to back`.
+- Modal ownership, pinned system surfaces, or session policy may disable the action. The disabled state explains the constraint.
+- Repeated activation is idempotent once the window is already at the back of its allowed stack.
+
+### 11.22 SizeToggleButton
+
+The size-toggle button represents `WindowControlKind::SizeToggle`.
+
+- In `WindowSizeState::Restored`, the glyph and accessible label describe the next action: `Maximize`.
+- In `WindowSizeState::Maximized`, the glyph and accessible label describe the next action: `Restore`.
+- Maximize fills the current session work area, not the physical display bounds, and is not fullscreen.
+- Restore returns to the saved logical rectangle. If the work area, scale, or display arrangement changed, the window manager revalidates and clamps that rectangle so a usable title bar remains reachable.
+- Fixed-size or otherwise non-resizable windows render the control disabled with a concise reason.
+- The transition preserves client content and scroll position. Reduced-motion mode uses an immediate geometry change.
+
+### 11.23 ResizeGrabber
+
+The resize grabber is an explicit, visible corner affordance for resizable windows.
+
+- It appears at the logical bottom-trailing corner by default and uses Grip Teeth or another shape mark that remains visible without color.
+- Its visible size and pointer hit region are separate. The hit region may extend invisibly into the frame but never into another control or scrollbar thumb.
+- Press and drag capture the pointer until release or cancel. Geometry follows the pointer on the next frame with no easing.
+- The window manager enforces typed minimum, maximum, aspect, and work-area constraints before presenting each new rectangle.
+- When both root scrollbars are visible, the grabber owns their junction cell. A non-resizable window uses a neutral `ScrollCorner` there instead.
+- Maximized and non-resizable windows hide or disable the grabber consistently with the active theme.
+- A keyboard resize command remains available through the window or system menu, so resize does not depend on precise pointer use.
+- Frame edges may also expose resize zones, but they share this same constraint, cursor, pointer-capture, and test model rather than implementing a second resize path.
+
+### 11.24 Dialog
 
 Dialogs are decision surfaces.
 
@@ -479,7 +693,7 @@ Dialogs are decision surfaces.
 - Disabled actions explain why through inline copy or a focused explanation.
 - Dialogs must not hide capability denial behind generic disabled state.
 
-### 11.18 Notification
+### 11.25 Notification
 
 Notifications use cards with semantic beads. They should remain compact and actionable.
 
@@ -489,18 +703,19 @@ Notifications use cards with semantic beads. They should remain compact and acti
 - Recovery available: recovery bead and clear action.
 - Denied action: Authority Mark with source application or service name.
 
-### 11.19 TaskbarItem
+### 11.26 TaskbarItem
 
-Taskbar items combine application identity, activity, and attention state.
+Taskbar items combine application identity, activity, attention, and window-visibility state.
 
 - Running: plate visible.
 - Focused: lower accent seam.
+- Minimized: distinct non-color mark or inset treatment while remaining restorable.
 - Background work: Heat Seam.
 - Attention requested: Signal Bead.
 - Recovery state: sharper recovery bead.
 - Denied optional action: lock or authority mark, not a generic error color.
 
-### 11.20 TraySignal
+### 11.27 TraySignal
 
 A tray signal is a compact live status capsule.
 
@@ -512,16 +727,60 @@ A tray signal is a compact live status capsule.
 
 A tray signal expands to an instrument readout on hover or focus. The readout must be short: state name, count or value, and primary safe action.
 
-### 11.21 ScrollBar
+### 11.28 ScrollBar Common Behavior
 
-Scrollbars should be quiet until useful.
+Vertical and horizontal scrollbars are one orientation-parameterized control. Window-level and embedded variants share the same range validation, thumb math, input behavior, focus model, and theme values.
 
-- Idle: low-contrast thumb, no rail noise.
-- Hover or scroll: thumb brightens and edge wake may appear near anchored controls.
-- Drag: thumb compresses and uses focus-visible state if keyboard-driven.
-- Content update: no animation unless the scroll extent changes while the user is looking at it.
+```text
+ScrollBar
+  DecrementButton
+  TrackBeforeThumb
+  Thumb
+  TrackAfterThumb
+  IncrementButton
+```
 
-### 11.22 Tooltip and HelpTip
+- The thumb length is proportional to `viewport_extent / content_extent`, subject to the theme's minimum thumb length and the space required by end controls.
+- The thumb position maps the clamped `offset` across the draggable track. The same mapping is used in paint, hit testing, keyboard updates, and tests.
+- When the viewport covers the content, the offset is zero and the bar follows the declared layout policy: hidden, or a reserved quiet gutter with a non-draggable thumb. It must not oscillate between policies as content changes by a pixel.
+- Idle: low-contrast thumb and quiet Scroll Channel.
+- Hover, keyboard focus, wheel input, or active scrolling: thumb and relevant end control brighten without changing geometry.
+- Thumb drag captures the pointer and preserves the initial pointer-to-thumb anchor so the content does not jump when the drag begins.
+- A decrement or increment control performs one typed line step. A track region performs one page step in its direction. Press-and-hold repetition uses a one-shot timer and event-driven wakeups, never a polling loop.
+- Mouse wheel, touchpad, keyboard, and accessibility actions update the same scroll model. The control does not maintain a private offset separate from the owning viewport.
+- If content extent changes during thumb drag, the control recomputes the range from the preserved drag anchor, clamps the result, and never produces an invalid offset.
+- Content updates do not animate the thumb unless the user is actively looking at or manipulating the scrollbar. Reduced-motion mode uses immediate position changes.
+- A focused scrollbar supports arrow keys for line steps, Page Up or Page Down for page steps, and Home or End for the range bounds, interpreted by orientation.
+
+### 11.29 VerticalScrollBar
+
+A vertical scrollbar controls the viewport's vertical offset.
+
+- It sits on the logical trailing edge by default. A right-to-left session policy may mirror it to the leading edge without changing command meaning.
+- The decrement control means `Scroll up`; the increment control means `Scroll down`.
+- The thumb moves only on the vertical axis, and its accessible value reports the vertical position and range.
+- Vertical wheel or touchpad input routes to the nearest eligible vertical viewport under the existing input-routing rules.
+- Edge Wake may appear on the top or bottom client edge to show that more content exists beyond the viewport.
+
+### 11.30 HorizontalScrollBar
+
+A horizontal scrollbar controls the viewport's horizontal offset.
+
+- It sits on the logical bottom edge by default.
+- The decrement control means `Scroll toward the logical start`; the increment control means `Scroll toward the logical end`. Glyph direction mirrors with layout direction while accessible names remain semantic.
+- The thumb moves only on the horizontal axis, and its accessible value reports the horizontal position and range.
+- Horizontal touchpad input and any session-defined modified-wheel gesture route to the nearest eligible horizontal viewport.
+- Edge Wake may appear on the leading or trailing client edge to show off-screen content.
+
+### 11.31 ScrollCorner
+
+A `ScrollCorner` occupies the junction between visible vertical and horizontal scrollbars.
+
+- On a resizable top-level window it is replaced by, or visually integrated with, the `ResizeGrabber` while retaining one unambiguous hit target.
+- On a non-resizable window it is a neutral Alloy Plate with no hidden scroll or resize action.
+- It never overlaps either thumb and never receives line-step or page-step input intended for a scrollbar track.
+
+### 11.32 Tooltip and HelpTip
 
 Tooltips explain immediate affordance. HelpTips explain why an action is unavailable or recommended.
 
@@ -590,6 +849,14 @@ A recovery action is a deliberate control state for hung or broken work.
 - Restart: Recovery Latch with stronger perimeter and deliberate press timing.
 - Force action: danger rim, confirmation posture, no playful movement.
 
+### 12.8 Frame Activation
+
+The active window receives the strongest Frame Rim and title treatment. Inactive windows retain complete furniture with quieter contrast. An application requesting attention receives a bounded bead or rim segment without stealing focus or starting an indefinite pulse. Activation state never changes frame measurements.
+
+### 12.9 Scroll Edge Wake
+
+When scrolling starts, the relevant Scroll Channel and the client edge in the direction of travel may brighten briefly. The thumb remains the authoritative position indicator. Reduced-motion mode keeps the wake static only while input is active, then returns directly to idle.
+
 ---
 
 ## 13. Authority and Security Rendering
@@ -607,6 +874,8 @@ Controls must distinguish these cases:
 Never render an authority denial as though the control is merely inactive. Users should be able to understand whether they cannot act because the object is done, because the action is not valid, or because they lack authority.
 
 Security-sensitive controls must not display secrets, raw capability tokens, or hidden policy internals. They may show concise user-facing reasons such as "requires system permission" or "action blocked by policy".
+
+Window furniture does not create authority. The window manager validates that a furniture event targets a live window owned by the addressed client and that the client cannot issue frame commands against another owner's window. Cooperative close, minimize, put-to-back, maximize, restore, move, resize, and scroll dispatch remain userland window operations. Force termination remains the distinct capability-checked recovery path. Root viewport ranges and resize constraints are validated and clamped before they influence geometry.
 
 ---
 
@@ -634,6 +903,14 @@ Interactive controls must meet the active theme's minimum target size. A dense t
 
 Labels, shortcuts, values, and icons keep their position while rims, rails, beads, and seams animate. Any value that changes frequently should use fixed-width numeric glyphs when available.
 
+### Window frame geometry
+
+- Title-bar height, frame inset, control extent, scrollbar breadth, corner cell, and resize hit slop are logical theme metrics.
+- Active, inactive, hover, attention, and maximized states do not change the client origin or frame extents.
+- The work-area clamp always leaves a usable title-bar region reachable after display, scale, or taskbar changes.
+- When space is constrained, title text truncates first. Window-command hit targets and the minimum drag region remain usable.
+- Overlay scrollbar hit regions must not cover title-bar controls, the resize grabber, or unrelated client actions. Reserved-gutter scrollbars must not resize the client in response to hover alone.
+
 ---
 
 ## 15. Accessibility
@@ -650,6 +927,12 @@ Reactive Alloy must be usable without color, without motion, and with keyboard i
 - Progress exposes text or numeric state when known.
 - Count beads have text equivalents.
 - Denied and destructive states have explicit labels or descriptions.
+- Every window command has an accessible name that describes the action, not only its glyph.
+- The size-toggle name and glyph describe the next action: Maximize or Restore.
+- Active and inactive windows remain distinguishable without color.
+- Window move, close, minimize, put-to-back, size toggle, and keyboard resize are reachable without a pointer through the established window or system menu path.
+- Scrollbars expose orientation, current value, minimum, maximum, and page extent, and support keyboard line, page, and bound navigation.
+- Resize grabbers use a visible shape mark and an enlarged target in comfortable density.
 
 ### Shape fallbacks
 
@@ -662,6 +945,9 @@ Reactive Alloy must be usable without color, without motion, and with keyboard i
 | Recovery | diamond bead or latch outline |
 | Success | check bead |
 | Denied | lock bead |
+| Active window | double Frame Rim, title-weight change, or another non-color frame distinction |
+| Resize affordance | Grip Teeth in the corner |
+| Scroll position | proportional thumb with accessible numeric range |
 
 ---
 
@@ -670,6 +956,14 @@ Reactive Alloy must be usable without color, without motion, and with keyboard i
 ### Active theme flow
 
 `userland/gui/session` owns the active theme selection and relays it to the window manager, taskbar, and GUI applications. Controls listen for theme changes through the existing session or application model, then repaint through the normal surface path.
+
+### Window furniture flow
+
+`userland/gui/wm` owns the frame composition, furniture hit map, activation, stacking, move and resize capture, minimize state, maximize and restore geometry, and root-viewport scrollbar composition. The existing window path carries typed application metadata and events; it does not add a GUI-specific syscall.
+
+The owning application provides the current title, optional application glyph reference, sizing constraints, and declared close, minimize, and resize support for that window class. The window manager and session derive put-to-back and size-toggle availability from stacking, modal, work-area, and sizing policy rather than accepting arbitrary z-order policy from the client. When a top-level client exposes a root viewport, it also provides a bounded scroll model and receives typed scroll requests. The window manager validates every range and constraint, then emits application-directed actions only to that window's owner.
+
+Close is cooperative and application-directed. Minimize, put-to-back, activation, and size state are window-manager/session state. A hung close request may make recovery available, but it never silently converts into force termination. Nested application scrollbars use the same control specification and theme data while remaining inside the client surface.
 
 ### Application bundles
 
@@ -688,6 +982,14 @@ Controls emit typed userland actions. The receiving service performs the operati
 ## 17. Switchboard as a Reference Composition
 
 Switchboard should use the same general controls as every other RustOS surface.
+
+### Window frame and viewport
+
+- The top-level Switchboard window uses the standard `WindowFrame` and `TitleBar`; it does not ship custom application-painted chrome.
+- Close, minimize, put-to-back, and size toggle are the standard window-manager controls with the same glyph, focus, tooltip, and keyboard semantics as every other RustOS window.
+- When content exceeds the client viewport, the standard vertical or horizontal scrollbar appears according to the root viewport model.
+- A resizable window exposes the standard ResizeGrabber at the frame corner or scrollbar junction.
+- Minimize keeps background jobs active and visible through the taskbar item; close remains a cooperative application request.
 
 ### Task list
 
@@ -759,6 +1061,25 @@ recovery latch + danger rim + deliberate press
 lower heat seam + recovery bead
 ```
 
+### Active window furniture
+
+The order is illustrative; theme data may place the command group elsewhere.
+
+```text
++--[back]--[min]-- Switchboard --[restore]--[close]--+
+| client viewport                                  |^|
+|                                                  |#|
+|<----------- horizontal thumb ----------->| grip |v|
++---------------------------------------------------+
+active Frame Rim + stable title + separate hit targets
+```
+
+### Inactive window furniture
+
+```text
+same geometry + quieter Frame Rim + complete controls
+```
+
 ---
 
 ## 19. Do and Do Not
@@ -772,6 +1093,11 @@ lower heat seam + recovery bead
 - Keep live state in view models supplied by services or owning containers.
 - Make every state accessible without color or motion.
 - Let services enforce authority and return typed results.
+- Keep outer frame furniture and its hit map owned by the window manager.
+- Keep Close, Minimize, PutToBack, and SizeToggle as distinct typed commands.
+- Preserve restored geometry and validate it when the work area or scale changes.
+- Share one scrollbar range, mapping, and input implementation across orientations and owners.
+- Make the resize grabber and scrollbar thumb visible, focusable where appropriate, and usable at every density.
 
 ### Do not
 
@@ -783,6 +1109,12 @@ lower heat seam + recovery bead
 - Treat a denied action as a generic disabled state.
 - Hide live system information behind an untyped text scrape.
 - Add a new public interface solely to make a control easier to draw.
+- Let application content paint over or intercept window-manager furniture.
+- Treat Close as force termination, or treat Minimize and PutToBack as the same action.
+- Duplicate vertical and horizontal scrollbar logic.
+- Animate window move, resize, or thumb drag behind the pointer.
+- Hide the only resize affordance in a one-pixel invisible border.
+- Change the title-bar or client geometry merely because activation, hover, or attention state changed.
 
 ---
 
@@ -800,6 +1132,11 @@ A control or control family is ready when the following are true:
 - Progress and pressure state come from typed models.
 - Tests cover measurement, state transitions, theme switching, reduced motion, and denied actions.
 - Documentation explains the control's public behavior and the meaning of each state.
+- Window-frame tests cover active, inactive, attention, maximize, restore, minimize, put-to-back, cooperative close, and disabled command states.
+- Move, resize, and scrollbar-thumb tests cover pointer capture, cancellation, exact pointer tracking, and constraint clamping.
+- Scrollbar tests cover zero overflow, proportional thumb math, minimum thumb size, line and page steps, range changes during drag, both orientations, and keyboard access.
+- Restore-rectangle tests cover work-area, display, and logical-scale changes while keeping the title bar reachable.
+- Hit-map tests prove that client content cannot receive outer-furniture input and that the resize corner does not overlap either scrollbar.
 
 ---
 
@@ -814,6 +1151,11 @@ Reactive Alloy succeeds when a user can answer these questions without reading a
 - What action is consequential?
 - What action is blocked by authority?
 - What will keep running if I leave this panel?
+- Which window is active?
+- How do I close, minimize, put to back, maximize, restore, or resize this window?
+- Will Close ask the application to finish safely, or is a separate force action required?
+- Where am I in vertically or horizontally scrolled content, and how much remains?
+- Will the size toggle return me to the window's previous usable rectangle?
 
 The design is allowed to be rich. It is not allowed to be noisy. RustOS controls should feel grounded, typed, secure, and alive at the edges.
 

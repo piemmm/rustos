@@ -189,6 +189,18 @@ pub struct AddressSpaceRegistry {
     /// [`withdraw`](Self::withdraw) so a reused id never inherits a dead
     /// task's span.
     stack_spans: BTreeMap<TaskId, StackSpan>,
+    /// The one-shot file delegations minted **to** each live task and not
+    /// yet redeemed (`fd_grant`/`fd_redeem`, `plans/CAPABILITY_USE.md`
+    /// CU6). Co-located with the address space for the same reason as
+    /// [`Self::grants`]: a pending delegation shares the exact per-process
+    /// lifecycle — minted when a grantor delegates to the task, consumed on
+    /// redemption, and dropped when the recipient exits — and is keyed by
+    /// the same kernel-trusted [`TaskId`]. A task with no entry holds no
+    /// pending delegation, so [`Self::redeem_fd_delegation`] resolves to
+    /// `NotFound` (fail closed: a task can redeem only what was actually
+    /// minted to it). Dropped at [`withdraw`](Self::withdraw) so a reused
+    /// id never inherits a dead task's pending delegations.
+    fd_delegations: BTreeMap<TaskId, TaskFdDelegations>,
 }
 
 /// One live demand-paged file mapping of a task: the region `file_map`
@@ -290,6 +302,26 @@ impl StackSpan {
     }
 }
 
+/// A filesystem object delegated by another process, carrying the
+/// **grantor's** captured authority (`plans/CAPABILITY_USE.md` CU6 — the
+/// file picker's one-shot hand-off).
+///
+/// Captured at `fd_grant` time from the grantor's kernel-attested identity
+/// — never from anything the recipient supplies — so every later operation
+/// on the redeemed descriptor is re-authorised through the secured VFS
+/// under exactly the authority the grantor held, no more. The recipient's
+/// own identity and capability set never enter the check: the delegation
+/// *is* the authority, established by the grantor's user-mediated choice.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelegatedFile {
+    /// The resolved absolute path the grantor's descriptor named.
+    pub path: String,
+    /// The grantor's uid, the identity every VFS re-check runs under.
+    pub uid: u32,
+    /// The grantor's effective capability set at grant time.
+    pub caps: CapabilitySet,
+}
+
 /// What a descriptor resolves to: a filesystem path or a typed resource.
 ///
 /// A descriptor's number is unique per process regardless of what backs it,
@@ -316,6 +348,12 @@ pub enum OpenBacking {
     /// releases it and wakes the peer side — the [`PipeEnd`] handle owns
     /// that bookkeeping.
     Pipe(PipeEnd),
+    /// A filesystem object delegated one-shot by another process
+    /// (`fd_grant`/`fd_redeem`), operated on under the **grantor's**
+    /// captured identity rather than the holder's. Never re-delegatable:
+    /// `fd_grant` accepts only [`OpenBacking::Path`], so a delegation
+    /// chain cannot form and delegated authority never widens.
+    Delegated(DelegatedFile),
 }
 
 /// One open descriptor: what it resolves to and the [`OpenFlags`] it was
@@ -392,11 +430,16 @@ impl OpenFile {
 
     /// The absolute filesystem path this descriptor resolves to, or `None`
     /// when it is backed by a resource or pipe rather than a path.
+    ///
+    /// A delegated backing deliberately answers `None` here: its path is
+    /// operated on under the grantor's captured identity, never under the
+    /// holder's own credentials, so a caller resolving "the caller's own
+    /// path" must not see it.
     #[must_use]
     pub fn path(&self) -> Option<&str> {
         match &self.backing {
             OpenBacking::Path(path) => Some(path),
-            OpenBacking::Resource(_) | OpenBacking::Pipe(_) => None,
+            OpenBacking::Resource(_) | OpenBacking::Pipe(_) | OpenBacking::Delegated(_) => None,
         }
     }
 
@@ -406,7 +449,7 @@ impl OpenFile {
     pub fn resource(&self) -> Option<ResourceBacking> {
         match self.backing {
             OpenBacking::Resource(backing) => Some(backing),
-            OpenBacking::Path(_) | OpenBacking::Pipe(_) => None,
+            OpenBacking::Path(_) | OpenBacking::Pipe(_) | OpenBacking::Delegated(_) => None,
         }
     }
 }
@@ -472,6 +515,25 @@ struct TaskGrants {
     by_handle: BTreeMap<u64, HwResource>,
 }
 
+/// The one-shot file delegations minted **to** one task and not yet
+/// redeemed (`fd_grant`/`fd_redeem`, `plans/CAPABILITY_USE.md` CU6).
+///
+/// Handles follow the [`TaskGrants`] discipline: minted per recipient,
+/// monotonically from `1` (handle `0` is the reserved invalid value and is
+/// never issued), never reused within the task's lifetime, and resolvable
+/// only when presented by the recipient itself. The whole record is dropped
+/// when the recipient is [`withdraw`](AddressSpaceRegistry::withdraw)n, so
+/// an unredeemed delegation dies with its recipient and never leaks
+/// (fail closed).
+#[derive(Default)]
+struct TaskFdDelegations {
+    /// The next handle value to issue. Starts at `1`; only ever increases.
+    next_handle: u64,
+    /// The pending delegation behind each issued handle, with the open
+    /// flags the grantor's descriptor carried.
+    by_handle: BTreeMap<u64, (DelegatedFile, OpenFlags)>,
+}
+
 impl AddressSpaceRegistry {
     /// Construct an empty registry.
     #[must_use]
@@ -487,6 +549,7 @@ impl AddressSpaceRegistry {
             cwds: BTreeMap::new(),
             file_regions: BTreeMap::new(),
             stack_spans: BTreeMap::new(),
+            fd_delegations: BTreeMap::new(),
         }
     }
 
@@ -567,6 +630,7 @@ impl AddressSpaceRegistry {
         let had_cwd = self.cwds.remove(&task).is_some();
         let had_file_regions = self.file_regions.remove(&task).is_some();
         let had_stack_span = self.stack_spans.remove(&task).is_some();
+        let had_fd_delegations = self.fd_delegations.remove(&task).is_some();
         self.tasks.remove(&task).is_some()
             || had_streams
             || had_limits
@@ -577,6 +641,7 @@ impl AddressSpaceRegistry {
             || had_cwd
             || had_file_regions
             || had_stack_span
+            || had_fd_delegations
     }
 
     /// Record that the autoloaded driver `task` was loaded for the discovered
@@ -991,6 +1056,69 @@ impl AddressSpaceRegistry {
         let table = self.open_files.entry(task).or_default();
         let fd = table.alloc_fd()?;
         table.by_fd.insert(fd, OpenFile::new(backing, flags));
+        Ok(fd)
+    }
+
+    /// Mint a one-shot file delegation **to** `recipient`, returning the
+    /// unforgeable handle the grantor forwards in-band
+    /// (`fd_grant`, `plans/CAPABILITY_USE.md` CU6).
+    ///
+    /// Called by the `fd_grant` handler *after* it has resolved the
+    /// grantor's own descriptor and captured the grantor's identity into
+    /// `file`, so this records an already-checked delegation; it grants no
+    /// authority of its own. The handle follows the [`Self::mint_grant`]
+    /// discipline — unique for `recipient`'s whole lifetime, meaningful
+    /// only when presented by `recipient` itself
+    /// ([`Self::redeem_fd_delegation`] is keyed by the kernel-trusted
+    /// caller id, so another task presenting the same numeric value
+    /// resolves to nothing).
+    pub fn mint_fd_delegation(
+        &mut self,
+        recipient: TaskId,
+        file: DelegatedFile,
+        flags: OpenFlags,
+    ) -> u64 {
+        let entry = self.fd_delegations.entry(recipient).or_default();
+        // Handle 0 is the reserved invalid value; the first minted handle
+        // is 1. `next_handle` only ever increases within a task's life.
+        entry.next_handle += 1;
+        let handle = entry.next_handle;
+        entry.by_handle.insert(handle, (file, flags));
+        handle
+    }
+
+    /// Redeem the one-shot file delegation `handle` minted to `task`,
+    /// installing it into `task`'s open table and returning the fresh
+    /// descriptor number (`fd_redeem`).
+    ///
+    /// One-shot with fail-closed atomicity: the delegation is consumed
+    /// only when the descriptor allocation succeeds, so a refused
+    /// redemption (descriptor-space exhaustion) leaves the grant intact
+    /// for a retry after the holder closes descriptors, and a redeemed
+    /// handle can never be redeemed twice. The `task` argument is the
+    /// kernel-trusted caller id, never a caller-supplied value.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotFound`] — no such handle minted to `task` (unknown,
+    ///   already redeemed, or minted to a different task — forgery answers
+    ///   exactly like absence, so the handle space leaks nothing).
+    /// * [`Errno::OutOfRange`] — descriptor-space exhaustion; the grant
+    ///   stays pending.
+    pub fn redeem_fd_delegation(&mut self, task: TaskId, handle: u64) -> Result<u32, Errno> {
+        let (file, flags) = self
+            .fd_delegations
+            .get(&task)
+            .and_then(|entry| entry.by_handle.get(&handle))
+            .cloned()
+            .ok_or(Errno::NotFound)?;
+        let fd = self.open_backed(task, OpenBacking::Delegated(file), flags)?;
+        // The allocation succeeded; consume the grant (one-shot). The
+        // entry provably exists — it was read above under the same
+        // exclusive borrow — so the removes cannot miss.
+        if let Some(entry) = self.fd_delegations.get_mut(&task) {
+            entry.by_handle.remove(&handle);
+        }
         Ok(fd)
     }
 

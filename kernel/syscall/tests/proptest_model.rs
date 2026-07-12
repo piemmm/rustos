@@ -698,6 +698,14 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn fd_grant(&self, _c: &CallerContext<'_>, _fd: u32, _pid: u64) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fd_redeem(&self, _c: &CallerContext<'_>, _handle: u64) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn resource_open(
         &self,
         _c: &CallerContext<'_>,

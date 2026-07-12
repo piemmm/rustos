@@ -7,9 +7,15 @@
 # (the kernel additionally owner-gates every drain against the live
 # lease), CAP_SHM to create and grant the zero-copy frame region the
 # display service maps (and to map each served app window's granted
-# frames), and CAP_PROC_SPAWN for the start menu's app launchers
-# (plans/APPWIN.md AW3). No console pair: the session's surface is the
-# seat, not a text console; no CAP_IPC_BIND_PRIVILEGED: the display
+# frames), CAP_PROC_SPAWN for the start menu's app launchers
+# (plans/APPWIN.md AW3), and CAP_FS_ACCESS for the trusted file picker
+# (plans/APPWIN.md AW5, plans/CAPABILITY_USE.md CU6): the session lists
+# directories and opens the user's chosen file under its own identity
+# (every read still permission-checked per inode), then delegates that
+# one file one-shot to the requesting app over fd_grant — the
+# user-mediated capability model, and also the read seam for the
+# on-disk SVG desktop assets. No console pair: the session's surface is
+# the seat, not a text console; no CAP_IPC_BIND_PRIVILEGED: the display
 # endpoint is called, never bound, and binding the seat-scoped window
 # rendezvous is authorised by the session's kernel-attested live seat
 # lease, not a capability.
@@ -17,4 +23,4 @@ id = "os.rustos.desktop"
 name = "desktop"
 version = "0.1.0"
 kind = "service"
-capabilities = ["CAP_DISPLAY", "CAP_INPUT_READ", "CAP_SHM", "CAP_PROC_SPAWN"]
+capabilities = ["CAP_DISPLAY", "CAP_INPUT_READ", "CAP_SHM", "CAP_PROC_SPAWN", "CAP_FS_ACCESS"]

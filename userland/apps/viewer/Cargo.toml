@@ -1,0 +1,51 @@
+[package]
+name = "rustos-viewer"
+description = "RustOS file viewer: a windowed read-only text viewer that holds no filesystem capability of its own — it asks the desktop session's trusted picker and reads exactly the one file the user chose through a one-shot fd_grant delegation (plans/APPWIN.md AW5, plans/CAPABILITY_USE.md CU6 — PLAN.md Stage 7)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The frozen `Errno` the viewer's seams report failures with (§2.2).
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The single shared theme definition (§10): the viewer takes its colours
+# from the active theme so it stays consistent with the desktop.
+rustos-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+# Shared software rasteriser (`Surface`) — the same premultiplied-alpha
+# primitives the window manager paints with (§17.4, §2.2).
+rustos-raster = { path = "../../../lib/raster", version = "=0.0.0" }
+# Shared text rasterisation: the built-in monospace face and glyph
+# blitter the content lines are drawn with (§16.4, §17.4).
+rustos-font = { path = "../../../lib/font", version = "=0.0.0" }
+
+# The package is both the viewer's host-tested view engine (above — the
+# bounded, sanitising byte→line model and the themed renderers) and the
+# `Run` entry-point binary of the on-disk `viewer.app` bundle
+# (plans/APPWIN.md AW5): the CU6 consumer whose manifest deliberately
+# holds NO filesystem capability — its only reach into the filesystem is
+# the one file the user hands it through the session's trusted picker.
+# The binary is a freestanding pure-Rust program on the native Tier-1
+# targets and an inert host stub elsewhere (see `src/run.rs` /
+# `build.rs`).
+[[bin]]
+name = "rustos-viewer-run"
+path = "src/run.rs"
+
+# Everything only the freestanding `Run` binary links is pulled in for
+# the bare-metal targets it is actually built for; on the host the
+# binary is an inert stub with no extra dependencies.
+[target.'cfg(target_os = "none")'.dependencies]
+# The app half of the window channel: `WindowClient` (create / present /
+# pick_file / close) and `WindowEvents` (the typed, parked event wait).
+rustos-window = { path = "../../../lib/window", version = "=0.0.0" }
+# The pure-Rust userland runtime: `_start`, the stack canary, the panic
+# handler, the allocator, and the syscall wrappers (`shm_create` /
+# `shm_grant`, `port_bind` / `ipc_recv`, `ipc_call`, `waitset_*`,
+# `fd_redeem` / `fs_read` / `fs_close`).
+rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+
+[lints]
+workspace = true

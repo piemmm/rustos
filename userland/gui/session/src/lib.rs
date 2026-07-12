@@ -132,6 +132,7 @@ pub mod config;
 pub mod device;
 pub mod input;
 pub mod keyboard;
+pub mod picker;
 pub mod presenter;
 pub mod seat;
 pub mod session;
@@ -145,11 +146,14 @@ mod tests;
 pub use assets::{load_cursor_theme, load_icon_set, GraphicsAssetReader, GRAPHICS_DIR};
 pub use config::{
     APPEARANCE_LABEL, FILES_LABEL, FILES_LAUNCHER, FILES_RUN_PATH, TERMINAL_LABEL,
-    TERMINAL_LAUNCHER, TERMINAL_RUN_PATH,
+    TERMINAL_LAUNCHER, TERMINAL_RUN_PATH, VIEWER_LABEL, VIEWER_LAUNCHER, VIEWER_RUN_PATH,
 };
 pub use device::{DeviceInputSource, PointerInputChannel};
 pub use input::{SessionInputResponse, SessionInputRouter};
 pub use keyboard::{KeyInputChannel, KeyboardInputSource};
+pub use picker::{
+    ConcludedPick, PickConclusion, PickerSlot, SessionPicker, PICKER_ORIGIN, PICKER_TITLE,
+};
 pub use presenter::TaskbarPresenter;
 pub use seat::{SeatEventReader, SeatInputChannel};
 pub use session::{DesktopSession, SessionEvent};

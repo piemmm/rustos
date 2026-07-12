@@ -6,12 +6,17 @@ ordinary `.app` bundles (`AGENTS.md` §16.5) that consume the shared desktop
 `rustos-font` — exactly as the taskbar does, and never depend on the window
 manager (`AGENTS.md` §17.4).
 
-## Filesystem browser (`rustos-files`)
+## Filesystem browser (`rustos-files` over `lib/browse`)
 
 The filesystem browser navigates the §16 filesystem layout and renders the
 current directory through the active theme. It is split into a navigation
 **model** and a **renderer**, both driven by an injected directory-read seam,
 so the security-relevant logic is testable without a kernel (`AGENTS.md` §7).
+The engine — the model, the renderer and its row hit-test, and the validated
+path spelling described below — lives in the shared `lib/browse` crate
+(`rustos-browse`), because the desktop session's trusted file picker
+(`plans/APPWIN.md` AW5) drives exactly the same engine; the `rustos-files`
+package is only the `Run` binary that composes it over the live syscalls.
 
 ### The directory-read seam
 
@@ -83,12 +88,16 @@ rather than a second copy (§2.2). The list scrolls so the selected entry stays
 visible, and every length saturates so a degenerate viewport paints what it
 can rather than panicking (`AGENTS.md` §2.9).
 
-### Still to do
+### The `Run` bundle
 
-The browser model, renderer, and production VFS source are complete and
-host-tested; the `Run` bundle that wires `VfsDirectorySource` over
-`rustos_rt::read_dir_all` and presents through the window channel lands with
-`plans/APPWIN.md` AW3.
+`files.app`'s entry point (`plans/APPWIN.md` AW3) wires `VfsDirectorySource`
+over `rustos_rt::read_dir_all`, creates and grants the zero-copy window
+frame region, parks on its window-event mailbox, and drives the browser
+with the keyboard (`Down`/`Up` select, `Enter` opens a directory,
+`Backspace` climbs); a `CloseRequested` from the desktop ends it cleanly,
+and every bring-up refusal exits fail-loud with its reason on `stderr`. The
+desktop session's start menu carries a `Files` entry that spawns the
+bundle.
 
 ## Terminal emulator (`rustos-terminal`)
 
@@ -180,3 +189,32 @@ session's start menu carries a `Terminal` entry that spawns the bundle, and
 the autoload QEMU vertical types a real command into the served window at
 the seat keyboard, PASSing only on the kernel-attested keyboard → session →
 terminal → pipe → shell → spawn round trip.
+
+## File viewer (`rustos-viewer`)
+
+The read-only text viewer is the first consumer of the desktop's trusted
+file picker and the CU6 one-shot file delegation (`plans/APPWIN.md` AW5,
+`plans/CAPABILITY_USE.md`). Its manifest requests `CAP_CONSOLE_WRITE` and
+`CAP_SHM` and deliberately **no filesystem capability**: on its own the
+viewer can open, list, and stat nothing.
+
+At startup the `Run` binary creates its window and immediately asks the
+session's picker (`WindowClient::pick_file`). The user browses in the
+*session's* UI under the *session's* authority; the viewer receives
+exactly one conclusion on its authenticated event channel — a
+`FilePicked` carrying the kernel's one-shot `fd_grant` handle, or a
+`PickCancelled`. Redeeming the handle (`fd_redeem`, unprivileged)
+installs a read-only descriptor whose reads the kernel re-authorises
+under the session's captured identity, so the viewer reads exactly the
+one file the user chose and nothing else — the user-mediated file
+capability of `AGENTS.md` §16.5, end to end.
+
+The host-tested view engine keeps untrusted content honest:
+`content_lines` bounds the shown bytes (`CONTENT_MAX`), splits on line
+feeds, and sanitises **every** non-printable byte to a placeholder before
+anything reaches the renderer, so a hostile picked file can neither pin
+unbounded memory nor smuggle control sequences; `render_status` /
+`render_lines` paint through the active theme and the shared monospace
+face. `Enter` asks for another pick; a cancelled pick leaves the viewer
+open with a notice; a `CloseRequested` ends it cleanly. The start menu
+carries a `Viewer` entry that spawns the bundle.

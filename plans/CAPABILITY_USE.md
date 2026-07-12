@@ -167,7 +167,8 @@ The life of a capability, from disk to exercise to revocation:
 
 All three defects are fixed; user management (CU4) and per-invocation
 elevation (CU5) are live; the desktop's session/ceiling slice (CU6) is
-live with `plans/DISPLAY.md` D7d, with picker descriptors remaining.
+live with `plans/DISPLAY.md` D7d, and its picker-issued one-shot
+descriptors landed with `plans/APPWIN.md` AW5.
 
 ---
 
@@ -289,13 +290,15 @@ set so widening is a reviewed diff.
 The graphical session changes no rule. The desktop-session service's
 manifest requests the graphical class (`CAP_DISPLAY`/`CAP_INPUT_READ`/
 `CAP_SHM` — seat ownership and the zero-copy frame region per
-`plans/DISPLAY.md`), the session baseline carries the same class so the
+`plans/DISPLAY.md`) plus `CAP_PROC_SPAWN` for its start-menu launchers
+and `CAP_FS_ACCESS` for the trusted picker (each sized to an exercised
+code path per §4.5), the session baseline carries the same class so the
 intersection keeps it for every interactive account, and a desktop app is
 spawned like any other process and gets `AppInfo request ∩ user ceiling`;
 user-mediated file access beyond the app's own state flows through
 picker-issued one-shot descriptors, not class capabilities (`AGENTS.md`
-§16.5). Nothing in CU1–CU5 needed revisiting; CU6 tracks the remaining
-picker work.
+§16.5 — live: the `fd_grant`/`fd_redeem` delegation of `plans/APPWIN.md`
+AW5). Nothing in CU1–CU5 needed revisiting.
 
 ### 4.7 Resource limits interplay
 
@@ -554,8 +557,10 @@ exist from CU3).
 
 ### CU6 — desktop session capabilities
 
-**Status: in progress — the session/ceiling slice is live
-(`plans/DISPLAY.md` D7d); picker-issued one-shot descriptors remain.**
+**Status: done — the session/ceiling slice landed with `plans/DISPLAY.md`
+D7d, and the picker-issued one-shot descriptors landed with
+`plans/APPWIN.md` AW5 (its remaining QEMU-vertical stage is tracked
+there).**
 
 - Live: the graphical-session class (`CAP_DISPLAY`/`CAP_INPUT_READ`/
   `CAP_SHM`) is part of `SESSION_BASELINE` — a graphical login is an
@@ -569,9 +574,20 @@ exist from CU3).
   `CAP_PROC_SPAWN`) per the §4.5 sizing rule, so widening the account
   ceiling never widened elsh; login's manifest gained `CAP_FS_ACCESS`
   for its one read-only desktop-bundle probe.
-- Remaining: picker-issued one-shot file descriptors for desktop apps
-  (`AGENTS.md` §16.5) — staged with the app windows / WM channel work,
-  not designed ahead of that consumer.
+- Live: picker-issued one-shot file descriptors (`AGENTS.md` §16.5,
+  `plans/APPWIN.md` AW5). The desktop session is the trusted UI: an app
+  asks over the window channel (`PickFile`), the session browses and
+  opens the chosen file under **its own** identity (its manifest gained
+  `CAP_FS_ACCESS` for exactly this), and the kernel's `fd_grant` mints a
+  one-shot, recipient-owner-bound, **read-only** delegation the app
+  redeems with the unprivileged `fd_redeem` — every later read is
+  re-authorised under the *grantor's* captured uid + effective set, the
+  grant is audited, delegation never chains, and an exited recipient's
+  pending grants are reclaimed. The `viewer.app` consumer holds no
+  filesystem capability at all and reads exactly the one user-chosen
+  file: spawn-time narrowing plus user-mediated widening, with no new
+  capability added (the §5.2 minimalism rule — `CAP_FS_ACCESS` already
+  gates delegating filesystem authority).
 
 ### CU7 — manifest entitlement audit (the §4.5 sizing rule)
 

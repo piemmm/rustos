@@ -15,7 +15,12 @@
 //! fixed-width [`WindowEvent`] and sends it to the owning app's own event
 //! endpoint (named in `Create`), where the app parks until one arrives.
 //! Events are advisory data about the app's own windows; they carry no
-//! authority and no capability tokens.
+//! ambient authority and no secret. The one authority-adjacent field — the
+//! [`WindowEvent::FilePicked`] delegation handle — is owner-bound
+//! kernel-side (it redeems only when presented by the task it was minted
+//! to, `fd_redeem`), so the number is useless to any observer or forger;
+//! an app still accepts events only from the session identity the create
+//! reply named.
 //!
 //! Requests are the fixed-width [`WindowRequest`]. `Create` answers with
 //! the [`WINDOW_CREATE_REPLY_LEN`]-byte window-id reply
@@ -185,6 +190,19 @@ pub enum WindowRequest {
         /// The window being closed.
         window_id: u64,
     },
+    /// Ask the session to run its **trusted file picker** for window
+    /// `window_id` (`plans/CAPABILITY_USE.md` CU6). The reply is only the
+    /// acceptance: the pick is asynchronous — the user browses in the
+    /// session's own UI under the session's own authority — and concludes
+    /// with a [`WindowEvent::FilePicked`] (carrying a one-shot `fd_redeem`
+    /// handle for the chosen file) or a [`WindowEvent::PickCancelled`]
+    /// delivered to the window's event endpoint. One pick may be pending
+    /// per window; a second request while one is pending is refused
+    /// (`AlreadyExists`).
+    PickFile {
+        /// The requesting app's own window the pick concludes to.
+        window_id: u64,
+    },
 }
 
 /// Wire operation discriminant of [`WindowRequest::Create`].
@@ -193,6 +211,8 @@ const OP_CREATE: u16 = 1;
 const OP_PRESENT: u16 = 2;
 /// Wire operation discriminant of [`WindowRequest::Close`].
 const OP_CLOSE: u16 = 3;
+/// Wire operation discriminant of [`WindowRequest::PickFile`].
+const OP_PICK_FILE: u16 = 4;
 
 impl WindowRequest {
     /// Encoded size on the wire: magic (4), version (2), op (2), and a
@@ -243,6 +263,10 @@ impl WindowRequest {
             }
             Self::Close { window_id } => {
                 put_u16(&mut out, 6, OP_CLOSE);
+                put_u64(&mut out, 8, window_id);
+            }
+            Self::PickFile { window_id } => {
+                put_u16(&mut out, 6, OP_PICK_FILE);
                 put_u64(&mut out, 8, window_id);
             }
         }
@@ -345,6 +369,11 @@ impl WindowRequest {
                 let window_id = nonzero_window_id(read_u64(bytes, 8))?;
                 Ok(Self::Close { window_id })
             }
+            OP_PICK_FILE => {
+                reserved_zero(bytes, 16)?;
+                let window_id = nonzero_window_id(read_u64(bytes, 8))?;
+                Ok(Self::PickFile { window_id })
+            }
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -431,6 +460,10 @@ const EV_KEY: u16 = 2;
 const EV_POINTER: u16 = 3;
 /// Wire event discriminant of [`WindowEvent::CloseRequested`].
 const EV_CLOSE_REQUESTED: u16 = 4;
+/// Wire event discriminant of [`WindowEvent::FilePicked`].
+const EV_FILE_PICKED: u16 = 5;
+/// Wire event discriminant of [`WindowEvent::PickCancelled`].
+const EV_PICK_CANCELLED: u16 = 6;
 
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
@@ -496,6 +529,27 @@ pub enum WindowEvent {
         /// The window the user asked to close.
         window_id: u64,
     },
+    /// The user chose a file in the session's trusted picker
+    /// ([`WindowRequest::PickFile`]'s conclusion). `handle` is the
+    /// kernel-minted one-shot delegation the app redeems with `fd_redeem`
+    /// into a read-only descriptor operated under the *session's* captured
+    /// authority — the CU6 user-mediated file capability. The handle is
+    /// owner-bound kernel-side, so the value is useless to any other
+    /// process.
+    FilePicked {
+        /// The window whose pick concluded.
+        window_id: u64,
+        /// The `fd_redeem` handle minted to the app's task; never zero
+        /// (the reserved invalid handle).
+        handle: u64,
+    },
+    /// The user dismissed the session's trusted picker without choosing
+    /// ([`WindowRequest::PickFile`]'s other conclusion). No authority was
+    /// delegated; the app may ask again.
+    PickCancelled {
+        /// The window whose pick was dismissed.
+        window_id: u64,
+    },
 }
 
 impl WindowEvent {
@@ -511,7 +565,9 @@ impl WindowEvent {
             Self::Focus { window_id, .. }
             | Self::Key { window_id, .. }
             | Self::Pointer { window_id, .. }
-            | Self::CloseRequested { window_id } => window_id,
+            | Self::CloseRequested { window_id }
+            | Self::FilePicked { window_id, .. }
+            | Self::PickCancelled { window_id } => window_id,
         }
     }
 
@@ -545,6 +601,13 @@ impl WindowEvent {
             }
             Self::CloseRequested { .. } => {
                 put_u16(&mut out, 6, EV_CLOSE_REQUESTED);
+            }
+            Self::FilePicked { handle, .. } => {
+                put_u16(&mut out, 6, EV_FILE_PICKED);
+                put_u64(&mut out, 16, handle);
+            }
+            Self::PickCancelled { .. } => {
+                put_u16(&mut out, 6, EV_PICK_CANCELLED);
             }
         }
         out
@@ -614,6 +677,21 @@ impl WindowEvent {
             EV_CLOSE_REQUESTED => {
                 event_reserved_zero(bytes, 16)?;
                 Ok(Self::CloseRequested { window_id })
+            }
+            EV_FILE_PICKED => {
+                event_reserved_zero(bytes, 24)?;
+                let handle = read_u64(bytes, 16);
+                // Handle 0 is the reserved invalid value the kernel never
+                // mints; a "picked" event without a redeemable delegation
+                // is refused rather than guessed at.
+                if handle == 0 {
+                    return Err(Errno::OutOfRange);
+                }
+                Ok(Self::FilePicked { window_id, handle })
+            }
+            EV_PICK_CANCELLED => {
+                event_reserved_zero(bytes, 16)?;
+                Ok(Self::PickCancelled { window_id })
             }
             _ => Err(Errno::OutOfRange),
         }
@@ -706,10 +784,21 @@ mod tests {
             sample_create(),
             sample_present(),
             WindowRequest::Close { window_id: 9 },
+            WindowRequest::PickFile { window_id: 9 },
         ] {
             let bytes = request.to_le_bytes();
             assert_eq!(WindowRequest::from_bytes(&bytes), Ok(request));
         }
+    }
+
+    #[test]
+    fn pick_file_refuses_a_zero_id_and_a_dirty_tail() {
+        let mut zero_id = WindowRequest::PickFile { window_id: 9 }.to_le_bytes();
+        zero_id[8..16].copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(WindowRequest::from_bytes(&zero_id), Err(Errno::OutOfRange));
+        let mut dirty = WindowRequest::PickFile { window_id: 9 }.to_le_bytes();
+        dirty[16] = 1;
+        assert_eq!(WindowRequest::from_bytes(&dirty), Err(Errno::BadMagic));
     }
 
     #[test]
@@ -918,11 +1007,42 @@ mod tests {
                 action: PointerAction::Released(PointerButtonCode::Middle),
             },
             WindowEvent::CloseRequested { window_id: 4 },
+            WindowEvent::FilePicked {
+                window_id: 4,
+                handle: 7,
+            },
+            WindowEvent::PickCancelled { window_id: 4 },
         ] {
             let bytes = event.to_le_bytes();
             assert_eq!(WindowEvent::from_bytes(&bytes), Ok(event));
             assert_eq!(event.window_id(), 4);
         }
+    }
+
+    #[test]
+    fn pick_events_fail_closed_on_a_zero_handle_and_dirty_tails() {
+        // A "picked" event must carry a redeemable (non-zero) handle.
+        let mut zero_handle = WindowEvent::FilePicked {
+            window_id: 4,
+            handle: 7,
+        }
+        .to_le_bytes();
+        zero_handle[16..24].copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(
+            WindowEvent::from_bytes(&zero_handle),
+            Err(Errno::OutOfRange)
+        );
+        // Reserved tails must be zero for both conclusions.
+        let mut picked = WindowEvent::FilePicked {
+            window_id: 4,
+            handle: 7,
+        }
+        .to_le_bytes();
+        picked[24] = 1;
+        assert_eq!(WindowEvent::from_bytes(&picked), Err(Errno::BadMagic));
+        let mut cancelled = WindowEvent::PickCancelled { window_id: 4 }.to_le_bytes();
+        cancelled[16] = 1;
+        assert_eq!(WindowEvent::from_bytes(&cancelled), Err(Errno::BadMagic));
     }
 
     #[test]

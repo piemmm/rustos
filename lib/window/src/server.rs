@@ -113,6 +113,22 @@ pub trait WindowHost {
     /// owner exited. Infallible: the window is already unmapped and
     /// forgotten by the engine, and the host must not resurrect it.
     fn window_closed(&mut self, window_id: u64);
+
+    /// A validated `PickFile`: the attested owner of live window
+    /// `window_id` (which has no pick pending) asked for the session's
+    /// trusted file picker. The host opens its picker UI and, when the
+    /// user concludes, routes the outcome back through
+    /// [`WindowServer::deliver_event`] as a `FilePicked` or
+    /// `PickCancelled` — the engine tracks the pending pick and enforces
+    /// that exactly one conclusion follows each acceptance.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host cannot run a picker for (its one picker
+    /// slot is taken by another window's pick, it holds no filesystem
+    /// authority, the desktop is tearing down); the refusal is relayed
+    /// to the client and no pick is recorded.
+    fn pick_requested(&mut self, window_id: u64) -> Result<(), Errno>;
 }
 
 /// The event-delivery seam — the session's app-ward send (`ipc_send` to
@@ -140,8 +156,9 @@ struct CreateSpec {
     title: WindowTitle,
 }
 
-/// One live window: its attested owner, its event route, and its
-/// once-mapped frame region.
+/// One live window: its attested owner, its event route, its
+/// once-mapped frame region, and whether a trusted-picker request is
+/// awaiting its conclusion.
 struct WindowRecord<R> {
     owner: ProcId,
     event_endpoint: u64,
@@ -149,6 +166,12 @@ struct WindowRecord<R> {
     frame_count: u32,
     frame_len: usize,
     region: R,
+    /// A `PickFile` was accepted and neither conclusion
+    /// (`FilePicked`/`PickCancelled`) has been delivered yet. At most one
+    /// pick is pending per window; the engine sets it on acceptance and
+    /// clears it when the conclusion is delivered, so the protocol's
+    /// one-conclusion-per-acceptance shape is enforced in one place.
+    pick_pending: bool,
 }
 
 /// The window-channel engine: one instance serves one desktop session.
@@ -258,6 +281,9 @@ impl<M: ShmMapper> WindowServer<M> {
             WindowRequest::Close { window_id } => {
                 status(reply, self.close(host, caller, window_id))
             }
+            WindowRequest::PickFile { window_id } => {
+                status(reply, self.pick_file(host, caller, window_id))
+            }
         }
     }
 
@@ -306,6 +332,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 frame_count: spec.frame_count,
                 frame_len,
                 region,
+                pick_pending: false,
             },
         );
         Ok(window_id)
@@ -335,6 +362,33 @@ impl<M: ShmMapper> WindowServer<M> {
             .get(base..base + record.frame_len)
             .ok_or(Errno::DeviceFault)?;
         host.window_presented(window_id, &record.surface, frame, damage)
+    }
+
+    /// Accept a trusted-picker request for `caller`'s window `window_id`:
+    /// at most one pick pends per window, and the host must be able to
+    /// run its picker before anything is recorded (fail closed — a
+    /// refused request leaves no pending state).
+    fn pick_file(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        window_id: u64,
+    ) -> Result<(), Errno> {
+        // Owned-window check first: a window the caller does not own
+        // answers exactly like one that never existed.
+        let record = self
+            .windows
+            .get_mut(&window_id)
+            .filter(|record| record.owner == caller)
+            .ok_or(Errno::NotFound)?;
+        if record.pick_pending {
+            return Err(Errno::AlreadyExists);
+        }
+        // Tell the host before committing: a refused picker (slot taken,
+        // no filesystem authority) leaves no pending pick behind.
+        host.pick_requested(window_id)?;
+        record.pick_pending = true;
+        Ok(())
     }
 
     /// Close `caller`'s window `window_id`, dropping its region mapping.
@@ -370,28 +424,49 @@ impl<M: ShmMapper> WindowServer<M> {
     /// validate it against the live window, encode it, and hand it to
     /// `sink` for the window's event endpoint.
     ///
+    /// A `FilePicked`/`PickCancelled` conclusion additionally requires a
+    /// pending pick on the window and clears it once the sink accepted
+    /// the delivery, so exactly one conclusion follows each accepted
+    /// `PickFile` — the engine enforces the protocol shape in one place
+    /// and a session bug (a conclusion no one asked for) is refused, not
+    /// delivered.
+    ///
     /// # Errors
     ///
     /// * [`Errno::NotFound`] — no such window (it was closed, or never
     ///   existed); the session drops the event.
     /// * [`Errno::OutOfRange`] — a pointer event outside the window's
-    ///   surface (a routing bug, refused rather than delivered).
-    /// * Any [`Errno`] the sink surfaces.
+    ///   surface, or a pick conclusion with no pick pending (a routing
+    ///   bug, refused rather than delivered).
+    /// * Any [`Errno`] the sink surfaces; a refused delivery leaves a
+    ///   pending pick pending (the session decides whether to retry or
+    ///   tear the client down).
     pub fn deliver_event(
-        &self,
+        &mut self,
         sink: &mut dyn EventSink,
         event: &WindowEvent,
     ) -> Result<(), Errno> {
         let record = self
             .windows
-            .get(&event.window_id())
+            .get_mut(&event.window_id())
             .ok_or(Errno::NotFound)?;
         if let WindowEvent::Pointer { x, y, .. } = *event {
             if x >= record.surface.width_px || y >= record.surface.height_px {
                 return Err(Errno::OutOfRange);
             }
         }
-        sink.deliver(record.event_endpoint, &event.to_le_bytes())
+        let concludes_pick = matches!(
+            event,
+            WindowEvent::FilePicked { .. } | WindowEvent::PickCancelled { .. }
+        );
+        if concludes_pick && !record.pick_pending {
+            return Err(Errno::OutOfRange);
+        }
+        sink.deliver(record.event_endpoint, &event.to_le_bytes())?;
+        if concludes_pick {
+            record.pick_pending = false;
+        }
+        Ok(())
     }
 }
 

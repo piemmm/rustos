@@ -329,6 +329,12 @@ const NUM_FS_GETCWD: u64 = SyscallNumber::FS_GETCWD.as_u16() as u64;
 /// `resource_open` syscall number (as above).
 const NUM_RESOURCE_OPEN: u64 = SyscallNumber::RESOURCE_OPEN.as_u16() as u64;
 
+/// `fd_grant` syscall number (as above).
+const NUM_FD_GRANT: u64 = SyscallNumber::FD_GRANT.as_u16() as u64;
+
+/// `fd_redeem` syscall number (as above).
+const NUM_FD_REDEEM: u64 = SyscallNumber::FD_REDEEM.as_u16() as u64;
+
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
 #[inline]
@@ -2850,6 +2856,54 @@ pub fn shm_grant(region: u64, endpoint: u64) -> i64 {
     // pointers, and the kernel validates `CAP_SHM`, the caller's own region
     // grant, and the endpoint before minting anything.
     let ret = unsafe { raw_syscall(NUM_SHM_GRANT, [region, endpoint, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Delegate the caller's own read-only filesystem descriptor `fd` to the
+/// live task `pid` as a one-shot grant, returning the minted handle (≥ 1)
+/// or `-errno` (`SyscallNumber::FD_GRANT`, `plans/CAPABILITY_USE.md` CU6 —
+/// the file picker's user-mediated hand-off).
+///
+/// Requires `CAP_FS_ACCESS`; the mint is audited. `pid` must come from a
+/// kernel-attested source (`call_peer_origin`) — task ids are never
+/// reused, so the grant lands on the intended process or fails closed
+/// (`NotFound`). The kernel captures the *caller's* identity and effective
+/// capability set with the descriptor's path, so every operation on the
+/// redeemed descriptor is re-authorised under the grantor's authority. The
+/// caller forwards the returned handle in-band (e.g. a window-channel
+/// event field); it resolves only when presented by the recipient's own
+/// [`fd_redeem`], so the number is useless to a bystander. A descriptor
+/// that is not a plain read-only file backing fails closed with `-errno`
+/// (`OutOfRange`).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 handle-or-errno encoding (handle ≥ 1, else -errno).
+pub fn fd_grant(fd: u32, pid: u64) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the call carries no
+    // pointers, and the kernel validates `CAP_FS_ACCESS`, the caller's own
+    // descriptor, and the recipient's liveness before minting anything.
+    let ret = unsafe { raw_syscall(NUM_FD_GRANT, [u64::from(fd), pid, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Redeem an [`fd_grant`] handle minted to the calling task, installing
+/// the delegated file into the caller's own open table and returning the
+/// fresh descriptor number (≥ 0) or `-errno`
+/// (`SyscallNumber::FD_REDEEM`).
+///
+/// Unprivileged: receiving user-mediated, already-checked authority is the
+/// point of the delegation — every later read is still VFS-checked under
+/// the grantor's captured identity. One-shot: the grant is consumed only
+/// when the descriptor allocation succeeds, so a refused redemption leaves
+/// it intact and a redeemed handle can never be redeemed twice. A handle
+/// minted to another task fails closed with `-errno` (`NotFound`),
+/// indistinguishable from one that never existed.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 fd-or-errno encoding (fd ≥ 0, else -errno).
+pub fn fd_redeem(handle: u64) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the call carries no
+    // pointers, and the kernel resolves the handle owner-bound before
+    // installing anything.
+    let ret = unsafe { raw_syscall(NUM_FD_REDEEM, [handle, 0, 0, 0, 0, 0]) };
     ret as i64
 }
 

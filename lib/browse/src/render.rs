@@ -150,6 +150,49 @@ fn first_visible(selected: Option<usize>, visible_rows: usize) -> usize {
     }
 }
 
+/// Height in pixels of one rendered row — the path bar and every entry
+/// row alike, derived from the shared font exactly as [`render`] draws
+/// them, so hit-testing and painting can never disagree.
+#[must_use]
+pub fn row_height() -> u32 {
+    BitmapFont::inconsolata()
+        .glyph_height()
+        .saturating_add(ROW_PADDING.saturating_mul(2))
+}
+
+/// The index of the entry drawn at the view-local pixel row `y` in a
+/// viewport `viewport_height` pixels tall, or `None` for the path bar,
+/// the empty space below the last entry, and any coordinate outside the
+/// viewport.
+///
+/// This is the one hit-test definition, mirroring [`render`]'s own layout
+/// (the path-bar offset, the row height, and the scroll anchor), so a
+/// pointer-driven view resolves a click to exactly the entry the user
+/// saw — never a re-derived guess.
+#[must_use]
+pub fn entry_index_at<S: DirectorySource>(
+    browser: &Browser<S>,
+    viewport_height: u32,
+    y: u32,
+) -> Option<usize> {
+    let row = row_height();
+    if row == 0 || y < row || y >= viewport_height {
+        return None;
+    }
+    let list_height = viewport_height.saturating_sub(row);
+    let visible_rows = usize::try_from(list_height / row).unwrap_or(usize::MAX);
+    if visible_rows == 0 {
+        return None;
+    }
+    let offset = usize::try_from((y - row) / row).unwrap_or(usize::MAX);
+    if offset >= visible_rows {
+        return None;
+    }
+    let first = first_visible(browser.selected_index(), visible_rows);
+    let index = first.checked_add(offset)?;
+    (index < browser.entries().len()).then_some(index)
+}
+
 /// Draw `text` leading-aligned and vertically centred within the row spanning
 /// the full surface width at top `y` with height `row_height`. Text wider than
 /// the row is truncated to what fits.

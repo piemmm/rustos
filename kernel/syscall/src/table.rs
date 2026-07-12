@@ -1605,6 +1605,53 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Delegate one of the caller's own open filesystem descriptors to
+    /// another live task as a one-shot grant, returning the minted grant
+    /// handle (`plans/CAPABILITY_USE.md` CU6 — the file picker's
+    /// user-mediated hand-off).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::FS_ACCESS`] and audited the call. The implementation
+    /// resolves `fd` against the **caller's own** open table (a foreign or
+    /// unopened descriptor fails closed with [`Errno::NotFound`]), refuses
+    /// any backing that is not a plain filesystem path (a pipe, resource,
+    /// or already-delegated descriptor answers [`Errno::OutOfRange`], so
+    /// delegation never chains), confirms the recipient task `pid` is live
+    /// (task ids are never reused, so the grant can never land on a
+    /// recycled identity), captures the caller's uid and effective
+    /// capability set beside the descriptor's path and open flags, and
+    /// mints the recipient an unforgeable handle that resolves only when
+    /// the recipient itself presents it to [`Self::fd_redeem`].
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn fd_grant(&self, _caller: &CallerContext<'_>, _fd: u32, _pid: u64) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Redeem an [`Self::fd_grant`] handle minted to the calling task,
+    /// installing the delegated file into the caller's own open table and
+    /// returning the fresh descriptor number.
+    ///
+    /// Needs no capability (the dispatcher gates nothing): receiving
+    /// user-mediated, already-checked authority is the point of the
+    /// delegation, and every later operation on the descriptor is still
+    /// VFS-checked under the grantor's captured identity. The
+    /// implementation resolves `handle` against the grants minted **to the
+    /// calling task** (a foreign or unknown handle fails closed with
+    /// [`Errno::NotFound`], indistinguishable from one that never existed)
+    /// and consumes the grant only once the descriptor allocation
+    /// succeeds, so redemption is one-shot and a refused redemption leaves
+    /// the grant intact.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn fd_redeem(&self, _caller: &CallerContext<'_>, _handle: u64) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Create a caller-owned wait-set that multiplexes the readiness of
     /// several event sources, returning its kernel-minted handle
     /// (`plans/USB.md`).
@@ -2766,6 +2813,18 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // args[1] is its capacity in bytes.
                 let out_cap = decode_len(args.0[1])?;
                 self.handlers.boot_facts_get(caller, args.0[0], out_cap)
+            }
+            SyscallNumber::FD_GRANT => {
+                // args[0] is the caller's own path-backed descriptor;
+                // args[1] is the recipient's kernel task id (both resolved
+                // and owner-/liveness-checked by the handler).
+                let fd = decode_u32(args.0[0]);
+                self.handlers.fd_grant(caller, fd, args.0[1])
+            }
+            SyscallNumber::FD_REDEEM => {
+                // args[0] is the grant handle minted to the calling task
+                // (resolved owner-bound by the handler; one-shot).
+                self.handlers.fd_redeem(caller, args.0[0])
             }
             SyscallNumber::SYSINFO_INTROSPECT => {
                 // args[0] is the `IntrospectDomain` discriminant (validated by
@@ -3944,6 +4003,20 @@ mod tests {
         fn fs_getcwd(&self, _c: &CallerContext<'_>, _buf: u64, _buf_cap: usize) -> SyscallResult {
             self.record("fs_getcwd");
             Ok(0)
+        }
+
+        fn fd_grant(&self, _c: &CallerContext<'_>, fd: u32, _pid: u64) -> SyscallResult {
+            self.record("fd_grant");
+            // Echo the descriptor so the reachability test can assert the
+            // dispatcher decoded both arguments without a real grant table.
+            Ok(u64::from(fd))
+        }
+
+        fn fd_redeem(&self, _c: &CallerContext<'_>, handle: u64) -> SyscallResult {
+            self.record("fd_redeem");
+            // Echo the handle so the reachability test sees a non-error
+            // result.
+            Ok(handle)
         }
     }
 
