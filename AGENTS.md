@@ -1513,6 +1513,7 @@ You are not exempt from any rule above. In addition:
     | Area you are touching | Read first |
     |---|---|
     | Capabilities: grants, manifests, ceilings, admin, elevation, the capability lifecycle | `plans/CAPABILITY_USE.md` |
+    | User accounts: default system/service identities, id ranges, the users/groups databases | `plans/USERS.md` |
     | Process spawn, userland multitasking | `plans/SPAWN.md` |
     | App bundles, command apps, help, command resolution | `plans/APPS.md`; `plans/UNIVERSAL.md` (multi-arch/Wasm distribution) |
     | Default desktop apps going live: app windows, live app data channels, the file picker | `plans/APPWIN.md` |
