@@ -533,6 +533,38 @@ fn allocate_all_dma_then_free_it_all_reclaims_fully_every_round() {
 }
 
 #[test]
+fn a_full_span_window_serves_a_multi_device_enclosure_lazily() {
+    // The Pi 4 defect: the per-task DMA window was a fixed 256-page
+    // ceiling, and a 13-device USB enclosure — one ~68 KiB ring/buffer
+    // region per attached device, each rounded to a 32-page buddy block
+    // plus two guard slots — exhausted it mid-walk, so the whole port was
+    // skipped. The window now spans its full reserved gigabyte with
+    // lazily grown slot bookkeeping: every region allocates, and the
+    // bookkeeping paid tracks the peak slots actually used, never the
+    // span.
+    const REGION_BYTES: usize = 17 * PAGE_SIZE; // rounds to a 32-page block
+    const REGIONS: usize = 13;
+    const SLOTS_PER_REGION: usize = 32 + 2;
+    // The scenario genuinely exceeds the former fixed 256-slot ceiling.
+    const _: () = assert!(REGIONS * SLOTS_PER_REGION > 256);
+    let frames = fresh_frames(2048);
+    let sim = fresh_sim(2048);
+    let span_pages = (1usize << 30) / PAGE_SIZE;
+    let mut pool = pool_with_capacity(&frames, &sim, span_pages);
+    let mut bufs = alloc::vec::Vec::new();
+    for _ in 0..REGIONS {
+        bufs.push(pool.alloc(REGION_BYTES).expect("a device region allocates"));
+    }
+    assert!(
+        pool.window.slot_used.len() <= REGIONS * SLOTS_PER_REGION,
+        "bookkeeping covers only the slots actually reached, not the span"
+    );
+    for buf in bufs {
+        pool.free(buf).expect("a device region frees");
+    }
+}
+
+#[test]
 fn dma_buffer_is_not_empty() {
     let frames = fresh_frames(8);
     let sim = fresh_sim(8);

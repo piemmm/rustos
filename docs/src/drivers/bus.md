@@ -511,11 +511,30 @@ step.
 Before addressing anything behind it, the bring-up walk first
 **marks the hub as a hub** in its own slot context
 (`configure_hub_slot`): it reads the hub descriptor (`bNbrPorts` and the
-`wHubCharacteristics` TT Think Time, `read_hub_topology`), copies the
+`wHubCharacteristics` TT Think Time, `read_hub_topology` — requested at
+the full base-descriptor size production stacks send, over a zeroed
+staging buffer, and retried a bounded three attempts when the hub
+answers with a refusal STALL or a reply that is not a hub descriptor;
+a truncated 8-byte read is an exchange no mainstream host issues, and a
+real Realtek RTS5411 answered it with garbage on a successful transfer,
+refusing the whole tier behind it), copies the
 controller's live output slot context, sets the **Hub** bit, **Number of
 Ports**, and **TT Think Time** (single-TT, so the Multi-TT bit stays
 clear), and issues a Configure Endpoint over the hub's slot that names
-only the slot context (Add flag `A0`). Without this the controller never
+only the slot context (Add flag `A0`). The descriptor type follows the
+hub's own protocol speed: a **SuperSpeed hub** serves only the fixed
+12-byte `0x2A` SS hub descriptor (USB 3.2 §10.15.2.1) and STALLs the
+USB 2.0 `0x29` request — the metal defect where the same enclosure
+enumerated on a USB 2.0 root port but its whole tier was refused on the
+SuperSpeed one. An SS hub has no transaction translator (its slot's TT
+Think Time is programmed zero), is told its tier depth with the
+mandatory `SET_HUB_DEPTH` request (USB 3.2 §10.16.2.7) right after its
+slot is configured, carries only SuperSpeed devices on its downstream
+ports (the USB 2.0 `wPortStatus` speed bits are reserved there, so the
+attach never decodes them), and latches the SS change set
+(warm-reset/link-state/config-error in place of enable/suspend), which
+the per-port latch drain clears through the SS `CLEAR_FEATURE`
+selectors. Without the hub marking the controller never
 schedules the split transactions a full/low-speed device behind the hub
 needs, so the keyboard is addressed (Address Device succeeds) but its
 interrupt-IN endpoint never completes and it delivers no report — the

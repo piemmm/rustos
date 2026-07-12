@@ -274,6 +274,13 @@ const HUB_RESET_POLLS: u32 = 40;
 /// behind it is addressed.
 const HUB_RESET_SETTLE_US: u32 = 10_000;
 
+/// Bounded attempts for the hub-descriptor read
+/// ([`UsbDevice::read_hub_topology`]): production stacks retry this
+/// exchange (Linux's hub driver issues it up to three times) because real
+/// hubs occasionally answer it wrongly once and honestly on the retry. A
+/// fixed protocol retry budget, not a scalable capacity.
+const HUB_DESC_ATTEMPTS: u32 = 3;
+
 /// Packs structures into a chunk of the [`DmaBank`]'s offset space at
 /// 64-byte alignment — the strictest alignment any xHCI context or ring
 /// requires — so every region constructor lays its slices out through the
@@ -722,6 +729,24 @@ const DEVICE_CLASS_HUB: u8 = 0x09;
 /// §11.23.2.1), requested with a class `GET_DESCRIPTOR`.
 const DESC_TYPE_HUB: u8 = 0x29;
 
+/// `bDescriptorType` of the **`SuperSpeed`** hub class descriptor (USB 3.2
+/// §10.15.2.1). A `SuperSpeed` hub serves *only* this descriptor — it
+/// STALLs a request for the USB 2.0 [`DESC_TYPE_HUB`] one — so the read
+/// must select the type by the hub's own protocol speed.
+const DESC_TYPE_SS_HUB: u8 = 0x2A;
+
+/// Byte length of the `SuperSpeed` hub descriptor (USB 3.2 §10.15.2.1): a
+/// fixed-size descriptor, unlike the USB 2.0 one whose tail varies with
+/// the port count.
+const SS_HUB_DESC_LEN: usize = 12;
+
+/// Hub class request `SET_HUB_DEPTH` (USB 3.2 §10.16.2.7, Table 10-8):
+/// a `SuperSpeed` hub must be told its tier depth (the number of hubs
+/// between it and the root port) before it can decode the route string
+/// in downstream packet headers; without it, downstream transactions
+/// are misrouted.
+const HUB_REQUEST_SET_HUB_DEPTH: u8 = 12;
+
 /// Hub class port feature selector `PORT_POWER` (USB 2.0 §11.24.2,
 /// Table 11-17): a port-power-controlled hub reports a downstream port
 /// disconnected until software sets this.
@@ -768,6 +793,27 @@ const PORT_CHANGE_FEATURES: [(u16, u8); 5] = [
     (PORT_CHANGE_SUSPEND, PORT_FEATURE_C_SUSPEND),
     (PORT_CHANGE_OVER_CURRENT, PORT_FEATURE_C_OVER_CURRENT),
     (PORT_CHANGE_RESET, PORT_FEATURE_C_RESET),
+];
+
+/// `SuperSpeed`-hub `wPortChange` bits and `CLEAR_FEATURE` selectors (USB
+/// 3.2 §10.16.2.6, Table 10-12): the enable/suspend changes are reserved,
+/// and three new latches exist — warm (BH) reset done, a port link-state
+/// transition, and a link-configuration error. Every latched bit must be
+/// cleared or the hub keeps re-asserting the port's status-change report,
+/// exactly as on a USB 2.0 hub.
+const PORT_FEATURE_C_LINK_STATE: u8 = 25;
+const PORT_FEATURE_C_CONFIG_ERROR: u8 = 26;
+const PORT_FEATURE_C_BH_RESET: u8 = 29;
+const PORT_CHANGE_BH_RESET: u16 = 1 << 5;
+const PORT_CHANGE_LINK_STATE: u16 = 1 << 6;
+const PORT_CHANGE_CONFIG_ERROR: u16 = 1 << 7;
+const SS_PORT_CHANGE_FEATURES: [(u16, u8); 6] = [
+    (PORT_CHANGE_CONNECT, PORT_FEATURE_C_CONNECTION),
+    (PORT_CHANGE_OVER_CURRENT, PORT_FEATURE_C_OVER_CURRENT),
+    (PORT_CHANGE_RESET, PORT_FEATURE_C_RESET),
+    (PORT_CHANGE_BH_RESET, PORT_FEATURE_C_BH_RESET),
+    (PORT_CHANGE_LINK_STATE, PORT_FEATURE_C_LINK_STATE),
+    (PORT_CHANGE_CONFIG_ERROR, PORT_FEATURE_C_CONFIG_ERROR),
 ];
 
 /// `wPortStatus` bit: Port Enabled (USB 2.0 §11.24.2.7.1): set by the
@@ -859,12 +905,30 @@ const fn setup_set_configuration(value: u8) -> [u8; 8] {
 }
 
 /// The 8-byte SETUP payload of the class `GET_DESCRIPTOR(hub)` request
-/// (USB 2.0 §11.24.2.5): `bmRequestType = 0xA0` (device-to-host, class,
-/// device), descriptor type [`DESC_TYPE_HUB`] in the high byte of
-/// `wValue`, for `len` bytes.
-const fn setup_get_hub_descriptor(len: u16) -> [u8; 8] {
+/// (USB 2.0 §11.24.2.5 / USB 3.2 §10.16.2.4): `bmRequestType = 0xA0`
+/// (device-to-host, class, device), `desc_type` ([`DESC_TYPE_HUB`] or
+/// [`DESC_TYPE_SS_HUB`], selected by the hub's own protocol speed) in the
+/// high byte of `wValue`, for `len` bytes.
+const fn setup_get_hub_descriptor(desc_type: u8, len: u16) -> [u8; 8] {
     let l = len.to_le_bytes();
-    [0xA0, 0x06, 0x00, DESC_TYPE_HUB, 0x00, 0x00, l[0], l[1]]
+    [0xA0, 0x06, 0x00, desc_type, 0x00, 0x00, l[0], l[1]]
+}
+
+/// The 8-byte SETUP payload of the hub class `SET_HUB_DEPTH(depth)`
+/// request (USB 3.2 §10.16.2.7): `bmRequestType = 0x20` (host-to-device,
+/// class, device), the hub's tier depth in `wValue`, no data stage.
+/// Defined only for `SuperSpeed` hubs.
+const fn setup_set_hub_depth(depth: u8) -> [u8; 8] {
+    [
+        0x20,
+        HUB_REQUEST_SET_HUB_DEPTH,
+        depth,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+    ]
 }
 
 /// The 8-byte SETUP payload of `SET_FEATURE(feature)` on a downstream
@@ -1401,7 +1465,7 @@ impl<T: Copy, const N: usize> Fifo<T, N> {
 /// Encode the xHCI endpoint-context Interval (§6.2.3.6, Table 6-12) for
 /// an interrupt endpoint reporting `b_interval` at protocol `speed`.
 ///
-/// High-/SuperSpeed `bInterval` is already a `2^(n-1)·125µs` exponent, so
+/// High-/`SuperSpeed` `bInterval` is already a `2^(n-1)·125µs` exponent, so
 /// the context Interval is `bInterval - 1` (clamped 0..=15). Full-/low-speed
 /// `bInterval` is in frames (1 ms): converted to 125µs microframes (×8)
 /// and reduced to its log2 exponent, clamped to the 3..=10 the periodic
@@ -4063,7 +4127,16 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         self.last_attach_status = 0;
         self.reset_hub_port(hub_index, port)?;
         let status = self.await_port_reset_complete(hub_index, port, delay)?;
-        let speed = hub_port_speed(status);
+        // A `SuperSpeed` hub's ports carry only `SuperSpeed` devices; its
+        // `wPortStatus` reserves the USB 2.0 speed bits as zero (USB 3.2
+        // §10.16.2.6), so decoding them would misread the device as
+        // full-speed and address it with the wrong EP0 packet size.
+        let hub_speed = self.hub(hub_index).ok_or(DriverError::DeviceFault)?.speed;
+        let speed = if hub_speed == SPEED_SUPER {
+            SPEED_SUPER
+        } else {
+            hub_port_speed(status)
+        };
         self.attach_downstream_device(hub_index, port, speed, delay)
     }
 
@@ -4132,37 +4205,99 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     /// `wHubCharacteristics` bits 5:6. The caller must already have
     /// enumerated the device and confirmed it is a hub.
     ///
+    /// The request mirrors what production stacks (Linux `hub.c`, Windows)
+    /// issue: the full base-descriptor size, retried a bounded number of
+    /// times when the hub answers wrongly. A truncated 8-byte read is an
+    /// exchange no mainstream host ever sends, and real hubs (a Realtek
+    /// RTS5411 on the Pi 4) answered it with garbage — the reply passed
+    /// the transfer but failed the type check, and the whole tier behind
+    /// the hub went unserved.
+    ///
+    /// `superspeed` selects the descriptor a `SuperSpeed` hub actually
+    /// serves — the fixed 12-byte [`DESC_TYPE_SS_HUB`] one (USB 3.2
+    /// §10.15.2.1); an SS hub STALLs a request for the USB 2.0
+    /// [`DESC_TYPE_HUB`] descriptor, which is how a whole USB3-attached
+    /// tier went unserved on the Pi 4's `SuperSpeed` root port. Both
+    /// layouts carry `bNbrPorts` at byte 2 and `wHubCharacteristics` at
+    /// bytes 3:4; a `SuperSpeed` hub has no transaction translator, so its
+    /// TT Think Time is reported as zero.
+    ///
     /// # Errors
     ///
-    /// * [`DriverError::BadMagic`] for a non-hub or too-short reply.
+    /// * [`DriverError::BadMagic`] for a non-hub or too-short reply on
+    ///   every attempt.
+    /// * [`DriverError::EndpointStalled`] if the hub refused the request
+    ///   on every attempt (the control endpoint is already recovered).
     /// * [`DriverError::DeviceFault`] if the control transfer faults.
-    fn read_hub_topology(&mut self) -> Result<(u8, u8), DriverError> {
-        // `bNbrPorts` is byte 2 and `wHubCharacteristics` bytes 3:4, so a
-        // short read of the leading bytes is enough.
-        const HUB_DESC_REQUEST: usize = 8;
-        let want = u16::try_from(HUB_DESC_REQUEST).map_err(|_| DriverError::LengthOutOfRange)?;
-        let transferred = self.control(setup_get_hub_descriptor(want), u32::from(want))?;
-        if (transferred as usize) < 5 {
-            return Err(DriverError::BadMagic);
+    fn read_hub_topology(&mut self, superspeed: bool) -> Result<(u8, u8), DriverError> {
+        // The USB 2.0 hub descriptor's fixed head plus the two variable
+        // port-bitmap fields at their smallest (§11.23.2.1) — the size
+        // Linux requests; a hub with more ports answers with a short
+        // packet's honest byte count, and the fields this driver needs
+        // (`bNbrPorts`, `wHubCharacteristics`) sit in the first five bytes.
+        const HUB_DESC_REQUEST: usize = 15;
+        let (desc_type, request) = if superspeed {
+            (DESC_TYPE_SS_HUB, SS_HUB_DESC_LEN)
+        } else {
+            (DESC_TYPE_HUB, HUB_DESC_REQUEST)
+        };
+        let want = u16::try_from(request).map_err(|_| DriverError::LengthOutOfRange)?;
+        let mut last = DriverError::BadMagic;
+        for _ in 0..HUB_DESC_ATTEMPTS {
+            // Zero the staging bytes first so a reply that moves fewer
+            // bytes than claimed can never be validated against a stale
+            // earlier transfer's leftovers.
+            self.dma
+                .write(self.layout.ctrl_data, &[0u8; HUB_DESC_REQUEST])?;
+            let transferred =
+                match self.control(setup_get_hub_descriptor(desc_type, want), u32::from(want)) {
+                    Ok(transferred) => transferred,
+                    // The hub answered the request wrongly (a refusal STALL —
+                    // EP0 is already recovered). Transport/controller faults
+                    // are not retried: a timeout compounds and a fault will
+                    // not heal.
+                    Err(err @ DriverError::EndpointStalled) => {
+                        last = err;
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                };
+            if (transferred as usize) < 5 {
+                last = DriverError::BadMagic;
+                continue;
+            }
+            let mut desc = [0u8; HUB_DESC_REQUEST];
+            self.dma.read(self.layout.ctrl_data, &mut desc)?;
+            if desc[1] != desc_type {
+                last = DriverError::BadMagic;
+                continue;
+            }
+            // A `SuperSpeed` hub has no TT; its characteristics bits 5:6 are
+            // reserved, never a think time.
+            let tt_think_time = if superspeed {
+                0
+            } else {
+                ((u16::from_le_bytes([desc[3], desc[4]]) >> 5) & 0b11) as u8
+            };
+            return Ok((desc[2], tt_think_time));
         }
-        let mut desc = [0u8; HUB_DESC_REQUEST];
-        self.dma.read(self.layout.ctrl_data, &mut desc)?;
-        if desc[1] != DESC_TYPE_HUB {
-            return Err(DriverError::BadMagic);
-        }
-        let tt_think_time = (u16::from_le_bytes([desc[3], desc[4]]) >> 5) & 0b11;
-        Ok((desc[2], tt_think_time as u8))
+        Err(last)
     }
 
     /// Read a configured hub's `bNbrPorts` (downstream port count) from its
-    /// hub class descriptor (USB 2.0 §11.23.2.1).
+    /// hub class descriptor (USB 2.0 §11.23.2.1 / USB 3.2 §10.15.2.1,
+    /// selected by the active hub's own protocol speed).
     ///
     /// # Errors
     ///
     /// * [`DriverError::BadMagic`] for a non-hub or too-short reply.
     /// * [`DriverError::DeviceFault`] if the control transfer faults.
     pub fn hub_num_ports(&mut self) -> Result<u8, DriverError> {
-        Ok(self.read_hub_topology()?.0)
+        let superspeed = self
+            .active_hub
+            .and_then(|index| self.hub(index))
+            .is_some_and(|hub| hub.speed == SPEED_SUPER);
+        Ok(self.read_hub_topology(superspeed)?.0)
     }
 
     /// Set the **Hub** bit in the active slot's context (xHCI §6.2.2) so the
@@ -4181,8 +4316,11 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     ///
     /// Returns the hub's `(bNbrPorts, TT Think Time)` so the caller records
     /// the topology it just programmed without a second descriptor read.
-    fn configure_hub_slot(&mut self) -> Result<(u8, u8), DriverError> {
-        let (num_ports, tt_think_time) = self.read_hub_topology()?;
+    /// `superspeed` selects the hub descriptor the hub actually serves
+    /// ([`Self::read_hub_topology`]); a `SuperSpeed` hub has no TT, so its
+    /// slot's TT Think Time is programmed zero.
+    fn configure_hub_slot(&mut self, superspeed: bool) -> Result<(u8, u8), DriverError> {
+        let (num_ports, tt_think_time) = self.read_hub_topology(superspeed)?;
         let mut slot = self.read_ctx(self.output_ctx_off)?;
         slot[0] = (slot[0] | SLOT_CTX_HUB) & !SLOT_CTX_MTT;
         slot[1] = (slot[1] & !(0xFFu32 << SLOT_CTX_NUM_PORTS_SHIFT))
@@ -4285,7 +4423,18 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         port: u8,
         change: u16,
     ) -> Result<(), DriverError> {
-        for (bit, feature) in PORT_CHANGE_FEATURES {
+        // A `SuperSpeed` hub latches a different change set (warm-reset,
+        // link-state, and config-error latches; no enable/suspend ones) —
+        // an uncleared latch keeps the status-change watch firing forever.
+        let features: &[(u16, u8)] = if self
+            .hub(hub_index)
+            .is_some_and(|hub| hub.speed == SPEED_SUPER)
+        {
+            &SS_PORT_CHANGE_FEATURES
+        } else {
+            &PORT_CHANGE_FEATURES
+        };
+        for &(bit, feature) in features {
             if change & bit != 0 {
                 self.hub_control(hub_index, setup_clear_port_feature(feature, port), 0)?;
             }
@@ -4647,7 +4796,14 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
             None => 0,
             Some(parent_index) => self.hub(parent_index).ok_or(DriverError::NotFound)?.depth + 1,
         };
-        let (num_ports, _tt_think_time) = self.configure_hub_slot()?;
+        let superspeed = base.speed == SPEED_SUPER;
+        let (num_ports, _tt_think_time) = self.configure_hub_slot(superspeed)?;
+        // A `SuperSpeed` hub must be told its tier depth before it can
+        // decode downstream route strings (USB 3.2 §10.16.2.7); without
+        // it every transaction to a device behind the hub is misrouted.
+        if superspeed {
+            self.control(setup_set_hub_depth(depth), 0)?;
+        }
         let region = HubRegion::at(self.dma.grow(HubRegion::layout_len())?);
         self.hubs[hub_index] = Some(HubState {
             slot: self.slot,

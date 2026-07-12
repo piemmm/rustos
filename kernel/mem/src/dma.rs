@@ -71,7 +71,6 @@
 //!   modules.
 
 use alloc::collections::BTreeMap;
-use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 use core::ptr::NonNull;
@@ -220,7 +219,11 @@ pub struct DmaWindowMap {
     capacity_pages: usize,
     /// Slot bookkeeping: `slot_used[i] == true` iff page `i` of the
     /// window is currently held by some live allocation (whether as a
-    /// data slot or a guard slot).
+    /// data slot or a guard slot). Grows lazily toward
+    /// `capacity_pages`: a slot beyond the vector's length is free, so a
+    /// task pays bookkeeping proportional to its peak concurrent carve,
+    /// not the window's full reserved span — the same lazy-bookkeeping
+    /// shape the device and shared windows use over their 1 GiB spans.
     slot_used: Vec<bool>,
     /// Live allocations keyed by `virt.as_u64()` (the first *data*
     /// page, i.e. the byte after the leading guard). `BTreeMap` rather
@@ -295,7 +298,7 @@ impl DmaWindowMap {
         Ok(Self {
             base,
             capacity_pages,
-            slot_used: vec![false; capacity_pages],
+            slot_used: Vec::new(),
             allocations: BTreeMap::new(),
         })
     }
@@ -457,6 +460,10 @@ impl DmaWindowMap {
             .ok_or(DmaError::Alloc(AllocError::OutOfMemory))?;
         let first_data_slot = leading_guard_slot + 1;
         let trailing_guard_slot = leading_guard_slot + 1 + data_pages;
+        // Grow the lazy slot bookkeeping to cover the chosen run before
+        // any frame is reserved or page mapped, so a bookkeeping-heap
+        // refusal fails the request cleanly with nothing to roll back.
+        self.ensure_slots(trailing_guard_slot + 1)?;
 
         // Reserve frames *before* mutating the slot bitmap so a frame
         // OOM leaves the pool's state untouched.
@@ -644,8 +651,25 @@ impl DmaWindowMap {
         VirtAddr::new(self.base.as_u64() + ((slot as u64) << PAGE_SHIFT))
     }
 
-    /// First slot index of a run of `len` consecutive *unused* slots,
-    /// or `None` if no such run exists.
+    /// Extend the lazy slot bookkeeping to cover at least `len` slots
+    /// (never past `capacity_pages`), failing closed on bookkeeping-heap
+    /// exhaustion rather than panicking.
+    fn ensure_slots(&mut self, len: usize) -> Result<(), DmaError> {
+        if len <= self.slot_used.len() {
+            return Ok(());
+        }
+        debug_assert!(len <= self.capacity_pages);
+        self.slot_used
+            .try_reserve(len - self.slot_used.len())
+            .map_err(|_| DmaError::Alloc(AllocError::OutOfMemory))?;
+        self.slot_used.resize(len, false);
+        Ok(())
+    }
+
+    /// First slot index of a run of `len` consecutive *unused* slots, or
+    /// `None` if no such run exists. A slot beyond the lazily-grown
+    /// bookkeeping is free, so the search is bounded by the window's
+    /// structural capacity while costing only the peak slots ever used.
     fn find_free_run(&self, len: usize) -> Option<usize> {
         if len == 0 || len > self.capacity_pages {
             return None;
@@ -654,7 +678,7 @@ impl DmaWindowMap {
         while start + len <= self.capacity_pages {
             let mut ok = true;
             for i in 0..len {
-                if self.slot_used[start + i] {
+                if self.slot_used.get(start + i).copied().unwrap_or(false) {
                     start = start + i + 1;
                     ok = false;
                     break;

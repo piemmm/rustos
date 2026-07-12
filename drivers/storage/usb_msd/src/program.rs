@@ -16,7 +16,7 @@ use rustos_drv_storage_usb_msd::desc::{
 use rustos_drv_storage_usb_msd::scsi::{
     CommandSet, LunBlock, LunState, ScsiDevice, ScsiTransport, DEVICE_TYPE_DIRECT_ACCESS, MAX_LUNS,
 };
-use rustos_drv_storage_usb_msd::serve::serve_request;
+use rustos_drv_storage_usb_msd::serve::{blk_block_for, serve_request};
 use rustos_drv_storage_usb_msd::uas::{Uas, UasPipes};
 use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
 use rustos_log::{log, Event, EventId, Field, FieldValue, Level};
@@ -60,21 +60,6 @@ const MSD_LUN_SKIPPED: EventId = EventId(4164);
 /// Diagnostic event id: the interface disappeared; nodes retracted and
 /// the driver exits for a clean reload on re-plug.
 const MSD_DETACHED: EventId = EventId(4165);
-
-/// Reserved id range the per-LUN block-service endpoints are bound in
-/// (`b"MSD\0"`-tagged, mirroring the HCD's URB endpoint range shape).
-/// Each driver process claims one contiguous block of [`MAX_LUNS`] ids
-/// ([`claim_blk_block`]): creating a block's first id claims the whole
-/// block, so a second device's driver probes on to the next block and two
-/// processes never collide on one id — and, within a claimed block, LUN
-/// `n`'s create at `base + n` succeeds first try, so bring-up never logs a
-/// rejected `call_create`.
-const BLK_ENDPOINT_BASE: u64 = 0x004D_5344_0000_0000;
-
-/// How many [`MAX_LUNS`]-id blocks to probe before giving up (a generous
-/// bound on simultaneously served mass-storage devices; the first driver
-/// claims the first block on its first try).
-const BLK_ENDPOINT_BLOCKS: u64 = 64;
 
 /// Outstanding-request capacity of a per-LUN endpoint. The volume layer
 /// submits one request at a time (it blocks on the reply); a small queue
@@ -342,31 +327,13 @@ fn create_blk_endpoint(id: u64) -> bool {
     ) == 0
 }
 
-/// Claim this driver's block of [`MAX_LUNS`] contiguous endpoint ids by
-/// probing block bases until one's *first* id binds. That one create is
-/// the only contended syscall; every per-LUN id inside the claimed block
-/// is then bound deterministically by [`bind_blk_endpoint`]. Returns the
-/// claimed block's base id (its first endpoint already bound, serving
-/// LUN 0 when LUN 0 is published), or `None` when every block is taken.
-fn claim_blk_block() -> Option<u64> {
-    let stride = u64::try_from(MAX_LUNS).ok()?;
-    for block in 0..BLK_ENDPOINT_BLOCKS {
-        let base = BLK_ENDPOINT_BASE + block * stride;
-        if create_blk_endpoint(base) {
-            return Some(base);
-        }
-    }
-    None
-}
-
-/// Bind LUN `lun`'s block-service endpoint inside the claimed block
-/// `block_base`: the id is `block_base + lun`. The block's first id was
-/// already bound by the claim ([`claim_blk_block`]); every other id is
-/// created here and must succeed — a refusal means the reserved range was
-/// squatted on, and the bring-up fails closed.
+/// Bind LUN `lun`'s block-service endpoint inside this driver's derived
+/// block `block_base`: the id is `block_base + lun`. Every create must
+/// succeed first try — a refusal means the reserved range was squatted
+/// on, and the bring-up fails closed.
 fn bind_blk_endpoint(block_base: u64, lun: u8) -> Option<u64> {
     let id = block_base + u64::from(lun);
-    if lun == 0 || create_blk_endpoint(id) {
+    if create_blk_endpoint(id) {
         Some(id)
     } else {
         None
@@ -547,7 +514,7 @@ fn main() -> i32 {
                 Bot::new(transport, interface.interface_number),
                 interface.command_set,
             );
-            run_device(scsi, |scsi| {
+            run_device(scsi, endpoint, |scsi| {
                 scsi.transport().transport().link.disconnected()
             })
         }
@@ -579,7 +546,7 @@ fn main() -> i32 {
                 Cbi::new(transport, interface.interface_number, status),
                 interface.command_set,
             );
-            run_device(scsi, |scsi| {
+            run_device(scsi, endpoint, |scsi| {
                 scsi.transport().transport().link.disconnected()
             })
         }
@@ -596,7 +563,9 @@ fn main() -> i32 {
             );
             let pipes = UasUrbPipes { link, endpoints };
             let scsi = ScsiDevice::new(Uas::new(pipes), interface.command_set);
-            run_device(scsi, |scsi| scsi.transport().pipes().link.disconnected())
+            run_device(scsi, endpoint, |scsi| {
+                scsi.transport().pipes().link.disconnected()
+            })
         }
     }
 }
@@ -609,7 +578,7 @@ fn main() -> i32 {
 /// HCD retracted the interface — the device was unplugged), so the serve
 /// loop can retract the LUN nodes and exit `0` for a clean reload on
 /// re-plug.
-fn run_device<T, F>(mut scsi: ScsiDevice<T>, disconnected: F) -> i32
+fn run_device<T, F>(mut scsi: ScsiDevice<T>, urb_endpoint: u64, disconnected: F) -> i32
 where
     T: ScsiTransport,
     F: Fn(&ScsiDevice<T>) -> bool,
@@ -618,7 +587,7 @@ where
     let Ok(lun_count) = scsi.lun_count() else {
         return EXIT_BRINGUP_FAILED;
     };
-    let Some(blk_block) = claim_blk_block() else {
+    let Some(blk_block) = blk_block_for(urb_endpoint) else {
         return EXIT_NO_SERVICE;
     };
     let mut luns: [Option<LunServe>; MAX_LUNS] = core::array::from_fn(|_| None);

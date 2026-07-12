@@ -400,6 +400,25 @@ const MOCK_HUB_DESCRIPTOR: [u8; 18] = [
     0x00, 0x01,
 ];
 
+/// Device descriptor fixture for a **`SuperSpeed`** USB hub: bcdUSB 3.00,
+/// `bMaxPacketSize0 = 9` (the exponent encoding of EP0's fixed 512, USB
+/// 3.2 §9.6.1), `idVendor:idProduct = 0bda:5411` — the Realtek RTS5411
+/// a Pi 4 multi-drive enclosure presents on the `SuperSpeed` root port.
+const MOCK_SS_HUB_DESCRIPTOR: [u8; 18] = [
+    18, 0x01, 0x00, 0x03, 0x09, 0x00, 0x00, 9, 0xDA, 0x0B, 0x11, 0x54, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x01,
+];
+
+/// Device descriptor fixture for a **`SuperSpeed`** leaf device behind the
+/// SS hub: bcdUSB 3.00 and `bMaxPacketSize0 = 9`. Addressing it at any
+/// speed but `SuperSpeed` makes the engine's descriptor validation refuse
+/// the exponent-encoded value, so a downstream-speed misdecode cannot
+/// pass this fixture.
+const MOCK_SS_DESCRIPTOR: [u8; 18] = [
+    18, 0x01, 0x00, 0x03, 0x00, 0x00, 0x00, 9, 0x6D, 0x04, 0x77, 0xC0, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x01,
+];
+
 /// Configuration descriptor fixture for the hub: one interface of the
 /// hub class (`0x09_00_00`) with one interrupt-IN status-change endpoint
 /// (USB 2.0 §11.12.3), so the engine arms the hub-hotplug watch.
@@ -690,6 +709,22 @@ struct MockXhci {
     /// `bDescriptorType` — a forged/corrupt descriptor the driver must
     /// reject fail-closed.
     forge_hub_descriptor: bool,
+    /// The next N class `GET_DESCRIPTOR(hub)` replies deliver
+    /// configuration-descriptor-shaped bytes with a *successful* transfer
+    /// — the RTS5411 metal signature where the exchange completes but the
+    /// bytes are not a hub descriptor — then honest replies follow, so the
+    /// driver's bounded retry is what rescues the attach.
+    garble_hub_descriptor_replies: u8,
+    /// The root-attached hub (and the leaf behind it) is a **`SuperSpeed`**
+    /// device: the root port trains at protocol speed 4, the fixtures
+    /// carry bcdUSB 3.00 / `bMaxPacketSize0 = 9`, the hub serves only the
+    /// 0x2A SS hub descriptor (refusing a 0x29 request with a STALL, as real SS hubs
+    /// do), and it accepts the `SET_HUB_DEPTH` request.
+    superspeed_hub: bool,
+    /// The `wValue` of the last hub-class `SET_HUB_DEPTH` received, so a
+    /// test pins that an SS hub is told its tier depth before its ports
+    /// are descended. `None` until the request arrives.
+    hub_depth_set: Option<u8>,
     /// Whether the default control endpoint is halted. A control
     /// transfer that STALLs halts EP0 in xHCI (§4.8.3 / §4.10.2.4): the
     /// controller runs no further TRBs on it until software resets the
@@ -1054,6 +1089,9 @@ impl MockXhci {
             hub_downstream_status: 0,
             hub_powered: 0,
             forge_hub_descriptor: false,
+            garble_hub_descriptor_replies: 0,
+            superspeed_hub: false,
+            hub_depth_set: None,
             ep0_halted: false,
             adsc_blocks: Vec::new(),
             fault_hub_port_status: false,
@@ -1106,6 +1144,23 @@ impl MockXhci {
         mock.hub_downstream_port = downstream;
         // Current Connect Status (bit 0) | High-Speed Device (bit 10).
         mock.hub_downstream_status = (1 << 0) | (1 << 10);
+        mock
+    }
+
+    /// As [`Self::with_hub`], but the hub tier is **`SuperSpeed`**: the
+    /// root port trains at protocol speed 4 and the hub serves only the
+    /// 12-byte 0x2A SS hub descriptor — the multi-drive-enclosure shape a
+    /// Pi 4's USB3 root port presents. The downstream leaf is a
+    /// `SuperSpeed` device whose exponent-encoded `bMaxPacketSize0` refuses
+    /// any misdecoded (USB 2.0) downstream speed.
+    fn with_ss_hub(mem: &SharedMem, ports: u8, downstream: u8) -> Self {
+        let mut mock = Self::with_hub(mem, ports, downstream);
+        mock.superspeed_hub = true;
+        mock.portsc[0] =
+            regs::PORTSC_CCS | regs::PORTSC_PED | regs::PORTSC_PP | (4 << regs::PORTSC_SPEED_SHIFT);
+        // An SS hub's downstream `wPortStatus` reserves the USB 2.0 speed
+        // bits: a connected device reports connect status alone.
+        mock.hub_downstream_status = 1 << 0;
         mock
     }
 
@@ -1970,7 +2025,9 @@ impl MockXhci {
                 &MOCK_COMPOSITE_DESCRIPTOR_FORGED_EP0
             }
             (0x01, false) if is_composite => &MOCK_COMPOSITE_DESCRIPTOR,
+            (0x01, false) if self.superspeed_hub => &MOCK_SS_DESCRIPTOR,
             (0x01, false) => &MOCK_DESCRIPTOR,
+            (0x01, true) if self.superspeed_hub => &MOCK_SS_HUB_DESCRIPTOR,
             (0x01, true) => &MOCK_HUB_DESCRIPTOR,
             (_, false) if is_msd => &MOCK_MSD_CONFIG_DESCRIPTOR,
             (_, false) if is_mouse => &MOCK_MOUSE_CONFIG_DESCRIPTOR,
@@ -1989,13 +2046,67 @@ impl MockXhci {
     /// the context still assumes 64).
     fn standard_descriptor_reply(&self, desc_type: u8) -> &'static [u8] {
         let source = self.descriptor_fixture(desc_type);
-        let device_ep0 = usize::from(self.descriptor_fixture(0x01)[7]);
+        let device = self.descriptor_fixture(0x01);
+        // A `SuperSpeed` descriptor (bcdUSB >= 3.00) encodes EP0's fixed 512
+        // as the exponent 9; the packet-size model compares in bytes.
+        let device_ep0 = if device[3] >= 0x03 {
+            1usize << device[7]
+        } else {
+            usize::from(device[7])
+        };
         let programmed = usize::from(self.ep0_max[usize::from(self.ep0_slot)]);
         if programmed != device_ep0 && device_ep0 < source.len() {
             &source[..device_ep0]
         } else {
             source
         }
+    }
+
+    /// Answer a class `GET_DESCRIPTOR(hub)` (USB 2.0 §11.24.2.5 / USB 3.2
+    /// §10.16.2.4): `bDescLength`, `bDescriptorType`, `bNbrPorts`, then a
+    /// minimal tail. The reply is the addressed hub's — the nested hub
+    /// reports its own port count when the request rides its EP0. A hub
+    /// serves only its own protocol's descriptor type: a `SuperSpeed` hub
+    /// STALLs a 0x29 request and a USB 2.0 hub STALLs a 0x2A one, exactly
+    /// as real hardware refuses the foreign type. A garbled reply models
+    /// the RTS5411 metal failure: the transfer completes successfully but
+    /// the bytes are configuration-descriptor-shaped, not a hub
+    /// descriptor; once the budget is spent the honest reply follows.
+    /// Returns [`Self::deliver_in_data`]'s verdict.
+    fn execute_get_hub_descriptor(
+        &mut self,
+        requested_type: u8,
+        data: Option<(u64, u64, u32, bool)>,
+        w_length: usize,
+        status_addr: u64,
+    ) -> bool {
+        let own_type = if self.superspeed_hub { 0x2A } else { 0x29 };
+        if requested_type != own_type {
+            self.ep0_halted = true;
+            self.post_transfer_event(status_addr, CompletionCode::StallError, 1, 0);
+            return false;
+        }
+        if self.garble_hub_descriptor_replies > 0 {
+            self.garble_hub_descriptor_replies -= 1;
+            let stale = [0x09u8, 0x02, 0x29, 0x00, 0x01, 0x01, 0x00, 0xA0, 0x32];
+            return self.deliver_in_data(data, &stale, w_length, status_addr);
+        }
+        let desc_type = if self.forge_hub_descriptor {
+            0x00
+        } else {
+            own_type
+        };
+        let ports = match self.nested_by_slot(self.ep0_slot) {
+            Some(i) => self.nested_hubs[i].ports,
+            None => self.hub_ports,
+        };
+        let hub_desc = if self.superspeed_hub {
+            // The fixed 12-byte SS hub descriptor (USB 3.2 §10.15.2.1).
+            [12u8, desc_type, ports, 0x00, 0x00, 0x32, 0x00, 0xFF]
+        } else {
+            [9u8, desc_type, ports, 0x00, 0x00, 0x32, 0x00, 0xFF]
+        };
+        self.deliver_in_data(data, &hub_desc, w_length, status_addr)
     }
 
     /// Execute the assembled control TD, posting its transfer events.
@@ -2023,24 +2134,18 @@ impl MockXhci {
                     return;
                 }
             }
-            // Class GET_DESCRIPTOR(hub) (USB 2.0 §11.24.2.5): bDescLength,
-            // bDescriptorType=0x29, bNbrPorts, then a minimal tail. The
-            // reply is the addressed hub's — the nested hub reports its own
-            // port count when the request rides its EP0.
-            (0xA0, 0x06) if setup[3] == 0x29 => {
-                let desc_type = if self.forge_hub_descriptor {
-                    0x00
-                } else {
-                    0x29
-                };
-                let ports = match self.nested_by_slot(self.ep0_slot) {
-                    Some(i) => self.nested_hubs[i].ports,
-                    None => self.hub_ports,
-                };
-                let hub_desc = [9u8, desc_type, ports, 0x00, 0x00, 0x32, 0x00, 0xFF];
-                if !self.deliver_in_data(data, &hub_desc, w_length, status_addr) {
+            // Class GET_DESCRIPTOR(hub) (USB 2.0 §11.24.2.5 / USB 3.2
+            // §10.16.2.4) — the hub serves only its own protocol's type.
+            (0xA0, 0x06) if setup[3] == 0x29 || setup[3] == 0x2A => {
+                if !self.execute_get_hub_descriptor(setup[3], data, w_length, status_addr) {
                     return;
                 }
+            }
+            // Hub class SET_HUB_DEPTH (USB 3.2 §10.16.2.7): defined only
+            // for a `SuperSpeed` hub — a USB 2.0 hub STALLs it (the default
+            // arm below). Records the depth so a test pins it was set.
+            (0x20, 0x0C) if self.superspeed_hub => {
+                self.hub_depth_set = Some(setup[2]);
             }
             // Class SET_FEATURE on a downstream port (USB 2.0 §11.24.2.13),
             // served from the addressed hub's bank: the nested hub's when
@@ -4438,6 +4543,76 @@ fn a_forged_hub_descriptor_fails_the_attach_closed() {
 }
 
 #[test]
+fn a_garbled_hub_descriptor_reply_is_retried_and_the_attach_succeeds() {
+    // The Pi 4 metal failure: a multi-drive enclosure's RTS5411 hub
+    // enumerated cleanly, then answered the hub-descriptor read with a
+    // *successful* transfer whose bytes were not a hub descriptor, and
+    // the whole tier behind it was refused. Production stacks retry this
+    // exchange; this pins that one garbled reply costs nothing — the
+    // bounded retry reads the honest descriptor and the hub installs.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 2);
+    mock.garble_hub_descriptor_replies = 1;
+    let mut device = started_device(mock, &mem);
+    assert!(
+        matches!(device.attach_root_on_port(1), Ok(AttachOutcome::Hub(_))),
+        "one garbled hub-descriptor reply is retried, never fatal"
+    );
+}
+
+#[test]
+fn a_superspeed_hub_installs_with_its_own_descriptor_and_hub_depth() {
+    // The Pi 4 metal failure on the `SuperSpeed` root port: the enclosure's
+    // RTS5411 is an SS hub there — it serves only the 12-byte 0x2A hub
+    // descriptor and refuses the USB 2.0 0x29 request the engine used to
+    // send, so the whole tier was skipped at boot and on hot-plug alike
+    // (BadMagic at EnumStage::Configured while the USB 2.0 port worked).
+    // This pins the `SuperSpeed` path end to end: the descriptor read at
+    // the hub's own type, the mandatory SET_HUB_DEPTH told the tier depth
+    // (0 for a root-attached hub), and the downstream device addressed as
+    // `SuperSpeed` — its exponent-encoded bMaxPacketSize0 refuses any
+    // misdecoded USB 2.0 port speed.
+    let mem = shared_mem();
+    let mock = MockXhci::with_ss_hub(&mem, 4, 2);
+    let mut device = started_device(mock, &mem);
+    assert!(
+        matches!(
+            device.attach_root_port(1, &TestDelay::default()),
+            Ok(AttachOutcome::Hub(_))
+        ),
+        "an SS hub installs through its own 0x2A descriptor"
+    );
+    assert_eq!(
+        device.host_mut().hub_depth_set,
+        Some(0),
+        "a root-attached SS hub is told tier depth 0 before its ports serve"
+    );
+    let fault = device.last_attach_fault();
+    assert_eq!(
+        device.host_mut().downstream_route_port,
+        2,
+        "the SS downstream device is addressed (at `SuperSpeed`, or its \
+         descriptor validation would have refused the attach): {fault:?}"
+    );
+}
+
+#[test]
+fn persistently_garbled_hub_descriptor_replies_fail_the_attach_closed() {
+    // A hub that answers the hub-descriptor read wrongly on every attempt
+    // exhausts the bounded retry budget and the attach still fails closed
+    // — the retry rescues a one-off wrong answer, never loops forever or
+    // serves a hub whose topology is a guess.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 2);
+    mock.garble_hub_descriptor_replies = u8::MAX;
+    let mut device = started_device(mock, &mem);
+    assert_eq!(
+        device.attach_root_on_port(1).err(),
+        Some(DriverError::BadMagic)
+    );
+}
+
+#[test]
 fn faulting_hub_port_status_records_the_completion_code() {
     // The metal capture reached `4127` for every downstream port but
     // each `wstatus` read as the all-ones sentinel — the per-port class
@@ -6396,7 +6571,7 @@ fn hub_assembly_unplug_at_root_port_tears_down_and_replug_reenumerates() {
 #[test]
 fn a_device_plugged_into_a_second_root_port_is_served_while_the_hub_stays_watched() {
     // The Pi 4 metal defect this rework fixes: only the USB2 side of the
-    // jacks runs through the watched onboard hub — a SuperSpeed device
+    // jacks runs through the watched onboard hub — a `SuperSpeed` device
     // trains directly on *another* root port. The old engine served only
     // the first connected root port and never scanned the others while a
     // hub watch was active, so plugging such a device produced nothing at
@@ -6418,7 +6593,7 @@ fn a_device_plugged_into_a_second_root_port_is_served_while_the_hub_stays_watche
     );
 
     // A device is plugged into root port 2: connected, already enabled
-    // (the SuperSpeed shape — no reset needed), connect change latched.
+    // (the `SuperSpeed` shape — no reset needed), connect change latched.
     device.host_mut().portsc[1] = regs::PORTSC_CCS
         | regs::PORTSC_PED
         | regs::PORTSC_PP
@@ -7071,7 +7246,7 @@ fn ep0_max_packet_validation_follows_the_speed_rules() {
     // High speed fixes 64.
     assert_eq!(validate(3, 64), Ok(64));
     assert_eq!(validate(3, 8), Err(DriverError::BadMagic));
-    // SuperSpeed encodes its fixed 512 as the exponent 9 (USB 3.2 §9.6.1).
+    // `SuperSpeed` encodes its fixed 512 as the exponent 9 (USB 3.2 §9.6.1).
     assert_eq!(validate(4, 9), Ok(512));
     assert_eq!(validate(4, 64), Err(DriverError::BadMagic));
     // A speed ID this driver does not model fails closed.

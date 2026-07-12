@@ -382,14 +382,23 @@ pub const MMIO_WINDOW_PAGES: usize =
 /// reason as [`MMIO_WINDOW_OFFSET`].
 pub const DMA_WINDOW_OFFSET: u64 = 0x8000_0000;
 
-/// Pages backing the DMA-buffer window (1 MiB): generous headroom over the
-/// few small coherent buffers a driver task carves (a DMA
-/// buffer is bounded to the [`rustos_kernel_mem::MAX_ORDER`] 8 MiB block).
-pub const DMA_WINDOW_PAGES: usize = 256;
+/// Pages backing the DMA-buffer window: the window's full reserved
+/// virtual span (1 GiB, up to the shared-memory window above it), like
+/// [`MMIO_WINDOW_PAGES`]. The span is the structural bound; the window
+/// map's slot bookkeeping grows lazily with the peak concurrent carve,
+/// so a driver serving two coherent buffers pays a few bytes while a
+/// USB host-controller driver serving a multi-drive enclosure — one
+/// demand-allocated ring/buffer region per attached device — carves
+/// tens of regions out of the same window. The former fixed 256-page
+/// (1 MiB) ceiling was a capacity defect: it held ~7 of the ~68 KiB
+/// per-device USB regions, so a 13-device enclosure exhausted it
+/// mid-walk and the whole port was skipped.
+pub const DMA_WINDOW_PAGES: usize =
+    ((SHARED_WINDOW_OFFSET - DMA_WINDOW_OFFSET) / rustos_kernel_mem::PAGE_SIZE as u64) as usize;
 
 /// Offset of the cross-process shared-memory virtual window above the image
 /// bias: placed 3 GiB above the bias — above the DMA window (which spans
-/// `[2 GiB, 2 GiB + 1 MiB)`) and far clear of the program image, stack,
+/// `[2 GiB, 3 GiB)`) and far clear of the program image, stack,
 /// startup block, and the device and DMA windows below it. The
 /// `shm_create` / `shm_map` syscalls map a granted shared region out of
 /// `[bias + SHARED_WINDOW_OFFSET, ... + SHARED_WINDOW_PAGES * 4 KiB)`. One
