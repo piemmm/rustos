@@ -115,6 +115,8 @@ extern "C" {
 #define ROS_SYS_BOOT_FACTS_GET 89u
 #define ROS_SYS_FD_GRANT 90u
 #define ROS_SYS_FD_REDEEM 91u
+#define ROS_SYS_MEM_PIN 92u
+#define ROS_SYS_MEM_UNPIN 93u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns ROS_E_WOULD_BLOCK when a
@@ -297,6 +299,8 @@ int32_t ros_sys_port_bind(uint64_t a0, uintptr_t a1, uintptr_t a2);
 uint64_t ros_sys_boot_facts_get(void * a0, uintptr_t a1);
 uint64_t ros_sys_fd_grant(uint32_t a0, uint64_t a1);
 uint64_t ros_sys_fd_redeem(uint64_t a0);
+int32_t ros_sys_mem_pin(void);
+int32_t ros_sys_mem_unpin(void);
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -212,7 +212,10 @@ Ineligible pages include, at minimum:
 - driver ring buffers;
 - cryptographic key storage;
 - kernel credential, token, or capability metadata;
-- pages explicitly locked or marked sensitive by a future approved API;
+- pages of a process pinned through `mem_pin` (the `CAP_MEM_PIN`-gated,
+  `pinned-memory-bytes`-bounded whole-process pin, `plans/STRESSTEST.md`
+  ST2 — the per-task registry's pin mark is the classifier's `pinned`
+  attribute source), or marked sensitive;
 - foreground realtime audio, input, compositor, or scheduler-critical pages;
 - pages whose type is unknown.
 

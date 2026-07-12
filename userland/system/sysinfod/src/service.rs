@@ -790,6 +790,11 @@ mod tests {
                     ResourceLimit::new(64 * 1024, 64 * 1024).unwrap(),
                     0,
                 ),
+                ResourceLimitRecord::new(
+                    LimitKind::PinnedMemoryBytes,
+                    ResourceLimit::new(1 << 20, 1 << 20).unwrap(),
+                    0,
+                ),
             ])
         }
     }

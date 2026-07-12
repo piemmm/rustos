@@ -45,6 +45,7 @@ use crate::bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch};
 use crate::dispatch_slot::AlreadyInstalledError;
 use crate::procwait::{KernelProcessWait, ProcessWait};
 use crate::random::{BootReserve, RandomReserve};
+use crate::rlimit::{default_pinned_limit_bytes, LimitSet};
 use crate::spawn::{InitSpawnCtx, ProcessSpawn};
 use crate::syscalls::{KernelDispatchHook, KernelSpawnCtx, SpawnCredential};
 
@@ -1204,6 +1205,22 @@ fn run_phases<A: KernelArch>(
         irq: irq_table,
         irq_controller,
     }));
+
+    // Derive the per-boot resource-limit default from the discovered
+    // installed-memory total: the pinned-memory budget (`mem_pin`,
+    // `plans/STRESSTEST.md` ST2) scales with the machine instead of a
+    // hard-wired ceiling, and every task — the boot floor and all its
+    // descendants — inherits it through the registry's one default. A
+    // boot that never learned the total keeps the compile-time floor
+    // rather than fabricating a zero bound that would refuse every pin.
+    if installed_memory_bytes != 0 {
+        state
+            .aspaces
+            .write()
+            .set_default_limits(LimitSet::with_pinned_default(default_pinned_limit_bytes(
+                installed_memory_bytes,
+            )));
+    }
 
     // Hand the arch port a `'static` reference to the freshly
     // constructed IrqTable so its external-IRQ trap dispatcher can

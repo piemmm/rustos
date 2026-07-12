@@ -53,5 +53,6 @@
 #define ROS_CAP_SPAWN_AS_USER ((uint16_t)31u)
 #define ROS_CAP_SYSINFO_INTROSPECT ((uint16_t)32u)
 #define ROS_CAP_SEAT_ADMIN ((uint16_t)33u)
+#define ROS_CAP_MEM_PIN ((uint16_t)34u)
 
 #endif /* ROS_CAPABILITY_H */

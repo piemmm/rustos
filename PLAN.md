@@ -4666,10 +4666,32 @@ format-conformance defect the evidence window exposed). See
 
 ---
 
+## NETWORK — full IPv4 + IPv6 networking (`plans/NETWORK.md`)
+
+**Status: planned (N1–N8).** The complete dual-stack user-space network
+stack above the link-layer driver seam: one pure, host-testable,
+fuzzed protocol engine (`lib/net` — Ethernet, ARP/ND over one neighbour
+contract, IPv4 + IPv6 as peers, ICMP/ICMPv6, IGMP/MLD multicast
+membership, UDP, full RFC 9293 TCP with SACK and pluggable congestion
+control), driven by the `userland/net/netstack` service (the §19.5
+minimum-capability parser process; event-driven, never polling), serving
+a versioned capability-gated socket ABI (`lib/abi/src/net.rs`; `CAP_NET`,
+`CAP_NET_BIND_PRIVILEGED`, `CAP_NET_ADMIN` land with their enforcement
+points) over kernel-brokered endpoints, and consuming an in-place-evolved
+NIC seam (shared-memory frame rings + a closed negotiated offload
+vocabulary `virtio_net` serves first; the software path stays the
+conformance oracle). DoS resistance is designed in: SYN cookies, RFC 5961
+challenge ACKs, CSPRNG ISNs/ports/IDs, budgeted fail-closed reassembly
+and neighbour caches, per-principal §24.3 accounting. The interim
+`userland/net/icmp` responder is subsumed and deleted in N3 (§2.14). See
+`plans/NETWORK.md` for the binding design and per-increment guarantees.
+
+---
+
 ## STRESSTEST — stress testing + live kernel monitoring (`plans/STRESSTEST.md`)
 
-**Status: ST1 done; ST2–ST6 planned.** Makes RustOS's behaviour under load
-observable and provokable with first-party tools. ST1 (done) exports the
+**Status: ST1–ST2 done; ST3–ST6 planned.** Makes RustOS's behaviour under
+load observable and provokable with first-party tools. ST1 (done) exports the
 counters the kernel keeps — the `kernel/mem` pressure gauge, reclaim ledger,
 and `ramzip` accounting, plus per-CPU load — as four audited
 `CAP_SYSINFO_KERNEL` sysinfo queries (`MEMORY_PRESSURE`, `RECLAIM_STATS`,
@@ -4680,11 +4702,19 @@ subcommands; the export rendezvous is the arch-neutral
 per-cache `Arc<CacheAccounting>` ledgers, and the seam a future live
 `ramzip` tier installs into — until then the query truthfully reports an
 idle tier), and `SchedulerPolicy` gained the `cpu_switches`/`queue_depth`
-observations both policies implement under conformance cover. ST2 lands the
-memory-pinning API behind `plans/SWAPSWAPSWAP.md` §5's "pinned" eligibility
-class: `mem_pin`/`mem_unpin` (whole-process anonymous memory, not inherited,
-cleared on exit) gated by the new `CAP_MEM_PIN` and bounded by a new
-`LimitKind::PinnedMemory` resource limit. ST3 adds `signal_intake` — a
+observations both policies implement under conformance cover. ST2 (done)
+landed the memory-pinning API behind `plans/SWAPSWAPSWAP.md` §5's "pinned"
+eligibility class: `mem_pin` (92, `CAP_MEM_PIN`, audited) / `mem_unpin`
+(93, ungated, audited) mark the caller's whole anonymous memory exempt from
+the compressed tier — the per-task registry's `is_pinned` mark is the
+classifier's `pinned`-attribute source, never inherited across spawn,
+cleared on exit — bounded by `LimitKind::PinnedMemoryBytes` over the pinned
+footprint (mapped address space + committed stack) at `mem_pin`,
+`mem_map`/`file_map`, and stack growth, with a per-boot derived default
+(installed RAM / 8) installed as the registry default limit set,
+`CAP_MEM_PIN` in the administrative ceiling, and the aggregate observable
+as `RamzipStats.pinned_bytes` / `stats:mem/pinned` (proved end to end by
+the `mem_pin_qemu_aarch64` vertical). ST3 adds `signal_intake` — a
 fail-closed opt-in that turns `Interrupt`/`Terminate` into a waitset-drainable
 event (`Kill` stays unmaskable; a second pending `Interrupt` escalates to
 terminate). ST4 is `sysmon`, the fullscreen curses kernel-memory monitor

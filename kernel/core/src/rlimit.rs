@@ -49,6 +49,26 @@ use rustos_abi::{Errno, LimitKind, ResourceLimit};
 /// span stays the terminal structural defence.
 pub const DEFAULT_STACK_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
 
+/// The default `LimitKind::PinnedMemoryBytes` policy: the bytes one
+/// process may hold pinned (exempt from the compressed tier) on a machine
+/// with `installed_memory_bytes` of discovered RAM — one eighth of it.
+///
+/// Sized from the discovered hardware, never a hard-wired ceiling: an
+/// eighth of RAM lets a monitor-scale process (tens of MiB even on a
+/// 1 GiB board, where the derived bound is 128 MiB) always pin fully,
+/// while a single abusive `CAP_MEM_PIN` holder can never exempt more
+/// than a fraction of the machine from pressure management — the
+/// capability gates *who* may pin, this bounds *how much*. The boot path
+/// installs the derived bound as the per-boot default limit set
+/// ([`LimitSet::with_pinned_default`]), so every task inherits it through
+/// the ordinary never-widen intersection and `ulimit`/`rlimit_get`
+/// report it honestly; raising it past the derived hard bound takes
+/// `CAP_RLIMIT_RAISE` like any other hard raise.
+#[must_use]
+pub const fn default_pinned_limit_bytes(installed_memory_bytes: u64) -> u64 {
+    installed_memory_bytes / 8
+}
+
 /// One task's effective resource limits: a [`ResourceLimit`] for every
 /// [`LimitKind`].
 ///
@@ -63,8 +83,14 @@ pub struct LimitSet {
 }
 
 impl LimitSet {
-    /// The default policy a task runs under until a tighter ceiling is
-    /// imposed.
+    /// The compile-time floor of the default policy a task runs under
+    /// until a tighter ceiling is imposed.
+    ///
+    /// The *operative* per-boot default is the registry-held set
+    /// ([`crate::aspace::AddressSpaceRegistry::default_limits`]), which the
+    /// boot path derives from discovered hardware (today: the pinned-memory
+    /// bound via [`Self::with_pinned_default`]) and which falls back to
+    /// this constant wherever no derivation applies.
     ///
     /// Every resource except the stack is [`ResourceLimit::UNLIMITED`]: L2
     /// imposes no `rlimit` ceiling of its own there, leaving each capacity
@@ -83,6 +109,24 @@ impl LimitSet {
         Self { limits }
     };
 
+    /// The per-boot default set: [`Self::DEFAULT`] with the
+    /// `PinnedMemoryBytes` bound set to `pinned_bytes` (soft and hard).
+    ///
+    /// Built once at boot from the discovered installed-memory total
+    /// ([`default_pinned_limit_bytes`]) and installed as the registry
+    /// default, so every task — including inheritance's never-widen
+    /// intersection — runs under the derived bound without a second code
+    /// path.
+    #[must_use]
+    pub const fn with_pinned_default(pinned_bytes: u64) -> Self {
+        let mut out = Self::DEFAULT;
+        out.limits[LimitKind::PinnedMemoryBytes.as_u32() as usize] = ResourceLimit {
+            soft: pinned_bytes,
+            hard: pinned_bytes,
+        };
+        out
+    }
+
     /// The effective limit for `kind`.
     #[must_use]
     pub const fn get(&self, kind: LimitKind) -> ResourceLimit {
@@ -98,21 +142,23 @@ impl LimitSet {
         self.limits[kind.as_u32() as usize] = limit;
     }
 
-    /// The limit set a child inherits from `parent` at spawn.
+    /// The limit set a child inherits from `parent` at spawn, under the
+    /// per-boot `default` policy.
     ///
-    /// Each resource is `parent.intersect(DEFAULT)`: the child can never
-    /// hold a bound wider than either the parent's ceiling or the system
+    /// Each resource is `parent.intersect(default)`: the child can never
+    /// hold a bound wider than either the parent's ceiling or the boot
     /// default, mirroring the never-widen capability delegation rule.
-    /// While [`LimitSet::DEFAULT`] is unlimited this equals the parent's set
-    /// verbatim; once a tighter default lands (L3) the same intersection
-    /// keeps a child inside it without a second code path.
+    /// Where the default is unlimited this equals the parent's set
+    /// verbatim; a derived bound (the pinned-memory default, a future
+    /// hardware-sized policy) constrains every child through this one
+    /// intersection without a second code path.
     #[must_use]
-    pub fn inherit(parent: &Self) -> Self {
-        let mut out = Self::DEFAULT;
+    pub fn inherit(parent: &Self, default: &Self) -> Self {
+        let mut out = *default;
         let mut i = 0;
         while i < LimitKind::ALL.len() {
             let kind = LimitKind::ALL[i];
-            out.set(kind, parent.get(kind).intersect(Self::DEFAULT.get(kind)));
+            out.set(kind, parent.get(kind).intersect(default.get(kind)));
             i += 1;
         }
         out
@@ -158,8 +204,34 @@ pub fn authorize_set(
 
 #[cfg(test)]
 mod tests {
-    use super::{authorize_set, LimitSet, DEFAULT_STACK_LIMIT_BYTES};
+    use super::{authorize_set, default_pinned_limit_bytes, LimitSet, DEFAULT_STACK_LIMIT_BYTES};
     use rustos_abi::{Errno, LimitKind, ResourceLimit, RLIMIT_INFINITY};
+
+    #[test]
+    fn pinned_default_policy_scales_with_discovered_memory() {
+        // One eighth of installed RAM, derived, never a hard-wired scalar:
+        // a small board still fits a monitor-scale pin, a large machine
+        // scales up, and zero (unknown) RAM derives a zero bound the boot
+        // path simply does not install.
+        assert_eq!(default_pinned_limit_bytes(1 << 30), 128 << 20);
+        assert_eq!(default_pinned_limit_bytes(64 << 30), 8 << 30);
+        assert_eq!(default_pinned_limit_bytes(0), 0);
+
+        let set = LimitSet::with_pinned_default(128 << 20);
+        let pinned = set.get(LimitKind::PinnedMemoryBytes);
+        assert_eq!(pinned.soft, 128 << 20);
+        assert_eq!(pinned.hard, 128 << 20);
+        assert!(pinned.is_well_formed());
+        // Every other kind keeps the compile-time floor.
+        assert_eq!(
+            set.get(LimitKind::StackBytes),
+            LimitSet::DEFAULT.get(LimitKind::StackBytes)
+        );
+        assert_eq!(
+            set.get(LimitKind::AddressSpaceBytes),
+            ResourceLimit::UNLIMITED
+        );
+    }
 
     #[test]
     fn default_is_unlimited_for_every_kind_except_the_stack() {
@@ -196,7 +268,7 @@ mod tests {
         let mut parent = LimitSet::DEFAULT;
         let cap = ResourceLimit::new(4, 8).expect("well-formed");
         parent.set(LimitKind::Processes, cap);
-        let child = LimitSet::inherit(&parent);
+        let child = LimitSet::inherit(&parent, &LimitSet::DEFAULT);
         // The child inherits the parent's tighter ceiling verbatim while the
         // default is unlimited.
         assert_eq!(child.get(LimitKind::Processes), cap);
@@ -215,7 +287,7 @@ mod tests {
         let default_for_kind = LimitSet::DEFAULT.get(LimitKind::Processes);
         let mut parent = LimitSet::DEFAULT;
         parent.set(LimitKind::Processes, ResourceLimit::UNLIMITED);
-        let child = LimitSet::inherit(&parent);
+        let child = LimitSet::inherit(&parent, &LimitSet::DEFAULT);
         // Under today's unlimited default the intersection is the parent's
         // value; the invariant under test is that inherit is exactly the
         // intersection, so it can never exceed the default.
@@ -225,6 +297,25 @@ mod tests {
         );
         // Sanity: intersecting a tight limit never widens it.
         assert_eq!(tight.intersect(ResourceLimit::UNLIMITED), tight);
+    }
+
+    #[test]
+    fn inherit_intersects_against_the_derived_pinned_default() {
+        // A parent with no pinned bound of its own is capped by the
+        // per-boot derived default; a parent already tighter keeps its
+        // tighter bound — inheritance never widens either way.
+        let boot_default = LimitSet::with_pinned_default(128 << 20);
+        let child = LimitSet::inherit(&LimitSet::DEFAULT, &boot_default);
+        assert_eq!(
+            child.get(LimitKind::PinnedMemoryBytes),
+            boot_default.get(LimitKind::PinnedMemoryBytes)
+        );
+
+        let mut tight_parent = boot_default;
+        let tight = ResourceLimit::new(1 << 20, 1 << 20).expect("well-formed");
+        tight_parent.set(LimitKind::PinnedMemoryBytes, tight);
+        let child = LimitSet::inherit(&tight_parent, &boot_default);
+        assert_eq!(child.get(LimitKind::PinnedMemoryBytes), tight);
     }
 
     #[test]

@@ -106,6 +106,12 @@ const NUM_MEM_MAP: u64 = SyscallNumber::MEM_MAP.as_u16() as u64;
 /// `mem_unmap` syscall number (as above).
 const NUM_MEM_UNMAP: u64 = SyscallNumber::MEM_UNMAP.as_u16() as u64;
 
+/// `mem_pin` syscall number (as above).
+const NUM_MEM_PIN: u64 = SyscallNumber::MEM_PIN.as_u16() as u64;
+
+/// `mem_unpin` syscall number (as above).
+const NUM_MEM_UNPIN: u64 = SyscallNumber::MEM_UNPIN.as_u16() as u64;
+
 /// `file_map` syscall number (as above).
 const NUM_FILE_MAP: u64 = SyscallNumber::FILE_MAP.as_u16() as u64;
 
@@ -1356,6 +1362,45 @@ pub fn mem_unmap(base: u64, len: usize) -> i64 {
     // the `(base, len)` range against the caller's own address space before
     // unmapping it. No user pointer is dereferenced.
     let ret = unsafe { raw_syscall(NUM_MEM_UNMAP, [base, len as u64, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Mark the calling process's entire anonymous memory — current and
+/// future — as pinned: ineligible for the compressed `ramzip` tier and any
+/// future lower swap tier (`SyscallNumber::MEM_PIN`,
+/// `plans/STRESSTEST.md` ST2).
+///
+/// Gated by `CAP_MEM_PIN` and bounded by the caller's effective
+/// `pinned-memory-bytes` limit; both refusals surface as `-errno`
+/// (`PermissionDenied` / `OutOfRange`) so the caller can report the
+/// refusal and continue unpinned — for a monitor or load controller the
+/// pin is incidental, never fatal. Returns `0` on success (already pinned
+/// is success), following the standard `abi-v1` signed-result convention;
+/// the wrapper hides no error.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn mem_pin() -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel checks
+    // the capability and the pinned-memory bound on the far side of the
+    // trap. No user pointer is passed.
+    let ret = unsafe { raw_syscall(NUM_MEM_PIN, [0; 6]) };
+    ret as i64
+}
+
+/// Clear the calling process's [`mem_pin`] mark, restoring its anonymous
+/// memory's eligibility for the swap tiers (`SyscallNumber::MEM_UNPIN`,
+/// `plans/STRESSTEST.md` ST2).
+///
+/// Unprivileged (releasing one's own exemption grants nothing) and
+/// idempotent: already unpinned is success. Returns `0` on success or
+/// `-errno`, following the standard `abi-v1` signed-result convention;
+/// the wrapper hides no error.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn mem_unpin() -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel only
+    // clears the caller's own pin mark. No user pointer is passed.
+    let ret = unsafe { raw_syscall(NUM_MEM_UNPIN, [0; 6]) };
     ret as i64
 }
 
@@ -4547,6 +4592,35 @@ mod tests {
         assert_eq!(args[0], base);
         assert_eq!(args[1], 0x2000);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn mem_pin_issues_the_pin_syscall_with_no_arguments() {
+        let (number, args) = capture(0, || {
+            assert_eq!(mem_pin(), 0);
+        });
+        assert_eq!(number, NUM_MEM_PIN);
+        assert_eq!(&args, &[0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn mem_pin_surfaces_negative_errno_encoding() {
+        // A refused pin (no capability, or over the pinned-memory bound)
+        // surfaces unchanged so the caller can degrade gracefully.
+        let want = -i64::from(rustos_abi::Errno::PermissionDenied.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(mem_pin(), want);
+        });
+    }
+
+    #[test]
+    fn mem_unpin_issues_the_unpin_syscall_with_no_arguments() {
+        let (number, args) = capture(0, || {
+            assert_eq!(mem_unpin(), 0);
+        });
+        assert_eq!(number, NUM_MEM_UNPIN);
+        assert_eq!(&args, &[0, 0, 0, 0, 0, 0]);
     }
 
     #[test]

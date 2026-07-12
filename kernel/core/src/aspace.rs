@@ -43,7 +43,7 @@
 //! [`PortRegistry`]: rustos_kernel_ipc::PortRegistry
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -104,9 +104,27 @@ pub struct AddressSpaceRegistry {
     /// per-process lifecycle (inherited at spawn, withdrawn at exit) and is
     /// keyed by the same [`TaskId`], so a parallel registry + lock would be
     /// near-duplicate plumbing. A task with no
-    /// entry resolves to the [`LimitSet::DEFAULT`] policy via
+    /// entry resolves to the per-boot [`Self::default_limits`] policy via
     /// [`Self::limits`].
     limits: BTreeMap<TaskId, LimitSet>,
+    /// The per-boot default limit policy a task with no established set
+    /// resolves to, and the default `LimitSet::inherit` intersects
+    /// against. Starts at the compile-time [`LimitSet::DEFAULT`] floor;
+    /// the boot path replaces it once with the hardware-derived set
+    /// (today: the discovered-RAM pinned-memory bound), so every
+    /// consumer — `limits`, inheritance, `rlimit_get` — reads one
+    /// definition and none can drift.
+    default_limits: LimitSet,
+    /// The tasks whose entire anonymous memory is pinned — exempt from
+    /// the compressed `ramzip` tier and any future lower swap tier
+    /// (`mem_pin`, `plans/STRESSTEST.md` ST2). Process-scoped state: a
+    /// task is present or absent, never partially pinned. Deliberately
+    /// not inherited across spawn (a fresh task id is never in the set)
+    /// and cleared by [`Self::withdraw`] on exit. The compressed tier's
+    /// eligibility classifier reads this through
+    /// [`Self::is_pinned`] when a candidate's owner is judged, so there
+    /// is exactly one pin decision.
+    pinned: BTreeSet<TaskId>,
     /// Each live task's device-resource grants (the unforgeable, kernel-issued handles a driver task may map with
     /// `mmio_map`). Co-located with the address space for the same reason
     /// as [`Self::streams`] and [`Self::limits`]: a grant shares the exact
@@ -550,6 +568,8 @@ impl AddressSpaceRegistry {
             file_regions: BTreeMap::new(),
             stack_spans: BTreeMap::new(),
             fd_delegations: BTreeMap::new(),
+            default_limits: LimitSet::DEFAULT,
+            pinned: BTreeSet::new(),
         }
     }
 
@@ -621,6 +641,11 @@ impl AddressSpaceRegistry {
     /// table is dropped at the same time so a reused id never inherits a
     /// dead task's streams (fail closed).
     pub fn withdraw(&mut self, task: TaskId) -> bool {
+        // The pin mark is per-process state: a task that exits (or is
+        // killed) leaves the pinned set, so a reused id never inherits a
+        // dead task's exemption and the system-wide pinned aggregate
+        // drops with the task.
+        let had_pin = self.pinned.remove(&task);
         let had_streams = self.streams.remove(&task).is_some();
         let had_limits = self.limits.remove(&task).is_some();
         let had_grants = self.grants.remove(&task).is_some();
@@ -632,6 +657,7 @@ impl AddressSpaceRegistry {
         let had_stack_span = self.stack_spans.remove(&task).is_some();
         let had_fd_delegations = self.fd_delegations.remove(&task).is_some();
         self.tasks.remove(&task).is_some()
+            || had_pin
             || had_streams
             || had_limits
             || had_grants
@@ -810,7 +836,8 @@ impl AddressSpaceRegistry {
     /// the child inherited (already intersected against the system default,
     /// [`LimitSet::inherit`]). Replacing an existing set is permitted, as
     /// for [`Self::set_streams`]; a task whose set is never established
-    /// resolves to [`LimitSet::DEFAULT`] via [`Self::limits`].
+    /// resolves to the per-boot [`Self::default_limits`] policy via
+    /// [`Self::limits`].
     pub fn set_limits(&mut self, task: TaskId, limits: LimitSet) {
         self.limits.insert(task, limits);
     }
@@ -820,16 +847,22 @@ impl AddressSpaceRegistry {
     ///
     /// The `rlimit_set` handler calls this once a request has been
     /// authorised ([`crate::authorize_set`]). A task with no established
-    /// set starts from [`LimitSet::DEFAULT`], so the first imposed bound on
-    /// any kind leaves every other kind at the default policy.
+    /// set starts from the per-boot [`Self::default_limits`] policy, so
+    /// the first imposed bound on any kind leaves every other kind at
+    /// the default policy.
     pub fn set_limit(&mut self, task: TaskId, kind: LimitKind, limit: ResourceLimit) {
-        let mut set = self.limits.get(&task).copied().unwrap_or_default();
+        let mut set = self
+            .limits
+            .get(&task)
+            .copied()
+            .unwrap_or(self.default_limits);
         set.set(kind, limit);
         self.limits.insert(task, set);
     }
 
-    /// Resolve `task`'s effective resource-limit set, or the
-    /// [`LimitSet::DEFAULT`] policy when none is established.
+    /// Resolve `task`'s effective resource-limit set, or the per-boot
+    /// default policy ([`Self::default_limits`]) when none is
+    /// established.
     ///
     /// The `rlimit_get` / `rlimit_set` handlers consult this to read a
     /// caller's own effective limit. An unregistered
@@ -837,7 +870,88 @@ impl AddressSpaceRegistry {
     /// policy — reading one's own limit grants no authority.
     #[must_use]
     pub fn limits(&self, task: TaskId) -> LimitSet {
-        self.limits.get(&task).copied().unwrap_or_default()
+        self.limits
+            .get(&task)
+            .copied()
+            .unwrap_or(self.default_limits)
+    }
+
+    /// The per-boot default limit policy (the fallback [`Self::limits`]
+    /// resolves to and the default `LimitSet::inherit` intersects
+    /// against).
+    #[must_use]
+    pub const fn default_limits(&self) -> LimitSet {
+        self.default_limits
+    }
+
+    /// Install the per-boot default limit policy.
+    ///
+    /// Called once by the boot path with the hardware-derived set (the
+    /// discovered-RAM pinned-memory bound); every later `limits` fallback
+    /// and spawn inheritance then runs under it. Replacing the default
+    /// never widens an already-established task set — those were
+    /// intersected at spawn and stand on their own.
+    pub fn set_default_limits(&mut self, default: LimitSet) {
+        self.default_limits = default;
+    }
+
+    /// Mark `task`'s entire anonymous memory — current and future — as
+    /// pinned (`mem_pin`). Idempotent: pinning a pinned task leaves it
+    /// pinned.
+    ///
+    /// The handler has already enforced the caller's
+    /// `PinnedMemoryBytes` bound; this is the unconditional store. The
+    /// `task` argument is the kernel-trusted caller id.
+    pub fn set_pinned(&mut self, task: TaskId) {
+        self.pinned.insert(task);
+    }
+
+    /// Clear `task`'s pin mark (`mem_unpin`). Idempotent: unpinning an
+    /// unpinned task is a no-op.
+    pub fn clear_pinned(&mut self, task: TaskId) {
+        self.pinned.remove(&task);
+    }
+
+    /// Whether `task`'s anonymous memory is pinned.
+    ///
+    /// The single pin decision every consumer reads: the compressed
+    /// tier's candidate path (a pinned owner's page carries the refusing
+    /// `pinned` attribute), the `mem_map`/stack-growth bounds while
+    /// pinned, and the observability export.
+    #[must_use]
+    pub fn is_pinned(&self, task: TaskId) -> bool {
+        self.pinned.contains(&task)
+    }
+
+    /// `task`'s pinned footprint in bytes: its mapped address space plus
+    /// its committed stack.
+    ///
+    /// The one measure the `PinnedMemoryBytes` bound is enforced
+    /// against — the same accounting the `AddressSpaceBytes` ceiling
+    /// uses ([`Self::mapped_aspace_bytes`]) plus the demand-grown stack,
+    /// so the bounds can never drift apart. File-backed pages are
+    /// counted although the compressed tier never takes them: counting
+    /// them only tightens the cap, and splitting the accounting would
+    /// mean a second running total to keep honest. Saturating: a
+    /// miscount can overstate, never understate, usage.
+    #[must_use]
+    pub fn pinned_footprint_bytes(&self, task: TaskId) -> u64 {
+        self.mapped_aspace_bytes(task)
+            .saturating_add(self.stack_committed_bytes(task))
+    }
+
+    /// The system-wide pinned aggregate: the summed
+    /// [`Self::pinned_footprint_bytes`] of every pinned task.
+    ///
+    /// Read by the observability export (`RAMZIP_STATS.pinned_bytes`,
+    /// `stats:mem/pinned`) so an operator can see how much memory
+    /// pressure management may never reclaim. Walks only the pinned set
+    /// (a handful of monitor-scale processes), not every task.
+    #[must_use]
+    pub fn pinned_total_bytes(&self) -> u64 {
+        self.pinned.iter().fold(0u64, |sum, task| {
+            sum.saturating_add(self.pinned_footprint_bytes(*task))
+        })
     }
 
     /// `task`'s running total of mapped address space — anonymous memory
@@ -1552,6 +1666,84 @@ mod tests {
         );
         reg.set_limits(TaskId(7), wanted);
         assert_eq!(reg.limits(TaskId(7)), wanted);
+    }
+
+    #[test]
+    fn set_default_limits_feeds_the_fallback_and_set_limit_base() {
+        let mut reg = AddressSpaceRegistry::new();
+        let boot_default = LimitSet::with_pinned_default(128 << 20);
+        reg.set_default_limits(boot_default);
+        // An unestablished task resolves to the per-boot default …
+        assert_eq!(reg.limits(TaskId(9)), boot_default);
+        assert_eq!(reg.default_limits(), boot_default);
+        // … and a first single-kind bound starts from it, keeping the
+        // derived pinned bound rather than silently reverting to the
+        // compile-time floor.
+        let cap = ResourceLimit::new(4, 8).expect("well-formed");
+        reg.set_limit(TaskId(9), LimitKind::Processes, cap);
+        assert_eq!(reg.limits(TaskId(9)).get(LimitKind::Processes), cap);
+        assert_eq!(
+            reg.limits(TaskId(9)).get(LimitKind::PinnedMemoryBytes),
+            boot_default.get(LimitKind::PinnedMemoryBytes)
+        );
+    }
+
+    #[test]
+    fn pin_state_is_per_task_idempotent_and_cleared_on_withdraw() {
+        let mut reg = AddressSpaceRegistry::new();
+        // Fresh tasks are unpinned — pinning is never inherited.
+        assert!(!reg.is_pinned(TaskId(1)));
+        reg.set_pinned(TaskId(1));
+        assert!(reg.is_pinned(TaskId(1)));
+        assert!(!reg.is_pinned(TaskId(2)), "pin is per-task state");
+        // Idempotent both ways.
+        reg.set_pinned(TaskId(1));
+        assert!(reg.is_pinned(TaskId(1)));
+        reg.clear_pinned(TaskId(1));
+        assert!(!reg.is_pinned(TaskId(1)));
+        reg.clear_pinned(TaskId(1));
+        assert!(!reg.is_pinned(TaskId(1)));
+        // Withdraw clears the mark, so a reused id starts unpinned and
+        // the withdraw reports state was dropped.
+        reg.set_pinned(TaskId(3));
+        assert!(reg.withdraw(TaskId(3)));
+        assert!(!reg.is_pinned(TaskId(3)));
+    }
+
+    #[test]
+    fn pinned_footprint_sums_mapped_bytes_and_committed_stack() {
+        let mut reg = AddressSpaceRegistry::new();
+        let task = TaskId(4);
+        assert_eq!(reg.pinned_footprint_bytes(task), 0);
+        reg.charge_aspace_bytes(task, 3 * PAGE_SIZE as u64);
+        assert_eq!(reg.pinned_footprint_bytes(task), 3 * PAGE_SIZE as u64);
+        // Commit one stack page inside a recorded span: the committed
+        // extent joins the footprint.
+        let top = 0x8000_0000u64;
+        let span = StackSpan::new(top - 16 * PAGE_SIZE as u64, top - PAGE_SIZE as u64, top)
+            .expect("well-formed span");
+        reg.set_stack_span(task, span);
+        assert_eq!(
+            reg.pinned_footprint_bytes(task),
+            3 * PAGE_SIZE as u64 + PAGE_SIZE as u64
+        );
+    }
+
+    #[test]
+    fn pinned_total_aggregates_only_pinned_tasks() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.charge_aspace_bytes(TaskId(1), 2 * PAGE_SIZE as u64);
+        reg.charge_aspace_bytes(TaskId(2), 5 * PAGE_SIZE as u64);
+        assert_eq!(reg.pinned_total_bytes(), 0, "nothing pinned yet");
+        reg.set_pinned(TaskId(1));
+        assert_eq!(reg.pinned_total_bytes(), 2 * PAGE_SIZE as u64);
+        reg.set_pinned(TaskId(2));
+        assert_eq!(reg.pinned_total_bytes(), 7 * PAGE_SIZE as u64);
+        // Unpin and exit both drop out of the aggregate.
+        reg.clear_pinned(TaskId(2));
+        assert_eq!(reg.pinned_total_bytes(), 2 * PAGE_SIZE as u64);
+        reg.withdraw(TaskId(1));
+        assert_eq!(reg.pinned_total_bytes(), 0);
     }
 
     #[test]

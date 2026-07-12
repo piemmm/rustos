@@ -326,6 +326,10 @@ fn resolve_stats(
         ["mem", "ramzip", leaf @ ("stored" | "logical" | "saved")] => {
             ramzip_bytes_metric(reference, now, transport, leaf)
         }
+        // Bytes pinned system-wide (`mem_pin`): anonymous memory exempted
+        // from the compressed tier, from the same gated tier query that
+        // carries the aggregate.
+        ["mem", "pinned"] => pinned_bytes_metric(reference, now, transport),
         // The caller's own live usage of one of its limited resources: a
         // measurement, so a gauge (it rises and falls and never resets over
         // the life of the process). Byte-denominated resources report
@@ -498,6 +502,27 @@ fn ramzip_bytes_metric(
         MetricKind::Gauge,
         Unit::Bytes,
         value,
+        ResetBehavior::Never,
+    )
+}
+
+/// The gated `stats:mem/pinned` byte gauge: anonymous memory pinned
+/// system-wide (`mem_pin`, `plans/STRESSTEST.md` ST2) and therefore
+/// exempt from the compressed tier — the aggregate the `RAMZIP_STATS`
+/// record carries.
+fn pinned_bytes_metric(
+    reference: &ResourceRef,
+    now: Time64,
+    transport: &dyn Transport,
+) -> Result<ResourceResponse, ResolveInfoError> {
+    let stats = query_ramzip(transport)?;
+    gated_metric(
+        reference,
+        now,
+        "mem/pinned",
+        MetricKind::Gauge,
+        Unit::Bytes,
+        stats.pinned_bytes,
         ResetBehavior::Never,
     )
 }
@@ -758,7 +783,9 @@ fn usage_for(kind: LimitKind, transport: &dyn Transport) -> Result<u64, ResolveI
 /// byte-denominated resources, a dimensionless count for the rest.
 fn unit_for_limit(kind: LimitKind) -> Unit {
     match kind {
-        LimitKind::AddressSpaceBytes | LimitKind::StackBytes => Unit::Bytes,
+        LimitKind::AddressSpaceBytes | LimitKind::StackBytes | LimitKind::PinnedMemoryBytes => {
+            Unit::Bytes
+        }
         LimitKind::OpenStreams | LimitKind::Processes => Unit::Count,
     }
 }
@@ -916,6 +943,7 @@ mod tests {
             entries: 4,
             logical_bytes: 16384,
             stored_bytes: 6000,
+            pinned_bytes: 5 << 20,
             ..RamzipStats::default()
         }
     }
@@ -1001,6 +1029,11 @@ mod tests {
                         LimitKind::StackBytes,
                         ResourceLimit::new(8192, 8192).expect("well-formed"),
                         2048,
+                    ),
+                    ResourceLimitRecord::new(
+                        LimitKind::PinnedMemoryBytes,
+                        ResourceLimit::new(1 << 20, 1 << 20).expect("well-formed"),
+                        0,
                     ),
                 ],
                 pressure: fixture_pressure(),
@@ -1689,6 +1722,23 @@ mod tests {
             assert_eq!(metric.value, expected, "{leaf}");
             assert_eq!(metric.unit, Unit::Bytes);
         }
+    }
+
+    #[test]
+    fn stats_mem_pinned_reports_the_system_wide_aggregate() {
+        let fixture = Fixture::new();
+        let response = resolve_str("stats:mem/pinned", &fixture).expect("resolves");
+        let ResponsePayload::Metric(metric) = &response.payload else {
+            panic!("expected a metric");
+        };
+        assert_eq!(metric.value, 5 << 20);
+        assert_eq!(metric.unit, Unit::Bytes);
+        assert_eq!(metric.name(), "mem/pinned");
+        // An extra path segment names nothing: the leaf is exact.
+        assert_eq!(
+            resolve_str("stats:mem/pinned/total", &fixture),
+            Err(ResolveInfoError::UnknownSelector)
+        );
     }
 
     #[test]

@@ -399,7 +399,8 @@ fn run_ramzip(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysinfo
         out,
         &format!("cluster restored: {}", stats.cluster_restored),
     )?;
-    emit(out, &format!("thrash detected:  {}", stats.thrash_detected))
+    emit(out, &format!("thrash detected:  {}", stats.thrash_detected))?;
+    emit(out, &format!("pinned bytes:    {}", stats.pinned_bytes))
 }
 
 /// Fetch and render the per-CPU scheduler load figures, one aligned row
@@ -592,6 +593,7 @@ mod tests {
                     rejected_incompressible: 3,
                     rejected_cap: 2,
                     fault_ins: 1,
+                    pinned_bytes: 5 << 20,
                     ..RamzipStats::default()
                 },
                 cpu_loads: alloc::vec![
@@ -1081,6 +1083,13 @@ mod tests {
         assert_eq!(lines[0], "entries:         4");
         assert!(lines.iter().any(|l| l == "rejected:        5"));
         assert!(lines.iter().any(|l| l.starts_with("fault-ins:")));
+        // The pinned aggregate (`mem_pin`) rides the same record.
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == &alloc::format!("pinned bytes:    {}", 5 << 20)),
+            "pinned bytes row missing: {lines:?}"
+        );
     }
 
     #[test]

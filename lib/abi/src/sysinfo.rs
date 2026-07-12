@@ -2553,9 +2553,13 @@ pub struct RamzipStats {
     pub cluster_restored: u64,
     /// Tasks that crossed the thrash threshold.
     pub thrash_detected: u64,
-    /// Reserved; must be zero in `sysinfo-v1` (the ST2 pinned-exemption
-    /// counter extends here by reserved-field evolution).
-    pub reserved: u64,
+    /// Bytes of anonymous memory currently exempted from the tier by
+    /// process pins (`mem_pin`, `plans/STRESSTEST.md` ST2): the aggregate
+    /// pinned footprint across every pinned process, so an operator can
+    /// see how much memory pressure management may never reclaim. Zero
+    /// when nothing is pinned. Took the record's reserved slot by
+    /// reserved-field evolution, so the wire length is unchanged.
+    pub pinned_bytes: u64,
 }
 
 impl RamzipStats {
@@ -2592,7 +2596,7 @@ impl RamzipStats {
             self.warm_stopped,
             self.cluster_restored,
             self.thrash_detected,
-            self.reserved,
+            self.pinned_bytes,
         ]
     }
 
@@ -2611,14 +2615,9 @@ impl RamzipStats {
     /// # Errors
     ///
     /// * [`Errno::BufferTooSmall`] if short.
-    /// * [`Errno::BadMagic`] if the reserved field is non-zero.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
-        }
-        let reserved = read_u64(bytes, 25 * 8);
-        if reserved != 0 {
-            return Err(Errno::BadMagic);
         }
         Ok(Self {
             entries: read_u64(bytes, 0),
@@ -2646,7 +2645,7 @@ impl RamzipStats {
             warm_stopped: read_u64(bytes, 176),
             cluster_restored: read_u64(bytes, 184),
             thrash_detected: read_u64(bytes, 192),
-            reserved,
+            pinned_bytes: read_u64(bytes, 200),
         })
     }
 }
@@ -3837,10 +3836,13 @@ mod tests {
             warm_stopped: 1,
             cluster_restored: 2,
             thrash_detected: 1,
-            reserved: 0,
+            pinned_bytes: 3 << 20,
         };
         let decoded = RamzipStats::from_bytes(&stats.to_le_bytes()).expect("round trip");
         assert_eq!(decoded, stats);
+        // The pinned aggregate is a live figure carried at the former
+        // reserved slot; it round-trips like every other counter.
+        assert_eq!(decoded.pinned_bytes, 3 << 20);
 
         // An idle tier is a valid, truthful all-zero record.
         let idle = RamzipStats::default();
@@ -3850,9 +3852,6 @@ mod tests {
             RamzipStats::from_bytes(&[0u8; RamzipStats::WIRE_LEN - 1]),
             Err(Errno::BufferTooSmall)
         );
-        let mut bytes = stats.to_le_bytes();
-        bytes[RamzipStats::WIRE_LEN - 1] = 1;
-        assert_eq!(RamzipStats::from_bytes(&bytes), Err(Errno::BadMagic));
     }
 
     #[test]

@@ -402,6 +402,23 @@ impl CapabilityId {
     /// owner's next owner-gated call fails closed with the distinct
     /// `SeatRevoked` refusal, so the loss is observable, never silent.
     pub const SEAT_ADMIN: Self = Self(33);
+    /// Exempt the calling process's anonymous memory from the swap tiers
+    /// (`plans/STRESSTEST.md` ST2).
+    ///
+    /// Gates the `mem_pin` syscall, which marks the caller's entire
+    /// anonymous memory — current and future — ineligible for the
+    /// compressed `ramzip` tier and any future lower swap tier. Exempting
+    /// memory from pressure management is a system-wide denial-of-service
+    /// lever (pinned bytes can never be reclaimed by compression), so it
+    /// is a guarded class of authority no existing capability expresses:
+    /// the `CAP_SYSINFO_*` family only observes, and the rlimit facility
+    /// only bounds. The pin is additionally bounded by the holder's
+    /// effective [`crate::LimitKind::PinnedMemoryBytes`] limit and every
+    /// pin/unpin edge is audited. Intended holders are the monitoring and
+    /// load-generation tools (`sysmon`, `stress`) whose controlling state
+    /// must never stall on its own fault-in under the very pressure they
+    /// exist to provoke and observe.
+    pub const MEM_PIN: Self = Self(34);
 
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
@@ -446,6 +463,7 @@ impl CapabilityId {
         (Self::SPAWN_AS_USER, "CAP_SPAWN_AS_USER"),
         (Self::SYSINFO_INTROSPECT, "CAP_SYSINFO_INTROSPECT"),
         (Self::SEAT_ADMIN, "CAP_SEAT_ADMIN"),
+        (Self::MEM_PIN, "CAP_MEM_PIN"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -573,6 +591,7 @@ mod tests {
         assert_eq!(CapabilityId::SPAWN_AS_USER.as_u16(), 31);
         assert_eq!(CapabilityId::SYSINFO_INTROSPECT.as_u16(), 32);
         assert_eq!(CapabilityId::SEAT_ADMIN.as_u16(), 33);
+        assert_eq!(CapabilityId::MEM_PIN.as_u16(), 34);
     }
 
     #[test]
@@ -595,6 +614,7 @@ mod tests {
         assert_eq!(CapabilityId::DISPLAY.name(), Some("CAP_DISPLAY"));
         assert_eq!(CapabilityId::INPUT_READ.name(), Some("CAP_INPUT_READ"));
         assert_eq!(CapabilityId::SEAT_ADMIN.name(), Some("CAP_SEAT_ADMIN"));
+        assert_eq!(CapabilityId::MEM_PIN.name(), Some("CAP_MEM_PIN"));
 
         // Every named id round-trips name -> id -> name.
         for &(cap, name) in CapabilityId::NAMED {

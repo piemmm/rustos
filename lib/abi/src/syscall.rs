@@ -1706,6 +1706,37 @@ impl SyscallNumber {
     /// on the descriptor is still VFS-checked under the grantor's captured
     /// identity.
     pub const FD_REDEEM: Self = Self(91);
+    /// Mark the calling process's entire anonymous memory — current and
+    /// future — as pinned: ineligible for the compressed `ramzip` tier and
+    /// any future lower swap tier (`plans/STRESSTEST.md` ST2, the API
+    /// behind `plans/SWAPSWAPSWAP.md` section 5's pinned class).
+    ///
+    /// No arguments. Returns an error code (`Ok(0)` on success; already
+    /// pinned is success — the process is in the requested state). Gated by
+    /// [`crate::CapabilityId::MEM_PIN`] and audited per call: exempting
+    /// memory from pressure management system-wide is a
+    /// denial-of-service lever against every other tenant. Bounded by the
+    /// caller's effective [`crate::LimitKind::PinnedMemoryBytes`] soft
+    /// bound: a pin whose anonymous bytes already exceed the bound fails
+    /// closed with [`crate::Errno::OutOfRange`], and while pinned the same
+    /// bound caps further anonymous growth (`mem_map`, demand-grown
+    /// stack). Pinning is process-scoped state: it is not inherited across
+    /// [`SyscallNumber::SPAWN`] (a child starts unpinned) and is cleared
+    /// on exit. It grants no residency promise beyond "never enters a swap
+    /// tier": pages are still faulted lazily, zero-on-free and encryption
+    /// guarantees are unchanged, and the process stays killable.
+    pub const MEM_PIN: Self = Self(92);
+    /// Clear the calling process's [`SyscallNumber::MEM_PIN`] mark,
+    /// restoring its anonymous memory's eligibility for the compressed
+    /// tier (`plans/STRESSTEST.md` ST2).
+    ///
+    /// No arguments. Returns an error code (`Ok(0)` on success; already
+    /// unpinned is success). Requires no capability — releasing the
+    /// caller's own exemption narrows its footprint and grants nothing
+    /// (the `mem_unmap` posture) — but is audited per call like
+    /// [`SyscallNumber::MEM_PIN`], so the audit trail carries both edges
+    /// of every pin window.
+    pub const MEM_UNPIN: Self = Self(93);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
