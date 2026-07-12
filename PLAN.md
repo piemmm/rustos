@@ -4666,6 +4666,28 @@ format-conformance defect the evidence window exposed). See
 
 ---
 
+## NETWORK — full IPv4 + IPv6 networking (`plans/NETWORK.md`)
+
+**Status: planned (N1–N8).** The complete dual-stack user-space network
+stack above the link-layer driver seam: one pure, host-testable,
+fuzzed protocol engine (`lib/net` — Ethernet, ARP/ND over one neighbour
+contract, IPv4 + IPv6 as peers, ICMP/ICMPv6, IGMP/MLD multicast
+membership, UDP, full RFC 9293 TCP with SACK and pluggable congestion
+control), driven by the `userland/net/netstack` service (the §19.5
+minimum-capability parser process; event-driven, never polling), serving
+a versioned capability-gated socket ABI (`lib/abi/src/net.rs`; `CAP_NET`,
+`CAP_NET_BIND_PRIVILEGED`, `CAP_NET_ADMIN` land with their enforcement
+points) over kernel-brokered endpoints, and consuming an in-place-evolved
+NIC seam (shared-memory frame rings + a closed negotiated offload
+vocabulary `virtio_net` serves first; the software path stays the
+conformance oracle). DoS resistance is designed in: SYN cookies, RFC 5961
+challenge ACKs, CSPRNG ISNs/ports/IDs, budgeted fail-closed reassembly
+and neighbour caches, per-principal §24.3 accounting. The interim
+`userland/net/icmp` responder is subsumed and deleted in N3 (§2.14). See
+`plans/NETWORK.md` for the binding design and per-increment guarantees.
+
+---
+
 ## STRESSTEST — stress testing + live kernel monitoring (`plans/STRESSTEST.md`)
 
 **Status: ST1 done; ST2–ST6 planned.** Makes RustOS's behaviour under load
