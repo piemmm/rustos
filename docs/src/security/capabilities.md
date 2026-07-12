@@ -143,7 +143,8 @@ The two sets are policy with one definition: `lib/users` (the `grants`
 module) defines `SESSION_BASELINE`, `ADMINISTRATIVE_SET`, and the
 `administrator_ceiling()` union beside the account record that stores a
 grant, and every author imports them — the image builder's debug `root`
-account (`tools/mkimage::debug_users_db`) and the QEMU disk fixtures seed
+account (`tools/mkimage`'s profile-keyed users-database seeding) and the
+QEMU disk fixtures seed
 exactly `administrator_ceiling()` (`plans/CAPABILITY_USE.md` CU3). The
 baseline is a **ceiling**, never a program's manifest: the shell
 requests its own exercised set (`SHELL_MANIFEST` — the console pair,

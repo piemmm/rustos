@@ -14,7 +14,7 @@
 //! prompts; the runner authenticates `root`/`root` against the planted
 //! account — whose grant is the shared administrator ceiling
 //! (`rustos_users::administrator_ceiling`, the same set
-//! `tools/mkimage::debug_users_db` seeds a debug image with) — and login
+//! `tools/mkimage`'s profile-keyed seeding gives a debug image) — and login
 //! spawns the account's shell **as that user** through `spawn_as`. The
 //! runner's ordered serial script (`tools/xtask`) then holds a real
 //! session with the shell, each line typed only after its marker appeared:

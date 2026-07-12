@@ -27,18 +27,21 @@
 //!   ([`fatboot::ROOT_UNLOCK_NAME`]) so the bootstrap can re-derive the key
 //!   before mounting. The passphrase itself is never stored in the image.
 //!
-//! Two [`ImageProfile`]s exist. **Installer** is the shippable form: the
-//! root carries no user accounts, the installer authors
-//! `/System/Security/Users` on first boot, and its encrypted root is
-//! unlocked by a **blank** passphrase ([`INSTALLER_PASSPHRASE`]) the
-//! bootstrap auto-enters with no prompt, so a fresh install boots straight
-//! into the installer. **Debug** is the development form: the root is
-//! seeded with a `root`/`root` account
-//! ([`DEBUG_USERNAME`]/[`DEBUG_PASSWORD`], salted and hashed per build) and
-//! its encrypted root is unlocked by the matching `root` passphrase
-//! ([`DEBUG_PASSPHRASE`], typed at the `Root passphrase:` prompt), so the
-//! login prompt is usable without running the installer. A debug image
-//! must never ship.
+//! Two [`ImageProfile`]s exist, and both seed the canonical default
+//! system/service account set (`rustos_users::default_system_accounts` /
+//! `default_groups`, `plans/USERS.md`): the locked, non-authenticating
+//! `system` record naming uid 0 plus one no-login account per system
+//! service. **Installer** is the shippable form: it carries *only* those
+//! no-login defaults (the installer authors the first human user on first
+//! boot), and its encrypted root is unlocked by a **blank** passphrase
+//! ([`INSTALLER_PASSPHRASE`]) the bootstrap auto-enters with no prompt, so
+//! a fresh install boots straight into the installer. **Debug** is the
+//! development form: it additionally appends an interactive `root`/`root`
+//! administrator ([`DEBUG_USERNAME`]/[`DEBUG_PASSWORD`], uid
+//! [`DEBUG_UID`], salted and hashed per build), and its encrypted root is
+//! unlocked by the matching `root` passphrase ([`DEBUG_PASSPHRASE`], typed
+//! at the `Root passphrase:` prompt), so the login prompt is usable
+//! without running the installer. A debug image must never ship.
 //!
 //! The builder is driven by `cargo xtask image --target aarch64-rpi` (or
 //! `cargo xtask build --target aarch64-rpi`) and by the `rustos-mkimage`
@@ -64,8 +67,7 @@ use rustos_abi::{DriverError, MACHINE_ID_LEN};
 use rustos_partition::mbr::{self, MbrError};
 use rustos_partition::{Partition, PartitionType};
 use rustos_users::{
-    AccountState, Gid, GroupRecord, GroupsDb, Identity, Salt, Uid, UserRecord, UsersDb,
-    STORAGE_GID, STORAGE_GROUP,
+    AccountState, Gid, GroupRecord, GroupsDb, Identity, Salt, Uid, UserRecord, UsersDb, STORAGE_GID,
 };
 
 /// First sector of the FAT32 boot partition (1 MiB alignment, the
@@ -156,12 +158,13 @@ impl std::error::Error for MkimageError {}
 /// Which kind of image to author.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ImageProfile {
-    /// Development image: the root volume is seeded with the
-    /// [`DEBUG_USERNAME`]/[`DEBUG_PASSWORD`] account and the matching
-    /// [`DEBUG_GROUP`] group registry so the login prompt is usable — and the
+    /// Development image: the default system/service account set plus the
+    /// interactive [`DEBUG_USERNAME`]/[`DEBUG_PASSWORD`] administrator and
+    /// its [`DEBUG_GROUP`] group, so the login prompt is usable — and the
     /// kernel's identity table builds — without the installer. Never shipped.
     Debug,
-    /// Shippable image: no user accounts; the installer authors
+    /// Shippable image: the default no-login system/service account set
+    /// only; the installer appends the first human user to
     /// `/System/Security/Users` and `/System/Security/Groups` on first boot.
     Installer,
 }
@@ -193,14 +196,21 @@ pub const DEBUG_USERNAME: &str = "root";
 
 /// Password of the debug-profile test account. Knowable by design — the
 /// debug image exists for bring-up on development hardware and must never
-/// ship; the installer image seeds no account at all.
+/// ship; the installer image seeds no login-capable account at all.
 pub const DEBUG_PASSWORD: &str = "root";
 
-/// Primary group id of the debug-profile test account, and the one group the
-/// seeded group registry declares. Defined once so the seeded user's
-/// `primary_gid` and the group registry it must resolve against cannot
-/// disagree about which gid exists.
-pub const DEBUG_PRIMARY_GID: Gid = Gid(0);
+/// Uid of the debug-profile test account: the first interactive-user id
+/// ([`rustos_users::FIRST_USER_UID`]). Uid 0 belongs to the no-login
+/// `system` record — powers come from the account's capability ceiling,
+/// never from its uid, so the debug administrator is an ordinary
+/// user-band principal.
+pub const DEBUG_UID: Uid = Uid(rustos_users::FIRST_USER_UID);
+
+/// Primary group id of the debug-profile test account: the first
+/// interactive-user gid ([`rustos_users::FIRST_USER_GID`]). Defined once so
+/// the seeded user's `primary_gid` and the group registry it must resolve
+/// against cannot disagree about which gid exists.
+pub const DEBUG_PRIMARY_GID: Gid = Gid(rustos_users::FIRST_USER_GID);
 
 /// Name of the debug-profile primary group (gid [`DEBUG_PRIMARY_GID`]). The
 /// conventional administrative group; the seeded `root` account's powers come
@@ -276,60 +286,79 @@ pub const fn console_baud_for(profile: ImageProfile) -> u32 {
     }
 }
 
-/// Build the debug-profile `/System/Security/Users` text: the single
-/// `root` account, its password salted from `entropy` and hashed at the
-/// default PBKDF2 cost, granted the administrator capability ceiling
-/// (`rustos_users::administrator_ceiling` — the session baseline plus the
-/// administrative set) a bring-up session needs. Powers come from
-/// capabilities, not from `uid 0`: the account is an administrator only
-/// because its ceiling says so.
-fn debug_users_db(entropy: &mut dyn EntropySource) -> Result<String, MkimageError> {
-    let mut salt: Salt = [0u8; rustos_users::SALT_LEN];
-    entropy
-        .fill(&mut salt)
-        .map_err(|e| MkimageError::Entropy(format!("users salt: {e:?}")))?;
+/// Build the profile's `/System/Security/Users` text.
+///
+/// Both profiles start from the canonical default system/service account
+/// set (`rustos_users::default_system_accounts`, `plans/USERS.md`): the
+/// locked, non-authenticating `system` record naming uid 0 plus one
+/// no-login account per system service, each carrying exactly its own
+/// service's ceiling. The debug profile appends the interactive
+/// [`DEBUG_USERNAME`] administrator (uid [`DEBUG_UID`], its password
+/// salted from `entropy` and hashed at the default PBKDF2 cost) granted
+/// the administrator capability ceiling
+/// (`rustos_users::administrator_ceiling`) a bring-up session needs.
+/// Powers come from capabilities, not from a uid: the account is an
+/// administrator only because its ceiling says so.
+fn users_db(
+    profile: ImageProfile,
+    entropy: &mut dyn EntropySource,
+) -> Result<String, MkimageError> {
+    let mut records = rustos_users::default_system_accounts()
+        .map_err(|e| MkimageError::UsersDb(format!("default system accounts: {e}")))?;
+    if profile == ImageProfile::Debug {
+        let mut salt: Salt = [0u8; rustos_users::SALT_LEN];
+        entropy
+            .fill(&mut salt)
+            .map_err(|e| MkimageError::Entropy(format!("users salt: {e:?}")))?;
 
-    let record = UserRecord::with_password(
-        Identity {
-            username: DEBUG_USERNAME,
-            uid: Uid(0),
-            primary_gid: DEBUG_PRIMARY_GID,
-            supplementary_gids: &[STORAGE_GID],
-            display_name: "System Administrator",
-            home: Some(&rustos_users::default_home(DEBUG_USERNAME)),
-            shell: Some(rustos_users::DEFAULT_SHELL),
-            capabilities: rustos_users::administrator_ceiling(),
-            state: AccountState::Active,
-        },
-        DEBUG_PASSWORD.as_bytes(),
-        salt,
-        rustos_users::DEFAULT_ITERATIONS,
-    )
-    .map_err(|e| MkimageError::UsersDb(format!("debug root record: {e}")))?;
-    let db = UsersDb::new(vec![record])
-        .map_err(|e| MkimageError::UsersDb(format!("debug database: {e}")))?;
+        let record = UserRecord::with_password(
+            Identity {
+                username: DEBUG_USERNAME,
+                uid: DEBUG_UID,
+                primary_gid: DEBUG_PRIMARY_GID,
+                supplementary_gids: &[STORAGE_GID],
+                display_name: "System Administrator",
+                home: Some(&rustos_users::default_home(DEBUG_USERNAME)),
+                shell: Some(rustos_users::DEFAULT_SHELL),
+                capabilities: rustos_users::administrator_ceiling(),
+                state: AccountState::Active,
+            },
+            DEBUG_PASSWORD.as_bytes(),
+            salt,
+            rustos_users::DEFAULT_ITERATIONS,
+        )
+        .map_err(|e| MkimageError::UsersDb(format!("debug root record: {e}")))?;
+        records.push(record);
+    }
+    let db = UsersDb::new(records)
+        .map_err(|e| MkimageError::UsersDb(format!("seeded database: {e}")))?;
     Ok(db.serialise())
 }
 
-/// Build the debug-profile `/System/Security/Groups` text: the
-/// [`DEBUG_GROUP`] group (gid [`DEBUG_PRIMARY_GID`]) the seeded `root`
-/// account's primary gid references — so the kernel's boot-time
-/// identity-table build resolves that reference against a real registry
-/// rather than failing closed on a dangling group — plus the well-known
-/// removable-storage group ([`STORAGE_GROUP`]) the account is a member
-/// of, which the unlock resolves by name to arm the hotplug-volume
-/// identity map (`plans/DEVICES.md` D3d). Membership is not stored here —
-/// it lives in the user records; this is only the authoritative name↔gid
-/// set.
-fn debug_groups_db() -> Result<String, MkimageError> {
-    let records = vec![
-        GroupRecord::new(DEBUG_GROUP, DEBUG_PRIMARY_GID)
-            .map_err(|e| MkimageError::GroupsDb(format!("debug group record: {e}")))?,
-        GroupRecord::new(STORAGE_GROUP, STORAGE_GID)
-            .map_err(|e| MkimageError::GroupsDb(format!("storage group record: {e}")))?,
-    ];
+/// Build the profile's `/System/Security/Groups` text.
+///
+/// Both profiles start from the canonical default group registry
+/// (`rustos_users::default_groups`, `plans/USERS.md`): `system`,
+/// `services`, and the well-known removable-storage group
+/// ([`rustos_users::STORAGE_GROUP`]) the unlock resolves by name to arm the
+/// hotplug-volume identity map (`plans/DEVICES.md` D3d). The debug
+/// profile appends the [`DEBUG_GROUP`] group (gid [`DEBUG_PRIMARY_GID`])
+/// the seeded administrator's primary gid references — so the kernel's
+/// boot-time identity-table build resolves that reference against a real
+/// registry rather than failing closed on a dangling group. Membership is
+/// not stored here — it lives in the user records; this is only the
+/// authoritative name↔gid set.
+fn groups_db(profile: ImageProfile) -> Result<String, MkimageError> {
+    let mut records = rustos_users::default_groups()
+        .map_err(|e| MkimageError::GroupsDb(format!("default groups: {e}")))?;
+    if profile == ImageProfile::Debug {
+        records.push(
+            GroupRecord::new(DEBUG_GROUP, DEBUG_PRIMARY_GID)
+                .map_err(|e| MkimageError::GroupsDb(format!("debug group record: {e}")))?,
+        );
+    }
     let db = GroupsDb::new(records)
-        .map_err(|e| MkimageError::GroupsDb(format!("debug registry: {e}")))?;
+        .map_err(|e| MkimageError::GroupsDb(format!("seeded registry: {e}")))?;
     Ok(db.serialise())
 }
 
@@ -437,13 +466,15 @@ pub fn build_rpi_image(
     drivers: &[(&[&[u8]], &[u8])],
     apps: &[(&[&[u8]], &[u8])],
 ) -> Result<RpiImage, MkimageError> {
-    let users_db = match profile {
-        ImageProfile::Debug => Some(debug_users_db(entropy)?),
-        ImageProfile::Installer => None,
-    };
-    let groups_db = match profile {
-        ImageProfile::Debug => Some(debug_groups_db()?),
-        ImageProfile::Installer => None,
+    let users_db = users_db(profile, entropy)?;
+    let groups_db = groups_db(profile)?;
+    // The debug image's interactive administrator gets its recorded home
+    // provisioned account-owned and owner-only (a recorded home is a real
+    // inode, never a dangling path); the installer image seeds no
+    // login-capable account, so no home either.
+    let home_dirs: &[(&str, u32, u32)] = match profile {
+        ImageProfile::Debug => &[(DEBUG_USERNAME, DEBUG_UID.0, DEBUG_PRIMARY_GID.0)],
+        ImageProfile::Installer => &[],
     };
     // Only a debug image bakes a log-attestation key; an installer image's
     // per-installation key is generated at first boot (a common baked key
@@ -488,10 +519,13 @@ pub fn build_rpi_image(
         u64::from(ROOT_PART_SECTORS),
         &root_key,
         entropy,
-        users_db.as_deref(),
-        groups_db.as_deref(),
-        log_key_file.as_deref(),
-        machine_id.as_ref().map(<[u8; MACHINE_ID_LEN]>::as_slice),
+        &rootfs::RootSeed {
+            users_db: &users_db,
+            groups_db: &groups_db,
+            home_dirs,
+            log_attestation_key: log_key_file.as_deref(),
+            machine_id: machine_id.as_ref().map(<[u8; MACHINE_ID_LEN]>::as_slice),
+        },
     )?;
 
     let mbr_sector = mbr::encode(&[
@@ -564,6 +598,7 @@ mod tests {
     use rustos_abi::CapabilityId;
     use rustos_drv_fs_fat32::Fat32;
     use rustos_drv_fs_rustfs::RustFs;
+    use rustos_users::STORAGE_GROUP;
 
     const TEST_KEY: VolumeKey = [0x42; VOLUME_KEY_LEN];
 
@@ -678,12 +713,16 @@ mod tests {
         let rustfs_root = rfs.root();
         rfs.lookup(rustfs_root, b"System").expect("/System exists");
 
-        // An installer image ships no user accounts (first-boot job).
+        // An installer image seeds the default no-login system/service
+        // databases (the first human user is a first-boot job; the
+        // installer-profile content is pinned by
+        // `an_installer_image_seeds_only_the_no_login_default_accounts`).
         let system = rfs.lookup(rustfs_root, b"System").expect("/System");
         let security = rfs.lookup(system, b"Security").expect("Security");
-        assert!(rfs
-            .lookup(security, rootfs::USERS_DB_NAME.as_bytes())
-            .is_err());
+        rfs.lookup(security, rootfs::USERS_DB_NAME.as_bytes())
+            .expect("Users database exists");
+        rfs.lookup(security, rootfs::GROUPS_DB_NAME.as_bytes())
+            .expect("Groups registry exists");
     }
 
     #[test]
@@ -900,7 +939,9 @@ mod tests {
         let record = db
             .authenticate(DEBUG_USERNAME, DEBUG_PASSWORD.as_bytes())
             .expect("root/root authenticates");
-        assert_eq!(record.uid(), Uid(0));
+        // The debug administrator is an ordinary user-band principal: uid 0
+        // belongs to the no-login `system` record below.
+        assert_eq!(record.uid(), DEBUG_UID);
         assert_eq!(record.shell(), Some("/System/Apps/elsh.app/Run"));
         // The seeded grant is exactly the shared administrator ceiling
         // (session baseline + administrative set) — the B3 regression
@@ -910,6 +951,86 @@ mod tests {
         assert_eq!(record.capabilities(), rustos_users::administrator_ceiling());
         assert!(record.capabilities().contains(CapabilityId::FS_ACCESS));
         assert!(db.authenticate(DEBUG_USERNAME, b"wrong").is_err());
+
+        // The canonical default set ships beneath the appended debug
+        // account: `system` names uid 0 and no default record can log in.
+        let defaults = rustos_users::default_system_accounts().expect("valid defaults");
+        assert_eq!(db.records().len(), defaults.len() + 1);
+        let system = db
+            .lookup(rustos_users::SYSTEM_USERNAME)
+            .expect("the system record is seeded");
+        assert_eq!(system.uid(), rustos_users::SYSTEM_UID);
+        assert_eq!(system.state(), AccountState::NoLogin);
+        for default in &defaults {
+            let seeded = db
+                .lookup(default.username())
+                .expect("every default account is seeded");
+            assert_eq!(seeded.state(), AccountState::NoLogin);
+            assert!(db.authenticate(default.username(), b"").is_err());
+        }
+    }
+
+    #[test]
+    fn an_installer_image_seeds_only_the_no_login_default_accounts() {
+        let built = build_rpi_image(
+            &test_kernel_elf(),
+            &test_firmware(),
+            &mut TestEntropy(9),
+            ImageProfile::Installer,
+            &[],
+            &[],
+        )
+        .expect("image builds");
+
+        // The installer root is provisioned under the blank passphrase.
+        let root_at = ROOT_PART_LBA as usize * SECTOR_BYTES;
+        let root_len = ROOT_PART_SECTORS as usize * SECTOR_BYTES;
+        let root_bytes = built.image[root_at..root_at + root_len].to_vec();
+        let mut rfs = RustFs::open(
+            MemBlock::from_bytes(root_bytes).expect("whole sectors"),
+            &built.root_key,
+        )
+        .expect("root partition mounts");
+        let rustfs_root = rfs.root();
+        let system = rfs.lookup(rustfs_root, b"System").expect("/System");
+        let security = rfs.lookup(system, b"Security").expect("Security");
+
+        let users = rfs
+            .lookup(security, rootfs::USERS_DB_NAME.as_bytes())
+            .expect("Users database exists");
+        let mut buf = vec![0u8; rustos_users::MAX_DB_LEN];
+        let read = rfs
+            .read_at(users, 0, &mut buf)
+            .expect("Users database reads");
+        let text = core::str::from_utf8(&buf[..read]).expect("valid UTF-8");
+        let db = UsersDb::parse(text).expect("seeded database parses");
+
+        // Exactly the canonical defaults — no debug account, and nothing
+        // that can start a session (the installer authors the first human
+        // user on first boot).
+        let defaults = rustos_users::default_system_accounts().expect("valid defaults");
+        assert_eq!(db.records().len(), defaults.len());
+        assert!(db.lookup(DEBUG_USERNAME).is_none());
+        for record in db.records() {
+            assert_eq!(record.state(), AccountState::NoLogin);
+            assert!(db.authenticate(record.username(), b"").is_err());
+        }
+
+        // The matching group registry carries the defaults and no debug
+        // group, and every seeded primary gid resolves against it.
+        let groups = rfs
+            .lookup(security, rootfs::GROUPS_DB_NAME.as_bytes())
+            .expect("Groups registry exists");
+        let mut buf = vec![0u8; rustos_users::MAX_GROUPS_DB_LEN];
+        let read = rfs
+            .read_at(groups, 0, &mut buf)
+            .expect("Groups registry reads");
+        let text = core::str::from_utf8(&buf[..read]).expect("valid UTF-8");
+        let registry = rustos_users::GroupsDb::parse(text).expect("seeded registry parses");
+        assert!(registry.lookup(DEBUG_GROUP).is_none());
+        for record in db.records() {
+            assert!(registry.lookup_gid(record.primary_gid()).is_some());
+        }
     }
 
     #[test]
@@ -959,6 +1080,17 @@ mod tests {
         assert_eq!(
             db.lookup(STORAGE_GROUP).map(GroupRecord::gid),
             Some(STORAGE_GID)
+        );
+        // The default `system` and `services` groups ship beneath the debug
+        // group, so every default account's primary gid resolves too.
+        assert_eq!(
+            db.lookup(rustos_users::SYSTEM_GROUP).map(GroupRecord::gid),
+            Some(rustos_users::SYSTEM_GID)
+        );
+        assert_eq!(
+            db.lookup(rustos_users::SERVICES_GROUP)
+                .map(GroupRecord::gid),
+            Some(rustos_users::SERVICES_GID)
         );
     }
 

@@ -12,7 +12,7 @@ directory.
 on) first. Every rule in this file is binding too. One fully-gated
 increment (one `U`-stage) per landing.
 
-Status: **U1 done**; U2–U4 planned.
+Status: **U1–U2 done**; U3–U4 planned.
 
 ---
 
@@ -31,17 +31,15 @@ Status: **U1 done**; U2–U4 planned.
    manifest lied.
 
 2. **`system` is a locked, non-authenticating uid 0 record; the debug
-   human account moves off uid 0.** Today the debug login `root` is
-   uid 0 / gid 0 (`tools/mkimage::DEBUG_USERNAME`, `DEBUG_PRIMARY_GID`)
-   — the same principal as the kernel's boot identity and the owner of
-   `/System`. Instead: `system` (uid 0, primary group `system` gid 0)
-   is a no-login record, and the debug account `root` becomes the first
-   interactive user (uid 1000, primary group `root`/`wheel` gid 1000)
-   with the administrator ceiling. Nothing is lost — powers come from
-   capabilities, not uid (§5.1) — and §12 fixes only the debug
-   account's *name/password* (`root`/`root`), not its uid. `/System`
-   stays owned by uid 0, which then visibly resolves to `system` in
-   `ls -l`, audit output, and `ps`.
+   human account lives off uid 0.** `system` (uid 0, primary group
+   `system` gid 0) is a no-login record, and the debug account `root`
+   is the first interactive user (uid `FIRST_USER_UID` = 1000, primary
+   group `wheel` gid `FIRST_USER_GID` = 1000, `tools/mkimage::DEBUG_UID`
+   / `DEBUG_PRIMARY_GID`) with the administrator ceiling. Nothing is
+   lost — powers come from capabilities, not uid (§5.1) — and §12 fixes
+   only the debug account's *name/password* (`root`/`root`), not its
+   uid. `/System` stays owned by uid 0, which visibly resolves to
+   `system` in `ls -l`, audit output, and `ps`.
 
 3. **Reserved id ranges.** System uids/gids occupy 0–999; interactive
    users start at 1000. `lib/users/src/policy.rs` defines
@@ -153,11 +151,27 @@ identity.
     three states. Rustdoc + `docs/src/lib/users.md` +
     `plans/CAPABILITY_USE.md` §4.3 updated.
 
-- **U2 — provisioning consumers.** `tools/mkimage` authors the U1
-  default set for **both** profiles (debug additionally appends the
-  uid-1000 `root`); the QEMU fixtures import the same definition; every
-  test that assumes `root` is uid 0 is updated. The installer inherits
-  the same definition when it lands (§11). Status: planned.
+- **U2 — provisioning consumers.** Status: **done**. What now holds:
+  - `tools/mkimage` authors the U1 default set for **both** profiles
+    through the profile-keyed `users_db`/`groups_db`: the installer
+    image seeds exactly the no-login defaults, the debug image appends
+    the interactive `root` (uid `DEBUG_UID` = `FIRST_USER_UID`, primary
+    group `wheel` gid `DEBUG_PRIMARY_GID` = `FIRST_USER_GID`) and its
+    `wheel` group. `rootfs::build_root_partition` takes both database
+    texts unconditionally (no image ships without them) plus the seeded
+    interactive accounts' home directories, each provisioned
+    account-owned and owner-only (`/Users/root` on a debug image — a
+    recorded home is a real inode, never a dangling path); the
+    log-attestation key and machine-id stay debug-only.
+  - The QEMU disk fixture (`tests/integration/rustfs_image`, and via it
+    every `EncryptedRootDisk` vertical) imports the same
+    `default_system_accounts()`/`default_groups()` definition and
+    appends the same uid-1000 fixture `root`.
+  - Unit tests pin both profiles' seeded sets (defaults present and
+    no-login, debug root at uid 1000, installer with no login-capable
+    account and no `wheel`); `docs/src/lib/users.md` and
+    `docs/src/security/capabilities.md` reflect the seeding.
+  - The installer inherits the same definition when it lands (§11).
 
 - **U3 — spawn-side wiring.** `init`'s startup config names each
   service's account; `init` resolves the uid by name from the loaded

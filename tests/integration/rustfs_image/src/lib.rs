@@ -35,7 +35,7 @@ use alloc::vec::Vec;
 use rustos_abi::driver::block::{Block, BlockGeometry};
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use rustos_abi::DriverError;
-use rustos_drv_fs_rustfs::{EntropySource, RustFs, VolumeKey, VOLUME_KEY_LEN};
+use rustos_drv_fs_rustfs::{EntropySource, RustFs, Security, VolumeKey, VOLUME_KEY_LEN};
 use rustos_users::{
     AccountState, Gid, GroupRecord, GroupsDb, Identity, ParseError, Salt, Uid, UserRecord, UsersDb,
 };
@@ -91,8 +91,9 @@ pub const NEW_FILE_NAME: &[u8] = b"written.txt";
 /// Contents the guest tail writes to [`NEW_FILE_NAME`] and reads back.
 pub const NEW_FILE_CONTENT: &[u8] = b"RustOS wrote this file to rustfs over virtio-blk.\n";
 
-/// Username of the single account planted on the users-root volume
-/// ([`build_users_root_image`]).
+/// Username of the interactive account planted on the users-root volume
+/// ([`build_users_root_image`]) on top of the canonical default
+/// system/service set.
 pub const USERS_FIXTURE_USERNAME: &str = "root";
 
 /// Password of the planted [`USERS_FIXTURE_USERNAME`] account.
@@ -109,12 +110,15 @@ pub const USERS_FIXTURE_ITERATIONS: u32 = rustos_users::MIN_ITERATIONS;
 const USERS_FIXTURE_SALT: Salt = [0xa5; rustos_users::SALT_LEN];
 
 /// Serialise the users-root volume's `/System/Security/Users` database:
-/// the single active [`USERS_FIXTURE_USERNAME`] account granted the shared
-/// administrator capability ceiling (`rustos_users::administrator_ceiling`
-/// — the session baseline plus the administrative set), exactly as the
-/// real debug image's `tools/mkimage::debug_users_db` seeds it, so the
-/// end-to-end session vertical exercises the same grant the shipped debug
-/// profile carries (`plans/CAPABILITY_USE.md` CU3).
+/// the canonical default system/service account set
+/// (`rustos_users::default_system_accounts`, `plans/USERS.md`) plus the
+/// active [`USERS_FIXTURE_USERNAME`] account (uid
+/// [`rustos_users::FIRST_USER_UID`]) granted the shared administrator
+/// capability ceiling (`rustos_users::administrator_ceiling` — the session
+/// baseline plus the administrative set), exactly as the real debug
+/// image's `tools/mkimage` seeding lays it down, so the end-to-end session
+/// vertical exercises the same grant the shipped debug profile carries
+/// (`plans/CAPABILITY_USE.md` CU3).
 ///
 /// # Errors
 ///
@@ -122,11 +126,12 @@ const USERS_FIXTURE_SALT: Salt = [0xa5; rustos_users::SALT_LEN];
 /// `users-v1` bounds — a programming error in this fixture, surfaced
 /// rather than panicked.
 pub fn users_db_text() -> Result<String, ParseError> {
-    let record = UserRecord::with_password(
+    let mut records = rustos_users::default_system_accounts()?;
+    records.push(UserRecord::with_password(
         Identity {
             username: USERS_FIXTURE_USERNAME,
-            uid: Uid(0),
-            primary_gid: Gid(0),
+            uid: Uid(rustos_users::FIRST_USER_UID),
+            primary_gid: Gid(rustos_users::FIRST_USER_GID),
             supplementary_gids: &[rustos_users::STORAGE_GID],
             display_name: "System Administrator",
             home: Some("/Users/root"),
@@ -137,19 +142,20 @@ pub fn users_db_text() -> Result<String, ParseError> {
         USERS_FIXTURE_PASSWORD.as_bytes(),
         USERS_FIXTURE_SALT,
         USERS_FIXTURE_ITERATIONS,
-    )?;
-    Ok(UsersDb::new(alloc::vec![record])?.serialise())
+    )?);
+    Ok(UsersDb::new(records)?.serialise())
 }
 
 /// Serialise the users-root volume's `/System/Security/Groups` registry:
-/// the `wheel` group (gid 0) the planted [`USERS_FIXTURE_USERNAME`]
-/// account names as its primary group — so the kernel's boot-time identity
-/// table build (`rustos_kernel_core::build_identity_table`) resolves the
-/// account's gid against a real registry rather than failing closed on a
-/// dangling reference — plus the well-known removable-storage group
-/// ([`rustos_users::STORAGE_GROUP`]) the account is a member of, exactly
-/// as `tools/mkimage::debug_groups_db` seeds the shipped debug profile,
-/// so the unlock's storage-gid resolution is exercised end to end.
+/// the canonical default groups (`rustos_users::default_groups` —
+/// `system`, `services`, and the well-known removable-storage group whose
+/// by-name resolution arms the hotplug-volume identity map) plus the
+/// `wheel` group (gid [`rustos_users::FIRST_USER_GID`]) the planted
+/// [`USERS_FIXTURE_USERNAME`] account names as its primary group — so the
+/// kernel's boot-time identity table build
+/// (`rustos_kernel_core::build_identity_table`) resolves every account's
+/// gid against a real registry rather than failing closed on a dangling
+/// reference — exactly as `tools/mkimage` seeds the shipped debug profile.
 ///
 /// # Errors
 ///
@@ -157,10 +163,11 @@ pub fn users_db_text() -> Result<String, ParseError> {
 /// `groups-v1` bounds — a programming error in this fixture, surfaced
 /// rather than panicked.
 pub fn groups_db_text() -> Result<String, ParseError> {
-    let records = alloc::vec![
-        GroupRecord::new("wheel", Gid(0))?,
-        GroupRecord::new(rustos_users::STORAGE_GROUP, rustos_users::STORAGE_GID)?,
-    ];
+    let mut records = rustos_users::default_groups()?;
+    records.push(GroupRecord::new(
+        "wheel",
+        Gid(rustos_users::FIRST_USER_GID),
+    )?);
     Ok(GroupsDb::new(records)?.serialise())
 }
 
@@ -306,9 +313,19 @@ pub fn build_users_root_image_with_key(volume_key: &VolumeKey) -> Result<Vec<u8>
     for name in ["System", "Users", "Apps", "Storage"] {
         let node = fs.create(root, name.as_bytes(), NodeKind::Directory)?;
         if name == "Users" {
-            // The planted account's recorded home directory, so a logged-in
-            // session's `cd /Users/root` resolves against a real inode.
-            fs.create(node, b"root", NodeKind::Directory)?;
+            // The planted account's recorded home directory, owned by the
+            // account and owner-only exactly as `tools/mkimage` provisions
+            // it, so a logged-in session's `cd /Users/root` (and a write
+            // into it) resolves against a real inode the account owns.
+            let home = fs.create(node, b"root", NodeKind::Directory)?;
+            fs.set_security(
+                home,
+                Security::new(
+                    0o700,
+                    rustos_users::FIRST_USER_UID,
+                    rustos_users::FIRST_USER_GID,
+                ),
+            )?;
         }
         if name == "System" {
             let security = fs.create(node, b"Security", NodeKind::Directory)?;
@@ -405,6 +422,8 @@ mod tests {
 
     #[test]
     fn users_root_image_mounts_and_the_kernel_loader_reads_the_database() {
+        use rustos_abi::driver::filesystem::FilesystemSecurity;
+
         let bytes = build_users_root_image().expect("users-root image builds");
         let dev = VecBlock { store: bytes };
         let mut fs =
@@ -413,12 +432,21 @@ mod tests {
         let sink = DiscardSink;
         let db = rustos_kernel_core::load_users_db(&mut fs, &sink)
             .expect("the kernel loader reads /System/Security/Users");
-        assert_eq!(db.records().len(), 1);
+        // The canonical defaults plus the appended interactive account.
+        let defaults = rustos_users::default_system_accounts().expect("valid defaults");
+        assert_eq!(db.records().len(), defaults.len() + 1);
+        for default in &defaults {
+            let seeded = db
+                .lookup(default.username())
+                .expect("every default account is seeded");
+            assert_eq!(seeded.state(), AccountState::NoLogin);
+        }
 
         let record = db
             .authenticate(USERS_FIXTURE_USERNAME, USERS_FIXTURE_PASSWORD.as_bytes())
             .expect("the planted account authenticates");
         assert_eq!(record.username(), USERS_FIXTURE_USERNAME);
+        assert_eq!(record.uid(), Uid(rustos_users::FIRST_USER_UID));
         // The planted grant round-trips as exactly the shared administrator
         // ceiling — the same set the debug image seeds — so the end-to-end
         // session vertical exercises the real CU3 grant.
@@ -427,9 +455,14 @@ mod tests {
         db.authenticate(USERS_FIXTURE_USERNAME, b"wrong password")
             .expect_err("a wrong password is refused");
 
-        // The account's recorded home directory exists on the volume.
+        // The account's recorded home directory exists on the volume,
+        // owned by the account and owner-only.
         let users = fs.lookup(fs.root(), b"Users").expect("/Users present");
-        fs.lookup(users, b"root").expect("/Users/root present");
+        let home = fs.lookup(users, b"root").expect("/Users/root present");
+        let sec = fs.security(home).expect("home security present");
+        assert_eq!(sec.mode, 0o700);
+        assert_eq!(sec.uid, rustos_users::FIRST_USER_UID);
+        assert_eq!(sec.gid, rustos_users::FIRST_USER_GID);
     }
 
     #[test]

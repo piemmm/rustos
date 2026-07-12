@@ -109,10 +109,35 @@ pub const LOG_ATTESTATION_KEY_NAME: &str = "LogAttestation";
 /// principal exists.
 const LOG_ATTESTATION_KEY_MODE: u32 = 0o600;
 
+/// Mode for a seeded `/Users/<name>` home directory: owner-only (`0o700`),
+/// so the account fully controls its home and no other ordinary principal
+/// reads it.
+const HOME_DIR_MODE: u32 = 0o700;
+
+/// Everything seeded onto the encrypted root beyond the directory
+/// skeleton. Every image profile seeds both account databases (the
+/// canonical default system/service set at minimum, `plans/USERS.md`), so
+/// they are not optional; the home directories follow the seeded
+/// interactive accounts, and only the debug-only log-attestation key and
+/// machine-id are optional.
+pub struct RootSeed<'a> {
+    /// The `/System/Security/Users` `users-v1` text.
+    pub users_db: &'a str,
+    /// The `/System/Security/Groups` `groups-v1` text.
+    pub groups_db: &'a str,
+    /// One `(username, uid, gid)` per seeded interactive account: its
+    /// `/Users/<username>` home, provisioned account-owned and owner-only
+    /// — a recorded home is a real inode, never a dangling path.
+    pub home_dirs: &'a [(&'a str, u32, u32)],
+    /// The debug image's baked log-attestation key file bytes, if any.
+    pub log_attestation_key: Option<&'a [u8]>,
+    /// The debug image's baked non-secret machine-id bytes, if any.
+    pub machine_id: Option<&'a [u8]>,
+}
+
 /// Author the `RustFS` root partition: format `sectors` sectors under
-/// `volume_key`, create the directory skeleton, and — when `users_db` /
-/// `groups_db` are given — write them to `/System/Security/Users` and
-/// `/System/Security/Groups`.
+/// `volume_key`, create the directory skeleton, and lay down everything
+/// `seed` describes ([`RootSeed`]).
 ///
 /// # Errors
 ///
@@ -123,10 +148,7 @@ pub fn build_root_partition(
     sectors: u64,
     volume_key: &VolumeKey,
     entropy: &mut dyn EntropySource,
-    users_db: Option<&str>,
-    groups_db: Option<&str>,
-    log_attestation_key: Option<&[u8]>,
-    machine_id: Option<&[u8]>,
+    seed: &RootSeed<'_>,
 ) -> Result<Vec<u8>, MkimageError> {
     let dev = MemBlock::new(sectors).map_err(MkimageError::RootPartition)?;
     let mut fs = RustFs::format(dev, ROOT_INODE_HINT, volume_key, entropy)
@@ -138,19 +160,36 @@ pub fn build_root_partition(
             .create(root, name.as_bytes(), NodeKind::Directory)
             .map_err(MkimageError::RootPartition)?;
         if name == "System" {
-            populate_system_subtree(
-                &mut fs,
-                node,
-                users_db,
-                groups_db,
-                log_attestation_key,
-                machine_id,
-            )?;
+            populate_system_subtree(&mut fs, node, seed)?;
+        }
+        if name == "Users" {
+            for (username, uid, gid) in seed.home_dirs {
+                create_home_dir(&mut fs, node, username, *uid, *gid)?;
+            }
         }
     }
 
     fs.flush().map_err(MkimageError::RootPartition)?;
     Ok(fs.into_block().into_bytes())
+}
+
+/// Create `/Users/<username>` owned by `(uid, gid)`, owner-only
+/// ([`HOME_DIR_MODE`]) — the same shape `users_admin` provisions a new
+/// account's home with, so a seeded account can enter and write its own
+/// home while no other ordinary principal can read it.
+fn create_home_dir(
+    fs: &mut RustFs<MemBlock>,
+    users: NodeId,
+    username: &str,
+    uid: u32,
+    gid: u32,
+) -> Result<(), MkimageError> {
+    let home = fs
+        .create(users, username.as_bytes(), NodeKind::Directory)
+        .map_err(MkimageError::RootPartition)?;
+    fs.set_security(home, Security::new(HOME_DIR_MODE, uid, gid))
+        .map_err(MkimageError::RootPartition)?;
+    Ok(())
 }
 
 /// Author the read-only, signed-bundle `/System` partition: format
@@ -243,18 +282,17 @@ pub fn build_system_partition(
 
 /// Lay the **writable-state** `/System` subtree under `system` on the
 /// encrypted data root: the [`WRITABLE_SYSTEM_SUBDIRS`] (`Logs`, `Settings`,
-/// and `Security` with its `Keys`/`Policy`), and — for a debug image — the
-/// seeded users database and matching group registry under `Security`. The
-/// immutable `/System` content is **not** authored here (it lives on the
-/// read-only `RustFsSystem` volume); only what the writable root volume
-/// actually backs at runtime is laid down.
+/// and `Security` with its `Keys`/`Policy`), the seeded users database and
+/// matching group registry under `Security` (every profile carries the
+/// default system/service accounts), and — for a debug image — the baked
+/// log-attestation key and machine-id. The immutable `/System` content is
+/// **not** authored here (it lives on the read-only `RustFsSystem` volume);
+/// only what the writable root volume actually backs at runtime is laid
+/// down.
 fn populate_system_subtree(
     fs: &mut RustFs<MemBlock>,
     system: NodeId,
-    users_db: Option<&str>,
-    groups_db: Option<&str>,
-    log_attestation_key: Option<&[u8]>,
-    machine_id: Option<&[u8]>,
+    seed: &RootSeed<'_>,
 ) -> Result<(), MkimageError> {
     for sub in WRITABLE_SYSTEM_SUBDIRS {
         let node = fs
@@ -264,30 +302,18 @@ fn populate_system_subtree(
             create_security_subdirs(fs, node, MkimageError::RootPartition)?;
         }
     }
-    if users_db.is_some() || groups_db.is_some() {
-        let security = fs
-            .lookup(system, b"Security")
-            .map_err(MkimageError::RootPartition)?;
-        if let Some(text) = users_db {
-            write_security_file(fs, security, USERS_DB_NAME, text)?;
-        }
-        if let Some(text) = groups_db {
-            write_security_file(fs, security, GROUPS_DB_NAME, text)?;
-        }
-    }
-    if let Some(key_bytes) = log_attestation_key {
-        let security = fs
-            .lookup(system, b"Security")
-            .map_err(MkimageError::RootPartition)?;
+    let security = fs
+        .lookup(system, b"Security")
+        .map_err(MkimageError::RootPartition)?;
+    write_security_file(fs, security, USERS_DB_NAME, seed.users_db)?;
+    write_security_file(fs, security, GROUPS_DB_NAME, seed.groups_db)?;
+    if let Some(key_bytes) = seed.log_attestation_key {
         let keys = fs
             .lookup(security, b"Keys")
             .map_err(MkimageError::RootPartition)?;
         write_key_file(fs, keys, LOG_ATTESTATION_KEY_NAME, key_bytes)?;
     }
-    if let Some(id_bytes) = machine_id {
-        let security = fs
-            .lookup(system, b"Security")
-            .map_err(MkimageError::RootPartition)?;
+    if let Some(id_bytes) = seed.machine_id {
         write_machine_id_file(fs, security, MACHINE_ID_NAME, id_bytes)?;
     }
     Ok(())
@@ -421,6 +447,27 @@ mod tests {
     const TEST_SECTORS: u64 = 131_072; // 64 MiB, the production root size.
     const TEST_KEY: VolumeKey = [0x42; rustos_drv_fs_rustfs::VOLUME_KEY_LEN];
 
+    /// Stand-in database texts: the seeding contract is "the given text is
+    /// written verbatim", so the tests only need recognisable bytes (the
+    /// real default set is pinned by `rustos_users::provision`'s own tests
+    /// and by the callers in `crate::lib`).
+    const TEST_USERS: &str = "rustos-users-v1\n# seeded for the test\n";
+    const TEST_GROUPS: &str = "rustos-groups-v1\nwheel:1000\n";
+
+    /// A debug-shaped home-directory spec: the seeded interactive account's
+    /// `/Users/root`, owned by the first user-band uid/gid.
+    const TEST_HOMES: &[(&str, u32, u32)] = &[("root", 1000, 1000)];
+
+    /// The debug-shaped seed most tests build with: databases + home, no
+    /// baked key or machine-id.
+    const TEST_SEED: RootSeed<'static> = RootSeed {
+        users_db: TEST_USERS,
+        groups_db: TEST_GROUPS,
+        home_dirs: TEST_HOMES,
+        log_attestation_key: None,
+        machine_id: None,
+    };
+
     /// Deterministic test entropy; production uses the host RNG.
     struct TestEntropy(u8);
 
@@ -435,16 +482,8 @@ mod tests {
     }
 
     fn build() -> Vec<u8> {
-        build_root_partition(
-            TEST_SECTORS,
-            &TEST_KEY,
-            &mut TestEntropy(7),
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("root partition builds")
+        build_root_partition(TEST_SECTORS, &TEST_KEY, &mut TestEntropy(7), &TEST_SEED)
+            .expect("root partition builds")
     }
 
     #[test]
@@ -505,31 +544,13 @@ mod tests {
                 Err(DriverError::DeviceFault)
             }
         }
-        assert!(build_root_partition(
-            TEST_SECTORS,
-            &TEST_KEY,
-            &mut NoEntropy,
-            None,
-            None,
-            None,
-            None
-        )
-        .is_err());
+        assert!(build_root_partition(TEST_SECTORS, &TEST_KEY, &mut NoEntropy, &TEST_SEED).is_err());
     }
 
     #[test]
     fn a_seeded_users_database_is_written_and_reads_back() {
-        let text = "rustos-users-v1\n# seeded for the test\n";
-        let bytes = build_root_partition(
-            TEST_SECTORS,
-            &TEST_KEY,
-            &mut TestEntropy(7),
-            Some(text),
-            None,
-            None,
-            None,
-        )
-        .expect("root partition builds");
+        let text = TEST_USERS;
+        let bytes = build();
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
         let mut fs = RustFs::open(dev, &TEST_KEY).expect("mounts");
         let root = fs.root();
@@ -547,17 +568,8 @@ mod tests {
 
     #[test]
     fn a_seeded_group_registry_is_written_and_reads_back() {
-        let text = "rustos-groups-v1\nwheel:0\n";
-        let bytes = build_root_partition(
-            TEST_SECTORS,
-            &TEST_KEY,
-            &mut TestEntropy(7),
-            None,
-            Some(text),
-            None,
-            None,
-        )
-        .expect("root partition builds");
+        let text = TEST_GROUPS;
+        let bytes = build();
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
         let mut fs = RustFs::open(dev, &TEST_KEY).expect("mounts");
         let root = fs.root();
@@ -574,18 +586,38 @@ mod tests {
     }
 
     #[test]
-    fn an_unseeded_root_ships_no_users_or_groups_database() {
+    fn a_seeded_home_directory_is_account_owned_and_owner_only() {
+        use rustos_abi::driver::filesystem::FilesystemSecurity;
+
+        let bytes = build();
+        let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
+        let mut fs = RustFs::open(dev, &TEST_KEY).expect("mounts");
+        let root = fs.root();
+        let users = fs.lookup(root, b"Users").expect("/Users exists");
+        let home = fs.lookup(users, b"root").expect("/Users/root exists");
+        // Owned by the seeded account, owner-only: the account enters and
+        // writes its own home; no other ordinary principal reads it.
+        let sec = fs.security(home).expect("security present");
+        assert_eq!(sec.mode, HOME_DIR_MODE);
+        assert_eq!(sec.uid, TEST_HOMES[0].1);
+        assert_eq!(sec.gid, TEST_HOMES[0].2);
+    }
+
+    #[test]
+    fn an_installer_shaped_root_ships_no_log_attestation_key() {
         let bytes = build();
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
         let mut fs = RustFs::open(dev, &TEST_KEY).expect("mounts");
         let root = fs.root();
         let system = fs.lookup(root, b"System").expect("/System exists");
         let security = fs.lookup(system, b"Security").expect("Security exists");
-        assert!(fs.lookup(security, USERS_DB_NAME.as_bytes()).is_err());
-        assert!(fs.lookup(security, GROUPS_DB_NAME.as_bytes()).is_err());
-        // An unseeded (installer-shaped) root also ships no log-attestation
-        // key: the first-boot installer generates the per-installation key,
-        // never the image.
+        // The databases are always seeded; the log-attestation key never is
+        // on an installer-shaped root — the first-boot installer generates
+        // the per-installation key, never the image.
+        fs.lookup(security, USERS_DB_NAME.as_bytes())
+            .expect("Users database exists");
+        fs.lookup(security, GROUPS_DB_NAME.as_bytes())
+            .expect("Groups registry exists");
         let keys = fs.lookup(security, b"Keys").expect("Keys exists");
         assert!(fs
             .lookup(keys, LOG_ATTESTATION_KEY_NAME.as_bytes())
@@ -605,10 +637,10 @@ mod tests {
             TEST_SECTORS,
             &TEST_KEY,
             &mut TestEntropy(7),
-            None,
-            None,
-            Some(&key_file),
-            None,
+            &RootSeed {
+                log_attestation_key: Some(&key_file),
+                ..TEST_SEED
+            },
         )
         .expect("root partition builds");
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
@@ -643,10 +675,10 @@ mod tests {
             TEST_SECTORS,
             &TEST_KEY,
             &mut TestEntropy(7),
-            None,
-            None,
-            None,
-            Some(&id),
+            &RootSeed {
+                machine_id: Some(&id),
+                ..TEST_SEED
+            },
         )
         .expect("root partition builds");
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");

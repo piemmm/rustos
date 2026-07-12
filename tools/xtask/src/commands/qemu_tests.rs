@@ -3269,7 +3269,7 @@ const TESTS: &[QemuTest] = &[
     // root at the passphrase prompt, authenticates `root`/`root` at the
     // console login (the planted account's grant is the shared
     // administrator ceiling, `rustos_users::administrator_ceiling` — the
-    // same set `tools/mkimage::debug_users_db` seeds a debug image with),
+    // same set `tools/mkimage`'s profile-keyed seeding gives a debug image),
     // and drives the spawned shell through a real session: `cd` into the
     // account's home (`CAP_FS_ACCESS` — the B3 regression), `pwd` proving
     // the move, typing the bare command word `ps` — resolved through the

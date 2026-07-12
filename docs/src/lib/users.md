@@ -87,11 +87,13 @@ user naming a group with no registry record is refused, fail closed
 One principal is kernel-defined rather than database-defined: the **system
 principal** (`uid 0`). It exists before any table can be read (PID 1 and
 the boot services load their `/System` store bundles before the encrypted
-root is unlocked) and an installer image's table never defines it, so the
-kernel's filesystem group resolution falls back to the capability-less
-bootstrap identity (`gid 0`, no supplementary groups) whenever the table is
-absent or holds no `uid 0` record — a table record for `uid 0` (the debug
-image's seeded administrator) wins when present. The fallback grants no
+root is unlocked), so the kernel's filesystem group resolution falls back
+to the capability-less bootstrap identity (`gid 0`, no supplementary
+groups) whenever the table is absent or holds no `uid 0` record — a table
+record for `uid 0` wins when present. Every image seeds that record: the
+no-login `system` account (`default_system_accounts()`, below) is merely
+the *name* the loaded registry gives the bootstrap identity, carrying the
+same gid 0 and an empty ceiling. The fallback grants no
 ambient power (`AGENTS.md` §5.1): every per-inode owner/mode/ACL and
 mount-flag check still applies, non-zero uids stay strictly fail-closed,
 and a spawn-as-user *switch* always requires the installed table.
@@ -134,10 +136,12 @@ deriving anything — a work-factor bound, not a capacity (`AGENTS.md`
 `UserRecord::with_password` hashes a fresh password under a caller-supplied
 random salt (the crate stays deterministic; entropy belongs to the caller),
 and `UsersDb::new` enforces the whole-database invariants over records
-built in memory. `tools/mkimage` uses exactly this path: a **debug** image
-seeds the single `root`/`root` bring-up account, an **installer** image
-seeds no accounts at all (the §11 installer authors the database on first
-boot).
+built in memory. `tools/mkimage` uses exactly this path: both profiles
+seed the canonical default system/service set (below), and a **debug**
+image appends the interactive `root`/`root` bring-up administrator (uid
+`FIRST_USER_UID`, primary group `wheel` gid `FIRST_USER_GID`); an
+**installer** image seeds no login-capable account (the §11 installer
+authors the first human user on first boot).
 
 The shared **account-authoring policy** lives beside the format so every
 author agrees on it (`AGENTS.md` §2.2): `DEFAULT_SHELL` (the default

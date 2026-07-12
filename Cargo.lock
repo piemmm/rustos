@@ -3500,6 +3500,7 @@ dependencies = [
  "rustos-test-fat32-image",
  "rustos-test-riscv64-boot",
  "rustos-test-rustfs-image",
+ "rustos-users",
  "rustos-virtio",
  "rustos-virtio-input",
 ]

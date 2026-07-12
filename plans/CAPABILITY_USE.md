@@ -162,8 +162,8 @@ The life of a capability, from disk to exercise to revocation:
   (`kernel/rustos-kernel/src/program_manifests.rs`, CU2) — B2 is fixed.
 - The §4.2/§4.3 sets defined once in `lib/users` (`grants`:
   `SESSION_BASELINE`, `ADMINISTRATIVE_SET`, `administrator_ceiling()`)
-  and seeded as the debug root grant (`tools/mkimage::debug_users_db`)
-  and the QEMU users-root fixture account — B3 is fixed (CU3).
+  and seeded as the debug root grant (`tools/mkimage`'s profile-keyed
+  `users_db`) and the QEMU users-root fixture account — B3 is fixed (CU3).
 
 All three defects are fixed; user management (CU4) and per-invocation
 elevation (CU5) are live; the desktop's session/ceiling slice (CU6) is
@@ -426,9 +426,9 @@ authorises it; anything not listed is denied.
   now a re-export) all import the one definition, so the CU4 "one
   definition of both sets, shared with `tools/mkimage`" requirement is
   already satisfied for the installer to reuse.
-- `tools/mkimage::debug_users_db` seeds the root grant as
-  `administrator_ceiling()`; its unit test pins the seeded record to the
-  exact set. The shared users-root QEMU fixture
+- `tools/mkimage`'s profile-keyed `users_db` seeds the debug root grant
+  as `administrator_ceiling()`; its unit test pins the seeded record to
+  the exact set. The shared users-root QEMU fixture
   (`rustos_test_rustfs_image`) plants the same ceiling and the account's
   `/Users/root` home directory, so the fixture cannot drift from the
   debug profile.
@@ -650,4 +650,4 @@ there).**
 administrative sets, the elevation model) is written with CU1 and kept
 current in the same change as each later stage; the rustdoc of every seam a
 stage touches (`TaskCapabilities`, `LateIdentity`, `SPAWN_PROGRAMS`,
-`debug_users_db`) is updated in that stage.
+`tools/mkimage`'s `users_db`) is updated in that stage.
