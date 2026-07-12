@@ -662,6 +662,22 @@ instead of parking forever. The wake rides the seat registry's inject and
 revoke paths; only sets that contain a `SeatInput` member join the seat
 wake queue, so pointer-rate wakes never touch unrelated waiters.
 
+It also accepts a `Stream` member (`plans/APPWIN.md` AW4): `id` names a
+descriptor of the **caller's own open table** holding a pipe end opened
+for reading (a write end, a path- or resource-backed descriptor, an
+unopened number, or another task's descriptor all refuse with the same
+oracle-free `NotFound` at add). The member is ready when a read would not
+park — buffered bytes are waiting, or every write end is closed, so the
+woken owner's read observes end-of-stream rather than waiting forever on
+a dead writer. Readiness is a non-consuming peek re-resolved against the
+caller's table on every scan (a descriptor closed mid-wait simply stops
+reporting), and the wake rides the pipe layer's existing write/close
+wakes; only sets that contain a `Stream` member join the pipe wake queue,
+so unrelated pipeline traffic never touches other waiters. This is the
+windowed terminal's "the shell wrote output" wake: it parks on one set
+holding its window-event port, its shell-output pipe, and its shell
+child, and dispatches on the woken member's token.
+
 `self_origin` (no. 68) is the self-directed twin of `call_peer_origin` (no.
 58): where that lets a server read the kernel-attested identity of the *peer*
 it is servicing, `self_origin` lets a task read its *own*. The kernel builds

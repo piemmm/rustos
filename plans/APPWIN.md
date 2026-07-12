@@ -37,13 +37,17 @@ exception.
   events to its owning app, and an app with no pending event **parks**
   (never polls, §2.23). The exact request/event vocabulary is fixed in
   AW2 when the engine lands, not speculated here (§2.3/§2.4).
-- **Known kernel gap — no stream/pipe wait source.** `WaitSourceKind` is
-  today `{Endpoint, Irq, Child, SeatInput}`: a windowed terminal must wake
-  on "the shell wrote output" as well as on window input, so the terminal
-  stage extends `WaitSourceKind` **in place** (abi-v1 is not frozen,
-  §2.13) with a stream-readable source, conformance-tested like the D7a
-  members. It is added in the stage that consumes it, never ahead
-  (§5.2's discipline applied to ABI surface).
+- **The stream/pipe wait source (AW4).** `WaitSourceKind::Stream` (wire
+  value 5, added in place — abi-v1 is not frozen, §2.13, in the stage that
+  consumed it): `id` names a pipe read end of the caller's **own** open
+  table, owner- and descriptor-checked at member add (every refusal the
+  same oracle-free `NotFound`), ready — as a non-consuming, per-scan
+  re-resolved peek — on buffered bytes or end-of-stream, woken by the
+  pipe layer's existing write/close wakes (`PIPE_WAITQ`, joined only by
+  sets holding a `Stream` member). Conformance-tested like the D7a
+  members, plus `PipeEnd::readable` / registry-peek unit tests (the peek
+  borrows in place — a clone/drop of a pipe end would spuriously wake
+  every pipe waiter).
 - **Fail closed, no ambient authority** (§5.4, §4): the session accepts a
   window request only from the task the shm grant and the protocol
   identify; a refused or malformed request is a typed reply, never a
@@ -144,25 +148,50 @@ Done. What now holds:
   the served window at the cascade origin; the light-theme desktop). All
   gates are kernel-attested serial records (the window endpoint's first
   `CallReplied`, `MessageDelivered` counts per the interaction contract in
-  the test crate's lib target); the guest PASS additionally requires the
-  contract's final delivery, so the run cannot pass without the whole
-  chain. Uncovered and fixed along the way: the session's blocking-recv
+  the test crate's lib target); the guest PASS rides the AW4 tail below,
+  so the run cannot pass without the whole chain. Uncovered and fixed
+  along the way: the session's blocking-recv
   loop wedge (above) and the virtio-input event queue's 8-descriptor
   ceiling silently dropping bursts under a saturated CPU (now the
   device's full 64, `lib/virtio_input`).
 
-### AW4 — the terminal goes live `[ ]`
+### AW4 — the terminal goes live `[x]`
 
-- `WaitSourceKind` gains the stream-readable source (in-place, owner- and
-  descriptor-checked at member add, conformance-tested like `SeatInput`).
-- The terminal's production `ShellSource`: `pipe_create` twice, spawn the
-  user's shell with `FdWire`-attached standard streams (the elsh
-  `wireplan` machinery is the precedent), drain/write over
-  `stream_read`/`stream_write`, `Child`-source teardown when the shell
-  exits. Host-tested over an injected pipe/spawn seam.
-- `userland/apps/terminal` gains its `Run` bundle (manifest:
-  `CAP_PROC_SPAWN` + the window-channel class) and its vertical: type into
-  the windowed terminal at the seat keyboard, assert the shell round trip.
+Done. What now holds:
+
+- `WaitSourceKind::Stream` (see §0): the kernel wait-set wakes a parked
+  owner on its own pipe read end's buffered bytes or end-of-stream.
+- `rustos_terminal::spawned` — the production `ShellSource`, host-tested
+  over injected closures: `shell_wires` (the one attach-block layout —
+  child stdin from the keystroke pipe, stdout *and* stderr onto the one
+  output pipe, fd 3 closed; canonical under `SpawnAttach::parse`) and
+  `PipeShellSource` (one bounded chunk per wake, end-of-stream surfaced
+  as the typed "shell exited" refusal, short-write resume, wedged-channel
+  fail-closed). The `Run` binary supplies `pipe_create` ×2,
+  `spawn_attached` of `rustos_users::policy::DEFAULT_SHELL` (with `TERM`
+  exported and the child-side ends closed after the spawn), and
+  `fs_read`/`fs_write` under the seam.
+- `userland/apps/terminal` ships its `Run` bundle (signed `AppInfo`:
+  `CAP_CONSOLE_WRITE` + `CAP_PROC_SPAWN` + `CAP_SHM`, 13-locale `Help/`):
+  the 80×24 grid presented over the AW2 client, parked on one wait-set
+  (window-event `Port`, shell-output `Stream`, shell `Child`), token
+  dispatch, `lib/keymap`-encoded key presses, pump-and-present on shell
+  output, clean teardown on end-of-stream / child exit / close. The
+  session's start-menu `Terminal` entry spawns it; the app event-mailbox
+  naming rule is now `rustos_window::event_endpoint_for` (one definition,
+  shared with the files app), and the cascade placement is
+  `rustos_desktop_session::windows::cascade_origin_for` (shared with the
+  vertical's click script).
+- The autoload QEMU vertical drives the AW4 tail after the AW3
+  click-through: menu → `Terminal` row, the terminal-window click gated
+  on the window endpoint's fourth reply (terminal create + first
+  present), `true` + Enter typed at the seat keyboard gated on the
+  click's deliveries, and guest PASS latching a kernel `ProcessSpawned`
+  record observed at/after the Enter press's delivery count — the only
+  spawn possible then is the shell executing the typed command, so PASS
+  proves the whole keyboard → session → terminal → pipe → shell → spawn
+  round trip (the interaction contract lives in the test crate's lib
+  target).
 
 ### AW5 — CU6 picker-issued one-shot descriptors `[ ]`
 

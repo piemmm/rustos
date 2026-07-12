@@ -569,3 +569,19 @@ fn event_routing_fails_closed() {
     );
     assert!(sink.delivered.is_empty());
 }
+
+#[test]
+fn event_endpoint_ids_are_distinct_per_task_and_never_reserved() {
+    use crate::event_endpoint_for;
+
+    // Distinct kernel task ids yield distinct mailbox ids, and the id
+    // embeds the pid recoverably (tag in the high bits, pid in the low).
+    assert_ne!(event_endpoint_for(1), event_endpoint_for(2));
+    assert_eq!(event_endpoint_for(0x1234) & 0xFFFF, 0x1234);
+    // No app mailbox may land on a reserved well-known rendezvous.
+    for pid in [0u64, 1, 7, 0x0000_FFFF_FFFF] {
+        assert!(!rustos_abi::ipc::is_reserved_endpoint(event_endpoint_for(
+            pid
+        )));
+    }
+}

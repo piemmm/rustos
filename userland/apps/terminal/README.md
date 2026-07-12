@@ -87,13 +87,30 @@ panicking (`AGENTS.md` §2.9).
 
 `ShellSource::read() -> Result<Vec<u8>, Errno>` and
 `ShellSource::write(&[u8]) -> Result<(), Errno>` are the one thing the
-terminal needs from outside. On a running system the seam is a
-capability-checked pseudo-terminal channel to the shell process, so the
-process-spawn and job-control authority lives behind the seam, not in this
-app; tests wire an in-memory queue, so the screen model and the renderer are
-exhaustively testable without a kernel (`AGENTS.md` §7). The binary that ships
-as the terminal wires the real channel (deferred until the userland
-process/IPC client lands).
+terminal needs from outside. On a running system the seam is
+`spawned::PipeShellSource`: two kernel pipes to a shell child the terminal
+spawned under its own `CAP_PROC_SPAWN` (`plans/APPWIN.md` AW4), wired at
+spawn through `spawned::shell_wires` — the child's stdin is the keystroke
+pipe, and its stdout *and* stderr land on the one output pipe a terminal
+renders. The process-spawn authority lives in the `Run` binary, behind the
+seam, not in the screen model; tests wire an in-memory queue or injected
+closures, so everything with behaviour is exhaustively testable without a
+kernel (`AGENTS.md` §7).
+
+## The `Run` bundle
+
+`src/run.rs` is the `terminal.app` bundle's entry point: it creates the two
+pipes, spawns the user's default shell (`rustos_users::policy::DEFAULT_SHELL`)
+with `TERM` exported, creates and grants the zero-copy window frame region,
+and **parks** on one wait-set with three members — its window-event mailbox
+(`WaitSourceKind::Port`), the shell-output pipe's read end
+(`WaitSourceKind::Stream`, the AW4 kernel addition: ready on buffered bytes
+or end-of-stream), and the shell child (`WaitSourceKind::Child`) —
+dispatching on the woken member's token, never a poll loop. Key presses are
+encoded through the one shared `lib/keymap` rule; shell output is pumped
+into the grid and the repainted frame presented. The shell exiting or a
+`CloseRequested` from the desktop ends the session cleanly; every bring-up
+refusal exits fail-loud with a reserved code and its reason on `stderr`.
 
 ## Layering & safety
 
@@ -104,7 +121,7 @@ production paths (`AGENTS.md` §2.9).
 
 ## Test surface
 
-`cargo test -p rustos-terminal` (34 unit tests): grid sizing fail-closed;
+`cargo test -p rustos-terminal` (42 unit tests): grid sizing fail-closed;
 text fill + cursor advance; right-edge wrap; last-row scroll on CRLF and
 line-feed-only down-move; carriage-return overwrite; backspace; tab stops;
 CSI cursor positioning (1-based and home default), relative moves defaulting
@@ -116,5 +133,8 @@ the hidden cursor not painting; the OSC window title; the saved cursor
 round-tripping position and pen; the §2.2 emitter↔consumer "one vocabulary"
 identity; `pump` applying output, the empty read, and read-error propagation;
 `send` forwarding without echo, the seam capturing bytes verbatim, and
-write-error propagation; and the renderer (viewport sizing, cursor highlight,
-and a degenerate zero-width viewport).
+write-error propagation; the renderer (viewport sizing, cursor highlight,
+and a degenerate zero-width viewport); and the spawned-shell wiring (the
+attach block's wire layout surviving the kernel's own canonical parse, the
+bounded one-chunk read, end-of-stream and error refusals, the short-write
+resume loop, and the wedged-channel fail-closed refusal).

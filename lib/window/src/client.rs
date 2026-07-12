@@ -20,6 +20,22 @@ use rustos_abi::window_ipc::{
 };
 use rustos_abi::{Errno, ProcId};
 
+/// High tag of an app's event-mailbox endpoint id (see
+/// [`event_endpoint_for`]).
+const EVENT_ENDPOINT_TAG: u64 = 0xE117_0000_0000_0000;
+
+/// The event-mailbox endpoint id an app binds for its window events: the
+/// app's kernel task id (never reused) under a fixed high tag, so every
+/// app instance binds a distinct, collision-free, non-reserved id — the
+/// one naming rule every window-channel app shares, so two apps can never
+/// disagree about the id space. The mailbox is owner-only to receive and
+/// every message carries its sender's kernel-attested origin, so the id
+/// needs no secrecy.
+#[must_use]
+pub const fn event_endpoint_for(pid: u64) -> u64 {
+    EVENT_ENDPOINT_TAG | pid
+}
+
 /// The one call the client issues: send one request frame, receive one
 /// reply frame — the `ipc_call` syscall behind a seam, so the client is
 /// host-testable.

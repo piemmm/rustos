@@ -5774,6 +5774,22 @@ where
                             return Err(Errno::NotFound);
                         }
                     }
+                    WaitSourceKind::Stream => {
+                        // A wait-set may observe a readable stream only
+                        // through the caller's **own** open table: `id` must
+                        // be a descriptor number holding a pipe end opened
+                        // for reading. A write end, a path/resource-backed
+                        // descriptor, an unopened number, an id outside the
+                        // descriptor width, and another task's descriptor
+                        // all collapse to the same `NotFound` the other
+                        // kinds use (no existence oracle).
+                        let owned = u32::try_from(id).is_ok_and(|fd| {
+                            self.aspaces.read().pipe_read_member(caller.task_id, fd)
+                        });
+                        if !owned {
+                            return Err(Errno::NotFound);
+                        }
+                    }
                 }
                 crate::waitset::add(
                     caller.task_id.0,
@@ -5819,11 +5835,19 @@ where
         // pointer-rate wakes a drag produces never touch an unrelated
         // waitset waiter.
         let observes_seat = members.iter().any(|m| m.kind == WaitSourceKind::SeatInput);
+        // `PIPE_WAITQ` is joined only by a set that actually holds a
+        // `Stream` member (the `SeatInput` discipline): pipe traffic
+        // between unrelated processes never wakes an unrelated waitset
+        // waiter.
+        let observes_stream = members.iter().any(|m| m.kind == WaitSourceKind::Stream);
         crate::waitq::SERVE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         crate::waitq::IRQ_WAITQ.register(sched_task, deadline_ns);
         crate::waitq::PROCWAIT_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         if observes_seat {
             crate::waitq::SEAT_INPUT_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
+        }
+        if observes_stream {
+            crate::waitq::PIPE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         }
 
         // `(kind, id, token)` of the ready member; `id`/`kind` drive the
@@ -5869,6 +5893,14 @@ where
                         .read()
                         .lookup(EndpointId(m.id))
                         .is_some_and(|port| port.owner() == sched_task && port.has_pending()),
+                    // A non-consuming peek: buffered bytes (or end-of-
+                    // stream) on the caller's own pipe read end — the woken
+                    // owner's read performs the drain. Re-resolved against
+                    // the caller's open table on every scan, so a
+                    // descriptor closed or replaced mid-wait simply is not
+                    // ready.
+                    WaitSourceKind::Stream => u32::try_from(m.id)
+                        .is_ok_and(|fd| self.aspaces.read().stream_readable(caller.task_id, fd)),
                 };
                 if is_ready {
                     ready = Some((m.kind, m.id, m.token));
@@ -5918,6 +5950,9 @@ where
         crate::waitq::PROCWAIT_WAITQ.deregister(sched_task);
         if observes_seat {
             crate::waitq::SEAT_INPUT_WAITQ.deregister(sched_task);
+        }
+        if observes_stream {
+            crate::waitq::PIPE_WAITQ.deregister(sched_task);
         }
         // Re-point the one-shot at the nearest deadline any remaining waiter
         // on *any* timed wait-queue needs (or clear it) so a finished wait
@@ -21186,6 +21221,7 @@ mod tests {
     const WS_KIND_IRQ: u32 = rustos_abi::WaitSourceKind::Irq as u32;
     const WS_KIND_CHILD: u32 = rustos_abi::WaitSourceKind::Child as u32;
     const WS_KIND_PORT: u32 = rustos_abi::WaitSourceKind::Port as u32;
+    const WS_KIND_STREAM: u32 = rustos_abi::WaitSourceKind::Stream as u32;
 
     /// A [`ProcessWait`] test double over the real [`ProcessTable`]
     /// bookkeeping, so the wait-set `Child` tests exercise the same matcher
@@ -21651,6 +21687,188 @@ mod tests {
         ipc.write().teardown_owned_by(0x5707, sink);
         ipc.write().teardown_owned_by(0xF0F0, sink);
         assert_eq!(crate::waitset::release_owned_by(0x5707), 1);
+    }
+
+    /// Adding a `Stream` wait-set member is owner- and descriptor-checked
+    /// against the caller's own open table: only the caller's own pipe
+    /// read end qualifies, and every refusal is the same oracle-free
+    /// `NotFound` the other member kinds use (`plans/APPWIN.md` AW4).
+    #[test]
+    fn waitset_stream_member_requires_the_callers_pipe_read_end() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        // Task ids unique to this test: the wait-set registry is process-
+        // global and another test asserts the exact count of sets it
+        // releases for its own task id.
+        let caps = make_caps_record(0x570B, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x570B),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        // A foreign task's pipe first, then the caller's own path-backed
+        // descriptor and pipe. Descriptor numbers are per-task, so the
+        // foreign read end's *number* resolves in the caller's own table
+        // (here to the path-backed entry) — a member id can never reach
+        // another task's resource, only mis-name one of the caller's own.
+        let (foreign_read_fd, _foreign_write_fd) = aspaces
+            .write()
+            .open_pipe(SecTaskId(0x570C))
+            .expect("foreign pipe minted");
+        let file_fd = aspaces
+            .write()
+            .open_file(
+                SecTaskId(0x570B),
+                alloc::string::String::from("/Storage/x"),
+                OpenFlags::READ,
+            )
+            .expect("file opened");
+        assert_eq!(
+            foreign_read_fd, file_fd,
+            "the foreign number lands on the caller's path-backed entry"
+        );
+        let (read_fd, write_fd) = aspaces
+            .write()
+            .open_pipe(SecTaskId(0x570B))
+            .expect("pipe minted");
+
+        let set = h.waitset_create(&ctx).expect("create");
+        // A write end, a path-backed descriptor (also the foreign read
+        // end's number), an unopened number, and an id outside the
+        // descriptor width are all refused with the same oracle-free
+        // `NotFound`.
+        for id in [
+            u64::from(write_fd),
+            u64::from(file_fd),
+            999,
+            u64::from(u32::MAX) + 1,
+        ] {
+            assert_eq!(
+                h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_STREAM, id, 0x41),
+                Err(Errno::NotFound)
+            );
+        }
+        h.waitset_ctl(
+            &ctx,
+            set,
+            WS_OP_ADD,
+            WS_KIND_STREAM,
+            u64::from(read_fd),
+            0x42,
+        )
+        .expect("add own pipe read end");
+
+        // Cleanup: this test's own sets and tables only.
+        assert_eq!(crate::waitset::release_owned_by(0x570B), 1);
+        assert!(aspaces.write().withdraw(SecTaskId(0x570C)));
+    }
+
+    /// A `Stream` member reports readiness as a non-consuming peek when
+    /// bytes arrive, keeps reporting until the owner's read drains them,
+    /// and reports the end-of-stream a closed writer leaves behind — the
+    /// terminal's shell-output wake slice (`plans/APPWIN.md` AW4).
+    #[test]
+    fn waitset_stream_member_reports_bytes_and_eof_without_consuming() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(0x570D), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(0x570D, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x570D),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        let (read_fd, write_fd) = aspaces
+            .write()
+            .open_pipe(SecTaskId(0x570D))
+            .expect("pipe minted");
+        let set = h.waitset_create(&ctx).expect("create");
+        h.waitset_ctl(
+            &ctx,
+            set,
+            WS_OP_ADD,
+            WS_KIND_STREAM,
+            u64::from(read_fd),
+            0x42,
+        )
+        .expect("add own pipe read end");
+
+        // Empty with a live writer: a zero-timeout wait expires.
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+
+        // Buffered bytes make the member ready and report its token; the
+        // wait only peeked, so it stays ready until the owner's read
+        // drains it.
+        let write_end = aspaces
+            .read()
+            .open_file_entry(SecTaskId(0x570D), write_fd)
+            .and_then(|entry| entry.pipe().cloned())
+            .expect("write end resolves");
+        assert_eq!(
+            write_end.try_write(b"out"),
+            crate::pipe::WriteStep::Wrote(3)
+        );
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+        let token_bytes = read_reply_page(
+            aspaces
+                .read()
+                .resolve(SecTaskId(0x570D))
+                .expect("registered")
+                .1,
+            8,
+        );
+        assert_eq!(
+            u64::from_le_bytes(token_bytes.try_into().expect("8 bytes")),
+            0x42
+        );
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+
+        // The owner's read drains the bytes; the member goes quiet again.
+        let read_end = aspaces
+            .read()
+            .open_file_entry(SecTaskId(0x570D), read_fd)
+            .and_then(|entry| entry.pipe().cloned())
+            .expect("read end resolves");
+        let mut out = [0u8; 8];
+        assert_eq!(read_end.try_read(&mut out), crate::pipe::ReadStep::Read(3));
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+
+        // Closing every write end leaves the member ready for its EOF
+        // read (the shell-exited wake), never parked forever.
+        drop(write_end);
+        assert!(aspaces.write().close_file(SecTaskId(0x570D), write_fd));
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+        assert_eq!(read_end.try_read(&mut out), crate::pipe::ReadStep::Eof);
+
+        // Cleanup: this test's own sets and tables only.
+        assert_eq!(crate::waitset::release_owned_by(0x570D), 1);
+        assert!(aspaces.write().withdraw(SecTaskId(0x570D)));
     }
 
     /// Task-exit reclamation tears down every port the dead task bound:

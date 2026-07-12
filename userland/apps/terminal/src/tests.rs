@@ -485,3 +485,103 @@ fn emitter_output_is_parsed_identically_by_the_consumer() {
     assert_eq!(plain.ch, 'p');
     assert_eq!(plain.attrs, rustos_vt::Attributes::PLAIN);
 }
+
+// --- The spawned shell's pipe wiring (`spawned`) -------------------------
+
+#[test]
+fn shell_wires_route_input_output_and_diagnostics_onto_the_pipes() {
+    use rustos_abi::{FdWire, SpawnAttach, CONSOLE_INHERIT, SPAWN_UID_INHERIT};
+
+    let attach = crate::spawned::shell_wires(7, 9);
+    // The child's stdin is the keystroke pipe; stdout *and* stderr land on
+    // the one output pipe (a terminal shows both); stdinfo is closed.
+    assert_eq!(attach.wires[0], FdWire::Handle(7));
+    assert_eq!(attach.wires[1], FdWire::Handle(9));
+    assert_eq!(attach.wires[2], FdWire::Handle(9));
+    assert_eq!(attach.wires[3], FdWire::Closed);
+    // Credential and console are inherited: the wires narrow, never widen.
+    assert_eq!(attach.target_uid, SPAWN_UID_INHERIT);
+    assert_eq!(attach.console, CONSOLE_INHERIT);
+    assert_eq!(attach.flags, 0);
+    // The block is canonical: it survives the same parse the kernel runs.
+    assert_eq!(SpawnAttach::parse(&attach.to_le_bytes()), Ok(attach));
+}
+
+#[test]
+fn pipe_source_read_drains_one_bounded_chunk() {
+    let data: &[u8] = b"prompt$ ";
+    let mut served = false;
+    let mut source = crate::spawned::PipeShellSource::new(
+        |out: &mut [u8]| {
+            assert_eq!(out.len(), crate::spawned::READ_CHUNK);
+            assert!(!served, "one wake drains exactly one chunk");
+            served = true;
+            out[..data.len()].copy_from_slice(data);
+            Ok(data.len())
+        },
+        |_: &[u8]| -> Result<usize, Errno> { unreachable!("read never writes") },
+    );
+    assert_eq!(source.read(), Ok(data.to_vec()));
+}
+
+#[test]
+fn pipe_source_read_surfaces_eof_and_errors_as_refusals() {
+    // End-of-stream (the shell exited, pipe drained) is the seam's typed
+    // "shell has exited" refusal, never a fabricated empty read.
+    let mut source = crate::spawned::PipeShellSource::new(
+        |_: &mut [u8]| Ok(0),
+        |_: &[u8]| -> Result<usize, Errno> { unreachable!() },
+    );
+    assert_eq!(source.read(), Err(Errno::NotFound));
+    // A failing primitive propagates untouched.
+    let mut failing = crate::spawned::PipeShellSource::new(
+        |_: &mut [u8]| Err(Errno::BadAddress),
+        |_: &[u8]| -> Result<usize, Errno> { unreachable!() },
+    );
+    assert_eq!(failing.read(), Err(Errno::BadAddress));
+}
+
+#[test]
+fn pipe_source_write_loops_over_short_writes_until_delivered() {
+    let mut delivered: Vec<u8> = Vec::new();
+    let mut calls = 0usize;
+    {
+        let mut source = crate::spawned::PipeShellSource::new(
+            |_: &mut [u8]| -> Result<usize, Errno> { unreachable!("write never reads") },
+            |bytes: &[u8]| {
+                calls += 1;
+                // Accept at most three bytes per call: a full pipe accepts
+                // its free space, and the source must resume at the tail.
+                let n = bytes.len().min(3);
+                delivered.extend_from_slice(&bytes[..n]);
+                Ok(n)
+            },
+        );
+        assert_eq!(source.write(b"echo hi\n"), Ok(()));
+    }
+    assert_eq!(delivered, b"echo hi\n");
+    assert_eq!(calls, 3);
+}
+
+#[test]
+fn pipe_source_write_fails_closed_on_a_wedged_or_failing_channel() {
+    // A zero-byte acceptance for a non-empty remainder can only mean a
+    // broken channel: fail closed rather than spin.
+    let mut wedged = crate::spawned::PipeShellSource::new(
+        |_: &mut [u8]| -> Result<usize, Errno> { unreachable!() },
+        |_: &[u8]| Ok(0),
+    );
+    assert_eq!(wedged.write(b"x"), Err(Errno::BrokenPipe));
+    // A failing primitive propagates untouched.
+    let mut failing = crate::spawned::PipeShellSource::new(
+        |_: &mut [u8]| -> Result<usize, Errno> { unreachable!() },
+        |_: &[u8]| Err(Errno::BrokenPipe),
+    );
+    assert_eq!(failing.write(b"x"), Err(Errno::BrokenPipe));
+    // A zero-length write is complete before the primitive is consulted.
+    let mut untouched = crate::spawned::PipeShellSource::new(
+        |_: &mut [u8]| -> Result<usize, Errno> { unreachable!() },
+        |_: &[u8]| -> Result<usize, Errno> { unreachable!("nothing to deliver") },
+    );
+    assert_eq!(untouched.write(b""), Ok(()));
+}

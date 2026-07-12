@@ -85,15 +85,23 @@
 //!    `CAP_IPC_BIND_PRIVILEGED` (only the display service may bind a
 //!    reserved endpoint id, so the witness is unforgeable by any other
 //!    process in the image).
-//! 5. The kernel/ipc `MessageDelivered` count reaching the crate's
-//!    shared interaction contract ([`PASS_DELIVERIES`]): the desktop
-//!    session — logged in at the seat keyboard and driven by injected
-//!    pointer clicks — opened its start menu, spawned the files bundle
-//!    from the on-disk system app store, served its window over the
-//!    reserved window rendezvous, toggled the appearance, and routed
-//!    the scripted in-window clicks app-ward (`plans/APPWIN.md` AW3).
+//! 5. A kernel `ProcessSpawned` audit record observed once the
+//!    kernel/ipc `MessageDelivered` count has reached the crate's shared
+//!    interaction contract ([`TERMINAL_ROUND_TRIP_DELIVERIES`]): the
+//!    desktop session — logged in at the seat keyboard and driven by
+//!    injected pointer clicks — opened its start menu, spawned the files
+//!    bundle from the on-disk system app store, served its window over
+//!    the reserved window rendezvous, toggled the appearance, routed the
+//!    scripted in-window clicks app-ward (`plans/APPWIN.md` AW3), then
+//!    spawned the terminal bundle, focused its served window, and
+//!    delivered the typed command's every key edge — whereupon the
+//!    windowed terminal wrote the line to its hosted shell over its
+//!    pipe, and the shell resolved and **spawned** the typed program:
+//!    the AW4 shell round trip, every hop kernel-attested (the only
+//!    spawn that can occur after the typing gate is the shell executing
+//!    the typed command).
 //!
-//! [`PASS_DELIVERIES`]: rustos_test_autoload_input_qemu_aarch64::PASS_DELIVERIES
+//! [`TERMINAL_ROUND_TRIP_DELIVERIES`]: rustos_test_autoload_input_qemu_aarch64::TERMINAL_ROUND_TRIP_DELIVERIES
 //!
 //! Reaching them requires every preceding step to have succeeded: the
 //! `/System` volume mounted and served, the store listed, each signed
@@ -173,20 +181,21 @@ mod kernel {
     /// users-database load (the passphrase typed at the virtio keyboard
     /// unlocked the encrypted root end to end), the reserved
     /// `DISPLAY_ENDPOINT` bind (the autoloaded framebuffer display service
-    /// came up on its granted surface), and the kernel/ipc
-    /// `MessageDelivered` count reaching the scripted click-through's
-    /// final delivery (the crate's shared interaction contract): the
-    /// start-menu launch spawned the files app, it created a window over
-    /// the reserved window rendezvous, the desktop routed the in-window
-    /// clicks app-ward, and the post-theme-toggle click landed — so the
-    /// guest exits only after the host has everything it needs
-    /// (`plans/APPWIN.md` AW3).
+    /// came up on its granted surface), and the AW4 shell round trip: a
+    /// `ProcessSpawned` record observed once the kernel/ipc
+    /// `MessageDelivered` count has reached the typed command's Enter
+    /// press (the crate's shared interaction contract) — the windowed
+    /// terminal received every typed key edge, wrote the line to its
+    /// hosted shell, and the shell spawned the typed program. The guest
+    /// exits only after the host has everything it needs
+    /// (`plans/APPWIN.md` AW3 + AW4).
     struct AutoloadInputSink {
         key_delivered: AtomicBool,
         pointer_delivered: AtomicBool,
         users_db_loaded: AtomicBool,
         display_endpoint_bound: AtomicBool,
         window_events_delivered: AtomicU32,
+        shell_round_trip: AtomicBool,
     }
 
     impl AutoloadInputSink {
@@ -197,6 +206,7 @@ mod kernel {
                 users_db_loaded: AtomicBool::new(false),
                 display_endpoint_bound: AtomicBool::new(false),
                 window_events_delivered: AtomicU32::new(0),
+                shell_round_trip: AtomicBool::new(false),
             }
         }
 
@@ -256,6 +266,17 @@ mod kernel {
                 self.note_endpoint_created(event);
             } else if event.id.0 == rustos_kernel_ipc::AuditEvent::MessageDelivered.id().0 {
                 self.window_events_delivered.fetch_add(1, Ordering::AcqRel);
+            } else if event.id.0 == AuditEvent::ProcessSpawned.id().0 {
+                // Attributable by ordering, not by name: every other spawn
+                // in the image happens strictly before the typing gate, so
+                // a spawn observed at or beyond the Enter press's delivery
+                // count can only be the shell executing the typed command
+                // (the contract crate's rationale).
+                if self.window_events_delivered.load(Ordering::Acquire)
+                    >= rustos_test_autoload_input_qemu_aarch64::TERMINAL_ROUND_TRIP_DELIVERIES
+                {
+                    self.shell_round_trip.store(true, Ordering::Release);
+                }
             } else {
                 return;
             }
@@ -263,8 +284,7 @@ mod kernel {
                 && self.pointer_delivered.load(Ordering::Acquire)
                 && self.users_db_loaded.load(Ordering::Acquire)
                 && self.display_endpoint_bound.load(Ordering::Acquire)
-                && self.window_events_delivered.load(Ordering::Acquire)
-                    >= rustos_test_autoload_input_qemu_aarch64::PASS_DELIVERIES
+                && self.shell_round_trip.load(Ordering::Acquire)
             {
                 qemu_exit::exit_success();
             }

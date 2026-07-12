@@ -2907,10 +2907,15 @@ pub fn waitset_create() -> i64 {
 /// [`IrqHandle`](rustos_abi::IrqHandle) the caller bound
 /// ([`WaitSourceKind::Irq`]), a child of the caller awaiting reap — a
 /// PID or [`rustos_abi::waitset::WAITSET_CHILD_ANY`]
-/// ([`WaitSourceKind::Child`]), or a seat whose live lease the caller holds
+/// ([`WaitSourceKind::Child`]), a seat whose live lease the caller holds
 /// via `display_acquire` ([`WaitSourceKind::SeatInput`], ready on queued
 /// keyboard/pointer input *and* on losing the lease, so a revocation is
-/// observed rather than parked through); `token` is the caller's opaque
+/// observed rather than parked through), a message port the caller bound
+/// via [`port_bind`] ([`WaitSourceKind::Port`], ready on a delivered
+/// message awaiting [`ipc_recv`]), or a pipe read end of the caller's own
+/// open table ([`WaitSourceKind::Stream`] — the descriptor from
+/// [`pipe_create`], ready on buffered bytes or end-of-stream, drained by
+/// [`fs_read`]); `token` is the caller's opaque
 /// value reported by [`waitset_wait`] when this member is ready. On `Add`
 /// the kernel resolves and **owner-checks** the named resource against the
 /// calling task before recording it, so the set can never observe authority

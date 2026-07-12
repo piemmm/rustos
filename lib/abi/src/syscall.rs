@@ -855,9 +855,12 @@ impl SyscallNumber {
     ///
     /// Arguments: `set: u64` — the wait-set handle; `op: u32` — a
     /// [`crate::WaitSetOp`] (`Add` / `Del`); `kind: u32` — a
-    /// [`crate::WaitSourceKind`] (`Endpoint` / `Irq`); `id: u64` — the
-    /// resource the member names (an IPC call-endpoint id the caller serves,
-    /// or an [`IrqHandle`] the caller bound); `token: u64` — an opaque,
+    /// [`crate::WaitSourceKind`]; `id: u64` — the resource the member names
+    /// (per the kind's own docs: an IPC call-endpoint id the caller serves,
+    /// an [`IrqHandle`] the caller bound, a child PID or
+    /// [`crate::WAITSET_CHILD_ANY`], a seat id the caller leases, a message
+    /// port the caller bound, or a pipe-read descriptor of the caller's own
+    /// open table); `token: u64` — an opaque,
     /// caller-chosen value [`SyscallNumber::WAITSET_WAIT`] reports back when
     /// this member is ready. Returns `0`, or `-errno`.
     ///

@@ -1,0 +1,17 @@
+# Signed-AppInfo manifest source for the `terminal` desktop terminal
+# emulator (plans/APPWIN.md AW4). Discovered by the build's app-bundle
+# composer, which cross-compiles Run, signs the manifest, and plants the
+# bundle on the read-only /System/Apps store; the desktop session's start
+# menu spawns it (and the shell resolves it by name like any command app).
+# The capability list is the bundle's request: CAP_CONSOLE_WRITE for its
+# fail-loud stderr diagnostics, CAP_PROC_SPAWN to host the user's shell as
+# its own child over pipes (the child receives only the shell's own
+# manifest ∩ user-grant authority, never the terminal's), and CAP_SHM to
+# create and grant the zero-copy window frame region the desktop session
+# maps. The launched process receives this set intersected with the
+# launching user's grants, never more.
+id = "os.rustos.terminal"
+name = "terminal"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_PROC_SPAWN", "CAP_SHM"]

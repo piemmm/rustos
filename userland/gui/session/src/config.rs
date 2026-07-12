@@ -20,3 +20,14 @@ pub const FILES_LABEL: &str = "Files";
 /// The file-browser bundle's entry-point path in the system app store
 /// (an OS-provided app, discovered on disk like every other bundle).
 pub const FILES_RUN_PATH: &[u8] = b"/System/Apps/files.app/Run";
+
+/// The start menu's terminal launcher: its menu identity. Selecting the
+/// entry spawns [`TERMINAL_RUN_PATH`].
+pub const TERMINAL_LAUNCHER: LauncherId = LauncherId(2);
+
+/// Label of the terminal launcher entry.
+pub const TERMINAL_LABEL: &str = "Terminal";
+
+/// The terminal bundle's entry-point path in the system app store (an
+/// OS-provided app, discovered on disk like every other bundle).
+pub const TERMINAL_RUN_PATH: &[u8] = b"/System/Apps/terminal.app/Run";

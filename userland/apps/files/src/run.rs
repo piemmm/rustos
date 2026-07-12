@@ -81,13 +81,6 @@ mod program {
     /// costs the kernel a bounded mailbox — never unbounded memory.
     const EVENT_CAPACITY: usize = 32;
 
-    /// High tag of the app's event-mailbox endpoint id. The low bits are
-    /// this process's kernel task id (never reused), so every app
-    /// instance binds a distinct, collision-free, non-reserved id; the
-    /// mailbox is owner-only to receive and every message carries its
-    /// sender's kernel-attested origin, so the id needs no secrecy.
-    const EVENT_ENDPOINT_TAG: u64 = 0xE117_0000_0000_0000;
-
     /// The wait-set token of the event-mailbox member.
     const EVENT_TOKEN: u64 = 1;
 
@@ -289,12 +282,13 @@ mod program {
         let frames = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, total) };
 
         // --- The event mailbox the app parks on. The id is unique by
-        // construction (this task's never-reused kernel id under a fixed
-        // tag) and never reserved; the bind is refused otherwise.
+        // construction (the shared `event_endpoint_for` naming rule: this
+        // task's never-reused kernel id under a fixed tag) and never
+        // reserved; the bind is refused otherwise.
         let Ok(origin) = rustos_rt::self_origin() else {
             return fail(EXIT_NO_EVENTS, "own identity unavailable");
         };
-        let event_endpoint = EVENT_ENDPOINT_TAG | origin.pid();
+        let event_endpoint = rustos_window::event_endpoint_for(origin.pid());
         if rustos_abi::ipc::is_reserved_endpoint(event_endpoint)
             || rustos_rt::port_bind(event_endpoint, WindowEvent::WIRE_LEN, EVENT_CAPACITY) != 0
         {

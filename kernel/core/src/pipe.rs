@@ -174,6 +174,22 @@ impl PipeEnd {
         ReadStep::Read(n)
     }
 
+    /// Whether a read on this end would complete without parking: buffered
+    /// bytes are waiting, or every write end is closed (the read observes
+    /// end-of-stream). A **non-consuming peek** — nothing is drained — so a
+    /// wait-set scan can report readiness and leave the bytes for the woken
+    /// owner's read (`plans/APPWIN.md` AW4). On a write end it is always
+    /// `false` (a write end can never be read; fail closed, matching
+    /// [`Self::try_read`]'s direction guard).
+    #[must_use]
+    pub fn readable(&self) -> bool {
+        if self.role != PipeRole::Read {
+            return false;
+        }
+        let state = self.pipe.state.lock();
+        !state.buf.is_empty() || state.writers == 0
+    }
+
     /// One non-blocking write step: append up to the ring's free space.
     ///
     /// Returns [`WriteStep::Full`] when the caller should park and retry,
@@ -343,6 +359,29 @@ mod tests {
         let mut out = [0u8; 1];
         assert_eq!(read.try_read(&mut out), ReadStep::Read(1));
         assert_eq!(out[0], b'a');
+    }
+
+    #[test]
+    fn readable_peeks_without_consuming_and_reports_eof() {
+        let (read, write) = Pipe::create();
+        // Empty with a live writer: a read would park, so not readable.
+        assert!(!read.readable());
+        assert_eq!(write.try_write(b"hi"), WriteStep::Wrote(2));
+        // Buffered bytes: readable, and the peek consumed nothing.
+        assert!(read.readable());
+        assert!(read.readable());
+        let mut out = [0u8; 4];
+        assert_eq!(read.try_read(&mut out), ReadStep::Read(2));
+        assert!(!read.readable());
+        // Every write end closed: readable (the read observes EOF).
+        drop(write);
+        assert!(read.readable());
+        assert_eq!(read.try_read(&mut out), ReadStep::Eof);
+        // A write end is never readable, buffered bytes or not.
+        let (read_b, write_b) = Pipe::create();
+        assert_eq!(write_b.try_write(b"x"), WriteStep::Wrote(1));
+        assert!(!write_b.readable());
+        assert!(read_b.readable());
     }
 
     #[test]

@@ -2836,7 +2836,10 @@ Shipped (headless-testable, model + renderer over injected seams):
 - `userland/gui/taskbar` (start menu + running-task list + clock/notification
   area) and `userland/gui/session` glue (theme registry, taskbar model,
   light/dark switch, `DesktopShell` event loop / `TaskBridge`).
-- Two default apps (filesystem browser, terminal emulator) — model + renderer.
+- Two default apps (filesystem browser, terminal emulator) — each a
+  host-tested model + renderer plus a live store bundle served over the
+  window channel (`plans/APPWIN.md` AW3/AW4; the terminal hosts the user's
+  shell over pipes and the AW4 `Stream` wait source).
 - `kernel/ipc::PortRegistry` named-port registry composed into `KernelState`;
   `ipc_send`/`ipc_recv` resolve endpoints against it. User space resolves a
   published `PortName` to its endpoint through the unprivileged
@@ -3034,8 +3037,15 @@ transfer, landed in increments:
   QEMU vertical click-drives the whole chain (menu → launch → served
   window → appearance toggle) with three verified screendumps, gated on
   kernel-attested serial records and the interaction contract in the test
-  crate's lib target. Remaining: AW4 terminal (stream wait source +
-  pipe/spawn `ShellSource`), AW5 CU6 picker descriptors.
+  crate's lib target. **AW4 is done:** `WaitSourceKind::Stream` (the
+  caller's own pipe read end, owner-checked at add, ready on bytes or
+  end-of-stream over the pipe layer's existing wakes), the terminal's
+  host-tested pipe/spawn `ShellSource` (`rustos_terminal::spawned`), the
+  `terminal.app` store bundle (`CAP_CONSOLE_WRITE`+`CAP_PROC_SPAWN`+
+  `CAP_SHM`) spawned from the start menu's `Terminal` entry, and the
+  autoload vertical's typed-command tail (guest PASS latches a
+  `ProcessSpawned` at/after the Enter press's delivery — the shell round
+  trip, kernel-attested). Remaining: AW5 CU6 picker descriptors.
 - The platform-RNG `EntropySource` that seeds the reserve — **DONE**
   (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `rustos_arch_api::entropy`
   slice (x86_64 `RDSEED`/`RDRAND`, aarch64 `RNDR` `Supported`; riscv64 `Zkr` /

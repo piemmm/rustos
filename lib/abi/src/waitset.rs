@@ -105,6 +105,22 @@ pub enum WaitSourceKind {
     /// consumes the message (`plans/APPWIN.md` AW3: an app parks here
     /// for its window events, never a poll loop).
     Port = 4,
+    /// A readable pipe stream of the caller's **own** open table (its
+    /// `id` is the descriptor number a [`crate::SyscallNumber::PIPE_CREATE`]
+    /// read end landed at). Adding the member is owner- and
+    /// descriptor-checked against the calling task's open table: the
+    /// descriptor must be a pipe end opened for reading — a write end, a
+    /// path- or resource-backed descriptor, an unopened number, or
+    /// another task's descriptor all refuse with the same oracle-free
+    /// `NotFound` the other kinds use. Ready when a read would not park:
+    /// buffered bytes are waiting, **or** every write end is closed (the
+    /// woken owner's read observes end-of-stream rather than waiting
+    /// forever on a dead writer). Readiness is a non-consuming peek — the
+    /// woken owner's read, not the wait, drains the bytes — so a still-
+    /// readable stream re-reports on the next wait (`plans/APPWIN.md`
+    /// AW4: the windowed terminal parks here for its shell's output,
+    /// never a poll loop).
+    Stream = 5,
 }
 
 impl WaitSourceKind {
@@ -127,6 +143,7 @@ impl WaitSourceKind {
             2 => Ok(Self::Child),
             3 => Ok(Self::SeatInput),
             4 => Ok(Self::Port),
+            5 => Ok(Self::Stream),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -153,10 +170,11 @@ mod tests {
             WaitSourceKind::Child,
             WaitSourceKind::SeatInput,
             WaitSourceKind::Port,
+            WaitSourceKind::Stream,
         ] {
             assert_eq!(WaitSourceKind::from_u32(kind.as_u32()), Ok(kind));
         }
-        assert_eq!(WaitSourceKind::from_u32(5), Err(Errno::OutOfRange));
+        assert_eq!(WaitSourceKind::from_u32(6), Err(Errno::OutOfRange));
         assert_eq!(WaitSourceKind::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -169,6 +187,7 @@ mod tests {
         assert_eq!(WaitSourceKind::Child.as_u32(), 2);
         assert_eq!(WaitSourceKind::SeatInput.as_u32(), 3);
         assert_eq!(WaitSourceKind::Port.as_u32(), 4);
+        assert_eq!(WaitSourceKind::Stream.as_u32(), 5);
         assert_eq!(WAITSET_CHILD_ANY, u64::MAX);
     }
 }

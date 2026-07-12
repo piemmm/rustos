@@ -1624,9 +1624,11 @@ pub trait SyscallHandlers {
     /// Add or remove a member of a wait-set (`plans/USB.md`).
     ///
     /// `set` is the wait-set handle; `op` is a [`rustos_abi::WaitSetOp`];
-    /// `kind` is a [`rustos_abi::WaitSourceKind`]; `id` names the resource (an
-    /// IPC call-endpoint id or an [`rustos_abi::IrqHandle`] raw value); `token`
-    /// is the caller's opaque tag. On `Add` the implementation **resolves and
+    /// `kind` is a [`rustos_abi::WaitSourceKind`]; `id` names the resource
+    /// per the kind's own docs (an IPC call-endpoint id, an
+    /// [`rustos_abi::IrqHandle`] raw value, a child PID, a seat id, a message
+    /// port id, or a pipe-read descriptor of the caller's own open table);
+    /// `token` is the caller's opaque tag. On `Add` the implementation **resolves and
     /// owner-checks the named resource against the calling task** before
     /// recording it (no ambient authority), and owner-checks the set itself; a
     /// resource the caller does not own, a handle that is not the caller's own

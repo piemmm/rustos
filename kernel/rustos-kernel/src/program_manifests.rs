@@ -683,6 +683,18 @@ mod tests {
             CapabilityId::SHM,
         ];
 
+        // The windowed terminal `terminal` (plans/APPWIN.md AW4): console
+        // write for its fail-loud diagnostics, CAP_PROC_SPAWN to host the
+        // user's shell as its own child over pipes, and CAP_SHM to create
+        // and grant the zero-copy window frame region the desktop session
+        // maps. Not an embedded spawn-floor program, so the list lives
+        // only in this pin.
+        const TERMINAL_REQUEST: &[CapabilityId] = &[
+            CapabilityId::CONSOLE_WRITE,
+            CapabilityId::PROC_SPAWN,
+            CapabilityId::SHM,
+        ];
+
         // The volume-detach tool `unmount` (plans/DEVICES.md D4b): the
         // pure-tool request plus `CAP_FS_MOUNT`, which *is* its job — the
         // kernel's `volume_detach` path re-checks it and audits every
@@ -736,6 +748,7 @@ mod tests {
             ("sysinfo", AppKind::Command, SYSINFO_MANIFEST),
             ("sysinfod", AppKind::Service, SYSINFOD_MANIFEST),
             ("tee", AppKind::Command, FILE_TOOL_REQUEST),
+            ("terminal", AppKind::Command, TERMINAL_REQUEST),
             ("top", AppKind::Command, TOP_MANIFEST),
             ("true", AppKind::Command, PURE_TOOL_REQUEST),
             ("unmount", AppKind::Command, UNMOUNT_TOOL_REQUEST),

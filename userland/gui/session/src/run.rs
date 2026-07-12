@@ -75,7 +75,7 @@ mod program {
     use rustos_desktop_session::{
         DesktopShell, DeviceInputSource, KeyboardInputSource, SeatEventReader, SeatInputChannel,
         SessionWindows, ShellWindowHost, APPEARANCE_LABEL, FILES_LABEL, FILES_LAUNCHER,
-        FILES_RUN_PATH,
+        FILES_RUN_PATH, TERMINAL_LABEL, TERMINAL_LAUNCHER, TERMINAL_RUN_PATH,
     };
     use rustos_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use rustos_taskbar::{MenuAction, TaskbarConfig, TaskbarResponse};
@@ -378,13 +378,19 @@ mod program {
         };
         let mut keyboard = KeyboardInputSource::new(SeatInputChannel::new(KeyboardReader));
 
-        // The start menu's launcher entry for the file browser: selecting
-        // it is forwarded by the shell and spawns the bundle below.
+        // The start menu's launcher entries for the file browser and the
+        // terminal: selecting one is forwarded by the shell and spawns
+        // the matching bundle below.
         let _ = shell
             .session_mut()
             .taskbar_mut()
             .start_menu_mut()
             .add_launcher(FILES_LAUNCHER, FILES_LABEL);
+        let _ = shell
+            .session_mut()
+            .taskbar_mut()
+            .start_menu_mut()
+            .add_launcher(TERMINAL_LAUNCHER, TERMINAL_LABEL);
 
         // First frame: place the bar and push the whole surface once; every
         // later present carries only the composited damage.
@@ -710,6 +716,17 @@ mod program {
                 // denied optional action never ends the session.
                 if rustos_rt::spawn(FILES_RUN_PATH) < 0 {
                     let _ = rustos_rt::stderr(b"desktop: files launch refused\n");
+                }
+            }
+            ShellOutcome::Session(SessionEvent::Forward(TaskbarResponse::MenuEntrySelected {
+                action: MenuAction::Launch(launcher),
+                ..
+            })) if launcher == TERMINAL_LAUNCHER => {
+                // The terminal, exactly as the file browser above: spawned
+                // from the on-disk store bundle, refusal reported, desktop
+                // carries on.
+                if rustos_rt::spawn(TERMINAL_RUN_PATH) < 0 {
+                    let _ = rustos_rt::stderr(b"desktop: terminal launch refused\n");
                 }
             }
             _ => {}

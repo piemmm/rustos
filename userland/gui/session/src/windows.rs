@@ -92,14 +92,25 @@ impl SessionWindows {
 
     /// The cascade origin for the next opened window.
     fn next_origin(&self) -> Point {
-        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
-        // Wrapped modulo `CASCADE_WRAP`, so the value is always tiny.
-        let step = (self.opened % CASCADE_WRAP as u64) as i32;
-        Point::new(
-            CASCADE_ORIGIN + step * CASCADE_STEP,
-            CASCADE_ORIGIN + step * CASCADE_STEP,
-        )
+        cascade_origin_for(self.opened)
     }
+}
+
+/// Top-left of the `opened`-th served window (zero-based), in screen
+/// pixels: the diagonal cascade from [`CASCADE_ORIGIN`], wrapping so late
+/// windows never walk off screen. The one placement rule the session
+/// applies and a host-side observer (the AW3/AW4 QEMU vertical's click
+/// script and screendump assertions) measures against — never a
+/// re-derived guess.
+#[must_use]
+pub fn cascade_origin_for(opened: u64) -> Point {
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    // Wrapped modulo `CASCADE_WRAP`, so the value is always tiny.
+    let step = (opened % CASCADE_WRAP as u64) as i32;
+    Point::new(
+        CASCADE_ORIGIN + step * CASCADE_STEP,
+        CASCADE_ORIGIN + step * CASCADE_STEP,
+    )
 }
 
 /// The [`WindowHost`] bridge one serve pass borrows: the desktop shell,

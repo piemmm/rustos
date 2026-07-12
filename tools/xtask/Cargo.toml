@@ -157,6 +157,7 @@ rustos-theme = { path = "../../lib/theme", version = "=0.0.0" }
 rustos-desktop-session = { path = "../../userland/gui/session", version = "=0.0.0" }
 rustos-taskbar = { path = "../../userland/gui/taskbar", version = "=0.0.0" }
 rustos-files = { path = "../../userland/apps/files", version = "=0.0.0" }
+rustos-terminal = { path = "../../userland/apps/terminal", version = "=0.0.0" }
 rustos-geometry = { path = "../../lib/geometry", version = "=0.0.0" }
 rustos-fwcfg = { path = "../../lib/fwcfg", version = "=0.0.0" }
 # The autoload desktop vertical's shared interaction contract (delivery

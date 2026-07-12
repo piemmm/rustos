@@ -1069,6 +1069,48 @@ impl AddressSpaceRegistry {
         self.open_files.get(&task)?.by_fd.get(&fd).cloned()
     }
 
+    /// Whether `task`'s open descriptor `fd` is a pipe end opened for
+    /// reading — the wait-set `Stream` member's add-time owner/descriptor
+    /// check (`plans/APPWIN.md` AW4). `false` covers an unopened number,
+    /// a descriptor of a different task, a path- or resource-backed
+    /// descriptor, a write end, and an entry opened without read access
+    /// (fail closed — the caller cannot distinguish which). The `task`
+    /// argument is the kernel-trusted caller id. Borrows the entry in
+    /// place — never a clone, so the peek can never touch the pipe's
+    /// live-end counts.
+    #[must_use]
+    pub fn pipe_read_member(&self, task: TaskId, fd: u32) -> bool {
+        self.borrow_pipe_read_end(task, fd).is_some()
+    }
+
+    /// Non-consuming readiness peek on `task`'s open descriptor `fd` for
+    /// the wait-set `Stream` scan: `true` when the descriptor is a pipe
+    /// read end whose read would complete without parking (buffered bytes,
+    /// or end-of-stream). Anything [`Self::pipe_read_member`] refuses is
+    /// simply not ready — a member whose descriptor was closed or replaced
+    /// mid-wait stops reporting rather than erring. Borrows in place, so
+    /// the per-scan peek never clones a pipe end (a clone/drop pair would
+    /// spuriously wake every pipe waiter).
+    #[must_use]
+    pub fn stream_readable(&self, task: TaskId, fd: u32) -> bool {
+        self.borrow_pipe_read_end(task, fd)
+            .is_some_and(PipeEnd::readable)
+    }
+
+    /// Resolve `task`'s `fd` to its pipe end **borrowed in place**, only
+    /// when the entry is a pipe end opened for reading — the one
+    /// resolution [`Self::pipe_read_member`] and [`Self::stream_readable`]
+    /// share.
+    fn borrow_pipe_read_end(&self, task: TaskId, fd: u32) -> Option<&PipeEnd> {
+        let entry = self.open_files.get(&task)?.by_fd.get(&fd)?;
+        if !entry.flags.contains(OpenFlags::READ) {
+            return None;
+        }
+        entry
+            .pipe()
+            .filter(|end| end.role() == crate::pipe::PipeRole::Read)
+    }
+
     /// Release `task`'s open descriptor `fd`, returning `true` if it was
     /// open.
     ///
@@ -1278,6 +1320,51 @@ mod tests {
         // reports the slot was present and clears the table.
         assert!(reg.withdraw(TaskId(4)));
         assert_eq!(reg.streams(TaskId(4)), DescriptorTable::closed());
+    }
+
+    #[test]
+    fn pipe_read_member_admits_only_the_owners_pipe_read_end() {
+        let mut reg = AddressSpaceRegistry::new();
+        let (read_fd, write_fd) = reg.open_pipe(TaskId(2)).expect("pipe minted");
+        let file_fd = reg
+            .open_file(TaskId(2), String::from("/Storage/x"), OpenFlags::READ)
+            .expect("file opened");
+        // Only the caller's own pipe read end qualifies.
+        assert!(reg.pipe_read_member(TaskId(2), read_fd));
+        // A write end, a path-backed descriptor, an unopened number, and
+        // another task's descriptor all refuse identically.
+        assert!(!reg.pipe_read_member(TaskId(2), write_fd));
+        assert!(!reg.pipe_read_member(TaskId(2), file_fd));
+        assert!(!reg.pipe_read_member(TaskId(2), 999));
+        assert!(!reg.pipe_read_member(TaskId(3), read_fd));
+        // A closed descriptor stops qualifying.
+        assert!(reg.close_file(TaskId(2), read_fd));
+        assert!(!reg.pipe_read_member(TaskId(2), read_fd));
+    }
+
+    #[test]
+    fn stream_readable_peeks_bytes_and_eof_without_consuming() {
+        let mut reg = AddressSpaceRegistry::new();
+        let (read_fd, write_fd) = reg.open_pipe(TaskId(2)).expect("pipe minted");
+        // Empty with a live writer: a read would park, so not ready.
+        assert!(!reg.stream_readable(TaskId(2), read_fd));
+        // Buffered bytes: ready, and the peek consumes nothing.
+        let end = reg
+            .open_file_entry(TaskId(2), write_fd)
+            .and_then(|entry| entry.pipe().cloned())
+            .expect("write end resolves");
+        assert_eq!(end.try_write(b"go"), crate::pipe::WriteStep::Wrote(2));
+        assert!(reg.stream_readable(TaskId(2), read_fd));
+        assert!(reg.stream_readable(TaskId(2), read_fd));
+        // The write end itself is never stream-readable; nor is a foreign
+        // task's descriptor.
+        assert!(!reg.stream_readable(TaskId(2), write_fd));
+        assert!(!reg.stream_readable(TaskId(3), read_fd));
+        // Closing every write end leaves the member ready for its EOF
+        // read (drop the local clone too — each holds a live end).
+        drop(end);
+        assert!(reg.close_file(TaskId(2), write_fd));
+        assert!(reg.stream_readable(TaskId(2), read_fd));
     }
 
     #[test]

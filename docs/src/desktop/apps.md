@@ -102,9 +102,16 @@ shell I/O seam, so the parsing and rendering logic is testable without a kernel
 
 `ShellSource::read()` returns the bytes the shell has produced since the last
 call (an empty read is not an error) and `ShellSource::write(bytes)` forwards
-the user's keystrokes. On a running system the seam is a capability-checked
-pseudo-terminal channel to the shell process, so the process-spawn and
-job-control authority lives behind the seam, not in the app.
+the user's keystrokes. On a running system the seam is
+`spawned::PipeShellSource` (`plans/APPWIN.md` AW4): two kernel pipes to a
+shell child the terminal spawned under its own `CAP_PROC_SPAWN`, wired at
+spawn through `spawned::shell_wires` — the child's stdin is the keystroke
+pipe and its stdout *and* stderr land on the one output pipe a terminal
+renders (fd 3 is closed; advisory records are best-effort by contract).
+Reads drain one bounded chunk per wait-set wake and surface end-of-stream as
+the typed "shell has exited" refusal; writes loop over short writes and fail
+closed on a wedged channel. The process-spawn authority lives in the `Run`
+binary, behind the seam, not in the screen model.
 
 ### The screen model
 
@@ -154,9 +161,22 @@ places and rounds it through its single anti-aliased rounded-corner path, so
 there is no rounding in the app. Every length saturates so a viewport smaller
 than the grid paints what fits rather than panicking (`AGENTS.md` §2.9).
 
-### Still to do
+### The `Run` bundle
 
-The terminal model and renderer are complete and headless-tested; the live
-`ShellSource` (pipe pair + `FdWire`-attached shell spawn) and the presented
-window ride `plans/APPWIN.md` AW4, which also adds the stream wait source the
-serve loop parks on.
+`terminal.app`'s entry point creates the two pipes, spawns the user's default
+shell (`rustos_users::policy::DEFAULT_SHELL`) with `TERM` exported and the
+child-side pipe ends closed after the spawn (so each side observes the
+other's end-of-file honestly), creates and grants the zero-copy window frame
+region, and **parks** on one wait-set with three members — its window-event
+mailbox (`Port`), the shell-output pipe's read end (`Stream`, the AW4 kernel
+addition: ready on buffered bytes or end-of-stream), and the shell child
+(`Child`) — dispatching on the woken member's token, never a poll loop. Key
+presses are encoded through the one shared `lib/keymap` rule and written to
+the shell (releases send nothing); shell output is pumped into the grid and
+the repainted frame presented. The shell exiting, or a `CloseRequested` from
+the desktop, ends the session cleanly; every bring-up refusal exits
+fail-loud with a reserved code and its reason on `stderr`. The desktop
+session's start menu carries a `Terminal` entry that spawns the bundle, and
+the autoload QEMU vertical types a real command into the served window at
+the seat keyboard, PASSing only on the kernel-attested keyboard → session →
+terminal → pipe → shell → spawn round trip.

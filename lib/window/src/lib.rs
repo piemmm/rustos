@@ -30,7 +30,7 @@ extern crate alloc;
 pub mod client;
 pub mod server;
 
-pub use client::{EventSource, WindowClient, WindowEvents, WindowTransport};
+pub use client::{event_endpoint_for, EventSource, WindowClient, WindowEvents, WindowTransport};
 pub use server::{
     CallerIdentity, EventSink, WindowHost, WindowServer, WINDOWS_PER_CLIENT_MAX, WINDOW_REPLY_MAX,
 };

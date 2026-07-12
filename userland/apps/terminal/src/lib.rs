@@ -38,11 +38,13 @@
 //!
 //! [`ShellSource`] is the one thing the terminal needs from outside: a way to
 //! read the shell's output bytes and write the user's input bytes. On a
-//! running system it is a capability-checked pseudo-terminal channel to the
-//! shell process; tests wire an in-memory queue, so the screen model and the
-//! renderer are exhaustively testable without a kernel. The
-//! binary that ships as the terminal wires the real channel (deferred until
-//! the userland process/IPC client lands).
+//! running system it is [`spawned::PipeShellSource`] — two kernel pipes to a
+//! shell child the terminal spawned under its own `CAP_PROC_SPAWN`, wired at
+//! spawn through [`spawned::shell_wires`] (`plans/APPWIN.md` AW4); tests wire
+//! an in-memory queue, so the screen model and the renderer are exhaustively
+//! testable without a kernel. The `Run` binary (`src/run.rs`) composes the
+//! live syscalls under the seam and parks on its wait-set for window events,
+//! shell output, and the shell child's exit — never a poll loop.
 //!
 //! # The terminal type it advertises
 //!
@@ -58,6 +60,7 @@
 //! * [`grid`] — the [`Grid`] character-cell screen of [`Cell`]s.
 //! * [`parser`] — the [`Parser`] adapter onto `lib/vt`'s shared parser.
 //! * [`shell`] — the [`ShellSource`] seam.
+//! * [`spawned`] — the production seam: the spawned shell's pipe wiring.
 //! * [`terminal`] — the [`Terminal`] model gluing the grid to the shell.
 //! * [`render`](mod@render) — painting the grid into a `Surface`.
 //!
@@ -78,12 +81,14 @@ pub mod grid;
 pub mod parser;
 pub mod render;
 pub mod shell;
+pub mod spawned;
 pub mod terminal;
 
 pub use grid::Grid;
 pub use parser::Parser;
 pub use render::render;
 pub use shell::ShellSource;
+pub use spawned::{shell_wires, PipeShellSource};
 pub use terminal::Terminal;
 // The cell and rendition vocabulary the emulator consumes is `lib/vt`'s, not a
 // second definition; re-export it so callers name one type.
@@ -98,6 +103,23 @@ pub use rustos_vt::{Attributes, Cell, Color};
 /// capability database keyed by this value is the `lib/termcap` stage of
 /// `plans/CURSES.md`.
 pub const TERM: &str = "xterm-256color";
+
+/// Columns of the terminal's fixed screen grid — the conventional 80×24
+/// text screen.
+pub const COLS: u16 = 80;
+
+/// Rows of the terminal's fixed screen grid.
+pub const ROWS: u16 = 24;
+
+/// Width in pixels of the terminal's window: the grid rendered with the
+/// shared monospace face, one advance per column. Derived from the same
+/// metrics the renderer draws with, so the window and the paint can never
+/// disagree; the QEMU vertical's runner imports it for its click
+/// coordinates exactly as it imports the file browser's.
+pub const WIN_WIDTH: u32 = rustos_font::BitmapFont::inconsolata().advance() * COLS as u32;
+
+/// Height in pixels of the terminal's window: one line height per row.
+pub const WIN_HEIGHT: u32 = rustos_font::BitmapFont::inconsolata().line_height() * ROWS as u32;
 
 #[cfg(test)]
 mod tests;

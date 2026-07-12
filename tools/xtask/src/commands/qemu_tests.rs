@@ -275,6 +275,27 @@ const AUTOLOAD_APPEARANCE_DUMP_OCCURRENCES: u32 =
 /// re-themed frame was presented.
 const AUTOLOAD_TOGGLE_CLICK_OCCURRENCES: u32 = 3;
 
+/// How many window-endpoint `CallReplied` occurrences gate the
+/// terminal-window click (`plans/APPWIN.md` AW4): the terminal bundle's
+/// create and first present — the shared contract, so the click can
+/// never race the window's existence.
+const AUTOLOAD_TERMINAL_WINDOW_REPLY_OCCURRENCES: u32 =
+    rustos_test_autoload_input_qemu_aarch64::TERMINAL_WINDOW_REPLIES;
+
+/// How many [`AUTOLOAD_WINDOW_EVENT_MARKER`] occurrences gate the typed
+/// shell command: the terminal-window click's own deliveries (the files
+/// window's unfocus, the terminal's focus, and the press), after which
+/// the terminal is provably the focused key recipient — the shared
+/// contract.
+const AUTOLOAD_TERMINAL_TYPE_OCCURRENCES: u32 =
+    rustos_test_autoload_input_qemu_aarch64::TERMINAL_TYPE_DELIVERIES;
+
+/// The shell command the autoload vertical types into the focused
+/// terminal at the seat keyboard — the shared contract (`true` plus
+/// Enter): the shell resolving and spawning it is the guest's AW4
+/// round-trip witness.
+const AUTOLOAD_TERMINAL_COMMAND: &str = rustos_test_autoload_input_qemu_aarch64::TERMINAL_COMMAND;
+
 /// Serial marker after which the autoload vertical types the login +
 /// graphical-choice dialogue: the serial rendering of the kernel's
 /// `UsersDbLoaded` audit witness (`EventId` 4040), emitted the moment the
@@ -3511,18 +3532,30 @@ const TESTS: &[QemuTest] = &[
     // desktop), the reopen-menu + appearance-toggle + window clicks follow,
     // and delivery 4 (a handshake click processed in a wake strictly after
     // the re-themed frame presented) keys the third screendump (the
-    // light-theme desktop, window still composited). A final handshake
-    // press — held until that dump verified — produces delivery 5, the
-    // guest PASS gate's threshold, so the guest can never exit under a
-    // pending dump and a run that never serves the app window cannot pass;
-    // the runner fails any run whose script or dumps did not complete.
+    // light-theme desktop, window still composited).
+    //
+    // AW4 then takes the run into the windowed terminal: held behind the
+    // verified light dump, the script reopens the menu and clicks its
+    // "Terminal" row (spawning the terminal bundle, which spawns the
+    // user's shell over pipes and serves its window at the second cascade
+    // slot); the window endpoint's fourth reply (the terminal's create +
+    // first present) gates the terminal-window click (deliveries 5–7:
+    // the files window's unfocus, the terminal's focus, and the press),
+    // after which the runner types `true` + Enter at the seat keyboard.
+    // The guest PASS gate latches a kernel `ProcessSpawned` record
+    // observed once the delivery count has reached the Enter press — the
+    // only spawn possible at that point is the shell executing the typed
+    // command, so PASS proves the whole keyboard → session → terminal →
+    // pipe → shell → spawn round trip and can neither fire under a
+    // pending dump nor without the served windows; the runner fails any
+    // run whose script or dumps did not complete.
     // Every click coordinate is computed from the production shell's own
     // layout code (`autoload_desktop_pointer_script`), and the pin move
     // also delivers the `kind=pointer` witness, so the pointer decode path
     // stays separately proven. A 240-second budget covers the boot +
     // bounded PBKDF2 + autoload + driver bring-up + the ~4 s passphrase +
     // ~1 s login typing + session bring-up + the paced click script +
-    // app spawn on QEMU TCG.
+    // both app spawns + the typed command on QEMU TCG.
     QemuTest {
         package: "rustos-test-autoload-input-qemu-aarch64",
         binary: "rustos-test-autoload-input-qemu-aarch64",
@@ -3541,6 +3574,15 @@ const TESTS: &[QemuTest] = &[
                 UNLOCK_PASSPHRASE_LINE,
             ),
             (AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            // The AW4 terminal stage: once the terminal-window click's
+            // deliveries prove the terminal focused, type the shell
+            // command — its spawn is the guest PASS gate's round-trip
+            // witness.
+            (
+                AUTOLOAD_WINDOW_EVENT_MARKER,
+                AUTOLOAD_TERMINAL_TYPE_OCCURRENCES,
+                AUTOLOAD_TERMINAL_COMMAND,
+            ),
         ],
         screendumps: &[
             ScreendumpPlan {
@@ -4382,18 +4424,21 @@ fn assert_files_window_screendump(
     Ok(())
 }
 
-/// Build the AW3 desktop click script: pin the pointer to the top-left
-/// corner, click the taskbar's start button (the menu opens), click the
-/// menu's "Files" row (spawning the file manager), click the served
-/// window's body (delivering `Focus` + `Pressed` app-ward — the
+/// Build the AW3+AW4 desktop click script: pin the pointer to the
+/// top-left corner, click the taskbar's start button (the menu opens),
+/// click the menu's "Files" row (spawning the file manager), click the
+/// served window's body (delivering `Focus` + `Pressed` app-ward — the
 /// kernel-attested `MessageDelivered` witnesses the second screendump
-/// keys on), reopen the menu and click the appearance-toggle row, then
-/// click the window once more (the third delivery, keying the light-theme
-/// screendump). Every coordinate is computed by reconstructing the
-/// production desktop shell — the same `TaskbarConfig`, launcher
-/// registration, and layout code the guest session runs over the shared
-/// ramfb console geometry — so the script and the rendered desktop cannot
-/// drift.
+/// keys on), reopen the menu and click the appearance-toggle row, click
+/// the window once more (the third delivery), and land the handshake
+/// click keying the light-theme screendump; then the AW4 terminal stage:
+/// reopen the menu, click its "Terminal" row (spawning the terminal
+/// bundle), and click the terminal's served window at the second cascade
+/// slot — the deliveries the typed shell command keys on. Every
+/// coordinate is computed by reconstructing the production desktop shell
+/// — the same `TaskbarConfig`, launcher registration, and layout code the
+/// guest session runs over the shared ramfb console geometry — so the
+/// script and the rendered desktop cannot drift.
 ///
 /// Step gating: the guest processes injected events strictly in device
 /// order and the menu model updates synchronously on the press, so the
@@ -4402,13 +4447,20 @@ fn assert_files_window_screendump(
 /// the first dump verified). The in-window click waits for the reserved
 /// window endpoint's first *reply* (the create round-trip completed, so
 /// the window exists in the compositor and was presented by that wake).
-/// The reopen/toggle/final-click steps key on the first click's
-/// deliveries (and are additionally held while the second dump is
-/// pending), so each dump captures exactly the staged frame.
+/// The reopen/toggle/handshake steps key on the first click's deliveries
+/// (and are additionally held while the second dump is pending), the
+/// terminal-stage menu steps on the handshake's delivery (held behind the
+/// pending light dump), and the terminal-window click on the endpoint's
+/// fourth reply (the terminal's create + first present) — so each dump
+/// captures exactly the staged frame and every stage is provably
+/// established before its step fires.
 #[allow(clippy::too_many_lines)] // One linear, ordered click-through script; splitting it would obscure the staging.
 fn autoload_desktop_pointer_script() -> Result<Vec<rustos_qemu::PointerStep>, String> {
-    use rustos_desktop_session::windows::CASCADE_ORIGIN;
-    use rustos_desktop_session::{DesktopShell, APPEARANCE_LABEL, FILES_LABEL, FILES_LAUNCHER};
+    use rustos_desktop_session::windows::cascade_origin_for;
+    use rustos_desktop_session::{
+        DesktopShell, APPEARANCE_LABEL, FILES_LABEL, FILES_LAUNCHER, TERMINAL_LABEL,
+        TERMINAL_LAUNCHER,
+    };
     use rustos_geometry::{Point, Rect, Scale};
     use rustos_qemu::{MouseButton, PointerAction, PointerStep};
     use rustos_taskbar::TaskbarConfig;
@@ -4416,11 +4468,19 @@ fn autoload_desktop_pointer_script() -> Result<Vec<rustos_qemu::PointerStep>, St
     let width = rustos_fwcfg::RAMFB_CONSOLE_WIDTH_PX;
     let height = rustos_fwcfg::RAMFB_CONSOLE_HEIGHT_PX;
     let mut shell = DesktopShell::new(TaskbarConfig::bottom_bar(width, height), APPEARANCE_LABEL);
+    // Registered in the same order the production session registers them
+    // (`userland/gui/session/src/run.rs`), so the reconstructed menu rows
+    // sit exactly where the guest draws them.
     let _ = shell
         .session_mut()
         .taskbar_mut()
         .start_menu_mut()
         .add_launcher(FILES_LAUNCHER, FILES_LABEL);
+    let _ = shell
+        .session_mut()
+        .taskbar_mut()
+        .start_menu_mut()
+        .add_launcher(TERMINAL_LAUNCHER, TERMINAL_LABEL);
 
     let centre = |rect: Rect, what: &str| -> Result<Point, String> {
         if rect.is_empty() {
@@ -4449,18 +4509,31 @@ fn autoload_desktop_pointer_script() -> Result<Vec<rustos_qemu::PointerStep>, St
         centre(rect, label)
     };
     let files_row = row(FILES_LABEL)?;
+    let terminal_row = row(TERMINAL_LABEL)?;
     let toggle_row = row(APPEARANCE_LABEL)?;
-    // The centre of the served files window: the session cascades the
-    // first window from `CASCADE_ORIGIN`, sized by the app's own
-    // constants — the same values the dump assertion measures.
+    // The centre of each served window: the session cascades them in
+    // open order through the one shared placement rule, each sized by
+    // its app's own constants — the same values the dump assertion
+    // measures.
+    let files_origin = cascade_origin_for(0);
     let window = centre(
         Rect::new(
-            CASCADE_ORIGIN,
-            CASCADE_ORIGIN,
+            files_origin.x,
+            files_origin.y,
             rustos_files::WIN_WIDTH,
             rustos_files::WIN_HEIGHT,
         ),
         "files window",
+    )?;
+    let terminal_origin = cascade_origin_for(1);
+    let terminal_window = centre(
+        Rect::new(
+            terminal_origin.x,
+            terminal_origin.y,
+            rustos_terminal::WIN_WIDTH,
+            rustos_terminal::WIN_HEIGHT,
+        ),
+        "terminal window",
     )?;
 
     // The reserved window endpoint's first reply on serial: the create
@@ -4571,7 +4644,7 @@ fn autoload_desktop_pointer_script() -> Result<Vec<rustos_qemu::PointerStep>, St
             AUTOLOAD_WINDOW_DUMP_OCCURRENCES,
             release,
         ),
-        // The first handshake click, keyed on the post-toggle click's own
+        // The handshake click, keyed on the post-toggle click's own
         // delivery: it is injected only after that delivery appeared on
         // serial, so the guest processes it in a later wake — strictly
         // after the light-theme frame was presented — and its delivery
@@ -4586,17 +4659,60 @@ fn autoload_desktop_pointer_script() -> Result<Vec<rustos_qemu::PointerStep>, St
             AUTOLOAD_TOGGLE_CLICK_OCCURRENCES,
             release,
         ),
-        // The second handshake, keyed on the first's delivery and held
-        // behind the pending light-theme dump: it fires only once the
-        // host has read that dump back, and its own delivery is the
-        // guest PASS gate's threshold — so the guest can never exit
-        // under a pending screendump. A press only: the guest exits the
-        // instant the delivery lands, so a trailing release could never
-        // be sent (and needs no cleanup in a guest that is gone).
+        // --- The AW4 terminal stage. Keyed on the handshake click's own
+        // delivery (the light dump's key) and additionally held while
+        // that dump is pending — the runner holds pointer steps behind
+        // unverified dumps — so the terminal never enters the frame the
+        // light dump asserts, and the guest (whose PASS needs the typed
+        // command's spawn, far below) can never exit under a pending
+        // dump. Reopen the menu and click its "Terminal" row, spawning
+        // the terminal bundle from the on-disk store.
+        step(
+            AUTOLOAD_WINDOW_EVENT_MARKER,
+            AUTOLOAD_APPEARANCE_DUMP_OCCURRENCES,
+            move_by(window, start),
+        ),
         step(
             AUTOLOAD_WINDOW_EVENT_MARKER,
             AUTOLOAD_APPEARANCE_DUMP_OCCURRENCES,
             press,
+        ),
+        step(
+            AUTOLOAD_WINDOW_EVENT_MARKER,
+            AUTOLOAD_APPEARANCE_DUMP_OCCURRENCES,
+            release,
+        ),
+        step(
+            AUTOLOAD_WINDOW_EVENT_MARKER,
+            AUTOLOAD_APPEARANCE_DUMP_OCCURRENCES,
+            move_by(start, terminal_row),
+        ),
+        step(
+            AUTOLOAD_WINDOW_EVENT_MARKER,
+            AUTOLOAD_APPEARANCE_DUMP_OCCURRENCES,
+            press,
+        ),
+        step(
+            AUTOLOAD_WINDOW_EVENT_MARKER,
+            AUTOLOAD_APPEARANCE_DUMP_OCCURRENCES,
+            release,
+        ),
+        // The terminal's window create and first present have been
+        // replied on the reserved window endpoint: click its body at the
+        // second cascade slot — the files window's unfocus, the
+        // terminal's focus, and the press are the deliveries the typed
+        // shell command keys on (the guest PASS gate's round-trip
+        // witness follows from the spawn the command causes).
+        step(
+            &created,
+            AUTOLOAD_TERMINAL_WINDOW_REPLY_OCCURRENCES,
+            move_by(terminal_row, terminal_window),
+        ),
+        step(&created, AUTOLOAD_TERMINAL_WINDOW_REPLY_OCCURRENCES, press),
+        step(
+            &created,
+            AUTOLOAD_TERMINAL_WINDOW_REPLY_OCCURRENCES,
+            release,
         ),
     ])
 }

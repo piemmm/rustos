@@ -1854,9 +1854,13 @@ dependencies = [
  "rustos-abi",
  "rustos-font",
  "rustos-geometry",
+ "rustos-keymap",
  "rustos-raster",
+ "rustos-rt",
  "rustos-theme",
+ "rustos-users",
  "rustos-vt",
+ "rustos-window",
 ]
 
 [[package]]
@@ -3746,6 +3750,7 @@ dependencies = [
  "rustos-qemu",
  "rustos-syshelp",
  "rustos-taskbar",
+ "rustos-terminal",
  "rustos-test-autoload-input-qemu-aarch64",
  "rustos-test-autoload-root-image",
  "rustos-test-encrypted-root-image",

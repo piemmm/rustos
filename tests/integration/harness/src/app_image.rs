@@ -584,6 +584,7 @@ mod tests {
                 "sysinfo",
                 "sysinfod",
                 "tee",
+                "terminal",
                 "top",
                 "true",
                 "unmount",
