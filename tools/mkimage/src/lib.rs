@@ -27,12 +27,12 @@
 //!   ([`fatboot::ROOT_UNLOCK_NAME`]) so the bootstrap can re-derive the key
 //!   before mounting. The passphrase itself is never stored in the image.
 //!
-//! Two [`ImageProfile`]s exist, and both seed the canonical default
-//! system/service account set (`rustos_users::default_system_accounts` /
-//! `default_groups`, `plans/USERS.md`): the locked, non-authenticating
-//! `system` record naming uid 0 plus one no-login account per system
-//! service. **Installer** is the shippable form: it carries *only* those
-//! no-login defaults (the installer authors the first human user on first
+//! Two [`ImageProfile`]s exist, and both seed **human**-account security
+//! databases only: the system/service identity is compiled into the
+//! kernel (`rustos_users::system_accounts` / `system_groups`,
+//! `plans/USERS.md`), never written to disk. **Installer** is the
+//! shippable form: it seeds an *empty* users database (the installer
+//! authors the first human user on first
 //! boot), and its encrypted root is unlocked by a **blank** passphrase
 //! ([`INSTALLER_PASSPHRASE`]) the bootstrap auto-enters with no prompt, so
 //! a fresh install boots straight into the installer. **Debug** is the
@@ -715,10 +715,10 @@ mod tests {
         let rustfs_root = rfs.root();
         rfs.lookup(rustfs_root, b"System").expect("/System exists");
 
-        // An installer image seeds the default no-login system/service
-        // databases (the first human user is a first-boot job; the
-        // installer-profile content is pinned by
-        // `an_installer_image_seeds_only_the_no_login_default_accounts`).
+        // An installer image seeds the human-account security databases
+        // (an empty users database — the first human user is a first-boot
+        // job; the installer-profile content is pinned by
+        // `an_installer_image_seeds_an_empty_users_database`).
         let system = rfs.lookup(rustfs_root, b"System").expect("/System");
         let security = rfs.lookup(system, b"Security").expect("Security");
         rfs.lookup(security, rootfs::USERS_DB_NAME.as_bytes())
@@ -942,7 +942,7 @@ mod tests {
             .authenticate(DEBUG_USERNAME, DEBUG_PASSWORD.as_bytes())
             .expect("root/root authenticates");
         // The debug administrator is an ordinary user-band principal: uid 0
-        // belongs to the no-login `system` record below.
+        // is the kernel's compiled-in `system` identity, never this record.
         assert_eq!(record.uid(), DEBUG_UID);
         assert_eq!(record.shell(), Some("/System/Apps/elsh.app/Run"));
         // The seeded grant is exactly the shared administrator ceiling
@@ -954,26 +954,16 @@ mod tests {
         assert!(record.capabilities().contains(CapabilityId::FS_ACCESS));
         assert!(db.authenticate(DEBUG_USERNAME, b"wrong").is_err());
 
-        // The canonical default set ships beneath the appended debug
-        // account: `system` names uid 0 and no default record can log in.
-        let defaults = rustos_users::default_system_accounts().expect("valid defaults");
-        assert_eq!(db.records().len(), defaults.len() + 1);
-        let system = db
-            .lookup(rustos_users::SYSTEM_USERNAME)
-            .expect("the system record is seeded");
-        assert_eq!(system.uid(), rustos_users::SYSTEM_UID);
-        assert_eq!(system.state(), AccountState::NoLogin);
-        for default in &defaults {
-            let seeded = db
-                .lookup(default.username())
-                .expect("every default account is seeded");
-            assert_eq!(seeded.state(), AccountState::NoLogin);
-            assert!(db.authenticate(default.username(), b"").is_err());
-        }
+        // The debug administrator is the only on-disk record: the
+        // system/service identity is compiled into the kernel and the
+        // kernel's identity merge refuses an on-disk `system` record, so
+        // none is seeded beside it.
+        assert_eq!(db.records().len(), 1);
+        assert!(db.lookup(rustos_users::SYSTEM_USERNAME).is_none());
     }
 
     #[test]
-    fn an_installer_image_seeds_only_the_no_login_default_accounts() {
+    fn an_installer_image_seeds_an_empty_users_database() {
         let built = build_rpi_image(
             &test_kernel_elf(),
             &test_firmware(),
@@ -1007,19 +997,17 @@ mod tests {
         let text = core::str::from_utf8(&buf[..read]).expect("valid UTF-8");
         let db = UsersDb::parse(text).expect("seeded database parses");
 
-        // Exactly the canonical defaults — no debug account, and nothing
-        // that can start a session (the installer authors the first human
-        // user on first boot).
-        let defaults = rustos_users::default_system_accounts().expect("valid defaults");
-        assert_eq!(db.records().len(), defaults.len());
+        // An empty database — no debug account, no on-disk system records
+        // (the compiled-in kernel identity is the only system principal
+        // set), and therefore nothing that can start a session; the
+        // installer authors the first human user on first boot.
+        assert!(db.records().is_empty());
         assert!(db.lookup(DEBUG_USERNAME).is_none());
-        for record in db.records() {
-            assert_eq!(record.state(), AccountState::NoLogin);
-            assert!(db.authenticate(record.username(), b"").is_err());
-        }
+        assert!(db.lookup(rustos_users::SYSTEM_USERNAME).is_none());
 
-        // The matching group registry carries the defaults and no debug
-        // group, and every seeded primary gid resolves against it.
+        // The matching group registry carries only the well-known
+        // removable-storage group: no debug group, and the reserved
+        // system/services groups stay compiled into the kernel.
         let groups = rfs
             .lookup(security, rootfs::GROUPS_DB_NAME.as_bytes())
             .expect("Groups registry exists");
@@ -1030,9 +1018,12 @@ mod tests {
         let text = core::str::from_utf8(&buf[..read]).expect("valid UTF-8");
         let registry = rustos_users::GroupsDb::parse(text).expect("seeded registry parses");
         assert!(registry.lookup(DEBUG_GROUP).is_none());
-        for record in db.records() {
-            assert!(registry.lookup_gid(record.primary_gid()).is_some());
-        }
+        assert_eq!(
+            registry.lookup(STORAGE_GROUP).map(GroupRecord::gid),
+            Some(STORAGE_GID)
+        );
+        assert!(registry.lookup(rustos_users::SYSTEM_GROUP).is_none());
+        assert!(registry.lookup(rustos_users::SERVICES_GROUP).is_none());
     }
 
     #[test]

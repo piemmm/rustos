@@ -4668,7 +4668,7 @@ format-conformance defect the evidence window exposed). See
 
 ## NETWORK — full IPv4 + IPv6 networking (`plans/NETWORK.md`)
 
-**Status: planned (N1–N8).** The complete dual-stack user-space network
+**Status: planned (N1–N9).** The complete dual-stack user-space network
 stack above the link-layer driver seam: one pure, host-testable,
 fuzzed protocol engine (`lib/net` — Ethernet, ARP/ND over one neighbour
 contract, IPv4 + IPv6 as peers, ICMP/ICMPv6, IGMP/MLD multicast
@@ -4682,9 +4682,16 @@ NIC seam (shared-memory frame rings + a closed negotiated offload
 vocabulary `virtio_net` serves first; the software path stays the
 conformance oracle). DoS resistance is designed in: SYN cookies, RFC 5961
 challenge ACKs, CSPRNG ISNs/ports/IDs, budgeted fail-closed reassembly
-and neighbour caches, per-principal §24.3 accounting. The interim
-`userland/net/icmp` responder is subsumed and deleted in N3 (§2.14). See
-`plans/NETWORK.md` for the binding design and per-increment guarantees.
+and neighbour caches, per-principal §24.3 accounting. Interfaces are
+observable through `info:net`/`state:net`/`stats:net` sysinfo queries and
+configured declaratively: the fail-closed
+`/System/Settings/Network/network.conf` store (`lib/netconfig`, a
+`lib/sysconfig`-shaped sibling engine) plus stack-wide `configure net.*`
+keys, with interface bonding (`active-backup` failover + flow-hashed
+`balance`) as a stack-composed virtual interface over unmodified NIC
+drivers (N9). The interim `userland/net/icmp` responder is subsumed and
+deleted in N3 (§2.14). See `plans/NETWORK.md` for the binding design and
+per-increment guarantees.
 
 ---
 

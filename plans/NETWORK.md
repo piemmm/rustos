@@ -7,10 +7,11 @@ hardware offloads — all built as a microkernel-style user-space stack above
 the existing link-layer driver seam. It is **binding under `AGENTS.md`** —
 read `AGENTS.md` (especially §2, §4, §5, §17, §19, §20, §24, §26.4),
 `PLAN.md`, `plans/fixdrivers.md` (driver layering), `plans/DEVICES.md`
-(hotplug), and `plans/SYSLOG.md` (audit events) first; every rule in all of
-them applies here without exception. `abi-v1` is **not frozen** (PLAN.md
-Stage 1): the ABI types this plan adds and the in-place evolutions it makes
-are ordinary pre-release changes (§2.13).
+(hotplug), `plans/ALIAS.md` (the resource-reference and `info:`/`state:`/
+`stats:` vocabulary §5 builds on), and `plans/SYSLOG.md` (audit events)
+first; every rule in all of them applies here without exception. `abi-v1`
+is **not frozen** (PLAN.md Stage 1): the ABI types this plan adds and the
+in-place evolutions it makes are ordinary pre-release changes (§2.13).
 
 ## 0. Scope and decisions (binding for this plan)
 
@@ -72,6 +73,15 @@ are ordinary pre-release changes (§2.13).
   "checksum valid" skips the software fold, but every semantic
   validation (lengths, addresses, state) still runs. No offload is ever
   load-bearing for security.
+- **Configuration is declarative, observability is typed.** Every managed
+  interface — identity binding, addressing, MTU, bonding/failover — is
+  described by one fail-closed configuration store
+  (`/System/Settings/Network/network.conf`, §6); stack-wide knobs are
+  `configure net.*` keys in the `lib/sysconfig` registry (§6.2); and
+  every interface's facts, live state, and counters are served through
+  the System Information API under the `info:net`/`state:net`/
+  `stats:net` resource references (§5). No pseudo-files, no imperative
+  boot scripts, no second config parser.
 - **Event-driven throughout (§2.23).** The stack parks on its IPC/IRQ
   wait sources and is woken by frame arrival, socket calls, and one-shot
   timers (retransmit, delayed ACK, reassembly expiry, neighbour-cache
@@ -276,7 +286,9 @@ planned, `[~]` in progress, `[x]` done.
 - `userland/net/netstack` process: interface/address/route state, the
   event loop (wait set over NIC rings + timer), SLAAC + static v4/v6
   address configuration, the timer wheel, `CAP_NET_ADMIN` admin surface
-  (typed IPC: interface list/addr add/route add/counters).
+  (typed IPC: interface list/addr add/route add/counters), and the
+  first `info:net`/`state:net` sysinfo queries (§5: interface facts,
+  link/address state) served through new `SysinfoQueryId` members.
 - The driver seam evolves in place: `Net` becomes the ring-transport +
   `DeviceFacts` contract; `virtio_net` serves it (still no offloads);
   the kernel provides only endpoint plumbing + `irq_wait` wake.
@@ -349,7 +361,158 @@ planned, `[~]` in progress, `[x]` done.
   posture page `docs/src/security/network.md` (threat model ↔ defence
   table, the §19.4 event-id registry for network events).
 
-## 5. Why this survives senior review
+### N9 — interface configuration, bonding, failover `[ ]`
+- `lib/netconfig` (grammar, closed registry, fail-closed parse,
+  canonical render; §6 README + stability tier; fuzz
+  `fuzz_netconfig`); `/System/Settings/Network/network.conf` laid out
+  by `tools/mkimage`/installer; `configure` gains the `net.*`
+  stack-wide keys in `lib/sysconfig`'s registry (§6.2).
+- `netstack`: config load/reload/apply (atomic per interface, audited),
+  bond interface kind with `active-backup` + `balance` (§6.3), member
+  health monitor, gratuitous ARP/NA on failover.
+- `info:`/`state:`/`stats:` members for bonds and the remaining §5
+  counter/rate queries; `SysinfoQueryId` additions; `lib/procinfo`
+  resolver mapping.
+- Tests: parser round-trip/adversarial corpora, bond failover QEMU
+  vertical (kill a member mid-TCP-transfer, assert the flow survives
+  within the monitor budget), config-reject-leaves-state tests,
+  audited-refusal tests.
+- Docs: `docs/src/userland/networking.md` configuration chapter;
+  `userland/apps/configure` Help/ + README for `net.*`.
+
+## 5. Observability: `info:` / `state:` / `stats:` for every interface
+
+Every network interface `netstack` manages is a first-class resource,
+addressable through the closed `lib/resref` namespaces (`net:` is already
+registered) and observable through the System Information API (§16.6) —
+never a `/proc` shape, never text scraping. The selector vocabulary follows
+`plans/ALIAS.md` §6 exactly; this plan adds the network-specific members:
+
+- **`net:<iface>`** — the interface itself (the device reference the admin
+  surface and `configure` name). Interface names are stable, admin-chosen
+  aliases (`wan`, `lan0`), never discovery-order names (ALIAS §6 rule).
+- **`info:net/<iface>/…`** — static facts: `driver`, `mac`, `mtu`,
+  `capabilities` (the negotiated offload set), `kind`
+  (`ethernet`/`bond`/`loopback`/…), and for a bond `members`. MAC
+  addresses are sensitive (ALIAS §6.2): `info:net` queries sit behind
+  `CAP_SYSINFO_HW`-class policy review, not open by default.
+- **`state:net/<iface>/…`** — current mutable state: `link` (up/down,
+  negotiated speed/duplex), `address` (the bound v4/v6 address set +
+  SLAAC state), `routes`, and for a bond `active-member` and per-member
+  health. `state:` reads are capability-checked; state **changes** go
+  through the typed `CAP_NET_ADMIN` admin IPC only (ALIAS §6.4 — never a
+  writable pseudo-file).
+- **`stats:net/<iface>/…`** — live metrics with the ALIAS §6.3 metadata
+  (kind/unit/source/time/window/reset_behavior): `rx.bytes`, `rx.packets`,
+  `tx.bytes`, `tx.packets`, `rx.errors`, `tx.errors`, `rx.dropped`,
+  `tx.dropped`, and windowed rates (`rx.pps?window=1s`, `tx.bps?…`);
+  plus the stack-wide defence counters (SYN-cookie activations,
+  reassembly evictions, rate-limited ICMP suppressions) under
+  `stats:net/stack/…` so a DoS in progress is *visible*.
+
+Mechanically: `netstack` answers typed `sysinfo` queries (new
+`SysinfoQueryId` members added under the §16.6 ABI discipline, versioned +
+hashed); `lib/procinfo`'s userspace `info:`/`stats:` resolver maps the
+parsed `ResourceRef` onto those query ids exactly as it does for the
+existing namespaces (§2.2 — one resolver, no second path). Unprivileged
+callers may read their own sockets' counters; interface-wide and
+stack-wide queries declare `CAP_SYSINFO_GLOBAL` (and `CAP_SYSINFO_HW`
+where hardware identity is exposed). Landed in N3 (interface facts/state,
+with the admin surface), completed in N8 (counters, rates, `ss`-class
+tooling reads the same queries), and extended by N9 for bond members
+(§6.3).
+
+## 6. Configuration: `/System/Settings/Network`, `configure net.*`, bonding and failover
+
+Interface configuration is deliberately boring: one declarative,
+fail-closed configuration store plus one `sysctl`-shaped command surface.
+No hidden state, no per-driver config files, no imperative boot scripts.
+
+### 6.1 The configuration store — `/System/Settings/Network/network.conf`
+
+- One document, engine-parsed like `system.conf`: the grammar, closed key
+  registry, typed value sets, bounded fail-closed parser, and canonical
+  render live in **`lib/netconfig`** (a `lib/sysconfig`-shaped sibling
+  engine, `no_std` + `alloc`, host-unit-tested), shared by the writer
+  (`configure`, the installer) and the one reader (`netstack` at start
+  and on typed reload) so producer and consumer can never diverge (§2.2).
+- The file fully describes every managed interface. Key shape is
+  `<iface>.<key>` under a closed per-interface registry:
+  - identity/binding: `<iface>.match.mac` / `<iface>.match.node` (bind an
+    alias to hardware by stable identity, never discovery order),
+    `<iface>.kind` (`ethernet` | `bond` | `loopback`; future link kinds
+    extend the closed set in place, §2.13);
+  - addressing: `<iface>.ipv4.method` (`static` | `disabled`),
+    `<iface>.ipv4.address`/`gateway`, `<iface>.ipv6.method` (`slaac` |
+    `static` | `disabled`), `<iface>.ipv6.address`/`gateway`,
+    `<iface>.mtu`;
+  - bonding (see 6.3): `<iface>.bond.members`, `<iface>.bond.mode`
+    (`active-backup` | `balance`), `<iface>.bond.monitor-interval`,
+    `<iface>.bond.primary`.
+- Parse failures reject the whole document with a typed, line-numbered
+  error and leave the running configuration untouched (fail closed,
+  §5.4); a malformed file never yields a half-configured stack. An
+  absent file means "no managed interfaces beyond loopback", not an
+  error.
+- Writes go through the secured VFS under the caller's kernel-attested
+  identity; the per-inode policy on `/System/Settings` decides who may
+  write (the `configure` precedent — no new capability for the file
+  itself). Applying it to the live stack is the `CAP_NET_ADMIN` admin
+  IPC: `netstack` re-reads, diffs, and applies atomically per interface,
+  auditing each change (§19.4).
+
+### 6.2 `configure net.*` — stack-wide knobs
+
+Stack-wide IP configuration joins the existing `configure` command's
+closed key registry (`lib/sysconfig`, `system.conf`) under a `net.*`
+tree, exactly like `os.*`:
+
+- `net.ipv4.enabled` (`true`|`false`), `net.ipv6.enabled`
+  (`true`|`false`) — a disabled family binds no addresses, answers no
+  packets, and refuses family-specific socket creation with a typed
+  error (fail closed, not silent drop).
+- `net.ipv6.privacy` (`true`|`false`) — RFC 8981 temporary addresses.
+- `net.tcp.syncookies` (`auto`|`always`) — `auto` (bounded queue,
+  cookies on overflow) is the default; there is deliberately **no**
+  `off`: an unbounded or undefended SYN queue is a §2.17 regression,
+  not a configuration.
+- Per-interface settings live in `network.conf` (6.1), never in
+  `system.conf`; `configure net.<key> <value>` edits the stack-wide
+  registry, and `configure` grows no interface sub-grammar — interface
+  changes are edits to `network.conf` plus the typed admin reload.
+  Both stores surface as `state:net/…` reads (§5).
+
+### 6.3 Bonding and failover
+
+Link aggregation is a stack construct, not a driver feature: a **bond**
+is a virtual interface `netstack` composes over two or more member NICs,
+so any driver serving the frame-ring seam participates with zero driver
+changes (§17.4 — the seam is the contract).
+
+- A bond owns the addresses, neighbour caches, and routes; members carry
+  no addresses of their own and refuse direct address assignment while
+  enrolled (typed error). Sockets and the routing table see one
+  interface; member fan-out is internal to the interface table.
+- **Modes (closed set):** `active-backup` — one transmitting member,
+  ordered failover to the next healthy member (the failover-interface
+  requirement is this mode with a declared `primary`); `balance` —
+  flow-hashed transmit spread (one flow stays on one member, so TCP
+  never reorders across links). LACP/802.3ad is a future in-place
+  extension of the mode set, not speculated here (§2.4).
+- **Health and failover:** member health is link-state driven (the
+  `DeviceFacts` link report over the ring seam) plus the configured
+  `monitor-interval` one-shot probe timer (§2.23 — timer-armed, never
+  polled). Failover re-targets transmit within one monitor interval,
+  emits gratuitous ARP / unsolicited NA so peers re-learn the path, and
+  is audited (§19.4). Failback to a recovered `primary` is deliberate
+  (configured), never flapping.
+- Bond state is fully observable: `info:net/<bond>/members`,
+  `state:net/<bond>/active-member`, per-member `state:`/`stats:` remain
+  addressable (§5), so a dead member is a visible, audited fact.
+- Landed as **N9** (§4) — after TCP and offloads, because failover
+  correctness is asserted *through* live TCP flows in the vertical.
+
+## 7. Why this survives senior review
 
 - **One engine, replayable and fuzzed**, exercised identically by unit
   tests, property tests, fuzzers, and the live service — no "tested
@@ -368,7 +531,7 @@ planned, `[~]` in progress, `[x]` done.
   not wrapped; the `Net` trait is evolved in place, not shimmed
   (§2.13, §2.14).
 
-## 6. Tests, docs, and gate (binding)
+## 8. Tests, docs, and gate (binding)
 
 - Every increment lands its unit/property/fuzz/QEMU tests in the same
   change (§7); every fuzz harness registers with `cargo xtask fuzz`;
@@ -380,7 +543,7 @@ planned, `[~]` in progress, `[x]` done.
   `cargo xtask ci` (once), `cargo xtask fuzz --secs 5`, and
   `tools/ci/soak.sh both --secs 20`, quoted in the completion report.
 
-## 7. What this plan explicitly does *not* do
+## 9. What this plan explicitly does *not* do
 
 - No DNS resolver, DHCP client/server, NTP, or HTTP library — future
   consumers of the socket ABI, each its own plan.
