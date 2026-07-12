@@ -3,9 +3,10 @@
 
 use rustos_abi::hwtree::{HwNode, HwTreeHeader};
 use rustos_abi::sysinfo::{
-    spec_for, CpuTimeListRequest, CpuTimeRecord, HardwareTreeRequest, MountListRequest,
-    MountRecord, ProcessListRequest, ProcessRecord, ResourceLimitRecord, SeatListRequest,
-    SeatRecord, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord, UserDirectoryRequest,
+    spec_for, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord,
+    HardwareTreeRequest, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
+    ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord,
+    SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord, UserDirectoryRequest,
 };
 use rustos_abi::{Errno, LimitKind};
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
@@ -162,6 +163,14 @@ fn dispatch(
         resource_limits(source, caller, response)
     } else if query == SysinfoQueryId::USER_DIRECTORY {
         user_directory(source, caller, payload, response)
+    } else if query == SysinfoQueryId::MEMORY_PRESSURE {
+        write_bytes(&source.memory_pressure(caller)?.to_le_bytes(), response)
+    } else if query == SysinfoQueryId::RECLAIM_STATS {
+        reclaim_list(source, caller, payload, response)
+    } else if query == SysinfoQueryId::RAMZIP_STATS {
+        write_bytes(&source.ramzip_stats(caller)?.to_le_bytes(), response)
+    } else if query == SysinfoQueryId::CPU_LOAD {
+        cpu_load_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::PROCESS_IDENTITY {
         // The answer is the caller's own kernel-attested origin, which the
         // dispatcher already holds: it is the attested principal, not state a
@@ -279,6 +288,46 @@ fn mount_list(
         request.limit as usize,
         records.len(),
         MountRecord::WIRE_LEN,
+        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
+    )
+}
+
+/// Decode the [`ReclaimListRequest`], apply paging, and pack the selected
+/// [`ReclaimClassRecord`]s into `response`.
+fn reclaim_list(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let request = ReclaimListRequest::from_bytes(payload)?;
+    let records = source.reclaim_records(caller)?;
+    page_records(
+        response,
+        request.offset as usize,
+        request.limit as usize,
+        records.len(),
+        ReclaimClassRecord::WIRE_LEN,
+        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
+    )
+}
+
+/// Decode the [`CpuLoadRequest`], apply paging, and pack the selected
+/// [`CpuLoadRecord`]s into `response`.
+fn cpu_load_list(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let request = CpuLoadRequest::from_bytes(payload)?;
+    let records = source.cpu_load(caller)?;
+    page_records(
+        response,
+        request.offset as usize,
+        request.limit as usize,
+        records.len(),
+        CpuLoadRecord::WIRE_LEN,
         |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
     )
 }
@@ -412,13 +461,14 @@ mod tests {
     use rustos_abi::driver::filesystem::{MountFlags, VolumeStats};
     use rustos_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
     use rustos_abi::sysinfo::{
-        CpuTimeListRequest, CpuTimeRecord, HardwareTreeRequest, KernelMemoryStats, LoadAverage,
-        MountAvailability, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
-        ProcessState, ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId,
-        SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord, UserDirectoryRequest,
-        LOAD_FIXED_SHIFT, MACHINE_ID_LEN, RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED,
-        SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC,
-        SYSINFO_VERSION_CURRENT,
+        CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord, HardwareTreeRequest,
+        KernelMemoryStats, LoadAverage, MemoryPressureStats, MountAvailability, MountListRequest,
+        MountRecord, ProcessListRequest, ProcessRecord, ProcessState, RamzipStats,
+        ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord,
+        SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord,
+        UserDirectoryRequest, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, RECLAIM_CLASS_COUNT,
+        RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED, SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN,
+        SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
     };
     use rustos_abi::time::{Duration64, Time64};
     use rustos_abi::{
@@ -496,6 +546,71 @@ mod tests {
             HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Root),
             HwNode::new(1, 0, HwDeviceClass::Serial),
             HwNode::new(2, 0, HwDeviceClass::Storage),
+        ]
+    }
+
+    /// The pressure snapshot the fixture serves.
+    fn fixture_pressure() -> MemoryPressureStats {
+        MemoryPressureStats {
+            band: 1,
+            reserved: [0u8; 7],
+            total_bytes: 1 << 30,
+            free_bytes: 180 << 20,
+            reserve_bytes: 16 << 20,
+            enter_bytes: [204 << 20, 102 << 20, 64 << 20, 32 << 20],
+            exit_bytes: [256 << 20, 143 << 20, 81 << 20, 51 << 20],
+            band_entries: [0, 2, 1, 0, 0],
+        }
+    }
+
+    /// One reclaim record per class, with figures derived from the class
+    /// id so paging tests can assert exact windows.
+    fn fixture_reclaim() -> alloc::vec::Vec<ReclaimClassRecord> {
+        (0..RECLAIM_CLASS_COUNT)
+            .map(|i| ReclaimClassRecord {
+                class: u8::try_from(i).unwrap(),
+                reserved: [0u8; 7],
+                payload_bytes: (i as u64) * 1000,
+                metadata_bytes: (i as u64) * 10,
+                entries: i as u64,
+                refusals: 0,
+                pressure_shrinks: 1,
+                teardowns: 0,
+                failures: 0,
+            })
+            .collect()
+    }
+
+    /// The `ramzip` snapshot the fixture serves.
+    fn fixture_ramzip() -> RamzipStats {
+        RamzipStats {
+            entries: 4,
+            logical_bytes: 4 * 4096,
+            stored_bytes: 6000,
+            attempts: 9,
+            accepted: 4,
+            fault_ins: 2,
+            ..RamzipStats::default()
+        }
+    }
+
+    /// Two CPUs' load records.
+    fn fixture_cpu_load() -> alloc::vec::Vec<CpuLoadRecord> {
+        alloc::vec![
+            CpuLoadRecord {
+                cpu: 0,
+                reserved: 0,
+                queue_depth: 1,
+                switches: 42,
+                preemptions: 5,
+            },
+            CpuLoadRecord {
+                cpu: 1,
+                reserved: 0,
+                queue_depth: 0,
+                switches: 17,
+                preemptions: 2,
+            },
         ]
     }
 
@@ -628,6 +743,21 @@ mod tests {
                     idle_ns: 900,
                 },
             ])
+        }
+        fn memory_pressure(&self, _caller: &Caller) -> Result<MemoryPressureStats, Errno> {
+            Ok(fixture_pressure())
+        }
+        fn reclaim_records(
+            &self,
+            _caller: &Caller,
+        ) -> Result<alloc::vec::Vec<ReclaimClassRecord>, Errno> {
+            Ok(fixture_reclaim())
+        }
+        fn ramzip_stats(&self, _caller: &Caller) -> Result<RamzipStats, Errno> {
+            Ok(fixture_ramzip())
+        }
+        fn cpu_load(&self, _caller: &Caller) -> Result<alloc::vec::Vec<CpuLoadRecord>, Errno> {
+            Ok(fixture_cpu_load())
         }
         fn seats(&self, _caller: &Caller) -> Result<alloc::vec::Vec<SeatRecord>, Errno> {
             Ok(alloc::vec![SeatRecord {
@@ -1173,6 +1303,163 @@ mod tests {
             flags: 0,
         };
         let req_end = request_bytes(SysinfoQueryId::SEAT_LIST, &slr_end.to_le_bytes());
+        assert_eq!(
+            serve(&source, &caller(&granted), &sink, &req_end, &mut resp),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn memory_pressure_is_gated_audited_and_round_trips() {
+        rustos_log::set_max_level(Level::Trace);
+        let source = FixtureSource::new();
+        let req = request_bytes(SysinfoQueryId::MEMORY_PRESSURE, &[]);
+        let mut resp = [0u8; 256];
+
+        // Denied without `CAP_SYSINFO_KERNEL`; the refusal is logged.
+        let sink = RecordingSink::new();
+        let denied = Caps(&[]);
+        assert_eq!(
+            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Warn, events::QUERY_DENIED)]
+        );
+
+        // Served (and audited) for a `CAP_SYSINFO_KERNEL` holder.
+        let granted = Caps(&[CapabilityId::SYSINFO_KERNEL]);
+        let sink = RecordingSink::new();
+        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, MemoryPressureStats::WIRE_LEN);
+        let decoded = MemoryPressureStats::from_bytes(&resp[..n]).unwrap();
+        assert_eq!(decoded, fixture_pressure());
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Debug, events::QUERY_SERVED)]
+        );
+    }
+
+    #[test]
+    fn reclaim_stats_is_gated_and_pages_per_class() {
+        let source = FixtureSource::new();
+        let mut resp = [0u8; 1024];
+        let granted = Caps(&[CapabilityId::SYSINFO_KERNEL]);
+
+        // Denied without the gate.
+        let sink = RecordingSink::new();
+        let rlr = ReclaimListRequest {
+            offset: 0,
+            limit: 16,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::RECLAIM_STATS, &rlr.to_le_bytes());
+        assert_eq!(
+            serve(&source, &caller(&Caps(&[])), &sink, &req, &mut resp),
+            Err(Errno::PermissionDenied)
+        );
+
+        // The whole ledger: one record per class, class-id order.
+        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, ReclaimClassRecord::WIRE_LEN * RECLAIM_CLASS_COUNT);
+        for i in 0..RECLAIM_CLASS_COUNT {
+            let window =
+                &resp[i * ReclaimClassRecord::WIRE_LEN..(i + 1) * ReclaimClassRecord::WIRE_LEN];
+            let record = ReclaimClassRecord::from_bytes(window).unwrap();
+            assert_eq!(usize::from(record.class), i);
+            assert_eq!(record.payload_bytes, (i as u64) * 1000);
+        }
+
+        // A paged window returns whole records from the offset…
+        let rlr_page = ReclaimListRequest {
+            offset: 7,
+            limit: 16,
+            flags: 0,
+        };
+        let req_page = request_bytes(SysinfoQueryId::RECLAIM_STATS, &rlr_page.to_le_bytes());
+        let n = serve(&source, &caller(&granted), &sink, &req_page, &mut resp).unwrap();
+        assert_eq!(n, ReclaimClassRecord::WIRE_LEN * 2);
+        let record = ReclaimClassRecord::from_bytes(&resp[..ReclaimClassRecord::WIRE_LEN]).unwrap();
+        assert_eq!(usize::from(record.class), 7);
+
+        // …and paging past the end is the empty terminator.
+        let rlr_end = ReclaimListRequest {
+            offset: 9,
+            limit: 16,
+            flags: 0,
+        };
+        let req_end = request_bytes(SysinfoQueryId::RECLAIM_STATS, &rlr_end.to_le_bytes());
+        assert_eq!(
+            serve(&source, &caller(&granted), &sink, &req_end, &mut resp),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn ramzip_stats_is_gated_and_round_trips() {
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        let req = request_bytes(SysinfoQueryId::RAMZIP_STATS, &[]);
+        let mut resp = [0u8; 256];
+
+        assert_eq!(
+            serve(&source, &caller(&Caps(&[])), &sink, &req, &mut resp),
+            Err(Errno::PermissionDenied)
+        );
+
+        let granted = Caps(&[CapabilityId::SYSINFO_KERNEL]);
+        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, RamzipStats::WIRE_LEN);
+        let decoded = RamzipStats::from_bytes(&resp[..n]).unwrap();
+        assert_eq!(decoded, fixture_ramzip());
+    }
+
+    #[test]
+    fn cpu_load_is_gated_and_pages() {
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        let mut resp = [0u8; 256];
+        let granted = Caps(&[CapabilityId::SYSINFO_KERNEL]);
+
+        let clr = CpuLoadRequest {
+            offset: 0,
+            limit: 8,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::CPU_LOAD, &clr.to_le_bytes());
+
+        // Denied without the gate: the queue depths and preemption
+        // counters are kernel scheduler internals, unlike the ungated
+        // busy/idle split.
+        assert_eq!(
+            serve(&source, &caller(&Caps(&[])), &sink, &req, &mut resp),
+            Err(Errno::PermissionDenied)
+        );
+
+        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, CpuLoadRecord::WIRE_LEN * 2);
+        let first = CpuLoadRecord::from_bytes(&resp[..CpuLoadRecord::WIRE_LEN]).unwrap();
+        assert_eq!(first.cpu, 0);
+        assert_eq!(first.switches, 42);
+
+        // Offset paging serves the second CPU alone, then the terminator.
+        let clr_next = CpuLoadRequest {
+            offset: 1,
+            limit: 8,
+            flags: 0,
+        };
+        let req_next = request_bytes(SysinfoQueryId::CPU_LOAD, &clr_next.to_le_bytes());
+        let n = serve(&source, &caller(&granted), &sink, &req_next, &mut resp).unwrap();
+        assert_eq!(n, CpuLoadRecord::WIRE_LEN);
+        let second = CpuLoadRecord::from_bytes(&resp[..n]).unwrap();
+        assert_eq!(second.cpu, 1);
+        let clr_end = CpuLoadRequest {
+            offset: 2,
+            limit: 8,
+            flags: 0,
+        };
+        let req_end = request_bytes(SysinfoQueryId::CPU_LOAD, &clr_end.to_le_bytes());
         assert_eq!(
             serve(&source, &caller(&granted), &sink, &req_end, &mut resp),
             Ok(0)

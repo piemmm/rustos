@@ -774,7 +774,19 @@ fn a_detected_defect_is_counted_and_reported_once() {
         captured,
     );
     cache.poison("ledger_imbalance");
-    assert_eq!(cache.accounting().failures(), 1);
+    // The poison disables the whole cache, so the one defect is
+    // attributed to both classes this cache serves.
+    assert_eq!(
+        cache
+            .accounting()
+            .class_failures(ReclaimClass::CleanFileData),
+        1
+    );
+    assert_eq!(
+        cache.accounting().class_failures(ReclaimClass::FsMetadata),
+        1
+    );
+    assert_eq!(cache.accounting().failures(), 2);
     assert!(cache.accounting().teardowns() >= 1);
     let events = captured.snapshot();
     assert_eq!(events.len(), 1);
@@ -790,7 +802,7 @@ fn a_detected_defect_is_counted_and_reported_once() {
     // An already-poisoned cache never reports again.
     cache.poison("orphan_index_slot");
     assert_eq!(captured.snapshot().len(), 1);
-    assert_eq!(cache.accounting().failures(), 1);
+    assert_eq!(cache.accounting().failures(), 2);
 }
 
 #[test]

@@ -125,13 +125,17 @@ where
         + Send
         + 'static,
 {
-    Box::new(CachedFs::new(
+    let cache = CachedFs::new(
         driver,
         CacheBudget::from_backing(rustos_kalloc::HEAP_BYTES),
         ReclaimOwner::FilesystemVolume { volume },
         pressure,
         audit,
-    ))
+    );
+    // Every production volume cache registers its ledger with the
+    // System Information memory-statistics registry (observation-only).
+    rustos_kernel_core::memstats::MEM_STATS.register_ledger(cache.accounting_shared());
+    Box::new(cache)
 }
 
 /// The production `fs_*` service the dispatch hook holds from boot

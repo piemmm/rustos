@@ -383,9 +383,12 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
     // The system memory-pressure gauge every mounted volume's cache
     // samples (`plans/SMARTRAM.md` SMART2), over the same `'static`
     // frame allocator the spawn path uses — physical free frames are
-    // the authoritative reading. One boot-time leak, like `caller`.
+    // the authoritative reading. Fetched from the memory-statistics
+    // registry so this boot path, every cache, and the System
+    // Information export all share the one gauge and its one
+    // transition history.
     let pressure: &'static MemoryPressure =
-        alloc::boxed::Box::leak(alloc::boxed::Box::new(MemoryPressure::over(frames)));
+        rustos_kernel_core::memstats::MEM_STATS.system_pressure(frames);
     let env = UnlockEnv {
         ctx,
         audit,
@@ -912,6 +915,7 @@ fn finish_unlock<B: Block + 'static>(
     // one coherent, pressure-governed cache of recently used blocks.
     let blk = BlockCache::for_boot_disk(blk, pressure, audit)
         .map_err(|_| "root-unlock: block device geometry")?;
+    rustos_kernel_core::memstats::MEM_STATS.register_ledger(blk.accounting_shared());
     let store: &'static DriverStoreService<BlockCache<B>> =
         alloc::boxed::Box::leak(alloc::boxed::Box::new(DriverStoreService::new(
             SharedBlock::new(blk).map_err(|_| "root-unlock: block device geometry")?,

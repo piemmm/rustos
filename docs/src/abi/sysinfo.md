@@ -42,6 +42,11 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `LOAD_AVERAGE`          | none                   | no      |
 | `USER_DIRECTORY`        | none                   | no      |
 | `CPU_TIME_STATS`        | none                   | no      |
+| `SEAT_LIST`             | `CAP_SYSINFO_HW`       | yes     |
+| `MEMORY_PRESSURE`       | `CAP_SYSINFO_KERNEL`   | yes     |
+| `RECLAIM_STATS`         | `CAP_SYSINFO_KERNEL`   | yes     |
+| `RAMZIP_STATS`          | `CAP_SYSINFO_KERNEL`   | yes     |
+| `CPU_LOAD`              | `CAP_SYSINFO_KERNEL`   | yes     |
 
 `CAP_SYSINFO_GLOBAL`, `CAP_SYSINFO_KERNEL`, and `CAP_SYSINFO_HW` are
 [`CapabilityId`] values 13, 14, and 15. Self-scoped observers ("list my
@@ -73,7 +78,37 @@ exposes strictly less than the load-average census. A consumer derives
 a utilisation percentage from the deltas of two samples; RustOS
 accounts busy and idle time only, never a fabricated
 user/system/nice/iowait split. The list is paged by a
-`CpuTimeListRequest` exactly like the mount list.
+`CpuTimeListRequest` exactly like the mount list. `SEAT_LIST` is gated
+like `HARDWARE_TREE` and audited: each `SeatRecord` names which task owns
+a physical display — cross-principal surface topology, not a self-scoped
+observer.
+
+The four kernel-statistics queries (`plans/STRESSTEST.md` ST1) share
+`KERNEL_MEMORY_STATS`'s security boundary — gated on `CAP_SYSINFO_KERNEL`
+and audited — because each exposes kernel-wide operational state:
+
+- `MEMORY_PRESSURE` — a single `MemoryPressureStats`: the live five-band
+  gauge's current band (an index into `PRESSURE_BAND_NAMES`), the
+  free/total/reserve readings, the derived per-band enter/exit
+  watermarks actually in force (reported, never promised), and the
+  per-band transition counters since boot.
+- `RECLAIM_STATS` — one `ReclaimClassRecord` per reclaim class (paged by
+  a `ReclaimListRequest`): live payload/metadata byte and entry gauges
+  plus the monotonic refusal/shrink/teardown/failure counters,
+  aggregated across every registered live cache. The class ids and the
+  stable names in `RECLAIM_CLASS_NAMES` are the shared vocabulary the
+  `stats:mem/reclaim/<class>` selectors resolve through.
+- `RAMZIP_STATS` — a single `RamzipStats`: the compressed anonymous-
+  memory tier's byte/entry gauges, derived min/soft/hard caps, and every
+  monotonic event counter. Counters only — never page contents or key
+  material; a build whose tier is not yet driven truthfully reports an
+  idle tier (all zeros) rather than refusing or fabricating.
+- `CPU_LOAD` — one `CpuLoadRecord` per online CPU (paged by a
+  `CpuLoadRequest`): the run-queue depth sample plus the context-switch
+  and preemption counters. The cumulative busy/idle time split stays in
+  `CPU_TIME_STATS`, so the same figure is never served twice; the queue
+  depths and preemption counters are kernel scheduler internals, hence
+  the gate the utilisation split does not carry.
 
 ## Wire framing
 

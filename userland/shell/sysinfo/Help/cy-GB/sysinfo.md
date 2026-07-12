@@ -27,6 +27,14 @@ Yr ymholiadau:
   byw.
 - `seats` — rhestr y seddi: perchennog pob dangosydd a'i gonsol
   blaendir (angen `CAP_SYSINFO_HW`).
+- `pressure` — y mesurydd pwysau cof byw: band, marciau dŵr a rhifwyr
+  trosglwyddo (angen `CAP_SYSINFO_KERNEL`).
+- `reclaim` — cofrestr y storfannau adferadwy, un rhes i bob dosbarth
+  (angen `CAP_SYSINFO_KERNEL`).
+- `ramzip` — rhifwyr yr haen gof gywasgedig (angen
+  `CAP_SYSINFO_KERNEL`).
+- `cpu` — dyfnder ciw rhedeg, newidiadau cyd-destun a rhagachubion fesul
+  CPU (angen `CAP_SYSINFO_KERNEL`).
 - `help` — cymorth byr y gorchymyn hwn ei hun.
 
 Heb ymholiad, dangosir y cymorth byr.

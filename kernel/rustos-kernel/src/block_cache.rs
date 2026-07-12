@@ -63,6 +63,7 @@
 //! device's own error surface and are forwarded untouched.
 
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use rustos_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
@@ -120,7 +121,7 @@ pub struct BlockCache<B: Block> {
     /// The audit sink a classification refusal or detected ledger
     /// defect reports through (`kernel/mem::reclaim_audit`).
     sink: &'static (dyn Sink + Sync),
-    accounting: CacheAccounting,
+    accounting: Arc<CacheAccounting>,
     /// The classified admission policy; `None` when classification
     /// refused, which poisons the cache from birth.
     policy: Option<CachePolicy>,
@@ -183,7 +184,7 @@ impl<B: Block> BlockCache<B> {
             budget,
             pressure,
             sink,
-            accounting: CacheAccounting::new(),
+            accounting: Arc::new(CacheAccounting::new()),
             poisoned: policy.is_none(),
             policy,
             tick: 0,
@@ -221,6 +222,15 @@ impl<B: Block> BlockCache<B> {
     #[must_use]
     pub fn accounting(&self) -> &CacheAccounting {
         &self.accounting
+    }
+
+    /// A shared handle to this cache's ledger, for registration with the
+    /// System Information memory-statistics registry. Observation-only:
+    /// the holder gets lock-free reads of the same saturating
+    /// diagnostics this cache keeps.
+    #[must_use]
+    pub fn accounting_shared(&self) -> Arc<CacheAccounting> {
+        Arc::clone(&self.accounting)
     }
 
     /// The owner the cache's memory is charged to, or `None` when
@@ -295,7 +305,7 @@ impl<B: Block> BlockCache<B> {
     /// defect is counted and reported once through the audit sink.
     fn poison(&mut self, cause: &'static str) {
         if !self.poisoned {
-            self.accounting.record_failure();
+            self.accounting.record_failure(ReclaimClass::CleanFileData);
             log_cache_poisoned(self.sink, CACHE_LABEL, self.owner(), cause);
         }
         self.poisoned = true;
@@ -305,7 +315,7 @@ impl<B: Block> BlockCache<B> {
     /// Drop every entry, wiping all payload and rebalancing the ledger
     /// to empty. Every whole-cache drain is counted as a teardown.
     fn drop_all(&mut self) {
-        self.accounting.record_teardown();
+        self.accounting.record_teardown(ReclaimClass::CleanFileData);
         for entry in self.entries.values_mut() {
             Self::wipe(&mut entry.data);
         }
@@ -344,7 +354,8 @@ impl<B: Block> BlockCache<B> {
         let band = self.pressure.sample();
         let target = shrink_target(band, ReclaimClass::CleanFileData, self.budget);
         if self.accounting.total_bytes() > target {
-            self.accounting.record_pressure_shrink();
+            self.accounting
+                .record_pressure_shrink(ReclaimClass::CleanFileData);
             self.evict_until(target);
         }
     }
@@ -401,7 +412,7 @@ impl<B: Block> BlockCache<B> {
                 continue;
             }
             if cost > self.budget.hard() || !self.pressure.growth_permitted(cost) {
-                self.accounting.record_refusal();
+                self.accounting.record_refusal(ReclaimClass::CleanFileData);
                 return;
             }
             if self.accounting.total_bytes().saturating_add(cost) > self.budget.hard() {
@@ -415,7 +426,7 @@ impl<B: Block> BlockCache<B> {
             // instead of aborting.
             let mut data = Vec::new();
             if data.try_reserve_exact(bs).is_err() {
-                self.accounting.record_refusal();
+                self.accounting.record_refusal(ReclaimClass::CleanFileData);
                 return;
             }
             data.extend_from_slice(bytes);
@@ -425,7 +436,7 @@ impl<B: Block> BlockCache<B> {
                 .is_err()
             {
                 Self::wipe(&mut data);
-                self.accounting.record_refusal();
+                self.accounting.record_refusal(ReclaimClass::CleanFileData);
                 return;
             }
             let tick = self.next_tick();

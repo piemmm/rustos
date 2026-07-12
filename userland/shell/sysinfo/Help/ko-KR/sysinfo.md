@@ -23,6 +23,13 @@ RustOS에는 `/proc`도 `/sys`도 없습니다. 이 명령은 모든 프로그�
 - `limits`, `rlimits` — 유효한 자원 제한과 실시간 사용량.
 - `seats` — 시트 목록: 각 디스플레이의 소유자와 전경 콘솔
   (`CAP_SYSINFO_HW` 필요).
+- `pressure` — 실시간 메모리 압력 게이지: 밴드, 워터마크, 전환 카운터
+  (`CAP_SYSINFO_KERNEL` 필요).
+- `reclaim` — 회수 가능 캐시 장부, 클래스당 한 줄
+  (`CAP_SYSINFO_KERNEL` 필요).
+- `ramzip` — 압축 메모리 계층의 카운터 (`CAP_SYSINFO_KERNEL` 필요).
+- `cpu` — CPU별 실행 큐 깊이, 컨텍스트 스위치, 선점
+  (`CAP_SYSINFO_KERNEL` 필요).
 - `help` — 이 명령 자체의 짧은 도움말.
 
 질의가 없으면 짧은 도움말이 표시됩니다.

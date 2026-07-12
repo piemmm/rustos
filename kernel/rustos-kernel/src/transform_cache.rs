@@ -48,6 +48,7 @@
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use rustos_drv_fs_rustfs::{ClusterCache, MAX_CLUSTER_PLAINTEXT};
@@ -87,7 +88,7 @@ pub struct TransformClusterCache {
     /// The audit sink a classification refusal or detected ledger
     /// defect reports through (`kernel/mem::reclaim_audit`).
     sink: &'static (dyn Sink + Sync),
-    accounting: CacheAccounting,
+    accounting: Arc<CacheAccounting>,
     /// The classified admission policy; `None` when classification
     /// refused, which poisons the cache from birth.
     policy: Option<CachePolicy>,
@@ -139,7 +140,7 @@ impl TransformClusterCache {
             budget,
             pressure,
             sink,
-            accounting: CacheAccounting::new(),
+            accounting: Arc::new(CacheAccounting::new()),
             poisoned: policy.is_none(),
             policy,
             tick: 0,
@@ -158,18 +159,31 @@ impl TransformClusterCache {
         pressure: &'static MemoryPressure,
         sink: &'static (dyn Sink + Sync),
     ) -> Box<dyn ClusterCache> {
-        Box::new(Self::new(
+        let cache = Self::new(
             CacheBudget::from_backing(rustos_kalloc::HEAP_BYTES),
             ReclaimOwner::FilesystemVolume { volume },
             pressure,
             sink,
-        ))
+        );
+        // Every production transform cache registers its ledger with the
+        // System Information memory-statistics registry (observation-only).
+        rustos_kernel_core::memstats::MEM_STATS.register_ledger(cache.accounting_shared());
+        Box::new(cache)
     }
 
     /// The cache's byte ledger and event counters.
     #[must_use]
     pub fn accounting(&self) -> &CacheAccounting {
         &self.accounting
+    }
+
+    /// A shared handle to this cache's ledger, for registration with the
+    /// System Information memory-statistics registry. Observation-only:
+    /// the holder gets lock-free reads of the same saturating
+    /// diagnostics this cache keeps.
+    #[must_use]
+    pub fn accounting_shared(&self) -> Arc<CacheAccounting> {
+        Arc::clone(&self.accounting)
     }
 
     /// The owner the cache's memory is charged to, or `None` when
@@ -225,7 +239,7 @@ impl TransformClusterCache {
     /// defect is counted and reported once through the audit sink.
     fn poison(&mut self, cause: &'static str) {
         if !self.poisoned {
-            self.accounting.record_failure();
+            self.accounting.record_failure(ReclaimClass::TransformCache);
             log_cache_poisoned(self.sink, CACHE_LABEL, self.owner(), cause);
         }
         self.poisoned = true;
@@ -236,7 +250,8 @@ impl TransformClusterCache {
     /// ledger to empty. Every whole-cache drain is counted as a
     /// teardown.
     fn drop_all(&mut self) {
-        self.accounting.record_teardown();
+        self.accounting
+            .record_teardown(ReclaimClass::TransformCache);
         for entry in self.entries.values_mut() {
             Self::wipe(&mut entry.plain);
         }
@@ -274,7 +289,8 @@ impl TransformClusterCache {
         let band = self.pressure.sample();
         let target = shrink_target(band, ReclaimClass::TransformCache, self.budget);
         if self.accounting.total_bytes() > target {
-            self.accounting.record_pressure_shrink();
+            self.accounting
+                .record_pressure_shrink(ReclaimClass::TransformCache);
             self.evict_until(target);
         }
     }
@@ -309,7 +325,7 @@ impl ClusterCache for TransformClusterCache {
         // over-bound plaintext) is refused: entries stay individually
         // bounded and coherently invalidatable.
         if stored == 0 || plaintext.is_empty() || plaintext.len() > MAX_CLUSTER_PLAINTEXT {
-            self.accounting.record_refusal();
+            self.accounting.record_refusal(ReclaimClass::TransformCache);
             return;
         }
         // Replace, never shadow: a stale entry under the same key would
@@ -323,7 +339,7 @@ impl ClusterCache for TransformClusterCache {
         let (payload, metadata) = Self::cost_of(plaintext.len());
         let cost = payload.saturating_add(metadata);
         if cost > self.budget.hard() || !self.pressure.growth_permitted(cost) {
-            self.accounting.record_refusal();
+            self.accounting.record_refusal(ReclaimClass::TransformCache);
             return;
         }
         if self.accounting.total_bytes().saturating_add(cost) > self.budget.hard() {
@@ -337,7 +353,7 @@ impl ClusterCache for TransformClusterCache {
         // instead of aborting.
         let mut plain = Vec::new();
         if plain.try_reserve_exact(plaintext.len()).is_err() {
-            self.accounting.record_refusal();
+            self.accounting.record_refusal(ReclaimClass::TransformCache);
             return;
         }
         plain.extend_from_slice(plaintext);
@@ -347,7 +363,7 @@ impl ClusterCache for TransformClusterCache {
             .is_err()
         {
             Self::wipe(&mut plain);
-            self.accounting.record_refusal();
+            self.accounting.record_refusal(ReclaimClass::TransformCache);
             return;
         }
         let tick = self.next_tick();

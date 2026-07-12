@@ -35,6 +35,11 @@ crate (`AGENTS.md` §17.4).
 | `identity`           | `SYSTEM_IDENTITY`     | none                 |
 | `uptime`             | `UPTIME`              | none                 |
 | `limits`             | `RESOURCE_LIMITS`     | none (self-scoped)   |
+| `seats`              | `SEAT_LIST`           | `CAP_SYSINFO_HW`     |
+| `pressure`           | `MEMORY_PRESSURE`     | `CAP_SYSINFO_KERNEL` |
+| `reclaim`            | `RECLAIM_STATS`       | `CAP_SYSINFO_KERNEL` |
+| `ramzip`             | `RAMZIP_STATS`        | `CAP_SYSINFO_KERNEL` |
+| `cpu`                | `CPU_LOAD`            | `CAP_SYSINFO_KERNEL` |
 | `help` (the default) | —                     | none                 |
 
 `processes` accepts the `-a`/`--all` flag; the other subcommands take no
@@ -43,6 +48,10 @@ aliases. `help` (also `-h`/`-?`/`--help`, and the default with no
 arguments) renders the tool's own short help from its bundle's `Help/`
 tree through the shared `lib/help` engine (`plans/APPS.md` §4), falling
 back to the built-in usage banner when the tree is unavailable.
+`pressure`, `reclaim`, `ramzip`, and `cpu` render the kernel-statistics
+queries `plans/STRESSTEST.md` ST1 added — the live memory-pressure gauge,
+the per-class reclaimable-cache ledger, the compressed tier's counters,
+and the per-CPU queue-depth/switch/preemption figures.
 `limits` reports the calling process's *own* effective resource
 limits and live usage (`AGENTS.md` §24.3) — the read-only counterpart of
 the `ulimit` shell builtin that *changes* them. The

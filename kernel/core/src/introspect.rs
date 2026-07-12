@@ -142,6 +142,53 @@ pub trait IntrospectSource: Sync {
     ///
     /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
     fn cpu_times(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
+
+    /// The wire image of the current
+    /// [`rustos_abi::sysinfo::MemoryPressureStats`]: the live band (a
+    /// fresh sample), the derived watermarks in force, the reserve
+    /// floor, the free/total readings, and the per-band entry counters
+    /// since boot (`plans/STRESSTEST.md` ST1).
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
+    fn memory_pressure(&self) -> Result<Vec<u8>, Errno>;
+
+    /// Encode up to `max_records`
+    /// [`rustos_abi::sysinfo::ReclaimClassRecord`]s beginning at class
+    /// index `offset`, in class-id order, packed little-endian
+    /// back-to-back — the reclaimable-cache ledger aggregated across
+    /// every registered live cache. An `offset` past the last class
+    /// returns an empty `Vec` (the paging terminator), never an error.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
+    fn reclaim(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
+
+    /// The wire image of the current
+    /// [`rustos_abi::sysinfo::RamzipStats`]: counters only, never page
+    /// contents or key material; an undriven tier truthfully reports
+    /// idle zeros.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
+    fn ramzip(&self) -> Result<Vec<u8>, Errno>;
+
+    /// Encode up to `max_records`
+    /// [`rustos_abi::sysinfo::CpuLoadRecord`]s beginning at CPU index
+    /// `offset`, in ascending CPU order, packed little-endian
+    /// back-to-back: the run-queue depth sample plus the context-switch
+    /// and preemption counters (the busy/idle time split stays in
+    /// [`cpu_times`](Self::cpu_times) — no figure is served twice). An
+    /// `offset` past the last CPU returns an empty `Vec` (the paging
+    /// terminator), never an error.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
+    fn cpu_load(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
 }
 
 /// The fail-closed default installed before the binding kernel wires the real
@@ -184,6 +231,22 @@ impl IntrospectSource for NullIntrospectSource {
     }
 
     fn cpu_times(&self, _offset: u64, _max_records: usize) -> Result<Vec<u8>, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn memory_pressure(&self) -> Result<Vec<u8>, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn reclaim(&self, _offset: u64, _max_records: usize) -> Result<Vec<u8>, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn ramzip(&self) -> Result<Vec<u8>, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn cpu_load(&self, _offset: u64, _max_records: usize) -> Result<Vec<u8>, Errno> {
         Err(Errno::NotImplemented)
     }
 }

@@ -1106,13 +1106,20 @@ RXE relocation-preparation cache (the loader model has no separate
 relocation stage; the validated image in the `LoadedApp` *is* the
 cached RXE state).
 
-## 7k. Reclaimable-cache observability (SMART9)
+## 7k. Reclaimable-cache observability (SMART9 + STRESSTEST ST1)
 
-The reclaimable-cache subsystem is observable through **internal
-counters and existing structured logging only** (`plans/SMARTRAM.md`
-SMART9, section 11): no `/proc`, no `/sys`, no text-scrape file, and no
-new public ABI — a System Information query is added only when a
-current in-tree caller requires it, and none does today.
+The reclaimable-cache subsystem is observable through its internal
+counters, the existing structured logging, and — since
+`plans/STRESSTEST.md` ST1 — the capability-gated System Information
+queries `MEMORY_PRESSURE`, `RECLAIM_STATS`, and `RAMZIP_STATS`
+(`CAP_SYSINFO_KERNEL`, audited): no `/proc`, no `/sys`, and no
+text-scrape file. The export is the one arch-neutral memory-statistics
+registry (`kernel/core::memstats::MEM_STATS`): the boot path publishes
+the single system pressure gauge through it, every production cache
+registers its `Arc<CacheAccounting>` ledger at construction
+(observation-only, lock-free reads of saturating diagnostics), and a
+future live `ramzip` tier installs its stats feed there — until it does,
+the query truthfully reports an idle tier.
 
 - **Counters.** Every cache instance's `CacheAccounting` (§7g) is the
   per-owner counter surface — each cache is charged to exactly one

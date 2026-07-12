@@ -7,8 +7,10 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 
 use rustos_abi::sysinfo::{
-    KernelMemoryStats, ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId,
-    SystemIdentity, Uptime,
+    CpuLoadRecord, CpuLoadRequest, KernelMemoryStats, MemoryPressureStats, RamzipStats,
+    ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord,
+    SysinfoQueryId, SystemIdentity, Uptime, PRESSURE_BAND_NAMES, RECLAIM_CLASS_COUNT,
+    RECLAIM_CLASS_NAMES,
 };
 use rustos_abi::{Errno, LimitKind};
 
@@ -34,6 +36,10 @@ queries:
   uptime              time since boot and boot wall-clock time
   limits              your effective resource limits and live usage
   seats               seat inventory: owners and foreground consoles (needs CAP_SYSINFO_HW)
+  pressure            memory-pressure band, watermarks, transitions (needs CAP_SYSINFO_KERNEL)
+  reclaim             reclaimable-cache ledger per class (needs CAP_SYSINFO_KERNEL)
+  ramzip              compressed-tier counters (needs CAP_SYSINFO_KERNEL)
+  cpu                 per-CPU queue depth, switches, preemptions (needs CAP_SYSINFO_KERNEL)
   help, -h, -?        show this help";
 
 /// `sysinfo`'s own command word: the short-help switches render its own
@@ -68,6 +74,10 @@ pub fn run(
         Command::Uptime => run_uptime(transport, out),
         Command::Limits => run_limits(transport, out),
         Command::Seats => run_seats(transport, out),
+        Command::Pressure => run_pressure(transport, out),
+        Command::Reclaim => run_reclaim(transport, out),
+        Command::Ramzip => run_ramzip(transport, out),
+        Command::CpuLoad => run_cpu_load(transport, out),
     }
 }
 
@@ -262,6 +272,173 @@ fn run_seats(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoE
     Ok(())
 }
 
+/// Fetch and render the live memory-pressure gauge: the band, the free/
+/// total/reserve readings, the derived per-band watermarks in force, and
+/// the per-band transition counters since boot.
+fn run_pressure(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
+    let reply = service_call(transport, SysinfoQueryId::MEMORY_PRESSURE, &[])?;
+    let stats = MemoryPressureStats::from_bytes(&reply).map_err(SysinfoError::Service)?;
+    let band = usize::from(stats.band).min(PRESSURE_BAND_NAMES.len() - 1);
+    emit(
+        out,
+        &format!(
+            "band:            {} ({})",
+            PRESSURE_BAND_NAMES[band], stats.band
+        ),
+    )?;
+    emit(out, &format!("total bytes:     {}", stats.total_bytes))?;
+    emit(out, &format!("free bytes:      {}", stats.free_bytes))?;
+    emit(out, &format!("reserve bytes:   {}", stats.reserve_bytes))?;
+    emit(out, "band        enter        exit        entries")?;
+    for (index, name) in PRESSURE_BAND_NAMES.iter().enumerate() {
+        // The normal band has no watermarks: it is where the gauge rests.
+        let (enter, exit) = if index == 0 {
+            (String::from("-"), String::from("-"))
+        } else {
+            (
+                format!("{}", stats.enter_bytes[index - 1]),
+                format!("{}", stats.exit_bytes[index - 1]),
+            )
+        };
+        emit(
+            out,
+            &format!(
+                "{:<10}  {:>11}  {:>10}  {:>7}",
+                name, enter, exit, stats.band_entries[index],
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+/// Fetch and render the reclaimable-cache ledger, one aligned row per
+/// class. The class set is small and closed, so one page carries it; a
+/// reply that is not a whole number of records fails closed.
+fn run_reclaim(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
+    let request = ReclaimListRequest {
+        offset: 0,
+        limit: u16::try_from(RECLAIM_CLASS_COUNT).unwrap_or(u16::MAX),
+        flags: 0,
+    };
+    let reply = service_call(
+        transport,
+        SysinfoQueryId::RECLAIM_STATS,
+        &request.to_le_bytes(),
+    )?;
+    if reply.len() % ReclaimClassRecord::WIRE_LEN != 0 {
+        return Err(SysinfoError::Service(Errno::BufferTooSmall));
+    }
+    emit(
+        out,
+        "class                  payload    metadata  entries  refusals  shrinks  teardowns  failures",
+    )?;
+    for chunk in reply.chunks_exact(ReclaimClassRecord::WIRE_LEN) {
+        let record = ReclaimClassRecord::from_bytes(chunk).map_err(SysinfoError::Service)?;
+        let name = RECLAIM_CLASS_NAMES[usize::from(record.class)];
+        emit(
+            out,
+            &format!(
+                "{:<21}  {:>7}  {:>10}  {:>7}  {:>8}  {:>7}  {:>9}  {:>8}",
+                name,
+                record.payload_bytes,
+                record.metadata_bytes,
+                record.entries,
+                record.refusals,
+                record.pressure_shrinks,
+                record.teardowns,
+                record.failures,
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+/// Fetch and render the `ramzip` compressed-tier counters. Counters only
+/// — never page contents; an undriven tier truthfully renders zeros.
+fn run_ramzip(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
+    let reply = service_call(transport, SysinfoQueryId::RAMZIP_STATS, &[])?;
+    let stats = RamzipStats::from_bytes(&reply).map_err(SysinfoError::Service)?;
+    emit(out, &format!("entries:         {}", stats.entries))?;
+    emit(out, &format!("logical bytes:   {}", stats.logical_bytes))?;
+    emit(out, &format!("stored bytes:    {}", stats.stored_bytes))?;
+    emit(out, &format!("metadata bytes:  {}", stats.metadata_bytes))?;
+    emit(
+        out,
+        &format!(
+            "caps (min/soft/hard): {} / {} / {}",
+            stats.min_cap_bytes, stats.soft_cap_bytes, stats.hard_cap_bytes
+        ),
+    )?;
+    emit(out, &format!("attempts:        {}", stats.attempts))?;
+    emit(out, &format!("accepted:        {}", stats.accepted))?;
+    let rejected = stats
+        .rejected_policy
+        .saturating_add(stats.rejected_ineligible)
+        .saturating_add(stats.rejected_incompressible)
+        .saturating_add(stats.rejected_cap)
+        .saturating_add(stats.rejected_reserve)
+        .saturating_add(stats.rejected_task_share)
+        .saturating_add(stats.rejected_thrash);
+    emit(out, &format!("rejected:        {rejected}"))?;
+    emit(out, &format!("fault-ins:       {}", stats.fault_ins))?;
+    emit(
+        out,
+        &format!(
+            "failures (auth/decode): {} / {}",
+            stats.auth_failures, stats.decode_failures
+        ),
+    )?;
+    emit(
+        out,
+        &format!(
+            "warm (attempts/restored/stopped): {} / {} / {}",
+            stats.warm_attempts, stats.warm_restored, stats.warm_stopped
+        ),
+    )?;
+    emit(
+        out,
+        &format!("cluster restored: {}", stats.cluster_restored),
+    )?;
+    emit(out, &format!("thrash detected:  {}", stats.thrash_detected))
+}
+
+/// Fetch and render the per-CPU scheduler load figures, one aligned row
+/// per CPU. One page carries every CPU a machine has today; the request's
+/// `limit` bounds it explicitly and a second page continues the walk.
+fn run_cpu_load(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
+    /// Records requested per page: bounds the reply size without bounding
+    /// how many CPUs the machine may have.
+    const PAGE: u16 = 64;
+    emit(out, "cpu   queue     switches  preemptions")?;
+    let mut offset: u32 = 0;
+    loop {
+        let request = CpuLoadRequest {
+            offset,
+            limit: PAGE,
+            flags: 0,
+        };
+        let reply = service_call(transport, SysinfoQueryId::CPU_LOAD, &request.to_le_bytes())?;
+        if reply.len() % CpuLoadRecord::WIRE_LEN != 0 {
+            return Err(SysinfoError::Service(Errno::BufferTooSmall));
+        }
+        let records = reply.len() / CpuLoadRecord::WIRE_LEN;
+        for chunk in reply.chunks_exact(CpuLoadRecord::WIRE_LEN) {
+            let record = CpuLoadRecord::from_bytes(chunk).map_err(SysinfoError::Service)?;
+            emit(
+                out,
+                &format!(
+                    "{:<4}  {:>5}  {:>10}  {:>11}",
+                    record.cpu, record.queue_depth, record.switches, record.preemptions,
+                ),
+            )?;
+        }
+        if records < usize::from(PAGE) {
+            return Ok(());
+        }
+        offset = offset.saturating_add(u32::from(PAGE));
+    }
+}
+
 /// Render `bytes` as lowercase hex with no separators.
 fn hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -288,9 +465,10 @@ mod tests {
     use core::cell::RefCell;
     use rustos_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
     use rustos_abi::sysinfo::{
-        KernelMemoryStats, ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord,
-        SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
-        SEAT_FLAG_OWNED,
+        CpuLoadRecord, CpuLoadRequest, KernelMemoryStats, MemoryPressureStats, ProcessListRequest,
+        ProcessRecord, ProcessState, RamzipStats, ReclaimClassRecord, ReclaimListRequest,
+        ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader,
+        SystemIdentity, Uptime, SEAT_FLAG_OWNED,
     };
     use rustos_abi::time::{Duration64, Time64};
     use rustos_abi::{Errno, LimitKind, ProcId, ResourceLimit, RLIMIT_INFINITY};
@@ -355,6 +533,10 @@ mod tests {
         uptime: Uptime,
         hardware: Vec<u8>,
         seats: Vec<SeatRecord>,
+        pressure: MemoryPressureStats,
+        reclaim: Vec<ReclaimClassRecord>,
+        ramzip: RamzipStats,
+        cpu_loads: Vec<CpuLoadRecord>,
         deny: Option<SysinfoQueryId>,
         malformed_process_list: bool,
         short_scalar: bool,
@@ -380,6 +562,54 @@ mod tests {
                 },
                 hardware: Vec::new(),
                 seats: Vec::new(),
+                pressure: MemoryPressureStats {
+                    band: 1,
+                    reserved: [0u8; 7],
+                    total_bytes: 4096,
+                    free_bytes: 512,
+                    reserve_bytes: 64,
+                    enter_bytes: [800, 400, 250, 125],
+                    exit_bytes: [1024, 570, 320, 200],
+                    band_entries: [0, 2, 1, 0, 0],
+                },
+                reclaim: alloc::vec![ReclaimClassRecord {
+                    class: 5,
+                    reserved: [0u8; 7],
+                    payload_bytes: 4096,
+                    metadata_bytes: 128,
+                    entries: 3,
+                    refusals: 1,
+                    pressure_shrinks: 2,
+                    teardowns: 0,
+                    failures: 0,
+                }],
+                ramzip: RamzipStats {
+                    entries: 4,
+                    logical_bytes: 16384,
+                    stored_bytes: 6000,
+                    attempts: 9,
+                    accepted: 4,
+                    rejected_incompressible: 3,
+                    rejected_cap: 2,
+                    fault_ins: 1,
+                    ..RamzipStats::default()
+                },
+                cpu_loads: alloc::vec![
+                    CpuLoadRecord {
+                        cpu: 0,
+                        reserved: 0,
+                        queue_depth: 1,
+                        switches: 42,
+                        preemptions: 5,
+                    },
+                    CpuLoadRecord {
+                        cpu: 1,
+                        reserved: 0,
+                        queue_depth: 0,
+                        switches: 17,
+                        preemptions: 2,
+                    },
+                ],
                 deny: None,
                 malformed_process_list: false,
                 short_scalar: false,
@@ -433,6 +663,34 @@ mod tests {
                 let take = core::cmp::min(self.seats.len() - offset, req.limit as usize);
                 let mut out = Vec::with_capacity(take * SeatRecord::WIRE_LEN);
                 for record in &self.seats[offset..offset + take] {
+                    out.extend_from_slice(&record.to_le_bytes());
+                }
+                Ok(out)
+            } else if header.query == SysinfoQueryId::MEMORY_PRESSURE {
+                Ok(self.pressure.to_le_bytes().to_vec())
+            } else if header.query == SysinfoQueryId::RAMZIP_STATS {
+                Ok(self.ramzip.to_le_bytes().to_vec())
+            } else if header.query == SysinfoQueryId::RECLAIM_STATS {
+                let req = ReclaimListRequest::from_bytes(payload)?;
+                let offset = req.offset as usize;
+                if offset >= self.reclaim.len() {
+                    return Ok(Vec::new());
+                }
+                let take = core::cmp::min(self.reclaim.len() - offset, req.limit as usize);
+                let mut out = Vec::with_capacity(take * ReclaimClassRecord::WIRE_LEN);
+                for record in &self.reclaim[offset..offset + take] {
+                    out.extend_from_slice(&record.to_le_bytes());
+                }
+                Ok(out)
+            } else if header.query == SysinfoQueryId::CPU_LOAD {
+                let req = CpuLoadRequest::from_bytes(payload)?;
+                let offset = req.offset as usize;
+                if offset >= self.cpu_loads.len() {
+                    return Ok(Vec::new());
+                }
+                let take = core::cmp::min(self.cpu_loads.len() - offset, req.limit as usize);
+                let mut out = Vec::with_capacity(take * CpuLoadRecord::WIRE_LEN);
+                for record in &self.cpu_loads[offset..offset + take] {
                     out.extend_from_slice(&record.to_le_bytes());
                 }
                 Ok(out)
@@ -775,6 +1033,72 @@ mod tests {
         assert_eq!(
             out.lines(),
             alloc::vec!["hardware tree: 2 nodes".to_string()]
+        );
+    }
+
+    #[test]
+    fn pressure_renders_band_watermarks_and_entries() {
+        let fixture = Fixture::new(Vec::new());
+        let out = Recorder::new();
+        run(Command::Pressure, &fixture, &out).expect("pressure renders");
+        let lines = out.lines();
+        assert_eq!(lines[0], "band:            mild (1)");
+        assert!(lines[1].ends_with("4096"), "total row: {}", lines[1]);
+        // One row per band under the header; mild shows its watermarks
+        // and its two recorded entries.
+        let mild = lines.iter().find(|l| l.starts_with("mild")).unwrap();
+        assert!(mild.contains("800") && mild.contains("1024") && mild.trim_end().ends_with('2'));
+        // The normal band rests: no watermarks.
+        let normal = lines.iter().find(|l| l.starts_with("normal")).unwrap();
+        assert!(normal.contains('-'));
+
+        // A denial maps to the CLI's permission error.
+        let mut denied = Fixture::new(Vec::new());
+        denied.deny = Some(SysinfoQueryId::MEMORY_PRESSURE);
+        assert_eq!(
+            run(Command::Pressure, &denied, &Recorder::new()),
+            Err(SysinfoError::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn reclaim_renders_one_row_per_class_and_fails_closed_on_torn_reply() {
+        let fixture = Fixture::new(Vec::new());
+        let out = Recorder::new();
+        run(Command::Reclaim, &fixture, &out).expect("reclaim renders");
+        let lines = out.lines();
+        assert!(lines[0].starts_with("class"));
+        assert!(lines[1].starts_with("clean-file-data"), "{}", lines[1]);
+        assert!(lines[1].contains("4096"));
+    }
+
+    #[test]
+    fn ramzip_renders_counters_only() {
+        let fixture = Fixture::new(Vec::new());
+        let out = Recorder::new();
+        run(Command::Ramzip, &fixture, &out).expect("ramzip renders");
+        let lines = out.lines();
+        assert_eq!(lines[0], "entries:         4");
+        assert!(lines.iter().any(|l| l == "rejected:        5"));
+        assert!(lines.iter().any(|l| l.starts_with("fault-ins:")));
+    }
+
+    #[test]
+    fn cpu_load_renders_one_row_per_cpu() {
+        let fixture = Fixture::new(Vec::new());
+        let out = Recorder::new();
+        run(Command::CpuLoad, &fixture, &out).expect("cpu renders");
+        let lines = out.lines();
+        assert!(lines[0].starts_with("cpu"));
+        assert_eq!(lines.len(), 3, "header plus two CPUs");
+        assert!(lines[1].contains("42"));
+        assert!(lines[2].contains("17"));
+
+        let mut denied = Fixture::new(Vec::new());
+        denied.deny = Some(SysinfoQueryId::CPU_LOAD);
+        assert_eq!(
+            run(Command::CpuLoad, &denied, &Recorder::new()),
+            Err(SysinfoError::PermissionDenied)
         );
     }
 

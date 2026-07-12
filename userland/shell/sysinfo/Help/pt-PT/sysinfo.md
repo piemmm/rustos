@@ -27,6 +27,14 @@ As consultas:
   vivo.
 - `seats` — o inventário de assentos: o dono de cada ecrã e a sua
   consola em primeiro plano (necessita de `CAP_SYSINFO_HW`).
+- `pressure` — o indicador de pressão de memória em direto: banda,
+  limiares e contadores de transição (necessita `CAP_SYSINFO_KERNEL`).
+- `reclaim` — o registo das caches recuperáveis, uma linha por classe
+  (necessita `CAP_SYSINFO_KERNEL`).
+- `ramzip` — os contadores do nível de memória comprimida (necessita
+  `CAP_SYSINFO_KERNEL`).
+- `cpu` — profundidade da fila, mudanças de contexto e preempções por
+  CPU (necessita `CAP_SYSINFO_KERNEL`).
 - `help` — a ajuda curta deste próprio comando.
 
 Sem consulta, mostra-se a ajuda curta.

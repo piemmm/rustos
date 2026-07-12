@@ -137,6 +137,47 @@ impl SysinfoQueryId {
     /// topology, not a self-scoped observer (`plans/DISPLAY.md` D3).
     pub const SEAT_LIST: Self = Self(12);
 
+    /// Read the live memory-pressure gauge: the current band, the
+    /// derived enter/exit watermarks actually in force, the reserve
+    /// floor, the free/total readings, and the per-band entry counters
+    /// since boot — a single [`MemoryPressureStats`].
+    ///
+    /// Requires `CAP_SYSINFO_KERNEL` and is audited: like
+    /// [`Self::KERNEL_MEMORY_STATS`], the gauge is kernel-wide
+    /// operational state, not a self-scoped observer
+    /// (`plans/STRESSTEST.md` ST1).
+    pub const MEMORY_PRESSURE: Self = Self(13);
+
+    /// Read the reclaimable-cache ledger: one [`ReclaimClassRecord`]
+    /// per reclaim class with live payload/metadata bytes, entry count,
+    /// and the per-class event counters, paged by a
+    /// [`ReclaimListRequest`].
+    ///
+    /// Requires `CAP_SYSINFO_KERNEL` and is audited, exactly like its
+    /// sibling [`Self::KERNEL_MEMORY_STATS`] (`plans/STRESSTEST.md` ST1).
+    pub const RECLAIM_STATS: Self = Self(14);
+
+    /// Read the `ramzip` compressed-tier accounting: a single
+    /// [`RamzipStats`] carrying the tier's stored/logical/metadata
+    /// bytes, the derived min/soft/hard caps, and every monotonic event
+    /// counter — counters only, never page contents or key material
+    /// (`plans/SWAPSWAPSWAP.md` §16).
+    ///
+    /// Requires `CAP_SYSINFO_KERNEL` and is audited.
+    pub const RAMZIP_STATS: Self = Self(15);
+
+    /// Read per-CPU scheduler load figures: one [`CpuLoadRecord`] per
+    /// online CPU (run-queue depth sample, context-switch and
+    /// preemption counters), paged by a [`CpuLoadRequest`].
+    ///
+    /// The cumulative busy/idle time split lives in
+    /// [`Self::CPU_TIME_STATS`]; this query carries only the remainder,
+    /// so the same figure is never served twice. Requires
+    /// `CAP_SYSINFO_KERNEL` and is audited: queue depths and
+    /// preemption counters are kernel-wide scheduler internals, not the
+    /// utilisation split every user may see.
+    pub const CPU_LOAD: Self = Self(16);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -207,6 +248,18 @@ pub enum IntrospectDomain {
     /// The seat registry: every seat, one packed [`SeatRecord`], with the
     /// syscall's `arg` naming the record offset to page from.
     Seats = 9,
+    /// The live memory-pressure gauge: a single [`MemoryPressureStats`].
+    MemoryPressure = 10,
+    /// The reclaimable-cache ledger: every reclaim class, one packed
+    /// [`ReclaimClassRecord`], with the syscall's `arg` naming the record
+    /// offset to page from.
+    Reclaim = 11,
+    /// The `ramzip` compressed-tier accounting: a single [`RamzipStats`].
+    Ramzip = 12,
+    /// Per-CPU scheduler load figures: every online CPU, one packed
+    /// [`CpuLoadRecord`], with the syscall's `arg` naming the record offset
+    /// to page from.
+    CpuLoad = 13,
 }
 
 impl IntrospectDomain {
@@ -231,6 +284,10 @@ impl IntrospectDomain {
             7 => Ok(Self::UserDirectory),
             8 => Ok(Self::CpuTimes),
             9 => Ok(Self::Seats),
+            10 => Ok(Self::MemoryPressure),
+            11 => Ok(Self::Reclaim),
+            12 => Ok(Self::Ramzip),
+            13 => Ok(Self::CpuLoad),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -361,6 +418,30 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
         id: SysinfoQueryId::SEAT_LIST,
         name: "seat_list",
         required_capability: Some(CapabilityId::SYSINFO_HW),
+        audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::MEMORY_PRESSURE,
+        name: "memory_pressure",
+        required_capability: Some(CapabilityId::SYSINFO_KERNEL),
+        audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::RECLAIM_STATS,
+        name: "reclaim_stats",
+        required_capability: Some(CapabilityId::SYSINFO_KERNEL),
+        audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::RAMZIP_STATS,
+        name: "ramzip_stats",
+        required_capability: Some(CapabilityId::SYSINFO_KERNEL),
+        audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::CPU_LOAD,
+        name: "cpu_load",
+        required_capability: Some(CapabilityId::SYSINFO_KERNEL),
         audit: true,
     },
 ];
@@ -2112,6 +2193,581 @@ impl ResourceLimitRecord {
 /// [`ResourceLimitRecord`] per [`LimitKind`], in discriminant order.
 pub const RESOURCE_LIMITS_REPORT_LEN: usize = ResourceLimitRecord::WIRE_LEN * LimitKind::COUNT;
 
+/// Number of memory-pressure bands in `sysinfo-v1` (normal, mild,
+/// moderate, severe, critical — depth order, shallowest first).
+pub const PRESSURE_BAND_COUNT: usize = 5;
+
+/// Number of *entered* bands (every band but normal): the deeper four
+/// carry enter/exit watermarks in [`MemoryPressureStats`].
+pub const PRESSURE_WATERMARK_COUNT: usize = PRESSURE_BAND_COUNT - 1;
+
+/// Stable display names of the five pressure bands, indexed by band depth.
+pub const PRESSURE_BAND_NAMES: [&str; PRESSURE_BAND_COUNT] =
+    ["normal", "mild", "moderate", "severe", "critical"];
+
+/// Response payload for [`SysinfoQueryId::MEMORY_PRESSURE`].
+///
+/// Reports the live five-band gauge: the current band, the readings it
+/// folded, the derived watermarks actually in force (reported, never
+/// promised — a re-derivation after a policy tune simply reports the new
+/// values), and the per-band entry counters since boot.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct MemoryPressureStats {
+    /// Current band depth: an index into [`PRESSURE_BAND_NAMES`].
+    pub band: u8,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub reserved: [u8; 7],
+    /// Byte size of the backing resource the gauge watches.
+    pub total_bytes: u64,
+    /// Free bytes at the sample.
+    pub free_bytes: u64,
+    /// The reserve floor in bytes: below this the system is critical
+    /// regardless of band history, and no cache growth may dip into it.
+    pub reserve_bytes: u64,
+    /// Enter watermarks (bytes free) for mild, moderate, severe,
+    /// critical: the band is entered when the free reading drops below
+    /// its watermark.
+    pub enter_bytes: [u64; PRESSURE_WATERMARK_COUNT],
+    /// Exit watermarks (bytes free) for mild, moderate, severe,
+    /// critical: the band is left when the free reading rises above its
+    /// watermark (the hysteresis gap).
+    pub exit_bytes: [u64; PRESSURE_WATERMARK_COUNT],
+    /// Times each band has been entered since boot, indexed by depth.
+    pub band_entries: [u64; PRESSURE_BAND_COUNT],
+}
+
+impl MemoryPressureStats {
+    /// Encoded size on the wire.
+    ///
+    /// Layout, little-endian: `band` (`u8`, offset 0), `reserved`
+    /// (7 bytes, offset 1), `total_bytes` (offset 8), `free_bytes`
+    /// (offset 16), `reserve_bytes` (offset 24), `enter_bytes`
+    /// (4 × `u64`, offset 32), `exit_bytes` (4 × `u64`, offset 64),
+    /// `band_entries` (5 × `u64`, offset 96).
+    pub const WIRE_LEN: usize =
+        8 + 3 * 8 + 2 * PRESSURE_WATERMARK_COUNT * 8 + PRESSURE_BAND_COUNT * 8;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[0] = self.band;
+        out[1..8].copy_from_slice(&self.reserved);
+        put_u64(&mut out, 8, self.total_bytes);
+        put_u64(&mut out, 16, self.free_bytes);
+        put_u64(&mut out, 24, self.reserve_bytes);
+        for (i, value) in self.enter_bytes.iter().enumerate() {
+            put_u64(&mut out, 32 + i * 8, *value);
+        }
+        for (i, value) in self.exit_bytes.iter().enumerate() {
+            put_u64(&mut out, 64 + i * 8, *value);
+        }
+        for (i, value) in self.band_entries.iter().enumerate() {
+            put_u64(&mut out, 96 + i * 8, *value);
+        }
+        out
+    }
+
+    /// Decode from `bytes`, failing closed on a malformed record.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if short.
+    /// * [`Errno::BadMagic`] if a reserved byte is non-zero.
+    /// * [`Errno::OutOfRange`] if `band` is not a `sysinfo-v1` band depth.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let mut reserved = [0u8; 7];
+        reserved.copy_from_slice(&bytes[1..8]);
+        if reserved != [0u8; 7] {
+            return Err(Errno::BadMagic);
+        }
+        let band = bytes[0];
+        if usize::from(band) >= PRESSURE_BAND_COUNT {
+            return Err(Errno::OutOfRange);
+        }
+        let mut enter_bytes = [0u64; PRESSURE_WATERMARK_COUNT];
+        for (i, slot) in enter_bytes.iter_mut().enumerate() {
+            *slot = read_u64(bytes, 32 + i * 8);
+        }
+        let mut exit_bytes = [0u64; PRESSURE_WATERMARK_COUNT];
+        for (i, slot) in exit_bytes.iter_mut().enumerate() {
+            *slot = read_u64(bytes, 64 + i * 8);
+        }
+        let mut band_entries = [0u64; PRESSURE_BAND_COUNT];
+        for (i, slot) in band_entries.iter_mut().enumerate() {
+            *slot = read_u64(bytes, 96 + i * 8);
+        }
+        Ok(Self {
+            band,
+            reserved,
+            total_bytes: read_u64(bytes, 8),
+            free_bytes: read_u64(bytes, 16),
+            reserve_bytes: read_u64(bytes, 24),
+            enter_bytes,
+            exit_bytes,
+            band_entries,
+        })
+    }
+}
+
+/// Number of reclaim classes in `sysinfo-v1`.
+///
+/// Mirrors the kernel reclaim ledger's closed class set; the shared
+/// names below are the classification's stable vocabulary, so the
+/// resolver's `stats:mem/reclaim/<class>` selectors and the kernel
+/// encoder can never spell a class differently.
+pub const RECLAIM_CLASS_COUNT: usize = 9;
+
+/// Stable names of the reclaim classes, indexed by class id.
+pub const RECLAIM_CLASS_NAMES: [&str; RECLAIM_CLASS_COUNT] = [
+    "disposable-ui",
+    "predictive-prefetch",
+    "background-validation",
+    "semantic-app-cache",
+    "runtime-cache",
+    "clean-file-data",
+    "transform-cache",
+    "fs-metadata",
+    "reliability-assist",
+];
+
+/// Look up a reclaim class id by its stable name. Fails closed: an
+/// unknown name is `None`, never a guessed class.
+#[must_use]
+pub fn reclaim_class_from_name(name: &str) -> Option<u8> {
+    RECLAIM_CLASS_NAMES
+        .iter()
+        .position(|&candidate| candidate == name)
+        .and_then(|index| u8::try_from(index).ok())
+}
+
+/// Request payload for [`SysinfoQueryId::RECLAIM_STATS`].
+///
+/// Structurally parallel to [`CpuTimeListRequest`] but a distinct frozen
+/// payload: each `sysinfo-v1` query owns its argument type. The response
+/// is a sequence of [`ReclaimClassRecord`]s paged with `offset`/`limit`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct ReclaimListRequest {
+    /// Index of the first class record to return.
+    pub offset: u32,
+    /// Maximum number of [`ReclaimClassRecord`]s the caller will accept.
+    pub limit: u16,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub flags: u16,
+}
+
+impl ReclaimListRequest {
+    /// Encoded size of a [`ReclaimListRequest`] on the wire.
+    pub const WIRE_LEN: usize = 8;
+
+    /// Encode `self` into its little-endian wire representation.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.offset);
+        put_u16(&mut out, 4, self.limit);
+        put_u16(&mut out, 6, self.flags);
+        out
+    }
+
+    /// Decode `bytes` into a [`ReclaimListRequest`].
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
+    /// * [`Errno::BadMagic`] if the reserved `flags` field is non-zero.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let flags = read_u16(bytes, 6);
+        if flags != 0 {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            offset: read_u32(bytes, 0),
+            limit: read_u16(bytes, 4),
+            flags,
+        })
+    }
+}
+
+/// One reclaim class's ledger figures inside a
+/// [`SysinfoQueryId::RECLAIM_STATS`] response.
+///
+/// Byte figures are live gauges (they rise and fall as caches charge and
+/// discharge); the event counters are monotonic since boot. All figures
+/// are aggregated across every registered cache ledger, so the record
+/// describes the *class*, not any one cache instance.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct ReclaimClassRecord {
+    /// The class this record describes: an index into
+    /// [`RECLAIM_CLASS_NAMES`].
+    pub class: u8,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub reserved: [u8; 7],
+    /// Cached payload bytes currently held for the class.
+    pub payload_bytes: u64,
+    /// Bookkeeping metadata bytes currently held for the class.
+    pub metadata_bytes: u64,
+    /// Entries currently held for the class.
+    pub entries: u64,
+    /// Admissions refused since boot.
+    pub refusals: u64,
+    /// Pressure-driven shrink passes that hit the class since boot.
+    pub pressure_shrinks: u64,
+    /// Whole-cache teardown drains that hit the class since boot.
+    pub teardowns: u64,
+    /// Internal failures (poisoned ledgers) attributed to the class
+    /// since boot.
+    pub failures: u64,
+}
+
+impl ReclaimClassRecord {
+    /// Encoded size on the wire: the class byte plus 7 reserved bytes,
+    /// then seven `u64` figures.
+    pub const WIRE_LEN: usize = 8 + 7 * 8;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[0] = self.class;
+        out[1..8].copy_from_slice(&self.reserved);
+        for (i, value) in [
+            self.payload_bytes,
+            self.metadata_bytes,
+            self.entries,
+            self.refusals,
+            self.pressure_shrinks,
+            self.teardowns,
+            self.failures,
+        ]
+        .iter()
+        .enumerate()
+        {
+            put_u64(&mut out, 8 + i * 8, *value);
+        }
+        out
+    }
+
+    /// Decode from `bytes`, failing closed on a malformed record.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if short.
+    /// * [`Errno::BadMagic`] if a reserved byte is non-zero.
+    /// * [`Errno::OutOfRange`] if `class` is not a `sysinfo-v1` class id.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let mut reserved = [0u8; 7];
+        reserved.copy_from_slice(&bytes[1..8]);
+        if reserved != [0u8; 7] {
+            return Err(Errno::BadMagic);
+        }
+        let class = bytes[0];
+        if usize::from(class) >= RECLAIM_CLASS_COUNT {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self {
+            class,
+            reserved,
+            payload_bytes: read_u64(bytes, 8),
+            metadata_bytes: read_u64(bytes, 16),
+            entries: read_u64(bytes, 24),
+            refusals: read_u64(bytes, 32),
+            pressure_shrinks: read_u64(bytes, 40),
+            teardowns: read_u64(bytes, 48),
+            failures: read_u64(bytes, 56),
+        })
+    }
+}
+
+/// Response payload for [`SysinfoQueryId::RAMZIP_STATS`].
+///
+/// Counters only — never page contents, never key material
+/// (`plans/SWAPSWAPSWAP.md` §16). Byte figures are live gauges; the
+/// event counters are monotonic since boot. A build whose tier is not
+/// yet driven truthfully reports an idle tier (all gauges and counters
+/// zero) rather than refusing or fabricating.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct RamzipStats {
+    /// Compressed entries currently held.
+    pub entries: u64,
+    /// Logical (uncompressed) page bytes the tier represents.
+    pub logical_bytes: u64,
+    /// Compressed bytes before encryption overhead.
+    pub compressed_bytes: u64,
+    /// Stored ciphertext bytes (after encryption and authentication
+    /// overhead), excluding bookkeeping metadata.
+    pub stored_bytes: u64,
+    /// Bookkeeping metadata bytes.
+    pub metadata_bytes: u64,
+    /// Derived minimum capacity the tier may always use, in bytes.
+    pub min_cap_bytes: u64,
+    /// Derived soft capacity target, in bytes.
+    pub soft_cap_bytes: u64,
+    /// Derived hard capacity ceiling, in bytes.
+    pub hard_cap_bytes: u64,
+    /// Compression attempts offered to the tier.
+    pub attempts: u64,
+    /// Attempts accepted and stored.
+    pub accepted: u64,
+    /// Refused by the pressure policy (handoff gate closed).
+    pub rejected_policy: u64,
+    /// Refused by the eligibility classifier.
+    pub rejected_ineligible: u64,
+    /// Refused because compression did not win.
+    pub rejected_incompressible: u64,
+    /// Refused by the band capacity cap.
+    pub rejected_cap: u64,
+    /// Refused by the decompression-floor reserve check.
+    pub rejected_reserve: u64,
+    /// Refused by the per-task fair-share bound.
+    pub rejected_task_share: u64,
+    /// Refused because the owning task is thrashing.
+    pub rejected_thrash: u64,
+    /// Compressed-entry pages restored on demand.
+    pub fault_ins: u64,
+    /// Entries lost to authentication failure (fail closed, audited).
+    pub auth_failures: u64,
+    /// Entries lost to metadata or decompression corruption (fail
+    /// closed, audited).
+    pub decode_failures: u64,
+    /// Warm-up steps that considered candidates.
+    pub warm_attempts: u64,
+    /// Pages restored by the warm-up worker.
+    pub warm_restored: u64,
+    /// Warm-up steps stopped by a pressure or reserve gate.
+    pub warm_stopped: u64,
+    /// Pages restored by post-fault clustering.
+    pub cluster_restored: u64,
+    /// Tasks that crossed the thrash threshold.
+    pub thrash_detected: u64,
+    /// Reserved; must be zero in `sysinfo-v1` (the ST2 pinned-exemption
+    /// counter extends here by reserved-field evolution).
+    pub reserved: u64,
+}
+
+impl RamzipStats {
+    /// Encoded size on the wire: twenty-six `u64` fields, field order as
+    /// declared, little-endian.
+    pub const WIRE_LEN: usize = 26 * 8;
+
+    /// The wire values in declaration order (shared by the encoder and
+    /// the decoder so the two can never disagree on field order).
+    fn field_values(&self) -> [u64; 26] {
+        [
+            self.entries,
+            self.logical_bytes,
+            self.compressed_bytes,
+            self.stored_bytes,
+            self.metadata_bytes,
+            self.min_cap_bytes,
+            self.soft_cap_bytes,
+            self.hard_cap_bytes,
+            self.attempts,
+            self.accepted,
+            self.rejected_policy,
+            self.rejected_ineligible,
+            self.rejected_incompressible,
+            self.rejected_cap,
+            self.rejected_reserve,
+            self.rejected_task_share,
+            self.rejected_thrash,
+            self.fault_ins,
+            self.auth_failures,
+            self.decode_failures,
+            self.warm_attempts,
+            self.warm_restored,
+            self.warm_stopped,
+            self.cluster_restored,
+            self.thrash_detected,
+            self.reserved,
+        ]
+    }
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        for (i, value) in self.field_values().iter().enumerate() {
+            put_u64(&mut out, i * 8, *value);
+        }
+        out
+    }
+
+    /// Decode from `bytes`, failing closed on a malformed record.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if short.
+    /// * [`Errno::BadMagic`] if the reserved field is non-zero.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let reserved = read_u64(bytes, 25 * 8);
+        if reserved != 0 {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            entries: read_u64(bytes, 0),
+            logical_bytes: read_u64(bytes, 8),
+            compressed_bytes: read_u64(bytes, 16),
+            stored_bytes: read_u64(bytes, 24),
+            metadata_bytes: read_u64(bytes, 32),
+            min_cap_bytes: read_u64(bytes, 40),
+            soft_cap_bytes: read_u64(bytes, 48),
+            hard_cap_bytes: read_u64(bytes, 56),
+            attempts: read_u64(bytes, 64),
+            accepted: read_u64(bytes, 72),
+            rejected_policy: read_u64(bytes, 80),
+            rejected_ineligible: read_u64(bytes, 88),
+            rejected_incompressible: read_u64(bytes, 96),
+            rejected_cap: read_u64(bytes, 104),
+            rejected_reserve: read_u64(bytes, 112),
+            rejected_task_share: read_u64(bytes, 120),
+            rejected_thrash: read_u64(bytes, 128),
+            fault_ins: read_u64(bytes, 136),
+            auth_failures: read_u64(bytes, 144),
+            decode_failures: read_u64(bytes, 152),
+            warm_attempts: read_u64(bytes, 160),
+            warm_restored: read_u64(bytes, 168),
+            warm_stopped: read_u64(bytes, 176),
+            cluster_restored: read_u64(bytes, 184),
+            thrash_detected: read_u64(bytes, 192),
+            reserved,
+        })
+    }
+}
+
+/// Request payload for [`SysinfoQueryId::CPU_LOAD`].
+///
+/// Structurally parallel to [`CpuTimeListRequest`] but a distinct frozen
+/// payload: each `sysinfo-v1` query owns its argument type. The response
+/// is a sequence of [`CpuLoadRecord`]s paged with `offset`/`limit`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct CpuLoadRequest {
+    /// Index of the first CPU to return.
+    pub offset: u32,
+    /// Maximum number of [`CpuLoadRecord`]s the caller will accept.
+    pub limit: u16,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub flags: u16,
+}
+
+impl CpuLoadRequest {
+    /// Encoded size of a [`CpuLoadRequest`] on the wire.
+    pub const WIRE_LEN: usize = 8;
+
+    /// Encode `self` into its little-endian wire representation.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.offset);
+        put_u16(&mut out, 4, self.limit);
+        put_u16(&mut out, 6, self.flags);
+        out
+    }
+
+    /// Decode `bytes` into a [`CpuLoadRequest`].
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
+    /// * [`Errno::BadMagic`] if the reserved `flags` field is non-zero.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let flags = read_u16(bytes, 6);
+        if flags != 0 {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            offset: read_u32(bytes, 0),
+            limit: read_u16(bytes, 4),
+            flags,
+        })
+    }
+}
+
+/// One CPU's scheduler load figures inside a
+/// [`SysinfoQueryId::CPU_LOAD`] response.
+///
+/// The cumulative busy/idle time split lives in [`CpuTimeRecord`]
+/// ([`SysinfoQueryId::CPU_TIME_STATS`]); this record carries only the
+/// remainder, so the same figure is never served twice. `queue_depth`
+/// is an instantaneous sample; the two counters are monotonic since
+/// boot.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct CpuLoadRecord {
+    /// The CPU index this record describes.
+    pub cpu: u32,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub reserved: u32,
+    /// Runnable tasks queued on this CPU at the sample (excluding the
+    /// currently running task).
+    pub queue_depth: u64,
+    /// Task dispatches (context switches into a task body) on this CPU
+    /// since boot.
+    pub switches: u64,
+    /// Timer-driven involuntary preemptions on this CPU since boot.
+    pub preemptions: u64,
+}
+
+impl CpuLoadRecord {
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = 32;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.cpu);
+        put_u32(&mut out, 4, self.reserved);
+        put_u64(&mut out, 8, self.queue_depth);
+        put_u64(&mut out, 16, self.switches);
+        put_u64(&mut out, 24, self.preemptions);
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if short.
+    /// * [`Errno::BadMagic`] if the reserved field is non-zero.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let reserved = read_u32(bytes, 4);
+        if reserved != 0 {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            cpu: read_u32(bytes, 0),
+            reserved,
+            queue_depth: read_u64(bytes, 8),
+            switches: read_u64(bytes, 16),
+            preemptions: read_u64(bytes, 24),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2145,6 +2801,10 @@ mod tests {
         assert_eq!(SysinfoQueryId::RESOURCE_LIMITS.as_u16(), 7);
         assert_eq!(SysinfoQueryId::PROCESS_IDENTITY.as_u16(), 8);
         assert_eq!(SysinfoQueryId::SEAT_LIST.as_u16(), 12);
+        assert_eq!(SysinfoQueryId::MEMORY_PRESSURE.as_u16(), 13);
+        assert_eq!(SysinfoQueryId::RECLAIM_STATS.as_u16(), 14);
+        assert_eq!(SysinfoQueryId::RAMZIP_STATS.as_u16(), 15);
+        assert_eq!(SysinfoQueryId::CPU_LOAD.as_u16(), 16);
         assert_eq!(SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1);
     }
 
@@ -2196,12 +2856,16 @@ mod tests {
             (7, IntrospectDomain::UserDirectory),
             (8, IntrospectDomain::CpuTimes),
             (9, IntrospectDomain::Seats),
+            (10, IntrospectDomain::MemoryPressure),
+            (11, IntrospectDomain::Reclaim),
+            (12, IntrospectDomain::Ramzip),
+            (13, IntrospectDomain::CpuLoad),
         ] {
             assert_eq!(domain.as_u32(), raw);
             assert_eq!(IntrospectDomain::from_u32(raw), Ok(domain));
         }
         // Any value outside the closed set is rejected, not guessed.
-        assert_eq!(IntrospectDomain::from_u32(10), Err(Errno::OutOfRange));
+        assert_eq!(IntrospectDomain::from_u32(14), Err(Errno::OutOfRange));
         assert_eq!(IntrospectDomain::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -2365,6 +3029,23 @@ mod tests {
             Some(CapabilityId::SYSINFO_HW)
         );
         assert!(spec_for(SysinfoQueryId::SEAT_LIST).unwrap().audit);
+        // The four kernel-statistics queries share KERNEL_MEMORY_STATS's
+        // boundary: gated on CAP_SYSINFO_KERNEL and audited.
+        for id in [
+            SysinfoQueryId::MEMORY_PRESSURE,
+            SysinfoQueryId::RECLAIM_STATS,
+            SysinfoQueryId::RAMZIP_STATS,
+            SysinfoQueryId::CPU_LOAD,
+        ] {
+            let spec = spec_for(id).unwrap();
+            assert_eq!(
+                spec.required_capability,
+                Some(CapabilityId::SYSINFO_KERNEL),
+                "{}",
+                spec.name
+            );
+            assert!(spec.audit, "{}", spec.name);
+        }
     }
 
     #[test]
@@ -3024,5 +3705,193 @@ mod tests {
             SystemIdentity::from_bytes(&[0u8; 8]),
             Err(Errno::BufferTooSmall)
         );
+    }
+
+    #[test]
+    fn memory_pressure_stats_round_trips_and_fails_closed() {
+        use super::{MemoryPressureStats, PRESSURE_BAND_COUNT, PRESSURE_BAND_NAMES};
+        let stats = MemoryPressureStats {
+            band: 2,
+            reserved: [0u8; 7],
+            total_bytes: 1 << 30,
+            free_bytes: 90 << 20,
+            reserve_bytes: 16 << 20,
+            enter_bytes: [200 << 20, 100 << 20, 64 << 20, 32 << 20],
+            exit_bytes: [256 << 20, 140 << 20, 80 << 20, 50 << 20],
+            band_entries: [1, 4, 3, 2, 1],
+        };
+        let decoded = MemoryPressureStats::from_bytes(&stats.to_le_bytes()).expect("round trip");
+        assert_eq!(decoded, stats);
+        assert_eq!(PRESSURE_BAND_NAMES[usize::from(decoded.band)], "moderate");
+
+        // Fail closed: short buffer, reserved byte set, unknown band depth.
+        assert_eq!(
+            MemoryPressureStats::from_bytes(&[0u8; MemoryPressureStats::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        let mut bytes = stats.to_le_bytes();
+        bytes[3] = 1;
+        assert_eq!(
+            MemoryPressureStats::from_bytes(&bytes),
+            Err(Errno::BadMagic)
+        );
+        let mut bytes = stats.to_le_bytes();
+        bytes[0] = u8::try_from(PRESSURE_BAND_COUNT).unwrap();
+        assert_eq!(
+            MemoryPressureStats::from_bytes(&bytes),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn reclaim_list_request_round_trips_and_rejects_reserved() {
+        use super::ReclaimListRequest;
+        let req = ReclaimListRequest {
+            offset: 2,
+            limit: 9,
+            flags: 0,
+        };
+        assert_eq!(ReclaimListRequest::from_bytes(&req.to_le_bytes()), Ok(req));
+        let mut bytes = req.to_le_bytes();
+        bytes[6] = 1;
+        assert_eq!(ReclaimListRequest::from_bytes(&bytes), Err(Errno::BadMagic));
+        assert_eq!(
+            ReclaimListRequest::from_bytes(&[0u8; ReclaimListRequest::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn reclaim_class_record_round_trips_and_fails_closed() {
+        use super::{ReclaimClassRecord, RECLAIM_CLASS_COUNT};
+        let record = ReclaimClassRecord {
+            class: 5,
+            reserved: [0u8; 7],
+            payload_bytes: 4096,
+            metadata_bytes: 128,
+            entries: 3,
+            refusals: 1,
+            pressure_shrinks: 5,
+            teardowns: 1,
+            failures: 0,
+        };
+        let decoded = ReclaimClassRecord::from_bytes(&record.to_le_bytes()).expect("round trip");
+        assert_eq!(decoded, record);
+
+        assert_eq!(
+            ReclaimClassRecord::from_bytes(&[0u8; ReclaimClassRecord::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        let mut bytes = record.to_le_bytes();
+        bytes[5] = 1;
+        assert_eq!(ReclaimClassRecord::from_bytes(&bytes), Err(Errno::BadMagic));
+        let mut bytes = record.to_le_bytes();
+        bytes[0] = u8::try_from(RECLAIM_CLASS_COUNT).unwrap();
+        assert_eq!(
+            ReclaimClassRecord::from_bytes(&bytes),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn reclaim_class_names_are_a_closed_bijection() {
+        use super::{reclaim_class_from_name, RECLAIM_CLASS_COUNT, RECLAIM_CLASS_NAMES};
+        for (index, name) in RECLAIM_CLASS_NAMES.iter().enumerate() {
+            assert_eq!(
+                reclaim_class_from_name(name),
+                Some(u8::try_from(index).unwrap())
+            );
+        }
+        assert_eq!(RECLAIM_CLASS_NAMES.len(), RECLAIM_CLASS_COUNT);
+        // Unknown names fail closed, never guessed.
+        assert_eq!(reclaim_class_from_name("page-cache"), None);
+        assert_eq!(reclaim_class_from_name(""), None);
+    }
+
+    #[test]
+    fn ramzip_stats_round_trips_and_fails_closed() {
+        use super::RamzipStats;
+        let stats = RamzipStats {
+            entries: 7,
+            logical_bytes: 7 * 4096,
+            compressed_bytes: 9000,
+            stored_bytes: 9500,
+            metadata_bytes: 700,
+            min_cap_bytes: 8 << 20,
+            soft_cap_bytes: 64 << 20,
+            hard_cap_bytes: 128 << 20,
+            attempts: 30,
+            accepted: 7,
+            rejected_policy: 3,
+            rejected_ineligible: 4,
+            rejected_incompressible: 5,
+            rejected_cap: 2,
+            rejected_reserve: 1,
+            rejected_task_share: 6,
+            rejected_thrash: 2,
+            fault_ins: 4,
+            auth_failures: 0,
+            decode_failures: 0,
+            warm_attempts: 3,
+            warm_restored: 2,
+            warm_stopped: 1,
+            cluster_restored: 2,
+            thrash_detected: 1,
+            reserved: 0,
+        };
+        let decoded = RamzipStats::from_bytes(&stats.to_le_bytes()).expect("round trip");
+        assert_eq!(decoded, stats);
+
+        // An idle tier is a valid, truthful all-zero record.
+        let idle = RamzipStats::default();
+        assert_eq!(RamzipStats::from_bytes(&idle.to_le_bytes()), Ok(idle));
+
+        assert_eq!(
+            RamzipStats::from_bytes(&[0u8; RamzipStats::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        let mut bytes = stats.to_le_bytes();
+        bytes[RamzipStats::WIRE_LEN - 1] = 1;
+        assert_eq!(RamzipStats::from_bytes(&bytes), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn cpu_load_request_round_trips_and_rejects_reserved() {
+        use super::CpuLoadRequest;
+        let req = CpuLoadRequest {
+            offset: 1,
+            limit: 8,
+            flags: 0,
+        };
+        assert_eq!(CpuLoadRequest::from_bytes(&req.to_le_bytes()), Ok(req));
+        let mut bytes = req.to_le_bytes();
+        bytes[6] = 1;
+        assert_eq!(CpuLoadRequest::from_bytes(&bytes), Err(Errno::BadMagic));
+        assert_eq!(
+            CpuLoadRequest::from_bytes(&[0u8; CpuLoadRequest::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn cpu_load_record_round_trips_and_rejects_reserved() {
+        use super::CpuLoadRecord;
+        let record = CpuLoadRecord {
+            cpu: 3,
+            reserved: 0,
+            queue_depth: 5,
+            switches: 12_345,
+            preemptions: 678,
+        };
+        let decoded = CpuLoadRecord::from_bytes(&record.to_le_bytes()).expect("round trip");
+        assert_eq!(decoded, record);
+
+        assert_eq!(
+            CpuLoadRecord::from_bytes(&[0u8; CpuLoadRecord::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        let mut bytes = record.to_le_bytes();
+        bytes[4] = 1;
+        assert_eq!(CpuLoadRecord::from_bytes(&bytes), Err(Errno::BadMagic));
     }
 }

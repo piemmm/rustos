@@ -33,9 +33,11 @@ use rustos_abi::reply::decode_status_reply;
 use rustos_abi::rlimit::ResourceLimit;
 use rustos_abi::seat::SeatAdminRequest;
 use rustos_abi::sysinfo::{
-    decode_reply, encode_reply_ok, IntrospectDomain, KernelMemoryStats, MountListRequest,
-    MountRecord, ProcessListRequest, ProcessRecord, ResourceLimitRecord, SeatListRequest,
-    SeatRecord, SysinfoRequestHeader, SystemIdentity, Uptime, SYSINFO_REPLY_STATUS_LEN,
+    decode_reply, encode_reply_ok, CpuLoadRecord, CpuLoadRequest, IntrospectDomain,
+    KernelMemoryStats, MemoryPressureStats, MountListRequest, MountRecord, ProcessListRequest,
+    ProcessRecord, RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
+    SeatListRequest, SeatRecord, SysinfoRequestHeader, SystemIdentity, Uptime,
+    SYSINFO_REPLY_STATUS_LEN,
 };
 use rustos_abi::time::{Duration64, Time64};
 use rustos_abi::users_admin::{
@@ -151,6 +153,36 @@ fn exercise_sysinfo_records(bytes: &[u8]) {
     }
     if let Ok(rec) = SeatRecord::from_bytes(bytes) {
         let redecoded = SeatRecord::from_bytes(&rec.to_le_bytes())
+            .expect("round-trip of an accepted record must succeed");
+        assert_eq!(rec, redecoded);
+    }
+    if let Ok(stats) = MemoryPressureStats::from_bytes(bytes) {
+        let redecoded = MemoryPressureStats::from_bytes(&stats.to_le_bytes())
+            .expect("round-trip of accepted pressure stats must succeed");
+        assert_eq!(stats, redecoded);
+    }
+    if let Ok(req) = ReclaimListRequest::from_bytes(bytes) {
+        let redecoded = ReclaimListRequest::from_bytes(&req.to_le_bytes())
+            .expect("round-trip of an accepted request must succeed");
+        assert_eq!(req, redecoded);
+    }
+    if let Ok(rec) = ReclaimClassRecord::from_bytes(bytes) {
+        let redecoded = ReclaimClassRecord::from_bytes(&rec.to_le_bytes())
+            .expect("round-trip of an accepted record must succeed");
+        assert_eq!(rec, redecoded);
+    }
+    if let Ok(stats) = RamzipStats::from_bytes(bytes) {
+        let redecoded = RamzipStats::from_bytes(&stats.to_le_bytes())
+            .expect("round-trip of accepted ramzip stats must succeed");
+        assert_eq!(stats, redecoded);
+    }
+    if let Ok(req) = CpuLoadRequest::from_bytes(bytes) {
+        let redecoded = CpuLoadRequest::from_bytes(&req.to_le_bytes())
+            .expect("round-trip of an accepted request must succeed");
+        assert_eq!(req, redecoded);
+    }
+    if let Ok(rec) = CpuLoadRecord::from_bytes(bytes) {
+        let redecoded = CpuLoadRecord::from_bytes(&rec.to_le_bytes())
             .expect("round-trip of an accepted record must succeed");
         assert_eq!(rec, redecoded);
     }

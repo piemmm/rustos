@@ -24,7 +24,8 @@ immutable system-store bundles), SMART9 (observability through
 existing diagnostics: the split payload/metadata ledger with
 pressure-shrink/teardown/failure counters, the pressure gauge's
 per-band transition counters, and the `kernel/mem` `reclaim_audit`
-events — no public ABI), SMART10 (the cross-cache integration,
+events; `plans/STRESSTEST.md` ST1 has since exported them through the
+capability-gated System Information queries), SMART10 (the cross-cache integration,
 thrash, and benchmark-evidence suites over one shared gauge), and
 SMART11 (the whole-disk block-level LRU cache,
 `kernel/rustos-kernel::block_cache::BlockCache`: the classified,
@@ -693,7 +694,8 @@ Deliverables:
 - Rebuild-cost, sensitivity, invalidation-source, and reclaim-rule modelling.
 - Typed refusal reasons for objects that are unknown, unowned, sensitive,
   unbounded, non-reclaimable, or missing invalidation data.
-- No userland pressure interface and no public ABI.
+- No userland pressure interface beyond the capability-gated System
+  Information export `plans/STRESSTEST.md` ST1 added.
 
 Tests:
 
@@ -994,9 +996,11 @@ Docs:
 ### SMART9 - Observability through existing diagnostics
 
 **Status: done.** The subsystem is observable through internal counters
-and existing structured logging only; no public ABI was added (no
-current caller requires one), and no `/proc`/`/sys`/text-scrape path
-exists.
+and existing structured logging; `plans/STRESSTEST.md` ST1 has since
+exported the same figures through the capability-gated
+`MEMORY_PRESSURE`/`RECLAIM_STATS`/`RAMZIP_STATS` System Information
+queries (the in-tree callers SMART9 anticipated). No
+`/proc`/`/sys`/text-scrape path exists.
 
 What now holds (`docs/src/architecture/memory.md` §7k):
 

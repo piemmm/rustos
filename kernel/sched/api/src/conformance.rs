@@ -27,6 +27,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arch::{CoreClass, TestArch};
 use crate::config::SchedulerConfig;
+use crate::error::SchedError;
 use crate::outcome::StepOutcome;
 use crate::policy::SchedulerPolicy;
 use crate::task::{Priority, TaskAction, TaskState};
@@ -44,6 +45,7 @@ pub fn run_all<S: SchedulerPolicy<TestArch>>() {
     yield_current_semantics::<S>();
     running_cpu_agrees_with_current_task::<S>();
     cpu_time_is_accounted_per_dispatch::<S>();
+    load_observations_track_dispatch::<S>();
     no_starvation_under_priority_boost::<S>();
     fairness_no_band_is_starved::<S>();
     smp_stress_four_cores::<S>();
@@ -83,6 +85,36 @@ fn spawn_runs_and_exits<S: SchedulerPolicy<TestArch>>() {
     assert_eq!(sched.state_of(id), TaskState::Exited, "task exited");
     assert!(arch.ipi_count(0) >= 1, "spawn notifies the home CPU");
     assert_eq!(sched.step(0), Ok(StepOutcome::Idle), "no work remains");
+}
+
+/// The per-CPU load observations are truthful: `queue_depth` reflects
+/// the tasks queued runnable on the CPU (a sample, excluding the running
+/// task), `cpu_switches` counts one context switch per dispatched body,
+/// and both fail closed on an out-of-range CPU.
+fn load_observations_track_dispatch<S: SchedulerPolicy<TestArch>>() {
+    let (arch, sched) = make::<S>(1, 64);
+    arch.set_current_cpu(0);
+    assert_eq!(sched.queue_depth(0), Ok(0), "empty queue at rest");
+    assert_eq!(sched.cpu_switches(0), Ok(0), "no dispatches at rest");
+
+    for _ in 0..2 {
+        sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Exit)
+            .expect("spawn");
+    }
+    assert_eq!(sched.queue_depth(0), Ok(2), "both tasks queued runnable");
+
+    assert!(matches!(sched.step(0), Ok(StepOutcome::Ran(_))));
+    assert_eq!(sched.queue_depth(0), Ok(1), "one task consumed");
+    assert_eq!(sched.cpu_switches(0), Ok(1), "one switch per dispatch");
+
+    assert!(matches!(sched.step(0), Ok(StepOutcome::Ran(_))));
+    assert_eq!(sched.queue_depth(0), Ok(0), "queue drained");
+    assert_eq!(sched.cpu_switches(0), Ok(2), "switches are cumulative");
+
+    // Out-of-range CPUs fail closed, never a fabricated figure.
+    assert_eq!(sched.queue_depth(99), Err(SchedError::NoSuchCpu));
+    assert_eq!(sched.cpu_switches(99), Err(SchedError::NoSuchCpu));
 }
 
 /// `park` then `unpark` re-admits the task for dispatch (block/wake).

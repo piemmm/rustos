@@ -32,6 +32,18 @@ pub enum Command {
     /// foreground console (`SEAT_LIST`, which the service gates on
     /// `CAP_SYSINFO_HW`).
     Seats,
+    /// Read the live memory-pressure gauge (`MEMORY_PRESSURE`, which the
+    /// service gates on `CAP_SYSINFO_KERNEL`).
+    Pressure,
+    /// Read the reclaimable-cache ledger, one row per class
+    /// (`RECLAIM_STATS`, gated on `CAP_SYSINFO_KERNEL`).
+    Reclaim,
+    /// Read the `ramzip` compressed-tier counters (`RAMZIP_STATS`, gated
+    /// on `CAP_SYSINFO_KERNEL`).
+    Ramzip,
+    /// Read the per-CPU scheduler load figures, one row per CPU
+    /// (`CPU_LOAD`, gated on `CAP_SYSINFO_KERNEL`).
+    CpuLoad,
     /// Render `sysinfo`'s own short help (`help`/`-h`/`-?`/`--help`): the
     /// `NAME`, `SYNOPSIS`, and compact `OPTIONS` of its Help document,
     /// through the same engine as any other command's short help
@@ -60,6 +72,10 @@ pub enum Command {
 /// | `uptime`              | [`Command::Uptime`]              |
 /// | `limits`, `rlimits`   | [`Command::Limits`]              |
 /// | `seats`               | [`Command::Seats`]               |
+/// | `pressure`            | [`Command::Pressure`]            |
+/// | `reclaim`             | [`Command::Reclaim`]             |
+/// | `ramzip`              | [`Command::Ramzip`]              |
+/// | `cpu`                 | [`Command::CpuLoad`]             |
 ///
 /// # Errors
 ///
@@ -77,6 +93,10 @@ pub fn parse(args: &[&str]) -> Result<Command, SysinfoError> {
         "uptime" => no_more(rest).map(|()| Command::Uptime),
         "limits" | "rlimits" => no_more(rest).map(|()| Command::Limits),
         "seats" => no_more(rest).map(|()| Command::Seats),
+        "pressure" => no_more(rest).map(|()| Command::Pressure),
+        "reclaim" => no_more(rest).map(|()| Command::Reclaim),
+        "ramzip" => no_more(rest).map(|()| Command::Ramzip),
+        "cpu" => no_more(rest).map(|()| Command::CpuLoad),
         _ => Err(SysinfoError::Usage),
     }
 }
@@ -142,6 +162,10 @@ mod tests {
         assert_eq!(parse(&["limits"]), Ok(Command::Limits));
         assert_eq!(parse(&["rlimits"]), Ok(Command::Limits));
         assert_eq!(parse(&["seats"]), Ok(Command::Seats));
+        assert_eq!(parse(&["pressure"]), Ok(Command::Pressure));
+        assert_eq!(parse(&["reclaim"]), Ok(Command::Reclaim));
+        assert_eq!(parse(&["ramzip"]), Ok(Command::Ramzip));
+        assert_eq!(parse(&["cpu"]), Ok(Command::CpuLoad));
     }
 
     #[test]
@@ -159,6 +183,8 @@ mod tests {
         assert_eq!(parse(&["uptime", "now"]), Err(SysinfoError::Usage));
         assert_eq!(parse(&["memory", "extra"]), Err(SysinfoError::Usage));
         assert_eq!(parse(&["seats", "0"]), Err(SysinfoError::Usage));
+        assert_eq!(parse(&["pressure", "now"]), Err(SysinfoError::Usage));
+        assert_eq!(parse(&["cpu", "0"]), Err(SysinfoError::Usage));
     }
 
     /// Every locale's `OPTIONS` section documents exactly the switches this

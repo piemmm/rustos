@@ -25,6 +25,13 @@ RustOS には `/proc` も `/sys` もありません。このコマンドは、�
 - `limits`、`rlimits` — あなたの有効な資源制限と生の使用量。
 - `seats` — シート一覧：各ディスプレイの所有者と前面コンソール
   （`CAP_SYSINFO_HW` が必要）。
+- `pressure` — ライブのメモリ圧力ゲージ：バンド、ウォーターマーク、
+  遷移カウンタ（`CAP_SYSINFO_KERNEL` が必要）。
+- `reclaim` — 回収可能キャッシュ台帳（クラスごとに 1 行、
+  `CAP_SYSINFO_KERNEL` が必要）。
+- `ramzip` — 圧縮メモリ層のカウンタ（`CAP_SYSINFO_KERNEL` が必要）。
+- `cpu` — CPU ごとの実行キュー深さ、コンテキストスイッチ、プリエンプション
+  （`CAP_SYSINFO_KERNEL` が必要）。
 - `help` — このコマンド自身の短いヘルプ。
 
 問い合わせなしなら短いヘルプが表示されます。

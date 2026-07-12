@@ -86,9 +86,18 @@ never bypass the authority that guards it:
   effective bounds and live usage, from the self-scoped `RESOURCE_LIMITS`
   query), `info:mem/{physical,page-size}` (total physical RAM and the reporting
   architecture's page size — stable facts carried by the
-  `CAP_SYSINFO_KERNEL`-gated kernel-memory query), `stats:uptime`, and
-  `stats:mem/{used,available,total,kernel-heap,user-resident}` — and grows in
-  place as more queries land.
+  `CAP_SYSINFO_KERNEL`-gated kernel-memory query), `info:cpu/count` (the
+  online CPU count, from the gated per-CPU load query), `stats:uptime`,
+  `stats:mem/{used,available,total,kernel-heap,user-resident}`,
+  `stats:cpu/load` and `stats:cpu/<n>/load` (the cumulative busy share
+  since boot, all-CPU or per-CPU, from the ungated busy/idle accounting),
+  `stats:cpu/switches` (cumulative context switches, gated),
+  `stats:mem/pressure` and `stats:mem/pressure/transitions` (the live
+  pressure band — with its name in the metric name — and the transition
+  counter), `stats:mem/reclaim/{total,<class>}` (reclaimable bytes held,
+  whole-ledger or by the stable class names in `RECLAIM_CLASS_NAMES`), and
+  `stats:mem/ramzip/{stored,logical,saved}` (the compressed tier's byte
+  gauges) — and grows in place as more queries land.
 
 Either way this crate only produces the typed spelling; the resolver applies
 the capability check and fails closed on an unknown selector, an unsupported

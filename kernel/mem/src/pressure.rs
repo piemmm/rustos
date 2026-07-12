@@ -96,7 +96,8 @@ impl PressureBand {
 
     /// The band at `depth`, clamped into range so a stored raw value
     /// can never decode to an out-of-model state.
-    const fn from_depth(depth: u8) -> Self {
+    #[must_use]
+    pub const fn from_depth(depth: u8) -> Self {
         match depth {
             0 => Self::Normal,
             1 => Self::Mild,
@@ -207,6 +208,30 @@ impl PressureThresholds {
     #[must_use]
     pub const fn reserve(&self) -> usize {
         self.reserve
+    }
+
+    /// Byte size of the backing resource the thresholds were derived
+    /// from.
+    #[must_use]
+    pub const fn total(&self) -> usize {
+        self.total
+    }
+
+    /// Enter watermarks (bytes free) for mild, moderate, severe,
+    /// critical, in depth order: the band is entered when the free
+    /// reading drops below its watermark. Reported values (the policy
+    /// actually in force), never promises.
+    #[must_use]
+    pub const fn enter_watermarks(&self) -> [usize; 4] {
+        self.enter
+    }
+
+    /// Exit watermarks (bytes free) for mild, moderate, severe,
+    /// critical, in depth order: the band is left when the free reading
+    /// rises above its watermark (the hysteresis gap).
+    #[must_use]
+    pub const fn exit_watermarks(&self) -> [usize; 4] {
+        self.exit
     }
 
     /// The warm-up *start* watermark: opportunistic decompression
@@ -352,6 +377,18 @@ impl MemoryPressure {
     #[must_use]
     pub fn band_entries(&self, band: PressureBand) -> u64 {
         self.transitions[band.depth() as usize].load(Ordering::Relaxed)
+    }
+
+    /// The backing's live free-byte reading.
+    #[must_use]
+    pub fn free_bytes(&self) -> usize {
+        self.source.free_bytes()
+    }
+
+    /// Byte size of the backing resource the gauge watches.
+    #[must_use]
+    pub fn total_bytes(&self) -> usize {
+        self.source.total_bytes()
     }
 
     /// Whether a cache may grow by `cost_bytes` right now: growth is

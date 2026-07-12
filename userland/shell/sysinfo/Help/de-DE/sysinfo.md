@@ -27,6 +27,14 @@ Die Abfragen:
   aktuelle Nutzung.
 - `seats` — das Sitzinventar: der Besitzer jedes Displays und seine
   Vordergrundkonsole (benötigt `CAP_SYSINFO_HW`).
+- `pressure` — die Live-Speicherdruckanzeige: Band, Wasserstände und
+  Übergangszähler (benötigt `CAP_SYSINFO_KERNEL`).
+- `reclaim` — das Register der rückgewinnbaren Caches, eine Zeile pro
+  Klasse (benötigt `CAP_SYSINFO_KERNEL`).
+- `ramzip` — die Zähler der komprimierten Speicherstufe (benötigt
+  `CAP_SYSINFO_KERNEL`).
+- `cpu` — Warteschlangentiefe, Kontextwechsel und Präemptionen je CPU
+  (benötigt `CAP_SYSINFO_KERNEL`).
 - `help` — die Kurzhilfe dieses Befehls.
 
 Ohne Abfrage wird die Kurzhilfe angezeigt.

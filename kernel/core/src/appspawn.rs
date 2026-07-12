@@ -179,7 +179,12 @@ impl AppStore {
     ) {
         let mut cache = self.cache.write();
         if cache.is_none() {
-            *cache = Some(LaunchCache::new(budget, pressure, sink));
+            let launch = LaunchCache::new(budget, pressure, sink);
+            // The installed launch cache registers its ledger with the
+            // System Information memory-statistics registry
+            // (observation-only); only the winning install registers.
+            crate::memstats::MEM_STATS.register_ledger(launch.accounting_shared());
+            *cache = Some(launch);
         }
     }
 

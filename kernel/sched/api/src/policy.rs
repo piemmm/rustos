@@ -146,6 +146,31 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     /// * [`crate::SchedError::NoSuchCpu`] if `cpu` is out of range.
     fn cpu_busy_ticks(&self, cpu: CpuId) -> SchedResult<u64>;
 
+    /// Task dispatches (context switches into a task body) observed on
+    /// `cpu` since construction.
+    ///
+    /// Counted on the same dispatch bracket that credits
+    /// [`cpu_busy_ticks`](Self::cpu_busy_ticks), so the two figures
+    /// describe the same events and the hot path pays one extra atomic
+    /// increment. A read-only observation for the System Information
+    /// introspection feed's per-CPU load records.
+    ///
+    /// # Errors
+    /// * [`crate::SchedError::NoSuchCpu`] if `cpu` is out of range.
+    fn cpu_switches(&self, cpu: CpuId) -> SchedResult<u64>;
+
+    /// Instantaneous count of runnable tasks queued on `cpu`'s run queue
+    /// (excluding the currently running task, which sits in the current
+    /// slot, and any globally overflowed tasks awaiting re-homing).
+    ///
+    /// A sample, not a promise: by the time the caller reads it the queue
+    /// may have changed. A read-only observation for the System
+    /// Information introspection feed's per-CPU load records.
+    ///
+    /// # Errors
+    /// * [`crate::SchedError::NoSuchCpu`] if `cpu` is out of range.
+    fn queue_depth(&self, cpu: CpuId) -> SchedResult<u64>;
+
     /// Most recent state of `id` ([`TaskState::Exited`] once drained).
     fn state_of(&self, id: TaskId) -> TaskState;
 

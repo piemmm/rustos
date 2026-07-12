@@ -13,8 +13,9 @@
 use alloc::vec::Vec;
 
 use rustos_abi::sysinfo::{
-    CpuTimeRecord, KernelMemoryStats, LoadAverage, MountRecord, ProcessRecord, ResourceLimitRecord,
-    SeatRecord, SystemIdentity, Uptime, UserDirectoryRecord,
+    CpuLoadRecord, CpuTimeRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats, MountRecord,
+    ProcessRecord, RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SeatRecord,
+    SystemIdentity, Uptime, UserDirectoryRecord,
 };
 use rustos_abi::{CapabilityQuery, Errno, LimitKind, Origin};
 
@@ -168,6 +169,43 @@ pub trait SysinfoSource {
     /// The owned list is returned whole and [`crate::serve`] applies the
     /// `offset`/`limit` paging; ordering must be stable across paged calls.
     fn cpu_times(&self, caller: &Caller) -> Result<Vec<CpuTimeRecord>, Errno>;
+
+    /// Return the live memory-pressure gauge snapshot: the current band,
+    /// the derived watermarks in force, the reserve floor, the free/total
+    /// readings, and the per-band entry counters since boot.
+    ///
+    /// Reached only after the `CAP_SYSINFO_KERNEL` gate has passed — the
+    /// same boundary as [`kernel_memory_stats`](Self::kernel_memory_stats)
+    /// (`plans/STRESSTEST.md` ST1).
+    fn memory_pressure(&self, caller: &Caller) -> Result<MemoryPressureStats, Errno>;
+
+    /// Return the reclaimable-cache ledger: one record per reclaim class,
+    /// in class-id order, aggregated across every live cache.
+    ///
+    /// Reached only after the `CAP_SYSINFO_KERNEL` gate has passed. The
+    /// owned list is returned whole and [`crate::serve`] applies the
+    /// `offset`/`limit` paging; ordering must be stable across paged
+    /// calls (class-id order is).
+    fn reclaim_records(&self, caller: &Caller) -> Result<Vec<ReclaimClassRecord>, Errno>;
+
+    /// Return the `ramzip` compressed-tier accounting: counters only,
+    /// never page contents or key material; an undriven tier truthfully
+    /// reports idle zeros.
+    ///
+    /// Reached only after the `CAP_SYSINFO_KERNEL` gate has passed.
+    fn ramzip_stats(&self, caller: &Caller) -> Result<RamzipStats, Errno>;
+
+    /// Return the per-CPU scheduler load figures (run-queue depth sample,
+    /// context-switch and preemption counters), one record per online CPU
+    /// in ascending CPU order — the busy/idle time split stays in
+    /// [`cpu_times`](Self::cpu_times), so no figure is served twice.
+    ///
+    /// Reached only after the `CAP_SYSINFO_KERNEL` gate has passed: queue
+    /// depths and preemption counters are kernel-wide scheduler internals,
+    /// unlike the ungated utilisation split. The owned list is returned
+    /// whole and [`crate::serve`] applies the `offset`/`limit` paging;
+    /// ordering must be stable across paged calls.
+    fn cpu_load(&self, caller: &Caller) -> Result<Vec<CpuLoadRecord>, Errno>;
 
     /// Return the seat inventory: one record per seat, in ascending seat-id
     /// order (`plans/DISPLAY.md` D3).

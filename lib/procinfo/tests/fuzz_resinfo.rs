@@ -25,8 +25,9 @@ use core::cell::Cell;
 
 use rustos_abi::origin::{CapabilitySummary, Origin, ProcId, TrustDomain};
 use rustos_abi::sysinfo::{
-    KernelMemoryStats, ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity,
-    Uptime,
+    CpuLoadRecord, CpuTimeRecord, KernelMemoryStats, MemoryPressureStats, RamzipStats,
+    ReclaimClassRecord, ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity,
+    Uptime, RECLAIM_CLASS_COUNT,
 };
 use rustos_abi::time::{Duration64, Time64};
 use rustos_abi::{Errno, LimitKind, ResourceLimit};
@@ -79,6 +80,18 @@ const TEMPLATES: &[&str] = &[
     "info:system/nope",
     "stats:mem/pagefaults",
     "stats:cpu/load",
+    "stats:cpu/0/load",
+    "stats:cpu/77/load",
+    "stats:cpu/switches",
+    "info:cpu/count",
+    "stats:mem/pressure",
+    "stats:mem/pressure/transitions",
+    "stats:mem/reclaim/total",
+    "stats:mem/reclaim/clean-file-data",
+    "stats:mem/reclaim/nope",
+    "stats:mem/ramzip/stored",
+    "stats:mem/ramzip/logical",
+    "stats:mem/ramzip/saved",
     "info:system/hostname::record",
     "stats:uptime?window=1s",
     "sys:random",
@@ -110,6 +123,9 @@ impl HostileBroker {
     }
 
     fn valid_reply(query: SysinfoQueryId) -> Option<Vec<u8>> {
+        if let Some(reply) = kernel_stats_reply(query) {
+            return Some(reply);
+        }
         match query {
             SysinfoQueryId::SYSTEM_IDENTITY => Some(
                 SystemIdentity::new([0x5A; 16], 9, 8, 7, b"fuzzbox")
@@ -163,6 +179,79 @@ impl HostileBroker {
             }
             _ => None,
         }
+    }
+}
+
+/// The kernel-statistics replies (`plans/STRESSTEST.md` ST1), split out of
+/// [`HostileBroker::valid_reply`] so neither function outgrows the lint.
+fn kernel_stats_reply(query: SysinfoQueryId) -> Option<Vec<u8>> {
+    match query {
+        SysinfoQueryId::MEMORY_PRESSURE => Some(
+            MemoryPressureStats {
+                band: 1,
+                reserved: [0u8; 7],
+                total_bytes: 1 << 30,
+                free_bytes: 1 << 27,
+                reserve_bytes: 1 << 24,
+                enter_bytes: [4, 3, 2, 1],
+                exit_bytes: [8, 6, 4, 2],
+                band_entries: [0, 1, 2, 3, 4],
+            }
+            .to_le_bytes()
+            .to_vec(),
+        ),
+        SysinfoQueryId::RAMZIP_STATS => Some(
+            RamzipStats {
+                entries: 2,
+                logical_bytes: 8192,
+                stored_bytes: 3000,
+                ..RamzipStats::default()
+            }
+            .to_le_bytes()
+            .to_vec(),
+        ),
+        SysinfoQueryId::RECLAIM_STATS => {
+            let mut out = Vec::new();
+            for i in 0..RECLAIM_CLASS_COUNT {
+                out.extend_from_slice(
+                    &ReclaimClassRecord {
+                        class: u8::try_from(i).ok()?,
+                        reserved: [0u8; 7],
+                        payload_bytes: (i as u64) * 100,
+                        metadata_bytes: i as u64,
+                        entries: 1,
+                        refusals: 0,
+                        pressure_shrinks: 0,
+                        teardowns: 0,
+                        failures: 0,
+                    }
+                    .to_le_bytes(),
+                );
+            }
+            Some(out)
+        }
+        SysinfoQueryId::CPU_LOAD => Some(
+            CpuLoadRecord {
+                cpu: 0,
+                reserved: 0,
+                queue_depth: 1,
+                switches: 10,
+                preemptions: 2,
+            }
+            .to_le_bytes()
+            .to_vec(),
+        ),
+        SysinfoQueryId::CPU_TIME_STATS => Some(
+            CpuTimeRecord {
+                cpu: 0,
+                reserved: 0,
+                busy_ns: 500,
+                idle_ns: 500,
+            }
+            .to_le_bytes()
+            .to_vec(),
+        ),
+        _ => None,
     }
 }
 

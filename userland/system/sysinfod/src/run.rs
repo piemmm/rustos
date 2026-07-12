@@ -49,10 +49,11 @@ mod program {
     use alloc::vec::Vec;
 
     use rustos_abi::sysinfo::{
-        encode_reply_err, encode_reply_ok, CpuTimeRecord, IntrospectDomain, KernelMemoryStats,
-        LoadAverage, MountRecord, ProcessRecord, ResourceLimitRecord, SeatRecord, SystemIdentity,
-        Uptime, UserDirectoryRecord, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT,
-        SYSINFO_MAX_REPLY, SYSINFO_MAX_REQUEST, SYSINFO_REPLY_STATUS_LEN,
+        encode_reply_err, encode_reply_ok, CpuLoadRecord, CpuTimeRecord, IntrospectDomain,
+        KernelMemoryStats, LoadAverage, MemoryPressureStats, MountRecord, ProcessRecord,
+        RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SeatRecord, SystemIdentity, Uptime,
+        UserDirectoryRecord, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY,
+        SYSINFO_MAX_REQUEST, SYSINFO_REPLY_STATUS_LEN,
     };
     use rustos_abi::{Errno, LimitKind, Origin, ORIGIN_WIRE_LEN, PROC_ID_LEN};
     use rustos_caps::CapabilitySet;
@@ -215,6 +216,32 @@ mod program {
             let mut records = Vec::new();
             for chunk in bytes.chunks_exact(SeatRecord::WIRE_LEN) {
                 records.push(SeatRecord::from_bytes(chunk)?);
+            }
+            Ok(records)
+        }
+
+        fn memory_pressure(&self, _caller: &Caller) -> Result<MemoryPressureStats, Errno> {
+            MemoryPressureStats::from_bytes(&read_scalar(IntrospectDomain::MemoryPressure)?)
+        }
+
+        fn reclaim_records(&self, _caller: &Caller) -> Result<Vec<ReclaimClassRecord>, Errno> {
+            let bytes = read_list(IntrospectDomain::Reclaim, ReclaimClassRecord::WIRE_LEN)?;
+            let mut records = Vec::new();
+            for chunk in bytes.chunks_exact(ReclaimClassRecord::WIRE_LEN) {
+                records.push(ReclaimClassRecord::from_bytes(chunk)?);
+            }
+            Ok(records)
+        }
+
+        fn ramzip_stats(&self, _caller: &Caller) -> Result<RamzipStats, Errno> {
+            RamzipStats::from_bytes(&read_scalar(IntrospectDomain::Ramzip)?)
+        }
+
+        fn cpu_load(&self, _caller: &Caller) -> Result<Vec<CpuLoadRecord>, Errno> {
+            let bytes = read_list(IntrospectDomain::CpuLoad, CpuLoadRecord::WIRE_LEN)?;
+            let mut records = Vec::new();
+            for chunk in bytes.chunks_exact(CpuLoadRecord::WIRE_LEN) {
+                records.push(CpuLoadRecord::from_bytes(chunk)?);
             }
             Ok(records)
         }

@@ -77,7 +77,8 @@ use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
 use rustos_abi::hwtree::{HwResource, HwResourceKind};
 use rustos_abi::input::{KeyInput, PointerInput};
 use rustos_abi::sysinfo::{
-    CpuTimeRecord, MountRecord, ProcessRecord, SeatRecord, UserDirectoryRecord,
+    CpuLoadRecord, CpuTimeRecord, MountRecord, ProcessRecord, ReclaimClassRecord, SeatRecord,
+    UserDirectoryRecord,
 };
 use rustos_abi::{
     decode_log_record, BootFacts, BootId, CallRecvFlags, CapabilityId, DescriptorTable, DirEntry,
@@ -4609,6 +4610,22 @@ where
                 // creation order; an offset past the end returns the empty
                 // terminator.
                 self.seat_registry.records(arg, max_records)
+            }
+            IntrospectDomain::MemoryPressure => self.introspect.memory_pressure()?,
+            IntrospectDomain::Reclaim => {
+                if out_cap < ReclaimClassRecord::WIRE_LEN {
+                    return Err(Errno::BufferTooSmall);
+                }
+                let max_records = out_cap / ReclaimClassRecord::WIRE_LEN;
+                self.introspect.reclaim(arg, max_records)?
+            }
+            IntrospectDomain::Ramzip => self.introspect.ramzip()?,
+            IntrospectDomain::CpuLoad => {
+                if out_cap < CpuLoadRecord::WIRE_LEN {
+                    return Err(Errno::BufferTooSmall);
+                }
+                let max_records = out_cap / CpuLoadRecord::WIRE_LEN;
+                self.introspect.cpu_load(arg, max_records)?
             }
             IntrospectDomain::TaskLimits => {
                 // The 128-bit target `ProcId` does not fit in the `u64` `arg`,
@@ -19098,6 +19115,22 @@ mod tests {
             Ok(alloc::vec::Vec::new())
         }
         fn cpu_times(
+            &self,
+            _offset: u64,
+            _max_records: usize,
+        ) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Ok(alloc::vec::Vec::new())
+        }
+        fn memory_pressure(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Err(Errno::NotImplemented)
+        }
+        fn reclaim(&self, _offset: u64, _max_records: usize) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Ok(alloc::vec::Vec::new())
+        }
+        fn ramzip(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Err(Errno::NotImplemented)
+        }
+        fn cpu_load(
             &self,
             _offset: u64,
             _max_records: usize,

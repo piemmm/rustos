@@ -34,6 +34,10 @@ struct CpuState {
     /// on the same dispatch bracket that credits the task; the busy half of
     /// the System Information busy/idle utilisation split.
     busy_ticks: AtomicU64,
+    /// Task dispatches (context switches into a task body) on this CPU,
+    /// counted on the same bracket as `busy_ticks`; the System Information
+    /// per-CPU switch counter.
+    switches: AtomicU64,
 }
 
 impl CpuState {
@@ -43,6 +47,7 @@ impl CpuState {
             bands: [band()?, band()?, band()?],
             last_run_tick: AtomicU64::new(0),
             busy_ticks: AtomicU64::new(0),
+            switches: AtomicU64::new(0),
         })
     }
 
@@ -659,6 +664,9 @@ impl<A: SchedulerArch> Scheduler<A> {
             .busy_ticks
             .fetch_add(span, Ordering::Relaxed);
         self.cpus[cpu as usize]
+            .switches
+            .fetch_add(1, Ordering::Relaxed);
+        self.cpus[cpu as usize]
             .last_run_tick
             .store(started_tick, Ordering::Release);
     }
@@ -839,6 +847,37 @@ impl<A: SchedulerArch> Scheduler<A> {
         self.cpus
             .get(cpu as usize)
             .map(|state| state.busy_ticks.load(Ordering::Acquire))
+            .ok_or(SchedError::NoSuchCpu)
+    }
+
+    /// Task dispatches (context switches into a task body) on `cpu`,
+    /// counted on the same bracket as [`Self::cpu_busy_ticks`].
+    ///
+    /// # Errors
+    /// * [`SchedError::NoSuchCpu`] if `cpu` is out of range.
+    pub fn cpu_switches(&self, cpu: CpuId) -> SchedResult<u64> {
+        self.cpus
+            .get(cpu as usize)
+            .map(|state| state.switches.load(Ordering::Acquire))
+            .ok_or(SchedError::NoSuchCpu)
+    }
+
+    /// Instantaneous count of ready tasks queued across `cpu`'s priority
+    /// bands (approximate under concurrent stealers; the running task
+    /// sits in the current slot, not a band).
+    ///
+    /// # Errors
+    /// * [`SchedError::NoSuchCpu`] if `cpu` is out of range.
+    pub fn queue_depth(&self, cpu: CpuId) -> SchedResult<u64> {
+        self.cpus
+            .get(cpu as usize)
+            .map(|state| {
+                state
+                    .bands
+                    .iter()
+                    .map(|band| band.len_approx() as u64)
+                    .sum()
+            })
             .ok_or(SchedError::NoSuchCpu)
     }
 
@@ -1031,6 +1070,14 @@ impl<A: SchedulerArch> SchedulerPolicy<A> for Scheduler<A> {
 
     fn cpu_busy_ticks(&self, cpu: CpuId) -> SchedResult<u64> {
         Scheduler::cpu_busy_ticks(self, cpu)
+    }
+
+    fn cpu_switches(&self, cpu: CpuId) -> SchedResult<u64> {
+        Scheduler::cpu_switches(self, cpu)
+    }
+
+    fn queue_depth(&self, cpu: CpuId) -> SchedResult<u64> {
+        Scheduler::queue_depth(self, cpu)
     }
 
     fn state_of(&self, id: TaskId) -> TaskState {

@@ -93,6 +93,7 @@ pub mod launch_cache;
 pub mod live_producer;
 pub mod loadavg;
 pub mod memmap;
+pub mod memstats;
 pub mod panic;
 pub mod pipe;
 pub mod preempt;

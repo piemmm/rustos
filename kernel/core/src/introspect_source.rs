@@ -23,11 +23,13 @@
 use alloc::vec::Vec;
 
 use rustos_abi::sysinfo::{
-    CpuTimeRecord, KernelMemoryStats, LoadAverage, ProcessRecord, ProcessState,
-    ResourceLimitRecord, SystemIdentity, Uptime, UserDirectoryRecord, PROCESS_CPU_NONE,
-    RESOURCE_LIMITS_REPORT_LEN,
+    CpuLoadRecord, CpuTimeRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats,
+    ProcessRecord, ProcessState, ReclaimClassRecord, ResourceLimitRecord, SystemIdentity, Uptime,
+    UserDirectoryRecord, PRESSURE_BAND_COUNT, PROCESS_CPU_NONE, RESOURCE_LIMITS_REPORT_LEN,
 };
 use rustos_abi::{Duration64, Errno, LimitKind, ProcId, Time64};
+use rustos_kernel_mem::pressure::PressureBand;
+use rustos_kernel_mem::reclaim::ReclaimClass;
 use rustos_kernel_mem::PAGE_SIZE;
 use rustos_kernel_sched_api::{SchedulerPolicy, TaskId, TaskState};
 use rustos_kernel_sec::TaskId as SecTaskId;
@@ -410,6 +412,94 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         Ok(out)
     }
 
+    fn memory_pressure(&self) -> Result<Vec<u8>, Errno> {
+        // The one system gauge, created over this kernel's frame
+        // allocator if the boot path has not already done so — either
+        // way there is a single hysteresis history. Reading it takes a
+        // fresh sample, exactly as every cache consumer reads it.
+        let gauge = crate::memstats::MEM_STATS.system_pressure(&self.state.frame_allocator);
+        let band = gauge.sample();
+        let thresholds = gauge.thresholds();
+        let to_u64 = |v: usize| v as u64;
+        let mut band_entries = [0u64; PRESSURE_BAND_COUNT];
+        for (depth, slot) in band_entries.iter_mut().enumerate() {
+            // Depth indexes are the closed five-band set by construction.
+            let band = PressureBand::from_depth(u8::try_from(depth).unwrap_or(0));
+            *slot = gauge.band_entries(band);
+        }
+        let stats = MemoryPressureStats {
+            band: band.depth(),
+            reserved: [0u8; 7],
+            total_bytes: to_u64(gauge.total_bytes()),
+            free_bytes: to_u64(gauge.free_bytes()),
+            reserve_bytes: to_u64(thresholds.reserve()),
+            enter_bytes: thresholds.enter_watermarks().map(to_u64),
+            exit_bytes: thresholds.exit_watermarks().map(to_u64),
+            band_entries,
+        };
+        Ok(stats.to_le_bytes().to_vec())
+    }
+
+    fn reclaim(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
+        // One record per reclaim class, aggregated across every
+        // registered live cache ledger; the wire class id is the class's
+        // index, pinned equal across `lib/abi` and `kernel/mem` by the
+        // `reclaim_classes_match_the_abi_registry` test below.
+        let classes = ReclaimClass::ALL;
+        let count = classes.len() as u64;
+        let first = offset.min(count);
+        let last = first.saturating_add(max_records as u64).min(count);
+        let mut out = Vec::new();
+        for index in first..last {
+            let class = classes[usize::try_from(index).unwrap_or(0)];
+            let stats = crate::memstats::MEM_STATS.reclaim_class_stats(class);
+            let record = ReclaimClassRecord {
+                class: u8::try_from(index).unwrap_or(0),
+                reserved: [0u8; 7],
+                payload_bytes: stats.payload_bytes,
+                metadata_bytes: stats.metadata_bytes,
+                entries: stats.entries,
+                refusals: stats.refusals,
+                pressure_shrinks: stats.pressure_shrinks,
+                teardowns: stats.teardowns,
+                failures: stats.failures,
+            };
+            out.extend_from_slice(&record.to_le_bytes());
+        }
+        Ok(out)
+    }
+
+    fn ramzip(&self) -> Result<Vec<u8>, Errno> {
+        // Counters only — never page contents or key material. An
+        // undriven tier truthfully reports idle zeros.
+        Ok(crate::memstats::MEM_STATS
+            .ramzip_stats()
+            .to_le_bytes()
+            .to_vec())
+    }
+
+    fn cpu_load(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
+        // The busy/idle split stays in `cpu_times`; these records carry
+        // only the remainder. A torn-down CPU truthfully reports zero
+        // rather than erroring the whole page.
+        let cpu_count = u64::from(self.state.scheduler.cpu_count());
+        let first = offset.min(cpu_count);
+        let last = first.saturating_add(max_records as u64).min(cpu_count);
+        let mut out = Vec::new();
+        for cpu in first..last {
+            let cpu_id = u32::try_from(cpu).unwrap_or(u32::MAX);
+            let record = CpuLoadRecord {
+                cpu: cpu_id,
+                reserved: 0,
+                queue_depth: self.state.scheduler.queue_depth(cpu_id).unwrap_or(0),
+                switches: self.state.scheduler.cpu_switches(cpu_id).unwrap_or(0),
+                preemptions: self.state.scheduler.preemption_count(cpu_id).unwrap_or(0),
+            };
+            out.extend_from_slice(&record.to_le_bytes());
+        }
+        Ok(out)
+    }
+
     fn task_limits(&self, proc_id: ProcId) -> Result<Vec<u8>, Errno> {
         // Resolve the target task by its unforgeable proc-id against the
         // authoritative CapTable; a proc-id with no live task fails closed.
@@ -455,7 +545,32 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
 #[cfg(test)]
 mod tests {
     use super::counts_toward_load;
+    use rustos_abi::sysinfo::{PRESSURE_BAND_COUNT, RECLAIM_CLASS_COUNT};
+    use rustos_kernel_mem::reclaim::ReclaimClass;
     use rustos_kernel_sched_api::TaskState;
+
+    /// The wire class ids the reclaim export emits are the kernel
+    /// taxonomy's own indexes; the two closed sets must stay the same
+    /// size (their name correspondence is pinned beside the names in
+    /// `lib/abi`).
+    #[test]
+    fn reclaim_classes_match_the_abi_registry() {
+        assert_eq!(ReclaimClass::ALL.len(), RECLAIM_CLASS_COUNT);
+        for (index, class) in ReclaimClass::ALL.iter().enumerate() {
+            assert_eq!(class.index(), index);
+        }
+    }
+
+    /// The pressure export's band vocabulary is the kernel gauge's own
+    /// five-band set.
+    #[test]
+    fn pressure_bands_match_the_abi_count() {
+        use rustos_kernel_mem::pressure::PressureBand;
+        for depth in 0..PRESSURE_BAND_COUNT {
+            let band = PressureBand::from_depth(u8::try_from(depth).unwrap());
+            assert_eq!(usize::from(band.depth()), depth);
+        }
+    }
 
     #[test]
     fn ready_and_running_tasks_count_toward_load() {

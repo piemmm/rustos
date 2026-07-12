@@ -25,6 +25,14 @@ The queries:
 - `limits`, `rlimits` — your effective resource limits and live usage.
 - `seats` — the seat inventory: each display's owner and foreground
   console (needs `CAP_SYSINFO_HW`).
+- `pressure` — the live memory-pressure gauge: band, watermarks, and
+  transition counters (needs `CAP_SYSINFO_KERNEL`).
+- `reclaim` — the reclaimable-cache ledger, one row per class (needs
+  `CAP_SYSINFO_KERNEL`).
+- `ramzip` — the compressed memory tier's counters (needs
+  `CAP_SYSINFO_KERNEL`).
+- `cpu` — per-CPU run-queue depth, context switches, and preemptions
+  (needs `CAP_SYSINFO_KERNEL`).
 - `help` — this command's own short help.
 
 With no query, the short help is shown.

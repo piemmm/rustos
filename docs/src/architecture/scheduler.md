@@ -572,6 +572,17 @@ reports `SchedError::NoSuchCpu`, never a fabricated zero; the same
 conformance case pins that the CPU total equals the sum of the work
 dispatched on it.
 
+The same bracket counts one context switch per dispatched body, exposed
+read-only through `SchedulerPolicy::cpu_switches(cpu)`, and
+`SchedulerPolicy::queue_depth(cpu)` samples the runnable tasks queued on
+a CPU (excluding the running task, which sits in the current slot).
+Together with `preemption_count(cpu)` these are the per-CPU figures the
+System Information `CPU_LOAD` query reports (`plans/STRESSTEST.md` ST1);
+the busy/idle time split stays in `CPU_TIME_STATS`, so no figure is
+served twice. Both fail closed on an out-of-range CPU, and the shared
+conformance suite pins the behaviour
+(`load_observations_track_dispatch`).
+
 ### `yield_current` vs body-returned `TaskAction::Yield`
 
 `Scheduler::yield_current(task_id)` models a **voluntary syscall

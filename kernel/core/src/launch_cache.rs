@@ -103,7 +103,7 @@ pub struct LaunchCache {
     /// The audit sink a classification refusal or detected ledger
     /// defect reports through (`kernel/mem::reclaim_audit`).
     sink: &'static (dyn Sink + Sync),
-    accounting: CacheAccounting,
+    accounting: Arc<CacheAccounting>,
     /// The classified admission policy; `None` when classification
     /// refused, which poisons the cache from birth.
     policy: Option<CachePolicy>,
@@ -155,7 +155,7 @@ impl LaunchCache {
             budget,
             pressure,
             sink,
-            accounting: CacheAccounting::new(),
+            accounting: Arc::new(CacheAccounting::new()),
             poisoned: policy.is_none(),
             policy,
             tick: 0,
@@ -168,6 +168,15 @@ impl LaunchCache {
     #[must_use]
     pub fn accounting(&self) -> &CacheAccounting {
         &self.accounting
+    }
+
+    /// A shared handle to this cache's ledger, for registration with the
+    /// System Information memory-statistics registry. Observation-only:
+    /// the holder gets lock-free reads of the same saturating
+    /// diagnostics this cache keeps.
+    #[must_use]
+    pub fn accounting_shared(&self) -> Arc<CacheAccounting> {
+        Arc::clone(&self.accounting)
     }
 
     /// The owner the cache's memory is charged to, or `None` when
@@ -237,11 +246,13 @@ impl LaunchCache {
     /// is counted as a teardown.
     fn poison(&mut self, cause: &'static str) {
         if !self.poisoned {
-            self.accounting.record_failure();
+            self.accounting
+                .record_failure(ReclaimClass::SemanticAppCache);
             log_cache_poisoned(self.sink, CACHE_LABEL, self.owner(), cause);
         }
         self.poisoned = true;
-        self.accounting.record_teardown();
+        self.accounting
+            .record_teardown(ReclaimClass::SemanticAppCache);
         self.entries.clear();
         self.lru.clear();
         self.accounting.zero_ledger();
@@ -277,7 +288,8 @@ impl LaunchCache {
         let band = self.pressure.sample();
         let target = shrink_target(band, ReclaimClass::SemanticAppCache, self.budget);
         if self.accounting.total_bytes() > target {
-            self.accounting.record_pressure_shrink();
+            self.accounting
+                .record_pressure_shrink(ReclaimClass::SemanticAppCache);
             self.evict_until(target);
         }
     }
@@ -319,7 +331,8 @@ impl LaunchCache {
         }
         self.enforce_pressure();
         if bundle.len() > MAX_BUNDLE_KEY {
-            self.accounting.record_refusal();
+            self.accounting
+                .record_refusal(ReclaimClass::SemanticAppCache);
             return;
         }
         // Replace, never shadow: a stale entry under the same key would
@@ -333,7 +346,8 @@ impl LaunchCache {
         let (payload, metadata) = Self::cost_of(bundle, app);
         let cost = payload.saturating_add(metadata);
         if cost > self.budget.hard() || !self.pressure.growth_permitted(cost) {
-            self.accounting.record_refusal();
+            self.accounting
+                .record_refusal(ReclaimClass::SemanticAppCache);
             return;
         }
         if self.accounting.total_bytes().saturating_add(cost) > self.budget.hard() {
@@ -347,7 +361,8 @@ impl LaunchCache {
         // instead of aborting.
         let mut key = String::new();
         if key.try_reserve_exact(bundle.len()).is_err() {
-            self.accounting.record_refusal();
+            self.accounting
+                .record_refusal(ReclaimClass::SemanticAppCache);
             return;
         }
         key.push_str(bundle);
@@ -356,7 +371,8 @@ impl LaunchCache {
             .charge(ReclaimClass::SemanticAppCache, payload, metadata)
             .is_err()
         {
-            self.accounting.record_refusal();
+            self.accounting
+                .record_refusal(ReclaimClass::SemanticAppCache);
             return;
         }
         let tick = self.next_tick();

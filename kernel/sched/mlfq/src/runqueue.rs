@@ -146,9 +146,9 @@ impl RunDeque {
     /// Number of items currently in the deque (approximate under concurrency).
     ///
     /// The result is exact in the absence of concurrent stealers and is
-    /// in `[0, capacity]` otherwise. Used by the deque's own tests only —
-    /// never to enforce safety — so it is compiled only under `cfg(test)`.
-    #[cfg(test)]
+    /// in `[0, capacity]` otherwise. A read-only observation (the System
+    /// Information queue-depth sample and the deque's own tests) — never
+    /// used to enforce safety.
     #[must_use]
     pub fn len_approx(&self) -> usize {
         let b = self.bottom.load(Ordering::Acquire);

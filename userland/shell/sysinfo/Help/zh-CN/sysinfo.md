@@ -22,6 +22,12 @@ sysinfo — 查询系统信息
 - `limits`、`rlimits` — 你的有效资源限制和实时使用量。
 - `seats` — 席位清单：每个显示器的所有者及其前台控制台（需要
   `CAP_SYSINFO_HW`）。
+- `pressure` — 实时内存压力仪表：档位、水位线和转换计数器（需要
+  `CAP_SYSINFO_KERNEL`）。
+- `reclaim` — 可回收缓存台账，每类一行（需要 `CAP_SYSINFO_KERNEL`）。
+- `ramzip` — 压缩内存层的计数器（需要 `CAP_SYSINFO_KERNEL`）。
+- `cpu` — 每个 CPU 的运行队列深度、上下文切换与抢占次数（需要
+  `CAP_SYSINFO_KERNEL`）。
 - `help` — 本命令自身的简短帮助。
 
 不带查询时显示简短帮助。

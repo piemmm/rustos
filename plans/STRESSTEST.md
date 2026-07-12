@@ -1,6 +1,6 @@
 # STRESSTEST.md — System stress testing and live kernel monitoring
 
-Status: planned (ST1–ST6)
+Status: ST1 done; ST2–ST6 planned
 Target: RustOS
 Primary code areas: `lib/abi`, `kernel/mem`, `kernel/core`, `userland/system/sysinfod`, `lib/procinfo`, `userland/apps/`
 Secondary code areas: `lib/rt`, `lib/curses`, `userland/shell/sysinfo`, `kernel/sched`, `docs/src/`
@@ -423,16 +423,68 @@ Each stage lands as a complete, tested, documented, fully-gated change
 with rustdoc, the mdBook pages, and `PLAN.md` updated in the same change.
 No stubs, no `todo!()`, no deferred tests.
 
-### ST1 — Observability queries and selectors
+### ST1 — Observability queries and selectors — **done**
 
-Deliverables: the four queries of §3.1 in `lib/abi` + `sysinfod` +
-kernel `SysinfoSource` plumbing; the §3.2 selectors in `lib/procinfo`;
-`sysinfo` CLI subcommands; fuzz targets for every new decoder.
-Tests: encode/decode round-trips and malformed-input rejection per type;
-dispatcher capability-denial and audit tests against the fixture source;
-resolver selector tests (gated gauge, denial mapping, unknown leaf fails
-closed); a kernel host test that the exported counters move when the
-gauges/ledgers move.
+What now holds (the deliverables of §3, with the reconciliations the
+implementation fixed):
+
+- The four queries ship as `SysinfoQueryId` 13–16 (`MEMORY_PRESSURE`,
+  `RECLAIM_STATS`, `RAMZIP_STATS`, `CPU_LOAD`), all under the existing
+  `CAP_SYSINFO_KERNEL`, audited, with `IntrospectDomain` 10–13, typed
+  `WIRE_LEN` payloads, fail-closed decoders, unit tests, and
+  `fuzz_decode` arms. `RECLAIM_CLASS_NAMES` /
+  `reclaim_class_from_name` in `lib/abi` are the one class vocabulary
+  the kernel encoder and the resolver share; `PRESSURE_BAND_NAMES` is
+  the band vocabulary.
+- Reconciliation against `CPU_TIME_STATS` (§3.1): `CpuLoadRecord`
+  carries only the remainder — run-queue depth sample, context-switch
+  and preemption counters; the busy/idle split stays in
+  `CPU_TIME_STATS`. The scheduler did **not** yet keep per-CPU
+  switch/depth figures, so `SchedulerPolicy` gained the read-only
+  `cpu_switches(cpu)` (counted on the same dispatch bracket as
+  `cpu_busy_ticks`) and `queue_depth(cpu)` observations, implemented by
+  both policies and pinned by the shared conformance suite
+  (`load_observations_track_dispatch`).
+- `ReclaimClassRecord` carries exactly this plan's field list (class,
+  payload/metadata bytes, entries, refusal/shrink/teardown/failure
+  counters). `kernel/mem::reclaim::CacheAccounting` was made
+  interior-atomic and class-attributed for those figures (entries as a
+  live per-class gauge; refusals/shrinks/teardowns/failures per class,
+  whole-cache accessors now sum), so a shared `Arc<CacheAccounting>` is
+  readable lock-free by the export while the owning cache mutates it
+  (single-writer discipline, documented).
+- The export rendezvous is `kernel/core::memstats::MEM_STATS`: the boot
+  path fetches the **one** system pressure gauge from it
+  (`system_pressure`, install-or-get — the aarch64 root-unlock no longer
+  leaks its own), every production cache (volume `CachedFs`, block,
+  transform, launch) registers its ledger at construction, and a future
+  live `ramzip` tier installs its stats feed there. Until that tier is
+  driven (the §0 restartable-user-fault caveat), `RAMZIP_STATS`
+  truthfully reports an idle tier — zeros, never `NotImplemented`.
+- The §3.2 selectors resolve in `lib/procinfo`: `info:cpu/count`,
+  `stats:cpu/switches`, `stats:mem/pressure` (band depth gauge with the
+  band name carried in the metric name),
+  `stats:mem/pressure/transitions`, `stats:mem/reclaim/{total,<class>}`,
+  `stats:mem/ramzip/{stored,logical,saved}`. **Reconciliation:**
+  `stats:cpu/load` and `stats:cpu/<n>/load` report the cumulative busy
+  share since boot (`Unit::Percent`, from the ungated `CPU_TIME_STATS`
+  accounting) — a one-shot resolver has no caller-controlled sampling
+  window to honestly measure, so the windowed view is `sysmon`'s ST4
+  job (two timed reads over its own refresh interval). Unknown leaves
+  and unknown class/CPU names fail closed; denials map to
+  `CapabilityDenied`; `fuzz_resinfo` covers the new selectors and
+  broker replies. `stats:mem/pinned` remains ST2's.
+- The `sysinfo` CLI gained `pressure`, `reclaim`, `ramzip`, and `cpu`
+  subcommands (fail-closed parsing, aligned renders, Help documents
+  updated in all 13 locales); docs pages
+  (`abi/sysinfo.md`, `userland/sysinfod.md`, `userland/utilities.md`,
+  `lib/resref.md`, `architecture/memory.md` §7k,
+  `architecture/scheduler.md`) describe the new surface.
+- Tests land per §10's observability rows: round-trips + malformed
+  rejection per type, dispatcher denial/audit/paging against the
+  fixture source, resolver selector tests, `memstats` host tests that
+  the aggregated figures move when a registered ledger moves, and the
+  conformance rows for the scheduler observations.
 
 ### ST2 — Memory pinning
 

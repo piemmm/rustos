@@ -71,6 +71,7 @@
 //! rather than by locking discipline.
 
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem::size_of;
 
@@ -166,7 +167,7 @@ pub struct CachedFs<F> {
     /// The audit sink a classification refusal or detected ledger
     /// defect reports through (`kernel/mem::reclaim_audit`).
     sink: &'static (dyn Sink + Sync),
-    accounting: CacheAccounting,
+    accounting: Arc<CacheAccounting>,
     /// The classified admission policies (file data, metadata); `None`
     /// when classification refused, which poisons the cache from birth.
     policies: Option<(CachePolicy, CachePolicy)>,
@@ -249,7 +250,7 @@ impl<F> CachedFs<F> {
             budget,
             pressure,
             sink,
-            accounting: CacheAccounting::new(),
+            accounting: Arc::new(CacheAccounting::new()),
             policies,
             tick: 0,
             poisoned: policies.is_none(),
@@ -267,6 +268,15 @@ impl<F> CachedFs<F> {
     #[must_use]
     pub fn accounting(&self) -> &CacheAccounting {
         &self.accounting
+    }
+
+    /// A shared handle to this cache's ledger, for registration with the
+    /// System Information memory-statistics registry. Observation-only:
+    /// the holder gets lock-free reads of the same saturating
+    /// diagnostics this cache keeps.
+    #[must_use]
+    pub fn accounting_shared(&self) -> Arc<CacheAccounting> {
+        Arc::clone(&self.accounting)
     }
 
     /// The cache's grow/shrink bounds.
@@ -392,7 +402,10 @@ impl<F> CachedFs<F> {
     /// does not report again.
     fn poison(&mut self, cause: &'static str) {
         if !self.poisoned {
-            self.accounting.record_failure();
+            // The poison disables the whole cache, so the failure hits
+            // both classes it serves.
+            self.accounting.record_failure(ReclaimClass::CleanFileData);
+            self.accounting.record_failure(ReclaimClass::FsMetadata);
             log_cache_poisoned(self.sink, CACHE_LABEL, self.owner(), cause);
         }
         self.poisoned = true;
@@ -403,7 +416,9 @@ impl<F> CachedFs<F> {
     /// ledger to empty. Every whole-cache drain is counted as a
     /// teardown.
     fn purge(&mut self) {
-        self.accounting.record_teardown();
+        // A whole-cache drain hits both classes this cache serves.
+        self.accounting.record_teardown(ReclaimClass::CleanFileData);
+        self.accounting.record_teardown(ReclaimClass::FsMetadata);
         for entry in self.data.values_mut() {
             entry.bytes.as_mut_slice().zeroize();
         }
@@ -468,7 +483,16 @@ impl<F> CachedFs<F> {
             .min(meta_target)
             .saturating_add(data_bytes.min(data_target));
         if self.accounting.total_bytes() > target {
-            self.accounting.record_pressure_shrink();
+            // Attribute the pass to each class whose footprint exceeds
+            // its own band target — the classes the shrink will hit.
+            if data_bytes > data_target {
+                self.accounting
+                    .record_pressure_shrink(ReclaimClass::CleanFileData);
+            }
+            if meta_bytes > meta_target {
+                self.accounting
+                    .record_pressure_shrink(ReclaimClass::FsMetadata);
+            }
             self.evict_until(target);
         }
     }
@@ -480,26 +504,26 @@ impl<F> CachedFs<F> {
     /// pressure band or would dip into the reserve, or the ledger
     /// cannot account it) — the caller then serves without caching.
     fn admit(&mut self, key: KeyRef, payload: usize, metadata: usize) -> Option<u64> {
+        let class = Self::class_of(&key);
         let cost = payload.saturating_add(metadata);
         if self.poisoned || cost > self.budget.hard() {
-            self.accounting.record_refusal();
+            self.accounting.record_refusal(class);
             return None;
         }
         if !self.pressure.growth_permitted(cost) {
-            self.accounting.record_refusal();
+            self.accounting.record_refusal(class);
             return None;
         }
         if self.accounting.total_bytes().saturating_add(cost) > self.budget.hard() {
             let headroom = self.budget.low().min(self.budget.hard() - cost);
             self.evict_until(headroom);
             if self.poisoned {
-                self.accounting.record_refusal();
+                self.accounting.record_refusal(class);
                 return None;
             }
         }
-        let class = Self::class_of(&key);
         if self.accounting.charge(class, payload, metadata).is_err() {
-            self.accounting.record_refusal();
+            self.accounting.record_refusal(class);
             return None;
         }
         let tick = self.next_tick();
@@ -677,7 +701,7 @@ impl<F: FilesystemRead> CachedFs<F> {
             // straight from the driver without caching. A short read
             // here means EOF within this window, reported as a short
             // chunk so the outer loop stops.
-            self.accounting.record_refusal();
+            self.accounting.record_refusal(ReclaimClass::CleanFileData);
             let n = self.inner.read_at(file, base + in_off as u64, out)?;
             let len = if n < out.len() { in_off + n } else { CHUNK };
             return Ok((n, len));
@@ -756,12 +780,12 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
         // A name over the VFS component bound is unbounded input from
         // the cache's point of view and is served uncached.
         if name.len() > MAX_COMPONENT_LEN {
-            self.accounting.record_refusal();
+            self.accounting.record_refusal(ReclaimClass::FsMetadata);
             return Ok(node);
         }
         let (Some(key_name), Some(entry_name)) = (Self::try_copy(name), Self::try_copy(name))
         else {
-            self.accounting.record_refusal();
+            self.accounting.record_refusal(ReclaimClass::FsMetadata);
             return Ok(node);
         };
         let metadata = ENTRY_OVERHEAD.saturating_add(name.len().saturating_mul(2));
@@ -847,10 +871,10 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
                     name.as_mut_slice().zeroize();
                 }
             } else {
-                self.accounting.record_refusal();
+                self.accounting.record_refusal(ReclaimClass::FsMetadata);
             }
         } else {
-            self.accounting.record_refusal();
+            self.accounting.record_refusal(ReclaimClass::FsMetadata);
         }
         // The entry carries the child's stat record; populate the stat
         // cache so a follow-up `node_info` is a hit.

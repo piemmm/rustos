@@ -4668,13 +4668,19 @@ format-conformance defect the evidence window exposed). See
 
 ## STRESSTEST — stress testing + live kernel monitoring (`plans/STRESSTEST.md`)
 
-**Status: planned (ST1–ST6).** Makes RustOS's behaviour under load
-observable and provokable with first-party tools. ST1 exports the counters
-the kernel already keeps — the `kernel/mem` pressure gauge, reclaim ledger,
-and `ramzip` accounting, plus per-CPU load — as four new audited
+**Status: ST1 done; ST2–ST6 planned.** Makes RustOS's behaviour under load
+observable and provokable with first-party tools. ST1 (done) exports the
+counters the kernel keeps — the `kernel/mem` pressure gauge, reclaim ledger,
+and `ramzip` accounting, plus per-CPU load — as four audited
 `CAP_SYSINFO_KERNEL` sysinfo queries (`MEMORY_PRESSURE`, `RECLAIM_STATS`,
-`RAMZIP_STATS`, `CPU_LOAD`) with matching `info:cpu/*` / `stats:mem/*` /
-`stats:cpu/*` resolver selectors and `sysinfo` CLI surface. ST2 lands the
+`RAMZIP_STATS`, `CPU_LOAD`, ids 13–16) with matching `info:cpu/*` /
+`stats:mem/*` / `stats:cpu/*` resolver selectors and `sysinfo` CLI
+subcommands; the export rendezvous is the arch-neutral
+`kernel/core::memstats::MEM_STATS` registry (one system pressure gauge,
+per-cache `Arc<CacheAccounting>` ledgers, and the seam a future live
+`ramzip` tier installs into — until then the query truthfully reports an
+idle tier), and `SchedulerPolicy` gained the `cpu_switches`/`queue_depth`
+observations both policies implement under conformance cover. ST2 lands the
 memory-pinning API behind `plans/SWAPSWAPSWAP.md` §5's "pinned" eligibility
 class: `mem_pin`/`mem_unpin` (whole-process anonymous memory, not inherited,
 cleared on exit) gated by the new `CAP_MEM_PIN` and bounded by a new

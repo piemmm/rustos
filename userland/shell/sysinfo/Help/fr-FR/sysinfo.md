@@ -27,6 +27,14 @@ Les requêtes :
   usage en direct.
 - `seats` — l'inventaire des sièges : le propriétaire de chaque écran
   et sa console de premier plan (nécessite `CAP_SYSINFO_HW`).
+- `pressure` — la jauge de pression mémoire en direct : bande, seuils
+  et compteurs de transition (nécessite `CAP_SYSINFO_KERNEL`).
+- `reclaim` — le registre des caches récupérables, une ligne par classe
+  (nécessite `CAP_SYSINFO_KERNEL`).
+- `ramzip` — les compteurs du niveau de mémoire compressée (nécessite
+  `CAP_SYSINFO_KERNEL`).
+- `cpu` — profondeur de file, changements de contexte et préemptions
+  par CPU (nécessite `CAP_SYSINFO_KERNEL`).
 - `help` — l'aide courte de cette commande.
 
 Sans requête, l'aide courte est affichée.

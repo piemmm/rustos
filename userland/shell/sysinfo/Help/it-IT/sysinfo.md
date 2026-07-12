@@ -27,6 +27,15 @@ Le interrogazioni:
   uso in tempo reale.
 - `seats` — l'inventario dei posti: il proprietario di ogni display e
   la sua console in primo piano (richiede `CAP_SYSINFO_HW`).
+- `pressure` — l'indicatore di pressione della memoria in tempo reale:
+  banda, soglie e contatori di transizione (richiede
+  `CAP_SYSINFO_KERNEL`).
+- `reclaim` — il registro delle cache recuperabili, una riga per classe
+  (richiede `CAP_SYSINFO_KERNEL`).
+- `ramzip` — i contatori del livello di memoria compressa (richiede
+  `CAP_SYSINFO_KERNEL`).
+- `cpu` — profondità della coda, cambi di contesto e prelazioni per CPU
+  (richiede `CAP_SYSINFO_KERNEL`).
 - `help` — la guida breve di questo comando.
 
 Senza interrogazione viene mostrata la guida breve.

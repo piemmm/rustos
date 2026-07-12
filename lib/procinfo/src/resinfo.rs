@@ -108,6 +108,9 @@ pub enum Unit {
     Seconds,
     /// A dimensionless count of things (open descriptors, live children).
     Count,
+    /// A share expressed as whole percentage points (0–100), e.g. the
+    /// CPU busy share.
+    Percent,
 }
 
 /// When a [`Metric`]'s accumulator resets (`plans/ALIAS.md` §14.3).
