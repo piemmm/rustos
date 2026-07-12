@@ -154,7 +154,10 @@ pub type SyscallResult = Result<u64, Errno>;
 /// Methods return a [`SyscallResult`]; the dispatcher converts an
 /// `Err` into the [`AuditEvent::SyscallHandlerRejected`] audit record
 /// for security-relevant calls before returning the same `Err` to the
-/// caller.
+/// caller — except the two benign non-rejections, which get their own
+/// below-error records: [`Errno::WouldBlock`] ("nothing yet, retry",
+/// [`AuditEvent::SyscallHandlerWouldBlock`]) and [`Errno::NotFound`]
+/// ("no such object", [`AuditEvent::SyscallHandlerNotFound`]).
 pub trait SyscallHandlers {
     /// Voluntarily yield the CPU.
     fn yield_now(&self, caller: &CallerContext<'_>) -> SyscallResult;
@@ -2274,6 +2277,14 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             // reading `users_db_read` while the encrypted root unlocks) cannot
             // flood the log with errors.
             Err(Errno::WouldBlock) if spec.audit => self.audit_would_block(caller, spec),
+            // `NotFound` is the "no such object" answer, not a rejection
+            // either: every check passed and the handler answered a
+            // legitimate question (a genuine authorisation refusal is
+            // `PermissionDenied` — the VFS never masks one as `NotFound`).
+            // Record it below the error level so a routine existence probe
+            // (e.g. `login` opening the optional system-configuration store
+            // and the desktop bundle each round) cannot flood the log.
+            Err(Errno::NotFound) if spec.audit => self.audit_not_found(caller, spec),
             Err(_) if spec.audit => self.audit_rejected(caller, spec, outcome.as_ref().err()),
             _ => {}
         }
@@ -3024,6 +3035,17 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
     fn audit_would_block(&self, caller: &CallerContext<'_>, spec: &SyscallSpec) {
         self.audit_with_identity(
             AuditEvent::SyscallHandlerWouldBlock,
+            caller,
+            &[Field {
+                key: "sc",
+                value: rustos_log::FieldValue::Str(spec.name),
+            }],
+        );
+    }
+
+    fn audit_not_found(&self, caller: &CallerContext<'_>, spec: &SyscallSpec) {
+        self.audit_with_identity(
+            AuditEvent::SyscallHandlerNotFound,
             caller,
             &[Field {
                 key: "sc",
@@ -4634,6 +4656,37 @@ mod tests {
             caps: &caps,
         };
         let h = MockHandlers {
+            force_err: Some(Errno::MessageTooLarge),
+            ..Default::default()
+        };
+        let d = Dispatcher::new(&h, &sink);
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 1;
+        args.0[1] = 0x2000;
+        args.0[2] = 4;
+        assert_eq!(
+            d.dispatch(&ctx, SyscallNumber::IPC_SEND.as_u16(), args),
+            Err(Errno::MessageTooLarge)
+        );
+        assert_eq!(sink.ids(), [AuditEvent::SyscallHandlerRejected.id().0]);
+    }
+
+    #[test]
+    fn a_not_found_outcome_is_audited_as_absent_not_rejected() {
+        // `NotFound` is the "no such object" answer, not a rejection: an
+        // audited syscall returning it must emit the benign, below-error
+        // `SyscallHandlerNotFound` (id 5006) rather than the ERROR-level
+        // `SyscallHandlerRejected` (id 5004) a genuine refusal gets —
+        // otherwise a caller that legitimately probes for an optional
+        // object (e.g. `login` opening the system-configuration store and
+        // the desktop bundle each round) floods the boot log with errors.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers {
             force_err: Some(Errno::NotFound),
             ..Default::default()
         };
@@ -4646,7 +4699,7 @@ mod tests {
             d.dispatch(&ctx, SyscallNumber::IPC_SEND.as_u16(), args),
             Err(Errno::NotFound)
         );
-        assert_eq!(sink.ids(), [AuditEvent::SyscallHandlerRejected.id().0]);
+        assert_eq!(sink.ids(), [AuditEvent::SyscallHandlerNotFound.id().0]);
     }
 
     #[test]

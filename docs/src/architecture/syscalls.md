@@ -1218,6 +1218,7 @@ emit `SYSCALL_INVOKED`; the pre-dispatch refusals (`PERMISSION_DENIED`,
 | 5003  | Error | `SYSCALL_BAD_ARGUMENTS`       | Argument validation failed. |
 | 5004  | Error | `SYSCALL_HANDLER_REJECTED`    | Owning subsystem rejected the call. |
 | 5005  | Debug | `SYSCALL_HANDLER_WOULD_BLOCK` | An audited handler returned `WouldBlock` — the `abi-v1` "nothing yet, retry" signal (not a rejection: every check passed, no security decision was taken). Recorded at `Debug`, below the default `Info` filter, so a caller that legitimately polls while pending cannot flood the log; available for flood/DoS forensics when the level is lowered (`AGENTS.md` §2.1 / §19.4). |
+| 5006  | Debug | `SYSCALL_HANDLER_NOT_FOUND`   | An audited handler returned `NotFound` — the "no such object" answer (not a rejection: every check passed, and a genuine authorisation refusal is `PermissionDenied`, which the secured VFS never masks as `NotFound`). Recorded at `Debug`, below the default `Info` filter, so a routine existence probe — e.g. `login` opening the optional `system.conf` store and the desktop bundle each round — cannot flood the boot log; available for probing/enumeration forensics when the level is lowered (`AGENTS.md` §2.1 / §19.4). |
 
 Adding an event takes the next free identifier and a new row in this
 table.

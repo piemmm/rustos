@@ -4091,6 +4091,14 @@ keyboard never regresses (§2.17), until the final flip:
     for flood/DoS forensics when the level is lowered (`AGENTS.md` §2.1 /
     §19.4). Regressions in `kernel/syscall` (`audit`: id/level frozen;
     `table`: `WouldBlock` → 5005, a real rejection still → 5004).
+    Likewise `NotFound` — the "no such object" answer a routine existence
+    probe gets (`login` opening the optional `system.conf` store and the
+    desktop bundle each round, both documented fail-closed-to-default) —
+    is recorded as the below-`Info` `SYSCALL_HANDLER_NOT_FOUND` (Debug,
+    id 5006), never 5004: a genuine authorisation refusal is
+    `PermissionDenied`, which the secured VFS never masks as `NotFound`,
+    so no security decision is hidden. Regressions in `kernel/syscall`
+    (`audit`: id/level frozen; `table`: `NotFound` → 5006).
   - **The silent blank-passphrase probe no longer logs as an error.** With
     the `users_db_read` poll quietened, the one remaining boot `[ERROR]` was
     `id=4134 ROOT_MOUNT_REJECTED … cause=unlock_refused`: `root_mount`'s

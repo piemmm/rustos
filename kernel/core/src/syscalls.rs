@@ -9773,7 +9773,7 @@ mod tests {
 
     /// `irq_wait` against a forged handle (one not minted for the
     /// calling task) returns `Errno::NotFound`. The dispatcher
-    /// emits the `SyscallHandlerRejected` audit record.
+    /// records the outcome as the below-error `SyscallHandlerNotFound`.
     #[test]
     fn irq_wait_returns_not_found_on_forged_handle() {
         install_trace_filter();

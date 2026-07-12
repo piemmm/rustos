@@ -16,6 +16,7 @@
 //! | 5003 | Error | `SYSCALL_BAD_ARGUMENTS`       | One or more arguments failed type-specific validation. |
 //! | 5004 | Error | `SYSCALL_HANDLER_REJECTED`    | The owning subsystem rejected the call after the dispatcher checks passed. |
 //! | 5005 | Debug | `SYSCALL_HANDLER_WOULD_BLOCK` | The owning subsystem had nothing to return yet and the caller may retry (`Errno::WouldBlock`). Not a rejection: recorded at `Debug` so a routine poll-while-pending cannot flood the log. |
+//! | 5006 | Debug | `SYSCALL_HANDLER_NOT_FOUND`   | The owning subsystem answered that the named object does not exist (`Errno::NotFound`). An ordinary answer, not a security decision (a genuine authorisation refusal is `PermissionDenied` and stays at `Error`): recorded at `Debug` so a routine existence probe of an optional file or endpoint cannot flood the log. |
 //!
 //! Adding a new event takes the next free identifier in this file and a
 //! row in `docs/src/architecture/syscalls.md`.
@@ -61,6 +62,22 @@ pub enum AuditEvent {
     ///
     /// [`Errno::WouldBlock`]: rustos_abi::Errno::WouldBlock
     SyscallHandlerWouldBlock,
+    /// The owning subsystem answered that the named object does not exist
+    /// (the handler returned [`Errno::NotFound`]).
+    ///
+    /// This is an ordinary answer to a legitimate question, **not** a
+    /// security decision — the dispatcher's capability and argument checks
+    /// all passed, and the secured VFS and the other handlers spell a
+    /// genuine authorisation refusal as `PermissionDenied`, never as
+    /// `NotFound` (e.g. `login` probing the optional
+    /// `/System/Settings/Configuration/system.conf` store and the desktop
+    /// bundle each round, both documented fail-closed-to-default). It is
+    /// recorded at [`Level::Debug`] so a routine existence probe cannot
+    /// flood the boot log with errors, while the record remains available
+    /// for probing/enumeration forensics when the level is lowered.
+    ///
+    /// [`Errno::NotFound`]: rustos_abi::Errno::NotFound
+    SyscallHandlerNotFound,
 }
 
 impl AuditEvent {
@@ -74,6 +91,7 @@ impl AuditEvent {
             Self::SyscallBadArguments => 5003,
             Self::SyscallHandlerRejected => 5004,
             Self::SyscallHandlerWouldBlock => 5005,
+            Self::SyscallHandlerNotFound => 5006,
         })
     }
 
@@ -81,17 +99,21 @@ impl AuditEvent {
     ///
     /// Refused or failed dispatches are recorded at [`Level::Error`] so
     /// they surface above a routine info filter. The high-rate benign
-    /// outcomes — a successful dispatch and a would-block retry — are
-    /// recorded at [`Level::Debug`] so they cannot flood the default
-    /// `Info` console; lowering the filter recovers them for forensics.
+    /// outcomes — a successful dispatch, a would-block retry, and a
+    /// not-found answer — are recorded at [`Level::Debug`] so they cannot
+    /// flood the default `Info` console; lowering the filter recovers them
+    /// for forensics.
     #[must_use]
     pub const fn level(self) -> Level {
         match self {
             // The benign high-rate outcomes: the continuous allow stream
-            // of a routine workload and the "nothing yet, retry" signal.
-            // Neither is an error, and both are too frequent for the
-            // default console filter.
-            Self::SyscallInvoked | Self::SyscallHandlerWouldBlock => Level::Debug,
+            // of a routine workload, the "nothing yet, retry" signal, and
+            // the "no such object" answer a routine existence probe gets.
+            // None is an error, and all are too frequent for the default
+            // console filter.
+            Self::SyscallInvoked
+            | Self::SyscallHandlerWouldBlock
+            | Self::SyscallHandlerNotFound => Level::Debug,
             Self::SyscallPermissionDenied
             | Self::SyscallUnknown
             | Self::SyscallBadArguments
@@ -109,6 +131,7 @@ impl AuditEvent {
             Self::SyscallBadArguments => "syscall denied: invalid arguments",
             Self::SyscallHandlerRejected => "syscall rejected by handler",
             Self::SyscallHandlerWouldBlock => "syscall pending; caller may retry",
+            Self::SyscallHandlerNotFound => "syscall target absent",
         }
     }
 }
@@ -147,6 +170,7 @@ mod tests {
             AuditEvent::SyscallBadArguments,
             AuditEvent::SyscallHandlerRejected,
             AuditEvent::SyscallHandlerWouldBlock,
+            AuditEvent::SyscallHandlerNotFound,
         ] {
             let EventId(raw) = ev.id();
             assert!(
@@ -160,6 +184,23 @@ mod tests {
         assert_eq!(AuditEvent::SyscallBadArguments.id(), EventId(5003));
         assert_eq!(AuditEvent::SyscallHandlerRejected.id(), EventId(5004));
         assert_eq!(AuditEvent::SyscallHandlerWouldBlock.id(), EventId(5005));
+        assert_eq!(AuditEvent::SyscallHandlerNotFound.id(), EventId(5006));
+    }
+
+    #[test]
+    fn a_not_found_outcome_is_recorded_below_error() {
+        // "No such object" is an ordinary answer, not a security decision —
+        // a genuine authorisation refusal is `PermissionDenied` and keeps
+        // its error-level record. Recording it below the default `Info`
+        // filter keeps a routine existence probe (e.g. `login` checking the
+        // optional system-configuration store and the desktop bundle each
+        // round) out of the boot log while leaving the record recoverable
+        // for probing forensics by lowering the level.
+        assert_eq!(AuditEvent::SyscallHandlerNotFound.level(), Level::Debug);
+        assert!(
+            AuditEvent::SyscallHandlerNotFound.level() < AuditEvent::SyscallHandlerRejected.level()
+        );
+        assert!(AuditEvent::SyscallHandlerNotFound.level() < Level::Info);
     }
 
     #[test]
