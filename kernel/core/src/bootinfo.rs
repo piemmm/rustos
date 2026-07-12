@@ -127,6 +127,16 @@ pub trait KernelArch: SchedulerArch {
     /// not require them to.
     fn monotonic_ns(&self, cpu: CpuId) -> u64;
 
+    /// The Tier-1 architecture identity of this port, or `None` for a
+    /// port that is not a shippable target (the host test arch).
+    ///
+    /// Consumed once at boot to mint the [`rustos_abi::BootFacts`] record
+    /// the ungated `boot_facts_get` syscall reports. There is **no default
+    /// impl**: every port must state its identity explicitly, so a new
+    /// port cannot silently ship reporting another architecture's name
+    /// (fail closed — a `None` leaves the boot facts uninstalled).
+    fn arch_id(&self) -> Option<rustos_abi::Arch>;
+
     /// Convert a span measured in [`SchedulerArch::ticks_now`] units into
     /// nanoseconds.
     ///
@@ -803,6 +813,20 @@ where
     /// figure.
     pub kernel_heap_bytes: u64,
 
+    /// Installed physical memory, in bytes, as the boot path's platform
+    /// memory source reports it (the firmware map / device-tree memory
+    /// node) **before** any kernel carve-outs — reported through the
+    /// ungated `boot_facts_get` syscall as the machine's installed-RAM
+    /// figure.
+    ///
+    /// The post-carve [`Self::memory_map`] cannot recover this figure (a
+    /// carved kernel-image range is dropped from the map entirely), so the
+    /// boot path threads the pre-carve total here. Defaults to `0` — a boot
+    /// path that does not set it leaves the boot facts uninstalled and
+    /// `boot_facts_get` fails closed rather than reporting a fabricated
+    /// figure.
+    pub installed_memory_bytes: u64,
+
     // Holds the lifetime parameter (covers `command_line`). The PhantomData
     // is invariant in `'a` so callers cannot accidentally extend the
     // borrow.
@@ -902,6 +926,10 @@ where
             // its committed `rustos_kalloc::HEAP_BYTES` through
             // `with_kernel_heap_bytes`; reported as `0` until then.
             kernel_heap_bytes: 0,
+            // Installed memory unknown until the boot path threads its
+            // pre-carve platform total through `with_installed_memory`;
+            // the boot facts stay uninstalled (fail closed) until then.
+            installed_memory_bytes: 0,
             _marker: core::marker::PhantomData,
         }
     }
@@ -916,6 +944,22 @@ where
     #[must_use]
     pub const fn with_kernel_heap_bytes(mut self, bytes: u64) -> Self {
         self.kernel_heap_bytes = bytes;
+        self
+    }
+
+    /// Record the installed physical memory, in bytes, as the platform's
+    /// boot memory source reports it before any kernel carve-outs,
+    /// consuming and returning `self`.
+    ///
+    /// `kernel_main` mints the [`rustos_abi::BootFacts`] record from this
+    /// figure (with the arch identity and CPU count) and installs it into
+    /// the syscall layer, so the ungated `boot_facts_get` reports the
+    /// machine's true installed RAM. A boot path that never calls it — or
+    /// passes `0` — leaves the facts uninstalled and the syscall failing
+    /// closed rather than reporting a fabricated figure.
+    #[must_use]
+    pub const fn with_installed_memory(mut self, bytes: u64) -> Self {
+        self.installed_memory_bytes = bytes;
         self
     }
 

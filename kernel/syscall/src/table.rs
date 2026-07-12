@@ -1319,6 +1319,29 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Read the kernel's boot-static machine summary
+    /// ([`rustos_abi::BootFacts`]).
+    ///
+    /// The dispatcher has already checked `out` is a non-null `UserPtr`; the
+    /// call is unprivileged (the facts are the machine's public shape —
+    /// arch, core count, installed memory — minted once at boot, never live
+    /// state and never a secret). The implementation copies the
+    /// [`rustos_abi::BOOT_FACTS_WIRE_LEN`]-byte encoding out to `out` and
+    /// returns its byte length. A buffer shorter than the wire length fails
+    /// closed with [`Errno::BufferTooSmall`].
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn boot_facts_get(
+        &self,
+        _caller: &CallerContext<'_>,
+        _out: u64,
+        _out_cap: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Read the calling task's own kernel-attested [`rustos_abi::Origin`].
     ///
     /// The dispatcher has already checked `out` is a non-null `UserPtr`; the
@@ -2736,6 +2759,12 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let out_cap = decode_len(args.0[1])?;
                 self.handlers.boot_id_get(caller, args.0[0], out_cap)
             }
+            SyscallNumber::BOOT_FACTS_GET => {
+                // args[0] is the non-null out `UserPtr` (dispatcher-checked);
+                // args[1] is its capacity in bytes.
+                let out_cap = decode_len(args.0[1])?;
+                self.handlers.boot_facts_get(caller, args.0[0], out_cap)
+            }
             SyscallNumber::SYSINFO_INTROSPECT => {
                 // args[0] is the `IntrospectDomain` discriminant (validated by
                 // the handler); args[1] is the domain-specific selector/offset;
@@ -3542,6 +3571,18 @@ mod tests {
             self.record("boot_id_get");
             // Echo the capacity so the reachability test can assert the
             // dispatcher decoded both arguments without wiring a real boot id.
+            Ok(out_cap as u64)
+        }
+
+        fn boot_facts_get(
+            &self,
+            _c: &CallerContext<'_>,
+            _out: u64,
+            out_cap: usize,
+        ) -> SyscallResult {
+            self.record("boot_facts_get");
+            // Echo the capacity so the reachability test can assert the
+            // dispatcher decoded both arguments without wiring real facts.
             Ok(out_cap as u64)
         }
 

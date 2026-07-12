@@ -63,7 +63,7 @@ pub use appinfo::{
     MIME_ENTRY_LEN, MIME_TYPE_MAX, SYSTEM_APP_STORE, SYSTEM_LIBRARIES_DIR, SYSTEM_SERVICE_STORE,
     USER_APP_STORE,
 };
-pub use boot::{BootId, BOOT_ID_HEX_LEN, BOOT_ID_LEN};
+pub use boot::{Arch, BootFacts, BootId, BOOT_FACTS_WIRE_LEN, BOOT_ID_HEX_LEN, BOOT_ID_LEN};
 pub use capability::{CapabilityId, CapabilityQuery, CAPABILITY_ID_MAX};
 pub use driver::{
     decode_bind_keys, BufferClass, Delay, DriverBindKey, DriverError, DriverHandle, DriverHost,

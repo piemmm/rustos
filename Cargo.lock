@@ -635,6 +635,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-configure"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-help",
+ "rustos-rt",
+ "rustos-sysconfig",
+]
+
+[[package]]
 name = "rustos-cp"
 version = "0.0.0"
 dependencies = [
@@ -1493,6 +1503,7 @@ dependencies = [
  "rustos-log",
  "rustos-procinfo",
  "rustos-rt",
+ "rustos-sysconfig",
  "rustos-termcap",
  "rustos-users",
  "rustos-vt",
@@ -1776,6 +1787,10 @@ dependencies = [
  "loom",
  "proptest",
 ]
+
+[[package]]
+name = "rustos-sysconfig"
+version = "0.0.0"
 
 [[package]]
 name = "rustos-syshelp"

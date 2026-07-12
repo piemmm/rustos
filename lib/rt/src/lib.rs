@@ -59,10 +59,10 @@ extern crate alloc;
 use rustos_abi::input::{KeyInput, PointerInput};
 use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
 use rustos_abi::{
-    BootId, FileStat, HwNode, InputMode, LimitKind, MapFlags, OpenFlags, Origin, ResourceLimit,
-    Signal, SyscallNumber, TerminalSize, Time64, WaitFlags, WaitStatus, WallClockReading,
-    WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, STDERR, STDIN,
-    STDINFO, STDOUT, TERMINAL_SIZE_WIRE_LEN,
+    BootFacts, BootId, FileStat, HwNode, InputMode, LimitKind, MapFlags, OpenFlags, Origin,
+    ResourceLimit, Signal, SyscallNumber, TerminalSize, Time64, WaitFlags, WaitStatus,
+    WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, ORIGIN_WIRE_LEN,
+    SPAWN_UID_INHERIT, STDERR, STDIN, STDINFO, STDOUT, TERMINAL_SIZE_WIRE_LEN,
 };
 use rustos_abi_trap::raw_syscall;
 
@@ -310,6 +310,9 @@ const NUM_WALL_TIME_SET: u64 = SyscallNumber::WALL_TIME_SET.as_u16() as u64;
 
 /// `boot_id_get` syscall number (as above).
 const NUM_BOOT_ID_GET: u64 = SyscallNumber::BOOT_ID_GET.as_u16() as u64;
+
+/// `boot_facts_get` syscall number (as above).
+const NUM_BOOT_FACTS_GET: u64 = SyscallNumber::BOOT_FACTS_GET.as_u16() as u64;
 
 /// `sysinfo_introspect` syscall number (as above).
 const NUM_SYSINFO_INTROSPECT: u64 = SyscallNumber::SYSINFO_INTROSPECT.as_u16() as u64;
@@ -2581,6 +2584,39 @@ pub fn boot_id() -> Result<BootId, i64> {
     // The kernel returns the wire length; decode it (fail closed on a
     // malformed image — never inventing an id).
     BootId::from_bytes(&buf).map_err(|e| -i64::from(e.as_i32()))
+}
+
+/// Read the kernel's boot-static machine summary ([`BootFacts`])
+/// (`SyscallNumber::BOOT_FACTS_GET`).
+///
+/// Returns the machine facts the kernel minted once at boot from
+/// kernel-attested state: the CPU architecture, the number of processor
+/// cores brought under the scheduler, and the installed physical memory the
+/// boot path discovered. Unprivileged, like [`boot_id`] — the facts are the
+/// machine's public shape, never live state or a secret.
+///
+/// # Errors
+///
+/// Returns the raw negative kernel result (`-errno`). The notable case is
+/// `NotImplemented`: a boot path that never installed the facts (the kernel
+/// fails closed rather than fabricate a machine shape). The wrapper hides no
+/// error.
+pub fn boot_facts() -> Result<BootFacts, i64> {
+    let mut buf = [0u8; BootFacts::WIRE_LEN];
+    let out_ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(ptr, len)` pair against the caller's address space before writing.
+    // `buf` is a live exclusive local for the duration of the call.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the i64 count-result encoding (count ≥ 0, else -errno).
+    let ret =
+        unsafe { raw_syscall(NUM_BOOT_FACTS_GET, [out_ptr, buf.len() as u64, 0, 0, 0, 0]) } as i64;
+    if ret < 0 {
+        return Err(ret);
+    }
+    // The kernel returns the wire length; decode it (fail closed on a
+    // malformed image — never inventing a machine shape).
+    BootFacts::from_bytes(&buf).map_err(|e| -i64::from(e.as_i32()))
 }
 
 /// Read the calling task's own kernel-attested [`Origin`]

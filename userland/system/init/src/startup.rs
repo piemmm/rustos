@@ -76,21 +76,117 @@ service /System/Services/seatmgr.app/Run
 session /System/Services/login.app/Run
 ";
 
-/// The first line `init` writes to the console once it reaches user mode.
+/// The version prefix of the banner `init` writes once it reaches user mode.
 ///
-/// A terse banner (no aimless waffle) that proves the kernel reached EL0 and
-/// `init`'s console write path works end to end, and now names *which* build
-/// reached it. The version is the workspace crate version stamped in at
-/// compile time (`env!("CARGO_PKG_VERSION")`), with a `pre-release` marker
-/// because RustOS has not shipped a release. No wall-clock build date or
-/// timestamp is embedded: the images must stay bit-reproducible, and a
-/// build clock would defeat that — the source-fixed version is the honest,
-/// reproducible build identity.
-pub const BANNER: &str = concat!(
-    "RustOS ",
-    env!("CARGO_PKG_VERSION"),
-    " (pre-release): reached user mode\n"
-);
+/// The version is the workspace crate version stamped in at compile time
+/// (`env!("CARGO_PKG_VERSION")`). No wall-clock build date or timestamp is
+/// embedded: the images must stay bit-reproducible, and a build clock would
+/// defeat that — the source-fixed version is the honest, reproducible build
+/// identity. The machine facts appended by [`render_banner`] come from the
+/// kernel-attested `boot_facts_get` answer, never a compiled-in guess.
+const BANNER_PREFIX: &str = concat!("RustOS ", env!("CARGO_PKG_VERSION"));
+
+/// Byte capacity of the [`render_banner`] output buffer.
+///
+/// The banner is bounded by construction: the fixed prefix and layout text,
+/// a `u64` memory figure (at most 20 digits), the longest arch name
+/// (`aarch64`/`riscv64`, 7 bytes), and a `u32` core count (at most
+/// 10 digits) fit comfortably; 96 bytes leaves honest headroom without a
+/// heap. A `Write` overflow is impossible for well-formed inputs and fails
+/// closed (truncation refused) rather than corrupting the text.
+pub const BANNER_MAX: usize = 96;
+
+/// One binary mebibyte, the banner's default memory unit.
+const MIB: u64 = 1024 * 1024;
+
+/// One binary gibibyte; the banner switches to GiB only above
+/// [`GIB_THRESHOLD`].
+const GIB: u64 = 1024 * MIB;
+
+/// Installed-memory sizes strictly above this render in GiB; everything at
+/// or below it renders in MiB (`8192MiB`, not `8GiB`).
+const GIB_THRESHOLD: u64 = 100 * GIB;
+
+/// A bounded, allocation-free `core::fmt::Write` sink over a caller-owned
+/// byte buffer. Refuses (fails closed) any write past the buffer's end
+/// rather than truncating mid-text.
+struct BufWriter<'a> {
+    buf: &'a mut [u8],
+    len: usize,
+}
+
+impl core::fmt::Write for BufWriter<'_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let bytes = s.as_bytes();
+        let end = self.len.checked_add(bytes.len()).ok_or(core::fmt::Error)?;
+        if end > self.buf.len() {
+            return Err(core::fmt::Error);
+        }
+        self.buf[self.len..end].copy_from_slice(bytes);
+        self.len = end;
+        Ok(())
+    }
+}
+
+/// Render the startup banner into `buf`, returning the text.
+///
+/// With the kernel's boot facts available the banner is the machine
+/// summary:
+///
+/// ```text
+/// RustOS 0.0.0: 8192MiB
+///
+/// Architecture: aarch64, 4 cores
+/// ```
+///
+/// The installed memory renders in whole MiB (rounded to nearest) unless it
+/// exceeds 100 GiB, where whole GiB keep the figure readable; a single core
+/// reads `1 core`. Without facts (a kernel that installed none) the banner
+/// degrades to the version line alone — the honest output, never a
+/// fabricated machine shape. A formatting overflow (impossible for
+/// well-formed inputs) equally degrades to the version line, fail closed.
+pub fn render_banner(facts: Option<rustos_abi::BootFacts>, buf: &mut [u8; BANNER_MAX]) -> &str {
+    use core::fmt::Write as _;
+
+    let mut w = BufWriter { buf, len: 0 };
+    let ok = match facts {
+        Some(facts) => write_facts_banner(&mut w, &facts).is_ok(),
+        None => writeln!(w, "{BANNER_PREFIX}").is_ok(),
+    };
+    if !ok {
+        // Fail closed to the version line alone; it always fits.
+        w.len = 0;
+        if writeln!(w, "{BANNER_PREFIX}").is_err() {
+            w.len = 0;
+        }
+    }
+    let len = w.len;
+    // The writer only ever copies whole `&str`s, so the prefix is UTF-8.
+    core::str::from_utf8(&buf[..len]).unwrap_or("")
+}
+
+/// Write the full machine-summary banner (see [`render_banner`]).
+fn write_facts_banner(w: &mut BufWriter<'_>, facts: &rustos_abi::BootFacts) -> core::fmt::Result {
+    use core::fmt::Write as _;
+
+    write!(w, "{BANNER_PREFIX}: ")?;
+    if facts.memory_bytes > GIB_THRESHOLD {
+        // Round to the nearest whole GiB; the saturating add cannot
+        // overflow below u64::MAX - GIB/2, far past any real machine.
+        let gib = facts.memory_bytes.saturating_add(GIB / 2) / GIB;
+        write!(w, "{gib}GiB")?;
+    } else {
+        let mib = facts.memory_bytes.saturating_add(MIB / 2) / MIB;
+        write!(w, "{mib}MiB")?;
+    }
+    let cores = facts.cpu_count;
+    let noun = if cores == 1 { "core" } else { "cores" };
+    write!(
+        w,
+        "\n\nArchitecture: {}, {cores} {noun}\n",
+        facts.arch.name()
+    )
+}
 
 /// Why a startup config text was refused.
 ///
@@ -421,5 +517,98 @@ session /Apps/Shell.app/Run   # the shell
             format!("{}", ConfigError::UnknownDirective),
             "startup config names an unknown directive",
         );
+    }
+
+    use super::{render_banner, BANNER_MAX};
+    use rustos_abi::{Arch, BootFacts};
+
+    /// Render with the given facts into a fresh buffer.
+    fn banner(facts: Option<BootFacts>) -> String {
+        let mut buf = [0u8; BANNER_MAX];
+        String::from(render_banner(facts, &mut buf))
+    }
+
+    #[test]
+    fn banner_renders_memory_arch_and_cores() {
+        let facts = BootFacts {
+            arch: Arch::X86_64,
+            cpu_count: 36,
+            memory_bytes: 8192 * 1024 * 1024,
+        };
+        assert_eq!(
+            banner(Some(facts)),
+            format!(
+                "RustOS {}: 8192MiB\n\nArchitecture: x86_64, 36 cores\n",
+                env!("CARGO_PKG_VERSION"),
+            ),
+        );
+    }
+
+    #[test]
+    fn banner_uses_mib_up_to_the_100_gib_threshold() {
+        // Exactly 100 GiB still renders in MiB ("over 100G" is strict).
+        let facts = BootFacts {
+            arch: Arch::Aarch64,
+            cpu_count: 4,
+            memory_bytes: 100 * 1024 * 1024 * 1024,
+        };
+        assert!(banner(Some(facts)).contains(": 102400MiB\n"));
+    }
+
+    #[test]
+    fn banner_switches_to_gib_above_the_threshold() {
+        let facts = BootFacts {
+            arch: Arch::Riscv64,
+            cpu_count: 128,
+            memory_bytes: 256 * 1024 * 1024 * 1024,
+        };
+        let text = banner(Some(facts));
+        assert!(text.contains(": 256GiB\n"), "{text}");
+        assert!(text.ends_with("Architecture: riscv64, 128 cores\n"));
+    }
+
+    #[test]
+    fn banner_rounds_memory_to_the_nearest_unit() {
+        // 8 GiB minus 100 KiB rounds back up to 8192 MiB — the figure a
+        // user recognises as installed, not a truncated 8191.
+        let facts = BootFacts {
+            arch: Arch::Aarch64,
+            cpu_count: 4,
+            memory_bytes: 8192 * 1024 * 1024 - 100 * 1024,
+        };
+        assert!(banner(Some(facts)).contains(": 8192MiB\n"));
+    }
+
+    #[test]
+    fn banner_uses_the_singular_for_one_core() {
+        let facts = BootFacts {
+            arch: Arch::Aarch64,
+            cpu_count: 1,
+            memory_bytes: 128 * 1024 * 1024,
+        };
+        let text = banner(Some(facts));
+        assert!(text.ends_with("Architecture: aarch64, 1 core\n"), "{text}");
+    }
+
+    #[test]
+    fn banner_without_facts_degrades_to_the_version_line() {
+        assert_eq!(
+            banner(None),
+            format!("RustOS {}\n", env!("CARGO_PKG_VERSION")),
+        );
+    }
+
+    #[test]
+    fn banner_always_fits_its_buffer() {
+        // The worst representable inputs still fit BANNER_MAX, so the
+        // fail-closed truncation refusal can never fire for real facts.
+        let facts = BootFacts {
+            arch: Arch::Riscv64,
+            cpu_count: u32::MAX,
+            memory_bytes: u64::MAX,
+        };
+        let text = banner(Some(facts));
+        assert!(text.starts_with("RustOS "));
+        assert!(text.ends_with(" cores\n"));
     }
 }

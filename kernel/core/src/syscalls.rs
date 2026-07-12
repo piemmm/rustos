@@ -80,14 +80,15 @@ use rustos_abi::sysinfo::{
     CpuTimeRecord, MountRecord, ProcessRecord, SeatRecord, UserDirectoryRecord,
 };
 use rustos_abi::{
-    decode_log_record, BootId, CallRecvFlags, CapabilityId, DescriptorTable, DirEntry, Errno,
-    FdWire, FileStat, InputMode, IntrospectDomain, IrqHandle, LimitKind, MapFlags, OpenFlags,
-    PortName, ProcId, ProcessStart, RandomFlags, ResourceLimit, Signal, SpawnAttach, StreamMode,
-    SyscallNumber, Time64, UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WallClockReading,
-    WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_IO_MAX,
-    FS_NAME_MAX, FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PORT_NAME_MAX_LEN,
-    PROCESS_START_MAX_TOTAL_LEN, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES, RESOURCE_REF_MAX,
-    SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
+    decode_log_record, BootFacts, BootId, CallRecvFlags, CapabilityId, DescriptorTable, DirEntry,
+    Errno, FdWire, FileStat, InputMode, IntrospectDomain, IrqHandle, LimitKind, MapFlags,
+    OpenFlags, PortName, ProcId, ProcessStart, RandomFlags, ResourceLimit, Signal, SpawnAttach,
+    StreamMode, SyscallNumber, Time64, UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind,
+    WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_ATTR_KEY_MAX,
+    FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX,
+    PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES,
+    RESOURCE_REF_MAX, SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN,
+    WAITSET_CHILD_ANY, WAIT_PID_ANY,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::{
@@ -452,6 +453,14 @@ where
     /// a real id. A plain value, not a borrow: it is 16 immutable bytes minted
     /// once, not a live seam.
     boot_id: BootId,
+    /// The boot-static machine summary the `boot_facts_get` syscall reports:
+    /// the arch port's identity, the scheduler's brought-up CPU count, and
+    /// the boot path's discovered installed-memory total. Defaults to `None`
+    /// (no boot path installed the facts yet), in which case the handler
+    /// fails closed with [`Errno::NotImplemented`] rather than fabricate a
+    /// machine shape. Installed once through [`Self::with_boot_facts`]; a
+    /// plain immutable value, not a live seam, exactly like the boot id.
+    boot_facts: Option<BootFacts>,
     /// The authoritative identity table the `spawn` handler resolves a
     /// spawn-as-user switch against (`PREREQUISITES.md` P-C). Defaults to the
     /// fail-closed [`NULL_IDENTITY`]; the boot path that unlocks the root
@@ -612,6 +621,9 @@ where
             // CSPRNG reserve and installs it (`PREREQUISITES.md` P-E):
             // `boot_id_get` fails closed with `EntropyNotReady` until then.
             boot_id: BootId::UNSET,
+            // `boot_facts_get` fails closed with `NotImplemented` until the
+            // boot path installs the discovered machine summary.
+            boot_facts: None,
             // The identity table is unwired until the boot path installs the
             // verified one (`PREREQUISITES.md` P-C): a spawn-as-user switch
             // fails closed with `NotImplemented` until then, never resolving
@@ -719,6 +731,21 @@ where
     #[must_use]
     pub const fn with_boot_id(mut self, boot_id: BootId) -> Self {
         self.boot_id = boot_id;
+        self
+    }
+
+    /// Install the boot-static machine summary the `boot_facts_get` syscall
+    /// reports, consuming and returning `self`.
+    ///
+    /// Called once by the boot path with the [`BootFacts`] it minted from
+    /// kernel-attested state (the arch port's identity, the scheduler's CPU
+    /// count, and the discovered installed-memory total). Until then the
+    /// handler fails closed with [`Errno::NotImplemented`] rather than
+    /// fabricate a machine shape. The value is copied in (16 immutable
+    /// bytes), not borrowed.
+    #[must_use]
+    pub const fn with_boot_facts(mut self, facts: BootFacts) -> Self {
+        self.boot_facts = Some(facts);
         self
     }
 
@@ -2731,6 +2758,34 @@ where
             return Err(Errno::EntropyNotReady);
         }
         let bytes = self.boot_id.to_le_bytes();
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(out), &bytes)
+        }) {
+            Some(Ok(())) => Ok(bytes.len() as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
+    }
+
+    fn boot_facts_get(
+        &self,
+        caller: &CallerContext<'_>,
+        out: u64,
+        out_cap: usize,
+    ) -> SyscallResult {
+        // The caller's buffer must hold the whole record; a short buffer
+        // fails closed rather than truncating it. Unprivileged, like
+        // `boot_id_get`: the facts are the machine's public shape, minted
+        // once at boot from kernel-attested state, never live state.
+        if out_cap < BootFacts::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        // Fail closed when no boot path installed the facts: never fabricate
+        // a machine shape.
+        let Some(facts) = self.boot_facts else {
+            return Err(Errno::NotImplemented);
+        };
+        let bytes = facts.to_le_bytes();
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_out(space, physmap, VirtAddr::new(out), &bytes)
         }) {
@@ -7397,6 +7452,19 @@ where
     #[must_use]
     pub fn with_boot_id(mut self, boot_id: BootId) -> Self {
         self.handlers = self.handlers.with_boot_id(boot_id);
+        self
+    }
+
+    /// Install the boot-static machine summary the `boot_facts_get` syscall
+    /// reports, consuming and returning `self`.
+    ///
+    /// The hook-level mirror of [`KernelSyscallHandlers::with_boot_facts`]:
+    /// the boot path passes the [`BootFacts`] it minted from kernel-attested
+    /// state. A boot path that never calls it leaves `boot_facts_get`
+    /// failing closed with [`Errno::NotImplemented`].
+    #[must_use]
+    pub fn with_boot_facts(mut self, facts: BootFacts) -> Self {
+        self.handlers = self.handlers.with_boot_facts(facts);
         self
     }
 
@@ -22429,6 +22497,75 @@ mod tests {
             h.boot_id_get(&ctx, 0x1000, BOOT_ID_LEN),
             Ok(BOOT_ID_LEN as u64)
         );
+    }
+
+    /// `boot_facts_get` fails closed with `BufferTooSmall` for a buffer
+    /// shorter than the wire length and with `NotImplemented` while no boot
+    /// path installed the facts — both *before* any address-space access.
+    /// Once facts are installed and the buffer is large enough, the record
+    /// is copied out and decodes back to the installed values.
+    #[test]
+    fn boot_facts_get_fails_closed_then_copies_out_the_installed_facts() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // A writable caller page (page 1 = `0x1000`) for the copy-out.
+        let (space, physmap) = server_aspace(&[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        // Uninstalled (default): a short buffer is rejected before anything
+        // else, and a large-enough buffer fails closed `NotImplemented`
+        // rather than ever fabricating a machine shape.
+        let unset = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            unset.boot_facts_get(&ctx, 0x1000, 0),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(
+            unset.boot_facts_get(&ctx, 0x1000, BootFacts::WIRE_LEN),
+            Err(Errno::NotImplemented)
+        );
+
+        // With facts installed: a short buffer is still rejected, and a
+        // large-enough one copies the record out; it decodes back exactly.
+        let facts = BootFacts {
+            arch: rustos_abi::Arch::Aarch64,
+            cpu_count: 4,
+            memory_bytes: 8 * 1024 * 1024 * 1024,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_boot_facts(facts);
+        assert_eq!(
+            h.boot_facts_get(&ctx, 0x1000, BootFacts::WIRE_LEN - 1),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(
+            h.boot_facts_get(&ctx, 0x1000, BootFacts::WIRE_LEN),
+            Ok(BootFacts::WIRE_LEN as u64)
+        );
+        let guard = aspaces.read();
+        let (_s, pm) = guard.resolve(SecTaskId(2)).expect("aspace present");
+        let bytes = read_server_page(pm, 1, BootFacts::WIRE_LEN);
+        assert_eq!(BootFacts::from_bytes(&bytes), Ok(facts));
     }
 
     /// `terminal_size` copies out the grid of a console whose geometry the

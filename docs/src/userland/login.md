@@ -36,7 +36,12 @@ the stored hash.
    means a stuck or hostile console can never spin forever.
 3. On success, **choose the session** — text by default, graphical offered
    only when `graphical_available` (`AGENTS.md` §10) — and hand the
-   authenticated identity to the `SessionLauncher`.
+   authenticated identity to the `SessionLauncher`. When the administrator
+   configured `os.loginType graphical` (the `configure` command's
+   system-configuration store, read through the shared `lib/sysconfig`
+   engine each round), an available graphical session starts directly
+   without the choice prompt; on a system with no desktop it degrades to
+   text — never an error.
 
 If the attempt budget is exhausted, login launches nothing and returns
 `LoginError::TooManyAttempts`. A terminal that cannot be read aborts with
@@ -263,6 +268,8 @@ on fd 2 until a userland audit transport exists.
 `LoginView`/`Authenticator`/`SessionLauncher` and a recording log sink,
 covering a successful text login, the graphical option hidden when
 unavailable, an offered graphical session selected and defaulted to text,
+the configured graphical boot default starting the desktop without a
+prompt (and degrading to text when headless),
 wrong-password retry then success, the fail-closed lockout and zero-budget
 paths, a dead console, and a refused session launch — plus the
 session-choice parser, the `EventId` range and uniqueness invariants, the

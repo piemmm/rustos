@@ -632,6 +632,41 @@ document with its usage-banner fallback, and the switch-drift pin that
 every locale's `OPTIONS` section documents exactly the parser's switches
 (`plans/APPS.md` §3.1).
 
+## `configure` — read and set the boot-time system configuration (`userland/apps/configure`)
+
+The `sysctl`-shaped settings command over the boot-time configuration store
+at `/System/Settings/Configuration/system.conf`. With no operand it lists
+every setting of the closed registry with its current value; with a key it
+shows that setting; with a key and a value it changes it:
+
+```text
+configure                          # list every setting
+configure os.loginType             # show one setting
+configure os.loginType graphical   # set it (boot to the graphical login)
+```
+
+The store's grammar, closed key registry, fail-closed parse, and canonical
+render are the shared `lib/sysconfig` engine (`docs/src/lib/sysconfig.md`)
+— the same engine every boot-time consumer reads through, so this writer
+and those readers can never diverge. An unknown key, a value outside its
+key's closed set, or a store document the engine cannot fully parse is
+refused with the reason (and the valid choices) stated, and changes
+nothing; a set rewrites the whole document in canonical form, never a
+partial patch. The store lives on the encrypted root, so a change takes
+effect when its consumer next parses it — `os.loginType` at the next login
+prompt.
+
+The pure grammar/engine core is host-tested against in-memory seams; the
+`Run` binary wires the syscall-backed store file, the shared own-bundle
+help source, and the inherited standard output. Manifest:
+`CAP_CONSOLE_WRITE` (the listing and short help) and `CAP_FS_ACCESS` (the
+store and the bundle's own `Help/` tree) — write authority is the
+`/System/Settings` per-inode policy under the caller's attested identity,
+so an ordinary account can read settings but a change is refused with its
+reason (fail closed, nothing applied). Exit status: `0` success, `1` a
+store/output failure, `2` a usage error (unknown key / out-of-set value
+included).
+
 ## `clear` — clear the terminal screen (`userland/apps/clear`)
 
 `rustos-clear` writes the byte sequence that moves the cursor home and

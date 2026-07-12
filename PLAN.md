@@ -5084,6 +5084,44 @@ binding design and staging.
 
 ---
 
+## SYSCONFIG — boot machine facts + the boot-time configuration store
+
+**Status: done** (both deliverables shipped; the registry grows by adding a
+`Key` variant to `lib/sysconfig`, never a second store).
+
+- **Boot facts (`boot_facts_get`, syscall 89) + the machine-summary
+  banner.** The kernel mints one immutable `rustos_abi::BootFacts` record at
+  boot — the arch port's stated identity (`KernelArch::arch_id`, `None` on
+  the host test arch so the facts stay uninstalled), the validated CPU
+  count, and the boot path's pre-carve installed-RAM total
+  (`BootInfo::with_installed_memory`; aarch64 sums the raw FDT `/memory`
+  windows, riscv64 takes the FDT window, x86_64 sums the firmware map's
+  usable RAM before the kernel-image carve) — and serves it through the
+  ungated, un-audited `boot_facts_get` syscall (the `boot_id_get` shape: the
+  machine's public shape, never live state; live figures stay behind the
+  capability-gated System Information API). PID 1 renders its startup banner
+  from it: `RustOS <version>: <mem>` (whole MiB rounded to nearest; whole
+  GiB above 100 GiB), a blank line, then
+  `Architecture: <arch>, <n> core(s)`; a kernel with no installed facts
+  degrades the banner to the version line, fail closed, with the reason on
+  stderr. Wrappers: `rustos_rt::boot_facts()`, `ros_sys_boot_facts_get`.
+- **The boot-time configuration store (`lib/sysconfig` + the `configure`
+  command app).** `/System/Settings/Configuration/system.conf` on the
+  encrypted root is the one administrator-settable boot-time store: a
+  bounded `key value` line grammar with a **closed** key registry
+  (`os.loginType` = `text` | `graphical` today), fail-closed parse, and
+  canonical render, all defined once in `lib/sysconfig` (no_std+alloc,
+  host-tested). The `configure` command app (`userland/apps/configure`,
+  `CAP_CONSOLE_WRITE`+`CAP_FS_ACCESS` — write authority is the
+  `/System/Settings` per-inode policy, no new capability) lists/shows/sets
+  through that engine and refuses an unknown key, an out-of-set value, or a
+  malformed store outright. Consumer: `login` re-reads the store each round
+  (post-unlock by construction — the store lives on the encrypted root) and
+  a configured `graphical` default starts the desktop directly after
+  authentication when one is available, degrading to text otherwise — never
+  an error. Remaining: nothing for the shipped keys; new settings enter by
+  extending the `Key` registry and its consumer in the same change.
+
 ## Cache-Aware Scheduling (LLC-aware task aggregation)
 
 **Status: planned.** A scheduler *performance* feature (§2.16): co-locate the

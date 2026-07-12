@@ -254,6 +254,13 @@ impl KernelArch for TestArch {
         self.monotonic_ns.fetch_add(1, Ordering::Relaxed) + 1
     }
 
+    fn arch_id(&self) -> Option<rustos_abi::Arch> {
+        // The host test arch is not a shippable Tier-1 target: it states
+        // no identity, so the boot facts stay uninstalled (fail closed)
+        // rather than impersonating a real architecture.
+        None
+    }
+
     fn pump_console_tx(&self) {
         // The host mock has no buffered device; it only records that the
         // dispatch loop reached the seam so a test can assert the

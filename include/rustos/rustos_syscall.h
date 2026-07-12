@@ -112,6 +112,7 @@ extern "C" {
 #define ROS_SYS_FS_ATTR_LIST 86u
 #define ROS_SYS_FS_ATTR_REMOVE 87u
 #define ROS_SYS_PORT_BIND 88u
+#define ROS_SYS_BOOT_FACTS_GET 89u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns ROS_E_WOULD_BLOCK when a
@@ -291,6 +292,7 @@ int32_t ros_sys_fs_attr_set(void * a0, uintptr_t a1, void * a2, uintptr_t a3, vo
 uint64_t ros_sys_fs_attr_list(void * a0, uintptr_t a1, uint64_t a2, void * a3, uintptr_t a4);
 int32_t ros_sys_fs_attr_remove(void * a0, uintptr_t a1, void * a2, uintptr_t a3);
 int32_t ros_sys_port_bind(uint64_t a0, uintptr_t a1, uintptr_t a2);
+uint64_t ros_sys_boot_facts_get(void * a0, uintptr_t a1);
 
 #ifdef __cplusplus
 } /* extern "C" */

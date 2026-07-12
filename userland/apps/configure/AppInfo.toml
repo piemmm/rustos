@@ -1,0 +1,17 @@
+# Signed-AppInfo manifest source for the `configure` command app
+# (plans/APPS.md deliverable 8). Discovered by the build's app-bundle
+# composer; the capability list is the bundle's request, intersected with
+# the launching user's grants. CAP_CONSOLE_WRITE covers the setting
+# listing (and the short help) written to the inherited standard output;
+# CAP_FS_ACCESS covers the store read/write under
+# /System/Settings/Configuration and the short-help read of the bundle's
+# own Help/ documents — both through the secured VFS, which authorises
+# every path per-inode under the caller's attested identity, so only a
+# principal the /System/Settings policy admits can change a setting. The
+# tool reads no input, so it requests no CAP_CONSOLE_READ and nothing
+# else.
+id = "os.rustos.configure"
+name = "configure"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS"]

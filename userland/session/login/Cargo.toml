@@ -57,6 +57,12 @@ rustos-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
 # host the binary is an inert stub.
 [target.'cfg(target_os = "none")'.dependencies]
 rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+# The one system-configuration store engine (`lib/sysconfig`): the `Run`
+# binary re-reads the administrator's `os.loginType` boot default through
+# it each round — the same engine the `configure` command writes with, so
+# producer and consumer can never diverge. Freestanding-only: the pure
+# login library takes the parsed default through `LoginConfig`.
+rustos-sysconfig = { path = "../../../lib/sysconfig", version = "=0.0.0" }
 # The production System Information transport (`IpcTransport`), enabled
 # through `rustos-procinfo`'s own `program` feature: the full-screen view's
 # status bars query `sysinfod` for the machine identity, memory figures,

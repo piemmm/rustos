@@ -344,6 +344,10 @@ impl KernelArch for BinArch {
         Some(&X86_PLATFORM_ENTROPY)
     }
 
+    fn arch_id(&self) -> Option<rustos_abi::Arch> {
+        Some(rustos_abi::Arch::X86_64)
+    }
+
     fn park_translation(&self) -> Option<fn()> {
         // Re-installs the trampoline `CR3` root (published by the boot
         // path's `publish_boot_park_root`) so no user root stays active

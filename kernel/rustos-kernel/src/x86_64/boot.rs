@@ -438,6 +438,10 @@ pub struct BspBringUp {
     /// The firmware memory map with the running kernel image reserved and
     /// the kthread-stack guard arena carved out.
     pub memory_map: BootMemoryMap,
+    /// Installed RAM in bytes: the firmware map's usable-RAM total taken
+    /// before the kernel-image and guard-arena carves — the figure the
+    /// ungated `boot_facts_get` syscall reports.
+    pub installed_memory_bytes: u64,
     /// The MADT-discovered IO-APIC routing, every pin programmed masked.
     pub irq_routing: IrqRouting,
 }
@@ -561,7 +565,7 @@ pub fn bring_up_bsp(
     // SAFETY-INVARIANT 4).
     let boot_data = unsafe { BootData::load(boot_info) }.map_err(|_| BootError::BootInfoParse)?;
 
-    let mut memory_map = build_memory_map(&boot_data)?;
+    let (mut memory_map, installed_memory_bytes) = build_memory_map(&boot_data)?;
 
     // Carve a 2 MiB-aligned kthread-stack guard arena out of the firmware
     // map and install it so the PID 1 spawn seam (`init_spawn_x86_64`) can
@@ -735,6 +739,7 @@ pub fn bring_up_bsp(
         cpu_to_lapic,
         calibration,
         memory_map,
+        installed_memory_bytes,
         irq_routing,
     })
 }
@@ -760,6 +765,7 @@ fn try_boot(
     let BspBringUp {
         calibration,
         memory_map,
+        installed_memory_bytes,
         irq_routing,
         ..
     } = board;
@@ -811,6 +817,9 @@ fn try_boot(
     // stream *backing*, not a program-facing device; the read half fails
     // closed (no COM1 RX drain is wired on this slice).
     .with_consoles(&COM1_CONSOLES)
+    // Record the firmware-reported installed-RAM total so the core mints
+    // the `boot_facts_get` machine summary from it.
+    .with_installed_memory(installed_memory_bytes)
     // The PID 1 (`init`) spawn seam: after `BootCompleted`, `kernel_main`
     // builds `init`'s ring-3 image and drops into it as a resumable user
     // kthread (`plans/PI.md` X3a).
@@ -882,7 +891,12 @@ fn make_bsp_lapic() -> Lapic<VolatileLapicMmio> {
     Lapic::new(mmio)
 }
 
-fn build_memory_map(data: &BootData<'_>) -> Result<BootMemoryMap, BootError> {
+/// Build the canonical memory map from the firmware description, returning
+/// it alongside the installed-RAM total — the usable-RAM byte sum taken
+/// **before** the kernel-image reservation below drops that range from the
+/// map (firmware `Reserved` regions span ACPI/MMIO, not RAM, so the usable
+/// sum is the honest installed figure a PC firmware map can state).
+fn build_memory_map(data: &BootData<'_>) -> Result<(BootMemoryMap, u64), BootError> {
     let mut map = BootMemoryMap::new();
 
     match data {
@@ -906,6 +920,15 @@ fn build_memory_map(data: &BootData<'_>) -> Result<BootMemoryMap, BootError> {
         }
     }
 
+    // The installed-RAM total: usable firmware bytes before the
+    // kernel-image carve below (the carve drops the range from the map, so
+    // it cannot be recovered afterwards).
+    let installed_memory_bytes: u64 = map
+        .regions()
+        .iter()
+        .filter(|region| region.kind == RegionKind::Usable)
+        .fold(0u64, |acc, region| acc.saturating_add(region.length));
+
     // Reserve the running kernel image (boot trampoline through the end of
     // .bss, which includes the bump heap) out of the firmware-usable RAM.
     //
@@ -921,7 +944,7 @@ fn build_memory_map(data: &BootData<'_>) -> Result<BootMemoryMap, BootError> {
     let (kstart, kend) = kernel_image_phys_bounds();
     map.reserve_range(kstart, kend);
 
-    Ok(map)
+    Ok((map, installed_memory_bytes))
 }
 
 /// Physical `[start, end)` bounds of the running kernel image — the boot

@@ -117,6 +117,10 @@ impl KernelArch for Aarch64BinArch {
         self.arch.monotonic_ns()
     }
 
+    fn arch_id(&self) -> Option<rustos_abi::Arch> {
+        Some(rustos_abi::Arch::Aarch64)
+    }
+
     fn ticks_to_ns(&self, ticks: u64) -> u64 {
         // `ticks_now` is raw `CNTPCT_EL0`, so the identity default would
         // misreport CPU time; convert against the same discovered timer

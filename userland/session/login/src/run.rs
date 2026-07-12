@@ -517,6 +517,47 @@ mod program {
         state
     }
 
+    /// The administrator-configured boot-default session type
+    /// (`os.loginType`), re-read from the system-configuration store each
+    /// round through the one shared `lib/sysconfig` engine — the same
+    /// engine the `configure` command writes with, so the two can never
+    /// diverge.
+    ///
+    /// Fail closed to the documented default ([`SessionKind::Text`]): an
+    /// absent store (a fresh installation, or a round before the root
+    /// unlock mounts `/System/Settings`), a refused read, an oversized
+    /// document, or one the engine cannot fully parse all yield the text
+    /// default rather than a guessed intent — a malformed store never
+    /// breaks the login.
+    fn configured_session_default() -> SessionKind {
+        let fd = rustos_rt::fs_open(rustos_sysconfig::CONFIG_PATH.as_bytes(), OpenFlags::READ);
+        if fd < 0 {
+            return SessionKind::Text;
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        // `fd >= 0` checked above; descriptors are small kernel indices.
+        let fd = fd as u32;
+        // One bounded read suffices: the engine refuses any document
+        // longer than its own ceiling, so a store that does not fit this
+        // buffer could never parse anyway.
+        let mut buf = [0u8; rustos_sysconfig::MAX_CONFIG_LEN];
+        let outcome = rustos_rt::fs_read(fd, 0, &mut buf);
+        let _ = rustos_rt::fs_close(fd);
+        let Ok(len) = outcome else {
+            return SessionKind::Text;
+        };
+        let Ok(text) = core::str::from_utf8(&buf[..len]) else {
+            return SessionKind::Text;
+        };
+        match rustos_sysconfig::SystemConfig::parse(text) {
+            Ok(config) => match config.login_type {
+                rustos_sysconfig::LoginType::Graphical => SessionKind::Graphical,
+                rustos_sysconfig::LoginType::Text => SessionKind::Text,
+            },
+            Err(_) => SessionKind::Text,
+        }
+    }
+
     /// Whether a graphical session can be offered on this round: the
     /// desktop-session bundle is installed **and** a display service is
     /// live. Both facts are re-checked per round — a service that came up
@@ -577,6 +618,10 @@ mod program {
             // is installed and a display service is live; hidden — never
             // errored — otherwise.
             graphical_available: graphical_session_available(),
+            // Re-read each round: a `configure os.loginType` change takes
+            // effect at the next prompt, exactly like the availability
+            // probe above.
+            session_default: configured_session_default(),
             view,
             authenticator,
             launcher: &launcher,

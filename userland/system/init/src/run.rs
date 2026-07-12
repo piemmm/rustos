@@ -9,9 +9,11 @@
 //! panic handler, and the syscall wrappers; `rustos_rt::entry!` names this
 //! program's `main`.
 //!
-//! `main` parses the compiled-in `startup::DEFAULT_CONFIG`, writes the
-//! first banner line to its inherited standard output (fd 1) through the
-//! shared `rustos_rt::io` layer over the `abi-v1` `stream_write` syscall
+//! `main` parses the compiled-in `startup::DEFAULT_CONFIG`, renders the
+//! startup banner from the kernel-attested `boot_facts_get` machine
+//! summary (version, installed memory, architecture, core count), writes
+//! it to its inherited standard output (fd 1) through the shared
+//! `rustos_rt::io` layer over the `abi-v1` `stream_write` syscall
 //! (`init` binds to the stream, never a device), then **supervises** the
 //! user's sessions: one session program per installed text console
 //! (`console_count` / `spawn_at` — the video console when a display is
@@ -39,7 +41,7 @@ mod supervisor;
 mod program {
     use rustos_rt::io::{Stderr, Stdout, Write};
 
-    use crate::startup::{StartupConfig, BANNER, DEFAULT_CONFIG, MAX_SERVICES};
+    use crate::startup::{render_banner, StartupConfig, BANNER_MAX, DEFAULT_CONFIG, MAX_SERVICES};
     use crate::supervisor::{supervise, Outcome, Sessions};
 
     /// Exit code when the compiled-in startup config does not parse. A
@@ -116,9 +118,25 @@ mod program {
         let Ok(config) = StartupConfig::parse(DEFAULT_CONFIG) else {
             return EXIT_CONFIG_INVALID;
         };
+        // The banner's machine facts come from the kernel-attested
+        // `boot_facts_get` answer. A refusal degrades the banner to the
+        // version line (never a fabricated machine shape) and states its
+        // reason on the diagnostic stream — fail loud, degrade gracefully;
+        // PID 1 boots on either way.
+        let facts = match rustos_rt::boot_facts() {
+            Ok(facts) => Some(facts),
+            Err(err) => {
+                let _ = Stderr.write_fmt(format_args!(
+                    "init: boot facts unavailable (err {err}); banner shows the version only\n"
+                ));
+                None
+            }
+        };
+        let mut banner_buf = [0u8; BANNER_MAX];
+        let banner = render_banner(facts, &mut banner_buf);
         // The shared `rustos_rt::io` short-write loop, never an init-private
         // copy (the charter forbids that duplication).
-        if Stdout.write_all(BANNER.as_bytes()).is_err() {
+        if Stdout.write_all(banner.as_bytes()).is_err() {
             // Terminal park off the run queue — a spinning halt would peg a
             // core for the life of the system. The spin below runs only when
             // even the park is refused (a doubly-failed boot: no console, no
@@ -197,7 +215,12 @@ impl supervisor::Sessions for NoSessions {
 #[cfg(not(freestanding))]
 fn main() {
     if let Ok(config) = startup::StartupConfig::parse(startup::DEFAULT_CONFIG) {
-        let _ = (config.session(), config.services(), startup::BANNER);
+        let mut banner_buf = [0u8; startup::BANNER_MAX];
+        let _ = (
+            config.session(),
+            config.services(),
+            startup::render_banner(None, &mut banner_buf),
+        );
     }
     assert_eq!(
         supervisor::supervise(&mut NoSessions, b"session", &[]),

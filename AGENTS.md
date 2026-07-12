@@ -766,6 +766,15 @@ rustos/
 │   ├── svg/             # Shared fail-closed no_std SVG decoder for the
 │   │                    #   WM/desktop SVG-first assets (§2.2, §2.12, §10, §16.4).
 │   ├── sync/            # Synchronisation primitives (locks, epoch, Once).
+│   ├── sysconfig/       # Boot-time system-configuration store engine: the
+│   │                    #   one definition of the
+│   │                    #   /System/Settings/Configuration/system.conf
+│   │                    #   grammar, its closed key registry (os.loginType),
+│   │                    #   the fail-closed parse, and the canonical render —
+│   │                    #   written by the `configure` command app and read by
+│   │                    #   every boot-time consumer (login's session-type
+│   │                    #   default) after the root unlock, so producer and
+│   │                    #   consumer can never diverge (§2.2).
 │   ├── termcap/         # Compiled-in TERM->capability database (plans/CURSES.md
 │   │                    #   C3): closed versioned TermType set in lib/vt terms,
 │   │                    #   fail-closed from_term (§2.2, §2.9, §16.1).

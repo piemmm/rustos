@@ -28,7 +28,7 @@ use alloc::sync::Arc;
 
 use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
 use rustos_abi::hwtree::HwResource;
-use rustos_abi::{DescriptorTable, Errno};
+use rustos_abi::{BootFacts, DescriptorTable, Errno};
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::PortRegistry;
 use rustos_kernel_irq::{IrqController, IrqTable};
@@ -1086,6 +1086,7 @@ fn run_phases<A: KernelArch>(
     boot.validate().map_err(InitError::BadBootInfo)?;
 
     let BootInfo {
+        cpu_count,
         memory_map,
         identity,
         scheduler_config,
@@ -1104,6 +1105,7 @@ fn run_phases<A: KernelArch>(
         volume_service,
         spawn_identity,
         kernel_heap_bytes,
+        installed_memory_bytes,
         ..
     } = boot;
 
@@ -1448,6 +1450,20 @@ fn run_phases<A: KernelArch>(
     let hook = match app_store {
         Some(store) => hook.with_app_store(store),
         None => hook,
+    };
+    // Mint the boot-static machine summary the ungated `boot_facts_get`
+    // syscall reports — the arch port's stated identity, the validated CPU
+    // count, and the boot path's pre-carve installed-memory total. A port
+    // with no Tier-1 identity (the host test arch) or a boot path that
+    // never learned the installed total leaves the facts uninstalled and
+    // the syscall failing closed rather than fabricating a machine shape.
+    let hook = match state.arch.arch_id() {
+        Some(arch_id) if installed_memory_bytes != 0 => hook.with_boot_facts(BootFacts {
+            arch: arch_id,
+            cpu_count,
+            memory_bytes: installed_memory_bytes,
+        }),
+        _ => hook,
     };
     let hook = Box::leak(Box::new(hook));
     dispatcher_callback_slot

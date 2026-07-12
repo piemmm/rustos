@@ -16,6 +16,18 @@
 //!
 //! The 16-byte width and the all-zero [`BootId::UNSET`] sentinel are part of
 //! the `abi-v1` contract.
+//!
+//! [`BootFacts`] is the second per-boot value this module carries: the
+//! kernel-attested, boot-static machine summary — the CPU architecture, the
+//! number of processor cores brought under the scheduler, and the installed
+//! physical memory the boot path discovered. Like the boot id it is not a
+//! secret (any task can measure its own timing across cores; the figures are
+//! the machine's public shape, not its state), so it is exposed read-only to
+//! any task through the ungated `boot_facts_get` syscall. Unlike the live
+//! `sysinfo` figures it never changes after boot, carries no per-process or
+//! usage detail, and grants no authority.
+
+use crate::le::{read_u16, read_u32, read_u64};
 
 /// Length, in bytes, of a [`BootId`].
 pub const BOOT_ID_LEN: usize = 16;
@@ -104,9 +116,130 @@ impl BootId {
     }
 }
 
+/// Length, in bytes, of the [`BootFacts`] wire encoding.
+pub const BOOT_FACTS_WIRE_LEN: usize = 16;
+
+/// The CPU architecture a RustOS kernel was built for.
+///
+/// A closed set: exactly the Tier-1 targets. The discriminants and the
+/// canonical [`names`](Self::name) are part of the `abi-v1` contract; a wire
+/// value outside the set fails closed at decode rather than being guessed.
+#[repr(u16)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum Arch {
+    /// 64-bit x86 (`x86_64-unknown-none`).
+    X86_64 = 1,
+    /// 64-bit Arm (`aarch64-unknown-none`).
+    Aarch64 = 2,
+    /// 64-bit RISC-V (`riscv64gc-unknown-none-elf`).
+    Riscv64 = 3,
+    /// WebAssembly (`wasm32-unknown-unknown`).
+    Wasm32 = 4,
+}
+
+impl Arch {
+    /// The wire discriminant.
+    #[must_use]
+    pub const fn as_u16(self) -> u16 {
+        self as u16
+    }
+
+    /// Decode a wire discriminant; `None` for a value outside the closed set.
+    #[must_use]
+    pub const fn from_u16(raw: u16) -> Option<Self> {
+        match raw {
+            1 => Some(Self::X86_64),
+            2 => Some(Self::Aarch64),
+            3 => Some(Self::Riscv64),
+            4 => Some(Self::Wasm32),
+            _ => None,
+        }
+    }
+
+    /// The canonical display name (`x86_64`, `aarch64`, `riscv64`, `wasm32`).
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::X86_64 => "x86_64",
+            Self::Aarch64 => "aarch64",
+            Self::Riscv64 => "riscv64",
+            Self::Wasm32 => "wasm32",
+        }
+    }
+}
+
+/// The kernel-attested, boot-static machine summary the ungated
+/// `boot_facts_get` syscall reports.
+///
+/// Minted once by the kernel at boot from state it alone owns — the arch
+/// port's identity, the scheduler's brought-up CPU count, and the boot
+/// path's discovered physical-RAM total — and immutable thereafter. Not a
+/// secret and not live state: usage figures, per-process detail, and
+/// anything that changes after boot stay behind the capability-gated
+/// System Information API.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct BootFacts {
+    /// The CPU architecture the running kernel was built for.
+    pub arch: Arch,
+    /// Processor cores brought under the scheduler at boot. Never zero:
+    /// at least the boot CPU runs.
+    pub cpu_count: u32,
+    /// Installed physical memory in bytes, as discovered by the boot
+    /// path's platform memory source (firmware map / device tree / host
+    /// query) **before** any kernel carve-outs. Never zero.
+    pub memory_bytes: u64,
+}
+
+impl BootFacts {
+    /// Length, in bytes, of the wire encoding.
+    pub const WIRE_LEN: usize = BOOT_FACTS_WIRE_LEN;
+
+    /// The wire encoding: `arch:u16`, `reserved:u16` (zero),
+    /// `cpu_count:u32`, `memory_bytes:u64`, all little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; BOOT_FACTS_WIRE_LEN] {
+        let mut out = [0u8; BOOT_FACTS_WIRE_LEN];
+        out[0..2].copy_from_slice(&self.arch.as_u16().to_le_bytes());
+        // Bytes 2..4 are the reserved word, kept zero.
+        out[4..8].copy_from_slice(&self.cpu_count.to_le_bytes());
+        out[8..16].copy_from_slice(&self.memory_bytes.to_le_bytes());
+        out
+    }
+
+    /// Decode and validate a wire encoding.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed: [`Errno::LengthOutOfRange`](crate::Errno) for a slice
+    /// that is not exactly [`WIRE_LEN`](Self::WIRE_LEN) long,
+    /// [`Errno::BadMagic`](crate::Errno) for an unknown arch discriminant
+    /// or a non-zero reserved word, and
+    /// [`Errno::OutOfRange`](crate::Errno) for a zero CPU count or zero
+    /// memory size (no machine that boots has either).
+    pub fn from_bytes(bytes: &[u8]) -> crate::Result<Self> {
+        if bytes.len() != BOOT_FACTS_WIRE_LEN {
+            return Err(crate::Errno::LengthOutOfRange);
+        }
+        let arch = Arch::from_u16(read_u16(bytes, 0)).ok_or(crate::Errno::BadMagic)?;
+        if read_u16(bytes, 2) != 0 {
+            return Err(crate::Errno::BadMagic);
+        }
+        let cpu_count = read_u32(bytes, 4);
+        let memory_bytes = read_u64(bytes, 8);
+        if cpu_count == 0 || memory_bytes == 0 {
+            return Err(crate::Errno::OutOfRange);
+        }
+        Ok(Self {
+            arch,
+            cpu_count,
+            memory_bytes,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BootId, BOOT_ID_HEX_LEN, BOOT_ID_LEN};
+    use super::{Arch, BootFacts, BootId, BOOT_FACTS_WIRE_LEN, BOOT_ID_HEX_LEN, BOOT_ID_LEN};
     use crate::Errno;
 
     #[test]
@@ -157,5 +290,65 @@ mod tests {
             BootId::from_raw([1u8; BOOT_ID_LEN]),
             BootId::from_raw([2u8; BOOT_ID_LEN])
         );
+    }
+
+    #[test]
+    fn arch_round_trips_and_rejects_unknown() {
+        for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64, Arch::Wasm32] {
+            assert_eq!(Arch::from_u16(arch.as_u16()), Some(arch));
+        }
+        assert_eq!(Arch::from_u16(0), None);
+        assert_eq!(Arch::from_u16(5), None);
+        assert_eq!(Arch::from_u16(u16::MAX), None);
+    }
+
+    #[test]
+    fn arch_names_are_frozen() {
+        assert_eq!(Arch::X86_64.name(), "x86_64");
+        assert_eq!(Arch::Aarch64.name(), "aarch64");
+        assert_eq!(Arch::Riscv64.name(), "riscv64");
+        assert_eq!(Arch::Wasm32.name(), "wasm32");
+    }
+
+    #[test]
+    fn boot_facts_round_trip() {
+        let facts = BootFacts {
+            arch: Arch::Aarch64,
+            cpu_count: 4,
+            memory_bytes: 8 * 1024 * 1024 * 1024,
+        };
+        assert_eq!(BootFacts::WIRE_LEN, BOOT_FACTS_WIRE_LEN);
+        assert_eq!(BootFacts::from_bytes(&facts.to_le_bytes()), Ok(facts));
+    }
+
+    #[test]
+    fn boot_facts_decode_fails_closed() {
+        let good = BootFacts {
+            arch: Arch::X86_64,
+            cpu_count: 36,
+            memory_bytes: 1 << 33,
+        }
+        .to_le_bytes();
+        // Wrong length.
+        assert_eq!(
+            BootFacts::from_bytes(&good[..BOOT_FACTS_WIRE_LEN - 1]),
+            Err(Errno::LengthOutOfRange)
+        );
+        // Unknown arch discriminant.
+        let mut bad = good;
+        bad[0] = 0xff;
+        assert_eq!(BootFacts::from_bytes(&bad), Err(Errno::BadMagic));
+        // Non-zero reserved word.
+        let mut bad = good;
+        bad[2] = 1;
+        assert_eq!(BootFacts::from_bytes(&bad), Err(Errno::BadMagic));
+        // Zero CPU count.
+        let mut bad = good;
+        bad[4..8].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(BootFacts::from_bytes(&bad), Err(Errno::OutOfRange));
+        // Zero memory size.
+        let mut bad = good;
+        bad[8..16].copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(BootFacts::from_bytes(&bad), Err(Errno::OutOfRange));
     }
 }

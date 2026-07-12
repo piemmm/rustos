@@ -29,6 +29,15 @@ pub struct LoginConfig<'a> {
     /// driver loaded **and** the window manager is present; otherwise the
     /// graphical option is hidden, never errored.
     pub graphical_available: bool,
+    /// The administrator-configured boot-default session type
+    /// (`os.loginType` in the system-configuration store, read by the
+    /// binary after the root unlock). [`SessionKind::Text`] keeps the
+    /// session-choice prompt with a text default; [`SessionKind::Graphical`]
+    /// starts the desktop directly after authentication — but only when
+    /// [`graphical_available`](Self::graphical_available) holds, so a
+    /// graphical default on a headless system degrades to text, never an
+    /// error.
+    pub session_default: SessionKind,
     /// Seam that presents the login screen and reads the user's input.
     pub view: &'a dyn LoginView,
     /// Seam that verifies credentials against `kernel/sec`.
@@ -155,10 +164,16 @@ impl<'a> Login<'a> {
     /// Decide which session to launch.
     ///
     /// Text is the default and the only option when no graphical session is
-    /// available; otherwise the user is offered the choice.
+    /// available. With a graphical session available, a configured
+    /// graphical boot default (`os.loginType graphical`) starts the desktop
+    /// directly; otherwise the user is offered the choice with a text
+    /// default.
     fn choose_session(&self) -> Result<SessionKind, LoginError> {
         if !self.cfg.graphical_available {
             return Ok(SessionKind::Text);
+        }
+        if self.cfg.session_default == SessionKind::Graphical {
+            return Ok(SessionKind::Graphical);
         }
         let mut answer_buf = [0u8; INPUT_LINE_MAX];
         let answer = self.read("session choice", &mut answer_buf, |v, buf| {
@@ -509,6 +524,7 @@ mod tests {
         let login = Login::new(LoginConfig {
             max_attempts: 3,
             graphical_available: false,
+            session_default: SessionKind::Text,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,
@@ -538,6 +554,7 @@ mod tests {
         let login = Login::new(LoginConfig {
             max_attempts: 3,
             graphical_available: false,
+            session_default: SessionKind::Text,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,
@@ -560,6 +577,7 @@ mod tests {
         let login = Login::new(LoginConfig {
             max_attempts: 3,
             graphical_available: true,
+            session_default: SessionKind::Text,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,
@@ -582,6 +600,7 @@ mod tests {
         let login = Login::new(LoginConfig {
             max_attempts: 3,
             graphical_available: true,
+            session_default: SessionKind::Text,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,
@@ -590,6 +609,55 @@ mod tests {
 
         let outcome = login.run().unwrap();
         assert_eq!(outcome.kind, SessionKind::Text);
+    }
+
+    #[test]
+    fn configured_graphical_default_skips_the_choice_prompt() {
+        // The administrator configured `os.loginType graphical`: the
+        // desktop starts directly after authentication, and the
+        // session-choice prompt is never presented.
+        let view = MockView::new(&["ada"], &["byron"]);
+        let auth = auth();
+        let launcher = MockLauncher::ok(SessionKind::Graphical);
+        let sink = RecordingSink::new();
+        let login = Login::new(LoginConfig {
+            max_attempts: 3,
+            graphical_available: true,
+            session_default: SessionKind::Graphical,
+            view: &view,
+            authenticator: &auth,
+            launcher: &launcher,
+            sink: &sink,
+        });
+
+        let outcome = login.run().unwrap();
+        assert_eq!(outcome.kind, SessionKind::Graphical);
+        assert_eq!(launcher.launched.borrow()[0].1, SessionKind::Graphical);
+        assert_eq!(view.choice_reads.get(), 0, "no choice prompt was read");
+    }
+
+    #[test]
+    fn configured_graphical_default_degrades_to_text_when_headless() {
+        // A graphical boot default on a system with no desktop session
+        // degrades to text — never an error, never a prompt for an option
+        // that does not exist.
+        let view = MockView::new(&["ada"], &["byron"]);
+        let auth = auth();
+        let launcher = MockLauncher::ok(SessionKind::Text);
+        let sink = RecordingSink::new();
+        let login = Login::new(LoginConfig {
+            max_attempts: 3,
+            graphical_available: false,
+            session_default: SessionKind::Graphical,
+            view: &view,
+            authenticator: &auth,
+            launcher: &launcher,
+            sink: &sink,
+        });
+
+        let outcome = login.run().unwrap();
+        assert_eq!(outcome.kind, SessionKind::Text);
+        assert_eq!(view.choice_reads.get(), 0);
     }
 
     #[test]
@@ -602,6 +670,7 @@ mod tests {
         let login = Login::new(LoginConfig {
             max_attempts: 3,
             graphical_available: false,
+            session_default: SessionKind::Text,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,
@@ -625,6 +694,7 @@ mod tests {
         let login = Login::new(LoginConfig {
             max_attempts: 2,
             graphical_available: false,
+            session_default: SessionKind::Text,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,
@@ -654,6 +724,7 @@ mod tests {
         let login = Login::new(LoginConfig {
             max_attempts: 3,
             graphical_available: false,
+            session_default: SessionKind::Text,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,
@@ -678,6 +749,7 @@ mod tests {
         let login = Login::new(LoginConfig {
             max_attempts: 3,
             graphical_available: false,
+            session_default: SessionKind::Text,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,
@@ -702,6 +774,7 @@ mod tests {
         let login = Login::new(LoginConfig {
             max_attempts: 3,
             graphical_available: false,
+            session_default: SessionKind::Text,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,
@@ -722,6 +795,7 @@ mod tests {
         let login = Login::new(LoginConfig {
             max_attempts: 3,
             graphical_available: false,
+            session_default: SessionKind::Text,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,
@@ -743,6 +817,7 @@ mod tests {
         let login = Login::new(LoginConfig {
             max_attempts: 0,
             graphical_available: false,
+            session_default: SessionKind::Text,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,

@@ -147,8 +147,9 @@ images use, §2.2). Proven end-to-end by
 `tests/integration/spawn_init_qemu_riscv64`: it boots the production
 pipeline with only the audit sink swapped and reports `SiFive` PASS once
 it observes `ProcessSpawned` (`EventId(4030)`, PID 1) → the
-`RustOS <version> (pre-release): reached user mode` banner (the version is
-stamped in at compile time from the crate version) → `ProcessSpawned` (the session) →
+`RustOS <version>: …` machine-summary banner (the version is stamped in at
+compile time from the crate version; the memory/architecture/core figures
+come from the kernel-attested `boot_facts_get` answer) → `ProcessSpawned` (the session) →
 `SyscallInvoked` (`EventId(5000)`, `init`'s `spawn`) — proving PID 1
 reached U-mode, wrote its banner over the SBI console backing, and
 trapped back.

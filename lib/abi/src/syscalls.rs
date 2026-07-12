@@ -2186,6 +2186,28 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // decision, audited like `call_create`.
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::BOOT_FACTS_GET,
+        name: "boot_facts_get",
+        arg_count: 2,
+        args: [
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the bytes-written-or-`-errno` convention, like
+        // `boot_id_get`.
+        ret: AbiType::U64,
+        // The boot facts are the machine's public shape (arch, core count,
+        // installed memory), minted once at boot and immutable — not live
+        // state and not a secret — so reading them is unprivileged like
+        // `boot_id_get`. Not audited — a pure observer.
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

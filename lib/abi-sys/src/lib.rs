@@ -143,6 +143,7 @@ const NUM_CALL_PEER_ORIGIN: u64 = SyscallNumber::CALL_PEER_ORIGIN.as_u16() as u6
 const NUM_WALL_TIME_GET: u64 = SyscallNumber::WALL_TIME_GET.as_u16() as u64;
 const NUM_WALL_TIME_SET: u64 = SyscallNumber::WALL_TIME_SET.as_u16() as u64;
 const NUM_BOOT_ID_GET: u64 = SyscallNumber::BOOT_ID_GET.as_u16() as u64;
+const NUM_BOOT_FACTS_GET: u64 = SyscallNumber::BOOT_FACTS_GET.as_u16() as u64;
 const NUM_SYSINFO_INTROSPECT: u64 = SyscallNumber::SYSINFO_INTROSPECT.as_u16() as u64;
 const NUM_TERMINAL_SIZE: u64 = SyscallNumber::TERMINAL_SIZE.as_u16() as u64;
 const NUM_SIGNAL: u64 = SyscallNumber::SIGNAL.as_u16() as u64;
@@ -1307,6 +1308,29 @@ pub extern "C" fn sys_boot_id_get(out: *mut c_void, out_cap: usize) -> u64 {
     unsafe { raw_syscall(NUM_BOOT_ID_GET, [ptr_arg(out), out_cap as u64, 0, 0, 0, 0]) }
 }
 
+/// `boot_facts_get`: read the kernel's boot-static machine summary
+/// (`SyscallNumber::BOOT_FACTS_GET`). The 16-byte `rustos_abi::BootFacts`
+/// wire image — CPU architecture, processor-core count, and installed
+/// physical memory, minted once at boot from kernel-attested state — is
+/// written to the `out_cap`-byte buffer at `out` and its byte count returned
+/// (or a `ROS_E_*` code reinterpreted into the result). Unprivileged, like
+/// `ros_sys_boot_id_get` — the facts are the machine's public shape, never
+/// live state or a secret. An undersized buffer fails closed with
+/// `ROS_E_BUFFER_TOO_SMALL`; a boot path that never installed the facts
+/// fails closed with `ROS_E_NOT_IMPLEMENTED`.
+#[must_use]
+#[export_name = "ros_sys_boot_facts_get"]
+pub extern "C" fn sys_boot_facts_get(out: *mut c_void, out_cap: usize) -> u64 {
+    // SAFETY: see `sys_boot_id_get`; the kernel validates the `(out, out_cap)`
+    // pair against the caller's address space before writing it.
+    unsafe {
+        raw_syscall(
+            NUM_BOOT_FACTS_GET,
+            [ptr_arg(out), out_cap as u64, 0, 0, 0, 0],
+        )
+    }
+}
+
 /// `self_origin`: read the calling task's own kernel-attested
 /// `rustos_abi::Origin` (`SyscallNumber::SELF_ORIGIN`). The wire image is
 /// written to the `out_cap`-byte buffer at `out` and its byte count returned
@@ -2235,6 +2259,7 @@ mod tests {
         (NUM_WALL_TIME_GET, "wall_time_get", 2),
         (NUM_WALL_TIME_SET, "wall_time_set", 3),
         (NUM_BOOT_ID_GET, "boot_id_get", 2),
+        (NUM_BOOT_FACTS_GET, "boot_facts_get", 2),
         (NUM_SYSINFO_INTROSPECT, "sysinfo_introspect", 4),
         (NUM_TERMINAL_SIZE, "terminal_size", 3),
         (NUM_SIGNAL, "signal", 2),

@@ -60,6 +60,7 @@
   - [`rustos-rng`](./lib/rng.md)
   - [`rustos-rt` I/O](./lib/rt-io.md)
   - [`rustos-sandbox`](./lib/sandbox.md)
+  - [`rustos-sysconfig`](./lib/sysconfig.md)
   - [`rustos-termcap`](./lib/termcap.md)
   - [`rustos-usb`](./lib/usb.md)
   - [`rustos-users`](./lib/users.md)

@@ -116,7 +116,12 @@ never the C ABI (`crt0` + `abi-sys`), which exists solely for programs
 **not** written in Rust (`AGENTS.md` §16.4). `rustos-rt` provides the
 program's `_start`, the §19.2 stack canary, the panic handler, and
 idiomatic syscall wrappers; `rustos_rt::entry!` names the program's
-`main`. `main` writes the first banner line to its inherited standard
+`main`. `main` renders the startup banner from the kernel-attested
+`boot_facts_get` machine summary — `RustOS <version>: <installed memory>`
+(whole MiB rounded to nearest, whole GiB above 100 GiB), a blank line, then
+`Architecture: <arch>, <n> core(s)`; a kernel that installed no facts
+degrades the banner to the version line with the reason on fd 2, never a
+fabricated machine shape — and writes it to its inherited standard
 output (fd 1) through `rustos_rt::stdout` — the `abi-v1` `stream_write`
 syscall (`AGENTS.md` §20; `init` binds to the inherited stream, never an
 ambient device) — then **supervises** the user's session (see below). The

@@ -705,6 +705,7 @@ mod tests {
             ("cat", AppKind::Command, CAT_MANIFEST),
             ("chmod", AppKind::Command, PURE_TOOL_REQUEST),
             ("clear", AppKind::Command, CLEAR_MANIFEST),
+            ("configure", AppKind::Command, PURE_TOOL_REQUEST),
             ("cp", AppKind::Command, FILE_TOOL_REQUEST),
             ("desktop", AppKind::Service, DESKTOP_SESSION_REQUEST),
             ("devmgr", AppKind::Service, DEVMGR_MANIFEST),

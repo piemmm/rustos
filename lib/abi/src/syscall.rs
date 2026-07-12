@@ -1650,6 +1650,23 @@ impl SyscallNumber {
     /// owner exits.
     pub const PORT_BIND: Self = Self(88);
 
+    /// Read the kernel's boot-static machine summary
+    /// ([`crate::BootFacts`]): the CPU architecture, the number of
+    /// processor cores brought under the scheduler, and the installed
+    /// physical memory the boot path discovered.
+    ///
+    /// Arguments: `out` (user pointer) and `out_cap` (its capacity in
+    /// bytes). On success the kernel writes the
+    /// [`crate::BOOT_FACTS_WIRE_LEN`]-byte encoding and returns the byte
+    /// count; a capacity below the wire length fails closed with
+    /// [`crate::Errno::BufferTooSmall`]. The facts are minted once at boot
+    /// from kernel-attested state and never change; like
+    /// [`Self::BOOT_ID_GET`] the value is public machine shape, not live
+    /// state, so the call is unprivileged and not audited. Live figures
+    /// (memory usage, per-process detail) stay behind the
+    /// capability-gated System Information API.
+    pub const BOOT_FACTS_GET: Self = Self(89);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -1902,6 +1919,7 @@ mod tests {
         assert_eq!(SyscallNumber::SELF_ORIGIN.as_u16(), 68);
         assert_eq!(SyscallNumber::USERS_ADMIN.as_u16(), 69);
         assert_eq!(SyscallNumber::PORT_BIND.as_u16(), 88);
+        assert_eq!(SyscallNumber::BOOT_FACTS_GET.as_u16(), 89);
     }
 
     #[test]

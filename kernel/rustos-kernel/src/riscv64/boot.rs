@@ -224,6 +224,10 @@ impl KernelArch for RiscvBinArch {
         self.arch.monotonic_ns()
     }
 
+    fn arch_id(&self) -> Option<rustos_abi::Arch> {
+        Some(rustos_abi::Arch::Riscv64)
+    }
+
     fn ticks_to_ns(&self, ticks: u64) -> u64 {
         // `ticks_now` is the raw `time` CSR, so the identity default would
         // misreport CPU time; convert against the same discovered timebase
@@ -798,7 +802,11 @@ pub fn try_boot(
     let fdt = unsafe { Fdt::from_ptr(dtb as *const u8) }.map_err(|_| BootError::Fdt)?;
     let timebase_hz = fdt.timebase_frequency().ok_or(BootError::NoTimebase)?;
 
-    // 2. Build the physical-memory map from the same parsed tree.
+    // 2. Build the physical-memory map from the same parsed tree. The
+    //    installed-RAM total is the device tree's whole `/memory` window —
+    //    the figure the ungated `boot_facts_get` syscall reports — taken
+    //    before the guard-arena carve below drops its range from the map.
+    let installed_memory_bytes = fdt.first_memory_region().map_or(0, |(_base, size)| size);
     let mut memory_map = memory_map_from_fdt(&fdt)?;
 
     // Carve a 2 MiB-aligned kthread-stack guard arena out of the map and
@@ -865,6 +873,9 @@ pub fn try_boot(
     // `NULL_CONSOLE_READ`: the SBI legacy console exposes no
     // non-blocking input drain, so fd 0 fails closed this slice.
     .with_consoles(&RISCV_UART_CONSOLES)
+    // Record the device-tree-discovered installed-RAM total so the core
+    // mints the `boot_facts_get` machine summary from it.
+    .with_installed_memory(installed_memory_bytes)
     // Install the PID 1 spawn seam (`plans/PI.md` RV-P3): once every init
     // phase has succeeded and `kernel_main` emits `BootCompleted`, the core
     // invokes it to build `init`'s U-mode image and drop into user mode.

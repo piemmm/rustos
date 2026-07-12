@@ -1783,7 +1783,7 @@ riscv64, mirroring the aarch64 P-stage arc.
   allocator-backed `FrameTableSource` (no fixed reserve, §24.1) and admits
   it Ready. The kernel `build.rs` now also builds the embedded `init`/`Shell`
   `rxe` blobs for the riscv64 target. Proven by `spawn_init_qemu_riscv64`
-  (`id=4030` PID 1 → `RustOS init: reached user mode` banner → `id=4030`
+  (`id=4030` PID 1 → the `RustOS <version>: …` machine-summary banner → `id=4030`
   Shell → `id=5000 sc=spawn` → SiFive PASS). **No ABI change.** Doc:
   `docs/src/platform/riscv64.md` ("PID 1 into user mode").
 

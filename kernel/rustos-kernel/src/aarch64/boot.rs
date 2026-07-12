@@ -504,6 +504,15 @@ pub fn boot(
     // Device — atomics on it are unpredictable — and must never reach
     // the mask or the allocator. Reclaiming those bytes needs
     // 2 MiB-granular identity typing (`plans/APPS.md` I4 follow-up).
+    //
+    // The installed-RAM total is taken from the *raw* discovered windows
+    // before that clip (clipped bytes are real installed RAM the identity
+    // map merely cannot use) — the figure the ungated `boot_facts_get`
+    // syscall reports.
+    let installed_memory_bytes = discovered
+        .ram_windows
+        .iter()
+        .fold(0u64, |sum, &(_, size)| sum.saturating_add(size));
     let ram_windows =
         crate::mem_map::clip_windows_to_normal_ram(&discovered.ram_windows, &device_mask);
     if !ram_windows.is_empty() {
@@ -743,7 +752,15 @@ pub fn boot(
             // video facts ride along so the boot display is published into
             // the same buffered tree (`plans/DISPLAY.md` D7d).
             audit_root_storage_binding(dtb, early.video, log_sink);
-            enter_kernel_core(arch, layout.map, log_sink, audit_sink, log_level, hw_tree)
+            enter_kernel_core(
+                arch,
+                layout.map,
+                installed_memory_bytes,
+                log_sink,
+                audit_sink,
+                log_level,
+                hw_tree,
+            )
         }
     }
 
@@ -933,6 +950,7 @@ fn audit_root_storage_binding(
 fn enter_kernel_core(
     arch: Aarch64Arch,
     memory_map: rustos_kernel_mem::BootMemoryMap,
+    installed_memory_bytes: u64,
     log_sink: &'static (dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
     log_level: Level,
@@ -978,6 +996,9 @@ fn enter_kernel_core(
     } else {
         &UART_ONLY_CONSOLES
     })
+    // Record the firmware-discovered installed-RAM total so the core mints
+    // the `boot_facts_get` machine summary from it.
+    .with_installed_memory(installed_memory_bytes)
     // Install the kernel seat registry (`plans/DISPLAY.md` D2 — input
     // follows the surface owner): its text sink is the video console's
     // keyboard queue, so an injected key press reaches the video login by

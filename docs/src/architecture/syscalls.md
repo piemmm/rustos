@@ -132,6 +132,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  85 | `fs_attr_set`  | `user_ptr` (path), `len`, `user_ptr` (key), `len`, `user_ptr` (value), `len` | `errno` | `CAP_FS_ACCESS` | yes |
 |  86 | `fs_attr_list` | `user_ptr` (path), `len`, `u64 index`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
 |  87 | `fs_attr_remove` | `user_ptr` (path), `len`, `user_ptr` (key), `len` | `errno` | `CAP_FS_ACCESS` | yes |
+|  89 | `boot_facts_get` | `user_ptr` (out), `len`                | `u64` (bytes) | —             | no    |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -601,6 +602,25 @@ time has no id — the call fails closed with `EntropyNotReady` rather than
 return the all-zero `BootId::UNSET` sentinel as if it were real. The
 first-party Rust wrapper is `rustos_rt::boot_id`; the C stub is
 `ros_sys_boot_id_get`.
+
+`boot_facts_get` (no. 89) copies the kernel's boot-static machine summary —
+the 16-byte `rustos_abi::BootFacts` wire record: the CPU architecture
+(`rustos_abi::Arch`, a closed Tier-1 set), the number of processor cores
+brought under the scheduler, and the installed physical memory the boot
+path discovered — out to the caller's `(out, len)` buffer and returns its
+byte count. The facts are minted once at boot from kernel-attested state
+(the arch port's stated identity, the validated `BootInfo::cpu_count`, and
+the boot path's pre-carve installed-RAM total) and never change; like
+`boot_id_get` the call is **ungated** and unaudited because the record is
+the machine's public shape, never live state or a secret — usage figures
+and per-process detail stay behind the capability-gated System Information
+API. A buffer shorter than `BOOT_FACTS_WIRE_LEN` (16) fails closed with
+`BufferTooSmall`, and a kernel whose boot path installed no facts (the host
+test arch states no Tier-1 identity, and a boot path may not learn its
+installed total) fails closed with `NotImplemented` rather than fabricate a
+machine shape. PID 1 renders its startup banner from this record. The
+first-party Rust wrapper is `rustos_rt::boot_facts`; the C stub is
+`ros_sys_boot_facts_get`.
 
 `call_peer_seat` (no. 83) is the seat-holding twin of `call_peer_origin`
 (`plans/DISPLAY.md` D7a): while a call is in service (between `call_recv`
