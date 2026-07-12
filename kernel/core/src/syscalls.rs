@@ -1482,6 +1482,42 @@ where
         }
     }
 
+    /// Enforce the caller's address-space growth bounds before a map of
+    /// `charged` further bytes: the `AddressSpaceBytes` ceiling always,
+    /// and — while the caller is pinned — the `PinnedMemoryBytes` budget
+    /// over the whole pinned footprint (mapped address space + committed
+    /// stack). One definition shared by `mem_map` and `file_map`, so the
+    /// two paths can never drift (fail closed; the limits are stored
+    /// against the kernel-trusted caller id, and a saturated/overflowing
+    /// projection denies rather than wrapping into a bogus small total).
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] when the projected total would cross the
+    /// operative soft bound — the same refusal a settable-but-ignored
+    /// limit would otherwise fail open on.
+    fn check_map_growth(&self, caller: &CallerContext<'_>, charged: u64) -> Result<(), Errno> {
+        let aspaces = self.aspaces.read();
+        let limits = aspaces.limits(caller.task_id);
+        let projected = aspaces
+            .mapped_aspace_bytes(caller.task_id)
+            .checked_add(charged)
+            .ok_or(Errno::OutOfRange)?;
+        if projected > limits.get(LimitKind::AddressSpaceBytes).soft {
+            return Err(Errno::OutOfRange);
+        }
+        if aspaces.is_pinned(caller.task_id) {
+            let pinned_projected = aspaces
+                .pinned_footprint_bytes(caller.task_id)
+                .checked_add(charged)
+                .ok_or(Errno::OutOfRange)?;
+            if pinned_projected > limits.get(LimitKind::PinnedMemoryBytes).soft {
+                return Err(Errno::OutOfRange);
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve a user-mode fault at `fault_va` as demand-grown stack for
     /// `task`, returning `true` when the faulting page is now resident and
     /// the access should simply be retried.
@@ -1518,21 +1554,46 @@ where
     /// never a caller-supplied value.
     #[must_use]
     pub fn resolve_stack_fault(&self, task: SecTaskId, fault_va: u64) -> bool {
-        let (span, soft) = {
+        let (span, soft, pinned_room) = {
             let aspaces = self.aspaces.read();
             let Some(span) = aspaces.stack_span(task) else {
                 return false;
             };
-            (span, aspaces.limits(task).get(LimitKind::StackBytes).soft)
+            let limits = aspaces.limits(task);
+            // While the task is pinned, stack growth also consumes the
+            // pinned-memory budget: every committed stack page joins the
+            // exempt footprint, so the budget left over the mapped bytes
+            // bounds the committed extent exactly as it bounds `mem_map`
+            // growth (fail closed — the guard page below the span stays
+            // the terminal defence). Saturating: a footprint already past
+            // the budget leaves zero room, refusing any further growth.
+            let pinned_room = if aspaces.is_pinned(task) {
+                Some(
+                    limits
+                        .get(LimitKind::PinnedMemoryBytes)
+                        .soft
+                        .saturating_sub(aspaces.mapped_aspace_bytes(task)),
+                )
+            } else {
+                None
+            };
+            (span, limits.get(LimitKind::StackBytes).soft, pinned_room)
         };
         if !span.in_growth_room(fault_va) {
             return false;
         }
         let page_va = fault_va & !(PAGE_SIZE as u64 - 1);
-        // Enforce the bound before touching any state. Cannot overflow:
+        // Enforce the bounds before touching any state. Cannot overflow:
         // `page_va < span.top()` inside the growth room.
         if span.top() - page_va > soft {
             return false;
+        }
+        if let Some(room) = pinned_room {
+            // The committed extent the fault would reach is the whole
+            // stack contribution to the pinned footprint.
+            if span.top() - page_va > room {
+                return false;
+            }
         }
         // Walk downward from the page below the committed base to the
         // faulting page, committing each page as it is backed so the
@@ -3872,30 +3933,11 @@ where
             .div_ceil(PAGE_SIZE as u64)
             .checked_mul(PAGE_SIZE as u64)
             .ok_or(Errno::OutOfRange)?;
-        // Enforce the caller's `AddressSpaceBytes` ceiling *before* mapping
-        // (check capacity before touching state, fail closed): the live
-        // total this map would reach must not exceed the task's soft limit —
-        // the operative `ulimit -v`-style bound a principal may impose
-        // (default `UNLIMITED`, so an unconstrained task is never affected).
-        // The limit set is stored against the kernel-trusted caller id, never
-        // a caller-supplied value, and a saturated/overflowing projection
-        // denies rather than wrapping into a bogus small total. Without this
-        // the limit would be settable but silently ignored on the one path
-        // that consumes the resource (fail open).
-        {
-            let aspaces = self.aspaces.read();
-            let soft = aspaces
-                .limits(caller.task_id)
-                .get(LimitKind::AddressSpaceBytes)
-                .soft;
-            let projected = aspaces
-                .mapped_aspace_bytes(caller.task_id)
-                .checked_add(charged)
-                .ok_or(Errno::OutOfRange)?;
-            if projected > soft {
-                return Err(Errno::OutOfRange);
-            }
-        }
+        // Enforce the caller's growth bounds *before* mapping (check
+        // capacity before touching state, fail closed): the
+        // `AddressSpaceBytes` ceiling, and — while the caller is pinned —
+        // the pinned-memory budget over the exempt footprint.
+        self.check_map_growth(caller, charged)?;
         // Hand the request to the installed `kernel/mem` producer, which
         // maps the region into the caller's own live address space, zeroes
         // it, and returns its base (`plans/SPAWN.md` SP5b). Until one is
@@ -4097,6 +4139,38 @@ where
         }
     }
 
+    fn mem_pin(&self, caller: &CallerContext<'_>) -> SyscallResult {
+        // The dispatcher enforced `CAP_MEM_PIN` and audited the call
+        // (capability check before state). Decide and mark under one write
+        // guard so the bound check and the store are a single step against
+        // any concurrent growth of the caller's own footprint. The bound
+        // is the caller's effective `PinnedMemoryBytes` soft limit over the
+        // whole pinned footprint (mapped address space + committed stack) —
+        // a footprint already past the budget is refused closed, exactly as
+        // a map past the budget would be, so the limit cannot be dodged by
+        // growing first and pinning after. Already pinned is success: the
+        // caller is in the requested state, and the bound was enforced when
+        // the earlier pin and every later growth were admitted.
+        let mut aspaces = self.aspaces.write();
+        let soft = aspaces
+            .limits(caller.task_id)
+            .get(LimitKind::PinnedMemoryBytes)
+            .soft;
+        if aspaces.pinned_footprint_bytes(caller.task_id) > soft {
+            return Err(Errno::OutOfRange);
+        }
+        aspaces.set_pinned(caller.task_id);
+        Ok(0)
+    }
+
+    fn mem_unpin(&self, caller: &CallerContext<'_>) -> SyscallResult {
+        // Ungated (releasing one's own exemption grants nothing) and
+        // audited by the dispatcher. Idempotent: unpinning an unpinned
+        // caller is a no-op success — the caller is in the requested state.
+        self.aspaces.write().clear_pinned(caller.task_id);
+        Ok(0)
+    }
+
     fn mem_unmap(&self, caller: &CallerContext<'_>, base: u64, len: usize) -> SyscallResult {
         // The dispatcher already validated `base` and that `len` fits in
         // `usize`. A zero-length range names nothing; reject it before
@@ -4171,25 +4245,12 @@ where
         let OpenBacking::Path(path) = &handle.backing else {
             return Err(Errno::PermissionDenied);
         };
-        // Enforce the caller's `AddressSpaceBytes` ceiling *before*
-        // reserving — the same projection `mem_map` applies, over the same
-        // shared accounting, so the `ulimit -v`-style bound covers file
-        // mappings too (fail closed, checked against the kernel-trusted
-        // caller id).
-        {
-            let aspaces = self.aspaces.read();
-            let soft = aspaces
-                .limits(caller.task_id)
-                .get(LimitKind::AddressSpaceBytes)
-                .soft;
-            let projected = aspaces
-                .mapped_aspace_bytes(caller.task_id)
-                .checked_add(charged)
-                .ok_or(Errno::OutOfRange)?;
-            if projected > soft {
-                return Err(Errno::OutOfRange);
-            }
-        }
+        // Enforce the caller's growth bounds *before* reserving — the same
+        // projection `mem_map` applies, over the same shared accounting, so
+        // the `ulimit -v`-style ceiling and the pinned-memory budget cover
+        // file mappings too (fail closed, checked against the
+        // kernel-trusted caller id).
+        self.check_map_growth(caller, charged)?;
         // Reserve pure address space in the caller's own live space — no
         // page is read or backed until a fault lands in the region. The
         // default `NULL_FILE_MAP` fails closed with `NotImplemented`.
@@ -7219,7 +7280,10 @@ where
         // resolves to `LimitSet::DEFAULT`, so the child does too. Read and
         // write are separate lock acquisitions because a fresh child id is
         // never concurrently mutated by another path.
-        let inherited = LimitSet::inherit(&self.aspaces.read().limits(self.parent));
+        let inherited = {
+            let aspaces = self.aspaces.read();
+            LimitSet::inherit(&aspaces.limits(self.parent), &aspaces.default_limits())
+        };
         self.aspaces.write().set_limits(sec_id, inherited);
 
         // Inherit the parent's current working directory (POSIX: a child
@@ -16311,6 +16375,53 @@ mod tests {
         );
     }
 
+    /// While the task is pinned, stack growth is additionally bounded by
+    /// its `PinnedMemoryBytes` budget: the committed extent plus the
+    /// mapped bytes may never cross the soft bound, and unpinning
+    /// restores the ordinary `StackBytes`-only rule.
+    #[test]
+    fn resolve_stack_fault_while_pinned_is_bounded_by_the_budget() {
+        let (_producer, aspaces, h, _sink) = stack_fault_fixture();
+        let page = PAGE_SIZE as u64;
+        // Budget: the already-committed extent plus exactly one growth
+        // page (mapped bytes are zero so far).
+        let committed = STACK_TOP - STACK_COMMITTED_BASE;
+        let bound = ResourceLimit::new(committed + page, committed + page).expect("well-formed");
+        aspaces
+            .write()
+            .set_limit(SecTaskId(2), LimitKind::PinnedMemoryBytes, bound);
+        aspaces.write().set_pinned(SecTaskId(2));
+        // Two growth pages would cross the budget: refused closed, no
+        // page mapped, committed base unchanged.
+        assert!(!h.resolve_stack_fault(SecTaskId(2), STACK_COMMITTED_BASE - page - 1));
+        assert_eq!(
+            aspaces
+                .read()
+                .stack_span(SecTaskId(2))
+                .expect("recorded")
+                .committed_base(),
+            STACK_COMMITTED_BASE
+        );
+        // One growth page fits the budget exactly.
+        assert!(h.resolve_stack_fault(SecTaskId(2), STACK_COMMITTED_BASE - 1));
+        assert_eq!(
+            aspaces
+                .read()
+                .stack_span(SecTaskId(2))
+                .expect("recorded")
+                .committed_base(),
+            STACK_COMMITTED_BASE - page
+        );
+        // Mapped bytes consume the same budget: with one further page
+        // charged, even the next single-page growth is refused …
+        aspaces.write().charge_aspace_bytes(SecTaskId(2), 2 * page);
+        assert!(!h.resolve_stack_fault(SecTaskId(2), STACK_COMMITTED_BASE - page - 1));
+        // … and unpinning restores the ordinary rule (the fixture span is
+        // far inside the default `StackBytes` bound).
+        aspaces.write().clear_pinned(SecTaskId(2));
+        assert!(h.resolve_stack_fault(SecTaskId(2), STACK_COMMITTED_BASE - page - 1));
+    }
+
     /// A fault that jumps several pages below the committed base (a large
     /// frame whose first touch is its lowest local — the compiler owes no
     /// page-by-page probe order) backs **every** page from the committed
@@ -18411,6 +18522,122 @@ mod tests {
         );
         // Nothing was stored: the caller still runs under the default.
         assert_eq!(aspaces.read().limits(SecTaskId(2)), LimitSet::DEFAULT);
+    }
+
+    /// Build the minimal handler fixture the pin tests share: no producer
+    /// (the `NULL_MEM_MAP` default), an empty registry, and a caller with
+    /// the given task id. The dispatcher-side `CAP_MEM_PIN` gate is
+    /// covered by the `kernel/syscall` table tests; these exercise the
+    /// handler's own bound enforcement and bookkeeping.
+    fn pin_fixture() -> (
+        &'static RwLock<AddressSpaceRegistry>,
+        KernelSyscallHandlers<'static, TestArch>,
+    ) {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch: &'static Arc<TestArch> = Box::leak(Box::new(Arc::new(TestArch::with_cpus(1))));
+        let sched = Box::leak(Box::new(make_sched(arch.clone())));
+        let table = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let ipc = Box::leak(Box::new(RwLock::new(PortRegistry::new())));
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let rng = Box::leak(Box::new(unseeded_rng()));
+        let irq = Box::leak(Box::new(IrqTable::new(31)));
+        let ctl = Box::leak(Box::new(UnsupportedController));
+        let h = KernelSyscallHandlers::new(sched, table, arch, sink, irq, ctl, ipc, aspaces, rng);
+        (aspaces, h)
+    }
+
+    /// `mem_pin` marks the kernel-trusted caller, is idempotent, and
+    /// `mem_unpin` clears the mark idempotently — each edge answers `Ok`
+    /// because the caller ends in the requested state.
+    #[test]
+    fn mem_pin_and_unpin_mark_the_caller_idempotently() {
+        let (aspaces, h) = pin_fixture();
+        let sink = make_sink();
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        assert!(!aspaces.read().is_pinned(SecTaskId(2)));
+        assert_eq!(h.mem_pin(&ctx), Ok(0));
+        assert!(aspaces.read().is_pinned(SecTaskId(2)));
+        // Re-pinning an already pinned caller is success, not an error.
+        assert_eq!(h.mem_pin(&ctx), Ok(0));
+        assert!(aspaces.read().is_pinned(SecTaskId(2)));
+        assert_eq!(h.mem_unpin(&ctx), Ok(0));
+        assert!(!aspaces.read().is_pinned(SecTaskId(2)));
+        assert_eq!(h.mem_unpin(&ctx), Ok(0));
+        assert!(!aspaces.read().is_pinned(SecTaskId(2)));
+    }
+
+    /// A `mem_pin` whose footprint already exceeds the caller's effective
+    /// `PinnedMemoryBytes` soft bound fails closed with `OutOfRange` and
+    /// stores no mark; shrinking back under the bound admits the pin.
+    #[test]
+    fn mem_pin_over_the_budget_fails_closed_and_stores_nothing() {
+        let (aspaces, h) = pin_fixture();
+        let sink = make_sink();
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let page = PAGE_SIZE as u64;
+        let bound = ResourceLimit::new(2 * page, 2 * page).expect("well-formed");
+        aspaces
+            .write()
+            .set_limit(SecTaskId(2), LimitKind::PinnedMemoryBytes, bound);
+        aspaces.write().charge_aspace_bytes(SecTaskId(2), 3 * page);
+        assert_eq!(h.mem_pin(&ctx), Err(Errno::OutOfRange));
+        assert!(!aspaces.read().is_pinned(SecTaskId(2)));
+        // Shrinking under the bound makes the same pin admissible.
+        aspaces.write().credit_aspace_bytes(SecTaskId(2), 2 * page);
+        assert_eq!(h.mem_pin(&ctx), Ok(0));
+        assert!(aspaces.read().is_pinned(SecTaskId(2)));
+    }
+
+    /// While pinned, `mem_map` growth is bounded by the pinned budget
+    /// *before* the producer is reached: a request inside the budget
+    /// passes the bound (surfacing the inert producer's
+    /// `NotImplemented`), one past it is refused `OutOfRange`, and
+    /// unpinning restores the unbounded path.
+    #[test]
+    fn mem_map_growth_while_pinned_is_bounded_by_the_budget() {
+        let (aspaces, h) = pin_fixture();
+        let sink = make_sink();
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let page = PAGE_SIZE as u64;
+        let bound = ResourceLimit::new(2 * page, 2 * page).expect("well-formed");
+        aspaces
+            .write()
+            .set_limit(SecTaskId(2), LimitKind::PinnedMemoryBytes, bound);
+        aspaces.write().charge_aspace_bytes(SecTaskId(2), page);
+        assert_eq!(h.mem_pin(&ctx), Ok(0));
+        // One more page fits the budget: the bound admits it and the
+        // request reaches the (inert) producer.
+        assert_eq!(
+            h.mem_map(&ctx, PAGE_SIZE, rustos_abi::MapFlags::empty(), 0),
+            Err(Errno::NotImplemented)
+        );
+        // Two more pages would cross the budget: refused closed before
+        // any producer work.
+        assert_eq!(
+            h.mem_map(&ctx, 2 * PAGE_SIZE, rustos_abi::MapFlags::empty(), 0),
+            Err(Errno::OutOfRange)
+        );
+        // Unpinning lifts the pinned bound (the address-space ceiling
+        // stays unlimited here), so the same request reaches the producer.
+        assert_eq!(h.mem_unpin(&ctx), Ok(0));
+        assert_eq!(
+            h.mem_map(&ctx, 2 * PAGE_SIZE, rustos_abi::MapFlags::empty(), 0),
+            Err(Errno::NotImplemented)
+        );
     }
 
     /// A [`UsersDbSource`] double holding a fixed `users-v1` text.

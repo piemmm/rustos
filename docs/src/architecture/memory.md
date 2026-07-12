@@ -1287,6 +1287,17 @@ nor metadata format with it.
   latency-critical pages, and pages of *unknown* role are refused with
   a typed reason. A mapping-flag defence (`NO_CACHE`/`DMA_COHERENT`)
   backs the classifier in depth.
+- **Process pinning is the "pinned" attribute's source**
+  (`mem_pin`/`mem_unpin`, `plans/STRESSTEST.md` ST2). A process holding
+  `CAP_MEM_PIN` may mark its entire anonymous memory — current and
+  future — as pinned, and the per-task registry's `is_pinned` mark is
+  the one pin decision a candidate's owner is judged by, so a pinned
+  process's pages carry the refusing `pinned` attribute above. The
+  exemption is bounded by the `pinned-memory-bytes` limit (see
+  [resource limits](resource-limits.md)) — the derived per-boot default
+  grants one eighth of discovered RAM per process — never inherited
+  across spawn, cleared on exit, and observable as the `pinned_bytes`
+  aggregate in `RAMZIP_STATS` / `stats:mem/pinned`.
 - **Derived capacity, no eager reservation** (`RamzipCaps`). Minimum
   guarantee `max(1% RAM, 64 MiB)` (clamped to the hard cap), soft cap
   10%, hard cap 25% — all fractions of discovered RAM, enforced per

@@ -61,6 +61,16 @@ pub enum LimitKind {
     /// Maximum size, in bytes, of a single task's stack (the per-task stack
     /// capacity).
     StackBytes = 3,
+    /// Maximum bytes of anonymous memory the process may hold pinned —
+    /// exempt from the compressed `ramzip` tier and any future lower swap
+    /// tier — through the `mem_pin` syscall (`plans/STRESSTEST.md` ST2).
+    ///
+    /// The bound caps the whole pinned footprint (mapped anonymous bytes
+    /// plus committed stack): a `mem_pin` whose current footprint exceeds
+    /// the soft bound fails closed, and while pinned the same bound caps
+    /// further anonymous growth, so an abusive pin cannot exempt
+    /// unbounded memory from pressure management.
+    PinnedMemoryBytes = 4,
 }
 
 impl LimitKind {
@@ -68,7 +78,7 @@ impl LimitKind {
     ///
     /// Equals one past the largest discriminant; a per-task limit array is
     /// sized by this constant so adding a variant grows the storage in step.
-    pub const COUNT: usize = 4;
+    pub const COUNT: usize = 5;
 
     /// Every [`LimitKind`] in discriminant order.
     ///
@@ -80,6 +90,7 @@ impl LimitKind {
         Self::OpenStreams,
         Self::Processes,
         Self::StackBytes,
+        Self::PinnedMemoryBytes,
     ];
 
     /// Every [`LimitKind`] in discriminant order, paired with its canonical
@@ -94,6 +105,7 @@ impl LimitKind {
         (Self::OpenStreams, "open-streams"),
         (Self::Processes, "processes"),
         (Self::StackBytes, "stack-bytes"),
+        (Self::PinnedMemoryBytes, "pinned-memory-bytes"),
     ];
 
     /// Raw on-wire discriminant.
@@ -115,6 +127,7 @@ impl LimitKind {
             1 => Ok(Self::OpenStreams),
             2 => Ok(Self::Processes),
             3 => Ok(Self::StackBytes),
+            4 => Ok(Self::PinnedMemoryBytes),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -261,7 +274,8 @@ mod tests {
         assert_eq!(LimitKind::OpenStreams.as_u32(), 1);
         assert_eq!(LimitKind::Processes.as_u32(), 2);
         assert_eq!(LimitKind::StackBytes.as_u32(), 3);
-        assert_eq!(LimitKind::COUNT, 4);
+        assert_eq!(LimitKind::PinnedMemoryBytes.as_u32(), 4);
+        assert_eq!(LimitKind::COUNT, 5);
     }
 
     #[test]

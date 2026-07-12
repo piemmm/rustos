@@ -2262,6 +2262,48 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::MEM_PIN,
+        name: "mem_pin",
+        arg_count: 0,
+        args: [
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Exempting the caller's anonymous memory from the swap tiers is a
+        // system-wide denial-of-service lever (pinned bytes can never be
+        // reclaimed by compression), so the pin is gated on the dedicated
+        // capability and audited per call — a pin is a security-relevant
+        // resource decision, and the volume is low (once per monitor/
+        // controller start), so the record cannot drown the log.
+        required_capability: Some(CapabilityId::MEM_PIN),
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::MEM_UNPIN,
+        name: "mem_unpin",
+        arg_count: 0,
+        args: [
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Ungated: releasing the caller's own exemption narrows its
+        // footprint and grants nothing (the `mem_unmap` posture). Audited
+        // like `mem_pin`, so the trail carries both edges of every pin
+        // window.
+        required_capability: None,
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -2736,6 +2778,25 @@ mod tests {
         );
         assert!(!spec.audit, "sysinfo_introspect must not audit per call");
         assert_eq!(spec.name, "sysinfo_introspect");
+    }
+
+    #[test]
+    fn mem_pin_capability_requirements_are_frozen() {
+        // Pinning exempts memory from pressure management system-wide, so
+        // the pin carries the dedicated capability; the unpin only narrows
+        // the caller's own footprint and is ungated. Both edges are
+        // audited. Lock this down so a refactor cannot loosen the gate or
+        // drop either audit record.
+        let pin = spec_for(SyscallNumber::MEM_PIN).unwrap();
+        assert_eq!(pin.required_capability, Some(CapabilityId::MEM_PIN));
+        assert!(pin.audit, "mem_pin must be audited");
+        assert_eq!(pin.name, "mem_pin");
+        assert_eq!(pin.arg_count, 0);
+        let unpin = spec_for(SyscallNumber::MEM_UNPIN).unwrap();
+        assert_eq!(unpin.required_capability, None);
+        assert!(unpin.audit, "mem_unpin must be audited");
+        assert_eq!(unpin.name, "mem_unpin");
+        assert_eq!(unpin.arg_count, 0);
     }
 
     #[test]

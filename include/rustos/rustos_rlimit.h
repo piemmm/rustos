@@ -25,7 +25,8 @@
 #define ROS_LIMIT_KIND_OPEN_STREAMS ((uint32_t)1u)
 #define ROS_LIMIT_KIND_PROCESSES ((uint32_t)2u)
 #define ROS_LIMIT_KIND_STACK_BYTES ((uint32_t)3u)
-#define ROS_LIMIT_KIND_COUNT ((uint32_t)4u)
+#define ROS_LIMIT_KIND_PINNED_MEMORY_BYTES ((uint32_t)4u)
+#define ROS_LIMIT_KIND_COUNT ((uint32_t)5u)
 
 /* Length, in bytes, of the little-endian ros_resource_limit_t encoding. */
 #define ROS_RESOURCE_LIMIT_WIRE_LEN 16u

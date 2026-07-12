@@ -2341,6 +2341,40 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
+    // The STRESSTEST ST2 memory-pinning vertical: the end-to-end proof of
+    // the `mem_pin`/`mem_unpin` pair through the production
+    // `KernelDispatchHook` on real traps. The four-role fixture program's
+    // parent is spawned through the production
+    // `InitSpawnCtx::spawn_driver_process` seam and drives the children
+    // through production `spawn` + `wait`: `deny` (no `CAP_MEM_PIN`) sees
+    // `mem_pin` refused `PermissionDenied` at the audited dispatcher gate
+    // while the ungated `mem_unpin` still succeeds; `pin` lowers its own
+    // `pinned-memory-bytes` bound via `rlimit_set`, pins itself
+    // (idempotently), sees an over-budget `mem_map` refused `OutOfRange`
+    // and a within-budget one succeed, unpins, and sees the formerly
+    // refused map succeed; `child` is spawned by the *pinned* parent and
+    // its over-budget map succeeds — the pin mark is never inherited even
+    // though the lowered limit is. PASS once the chassis reaps a parent
+    // exit of 0; every failure site carries a distinct finisher (the
+    // parent's diagnostic exit code is folded in). Single CPU and a
+    // 60-second budget match the other boot-then-do-fixed-work aarch64
+    // tests.
+    QemuTest {
+        package: "rustos-test-mem-pin-qemu-aarch64",
+        binary: "rustos-test-mem-pin-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // The riscv64 twin of the stack-grow vertical above: the same
     // four-role fixture program and production `KernelDispatchHook`
     // chassis, driven on the riscv64 `virt` board through the S-mode trap

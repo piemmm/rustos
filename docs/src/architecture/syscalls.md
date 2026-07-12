@@ -135,6 +135,8 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  89 | `boot_facts_get` | `user_ptr` (out), `len`                | `u64` (bytes) | —             | no    |
 |  90 | `fd_grant`     | `u32 fd`, `u64 pid`                     | `u64` (handle) | `CAP_FS_ACCESS` | yes  |
 |  91 | `fd_redeem`    | `Handle` (grant)                        | `u64` (fd)    | —             | yes   |
+|  92 | `mem_pin`      | —                                       | `errno`       | `CAP_MEM_PIN` | yes   |
+|  93 | `mem_unpin`    | —                                       | `errno`       | —             | yes   |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -749,6 +751,27 @@ same unprivileged baseline as "list my own processes" (`AGENTS.md` §16.6).
 There is no global user heap and no cross-process mapping; shared memory
 stays the capability-checked IPC object (`AGENTS.md` §4).
 
+`mem_pin` (no. 92) / `mem_unpin` (no. 93) mark and clear the caller's
+entire anonymous memory — current and future — as **pinned**: ineligible
+for the compressed `ramzip` tier and any future lower swap tier
+(`plans/STRESSTEST.md` ST2, the API behind `plans/SWAPSWAPSWAP.md`
+section 5's pinned class). The pin is gated on `CAP_MEM_PIN` — exempting
+memory from pressure management is a system-wide denial-of-service lever —
+and bounded by the caller's effective `pinned-memory-bytes` limit (see
+[resource limits](resource-limits.md)): a footprint already past the soft
+bound is refused `OutOfRange`, and while pinned the same budget caps
+further anonymous growth (`mem_map`, `file_map`, the demand-grown stack).
+The unpin is **ungated** — releasing the caller's own exemption narrows
+its footprint and grants nothing (the `mem_unmap` posture). Both edges
+are audited so the trail carries every pin window. The mark is
+process-scoped state in the per-task registry: never inherited across
+`spawn` (a child starts unpinned even when its parent is pinned) and
+cleared on exit. Pinning grants no residency promise beyond "never enters
+a swap tier": pages still fault in lazily, zero-on-free and encryption
+guarantees are unchanged, and the process stays killable. First-party
+Rust wrappers are `rustos_rt::mem_pin` / `rustos_rt::mem_unpin`; C stubs
+`ros_sys_mem_pin` / `ros_sys_mem_unpin`.
+
 `wait` (no. 16) is likewise **ungated**: a process may only wait on its
 *own* children, so reaping one grants no authority over any other
 principal (the same §16.6 baseline). It is, however, *audited* — reaping a
@@ -1168,6 +1191,8 @@ re-validates arguments — the dispatcher does that first.
 | `spawn`         | stages and parses the optional `SpawnAttach` block fail-closed (`stage_spawn_attach`; a zero pointer = full inherit, `plans/SPAWN.md` SP10), resolves its console selector first (`CONSOLE_INHERIT` → the caller's own descriptor table; else a validated installed-console index → `DescriptorTable::standard_on`), applies the per-descriptor wires onto that base — `InheritSlot`/`Closed` reshape the console table, and every `Handle` wire resolves owner-checked against the caller's own open table into a cloned entry (direction-checked for its slot) installed at the child's fd 0–3 with its console slot closed, so exactly one authority backs each descriptor and a pipe-end clone registers one more live end — copies the absolute program path in through `copy_from_user` (bounded by `SPAWN_PATH_MAX`), resolves it in the `ProgramRegistry` (the x86_64/riscv64 §18.6 boot floor) or — for an absolute `…/<Name>.app/Run` store-bundle path with an installed `AppStore` — loads and verifies the on-disk bundle through the shared `rustos_appload` gate (signature against the embedded app trust anchor, content hash, ABI/syscall hash), the bundle read running through the secured VFS under the caller's kernel-attested identity and a spawn racing the boot mount parking on the store's readiness latch (`plans/APPS.md` deliverable 8), then resolves the child's kernel-attested **credential** from the block's `target_uid` (`SPAWN_UID_INHERIT` → snapshot the caller's own credential; else, gated by `CAP_SPAWN_AS_USER`, resolve the target user's uid/gid/groups from the authoritative identity table — spawn-as-user, `PREREQUISITES.md` P-C), and hands the validated `rxe` to the installed `ProcessSpawn` producer (`with_spawn`; default `NULL_PROCESS_SPAWN`) which builds a fresh isolated address space and admits a **Ready** user kthread (established with the resolved descriptor table, wired entries, and credential) through `SpawnCtx::admit_process`, returning the child PID — the caller keeps running (`plans/SPAWN.md` SP3) | Malformed / wrong-length attach block → `LengthOutOfRange` / `BadMagic` / `OutOfRange`. Console index with no installed console → `NotFound`. A `Handle` wire naming no descriptor of the caller → `NotFound`; one whose direction cannot serve its slot → `PermissionDenied`. Frame allocator not threaded (`with_frames`) → `NotImplemented`. Empty / over-long path → `NotFound`. Faulting path / no registered address space → `BadAddress`. Unknown path → `NotFound`. A `target_uid` switch without `CAP_SPAWN_AS_USER` → `PermissionDenied`; an unresolvable target (no identity table, or unknown uid) → `NotImplemented` / `PermissionDenied`. No producer wired → `NotImplemented`. Otherwise `Ok(pid)`. |
 | `mem_map`       | rejects a zero `len`, decodes `flags` through `MapFlags::from_bits`, then hands `(len, flags, addr_hint)` to the installed `MemMap` producer (`with_mem_map`; default `NULL_MEM_MAP`) which maps a fresh zeroed `RW` region into the caller's **own** live address space and returns its base (`plans/SPAWN.md` SP5) | `len == 0` → `LengthOutOfRange`. Reserved flag bit → `OutOfRange`. No producer wired → `NotImplemented`. Frame exhaustion → `OutOfMemory`. Otherwise `Ok(base)`. |
 | `mem_unmap`     | rejects a zero `len`, then hands `(base, len)` to the same `MemMap` producer, which zeroes the frames it reclaims (`AGENTS.md` §4) and fails closed when the range does not name a region the caller mapped | `len == 0` → `LengthOutOfRange`. No producer wired → `NotImplemented`. Range not mapped by the caller → producer errno. Otherwise `Ok(0)`. |
+| `mem_pin`       | checks the caller's pinned footprint (mapped address space + committed stack, the one shared accounting) against its effective `pinned-memory-bytes` soft bound under one registry write guard, then stores the pin mark against the kernel-trusted caller id — idempotent: an already-pinned caller is in the requested state | Footprint past the soft bound → `OutOfRange`. Otherwise `Ok(0)`. |
+| `mem_unpin`     | clears the caller's pin mark — idempotent: an already-unpinned caller is in the requested state | Always `Ok(0)`. |
 | `wait`          | decodes `flags` through `WaitFlags::from_bits`, then hands `(caller.task_id, pid)` to the installed `ProcessWait` producer (`with_process_wait`; default `NULL_PROCESS_WAIT`) which validates the parent/child relationship and reaps a reapable child; blocking (`flags` clear) parks until one is reapable, `NONBLOCK` polls via the same `ProcessTable::reap` and returns `WouldBlock` for a still-running child without parking; on a reap the exit code is copied out to `status` through `copy_to_user` and the child's PID returned (`plans/SPAWN.md` SP6) | Reserved flag bit → `OutOfRange`. No producer wired → `NotImplemented`. `pid` not a child of the caller → `NotFound`. `NONBLOCK` with a still-running child → `WouldBlock` (`status` untouched). Faulting `status` / no registered address space → `BadAddress`. Otherwise `Ok(pid)`. |
 | `rlimit_get`    | validates `kind` against `LimitKind`, then reads the caller's effective limit from the installed resource-limit service and copies the encoded `ResourceLimit` out to the user buffer through `copy_to_user` (`AGENTS.md` §24.3). The default trait method fails closed until the L2 enforcement is installed | Unassigned `kind` → `OutOfRange`. No service wired → `NotImplemented`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(0)`. |
 | `rlimit_set`    | copies the encoded `ResourceLimit` in through `copy_from_user`, validates `kind` + the `soft <= hard` pair, and — when the request raises a hard bound above the inherited ceiling — refuses unless the caller holds `CAP_RLIMIT_RAISE` (`AGENTS.md` §24.3). The default trait method fails closed until L2 | Unassigned `kind` / malformed pair → `OutOfRange`. Raising a hard bound without the capability → `PermissionDenied`. No service wired → `NotImplemented`. Faulting buffer → `BadAddress`. Otherwise `Ok(0)`. |

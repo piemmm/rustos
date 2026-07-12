@@ -94,6 +94,11 @@ pub const SESSION_BASELINE: &[CapabilityId] = &[
 /// * `CAP_TIME_SET` — adjust the wall clock.
 /// * `CAP_TIME_HIRES` — the full-resolution monotonic clock
 ///   (diagnostics and profiling).
+/// * `CAP_MEM_PIN` — exempt a process's anonymous memory from the swap
+///   tiers (`mem_pin`, bounded by the `pinned-memory-bytes` limit): the
+///   operator-diagnostics power the monitoring and load-generation tools
+///   request in their manifests, grantable only through a ceiling that
+///   carries it.
 pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::USER_ADMIN,
     CapabilityId::FS_MOUNT,
@@ -104,6 +109,7 @@ pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::SYSINFO_HW,
     CapabilityId::TIME_SET,
     CapabilityId::TIME_HIRES,
+    CapabilityId::MEM_PIN,
 ];
 
 /// The `devmgr` service account's grant ceiling: read the hardware tree
@@ -212,7 +218,7 @@ mod tests {
     #[test]
     fn administrator_ceiling_is_pinned() {
         let set = administrator_ceiling();
-        assert_eq!(set.len(), 16);
+        assert_eq!(set.len(), 17);
         for cap in SESSION_BASELINE {
             assert!(set.contains(*cap), "{cap:?} missing from the ceiling");
         }
@@ -226,6 +232,7 @@ mod tests {
             CapabilityId::SYSINFO_HW,
             CapabilityId::TIME_SET,
             CapabilityId::TIME_HIRES,
+            CapabilityId::MEM_PIN,
         ] {
             assert!(set.contains(cap), "{cap:?} missing from the ceiling");
         }

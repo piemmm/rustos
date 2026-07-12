@@ -226,6 +226,7 @@ top of the session baseline:
 | `CAP_SYSINFO_GLOBAL`, `CAP_SYSINFO_KERNEL`, `CAP_SYSINFO_HW` | System-wide observability (all processes, kernel memory, hardware tree). |
 | `CAP_TIME_SET` | Adjust the wall clock. |
 | `CAP_TIME_HIRES` | Full-resolution monotonic clock (diagnostics/profiling). |
+| `CAP_MEM_PIN` | Exempt a process's anonymous memory from the swap tiers (`mem_pin`, bounded by the `pinned-memory-bytes` limit; `plans/STRESSTEST.md` ST2). |
 
 The **debug image's root account** is seeded with exactly the session
 baseline plus this administrative set — the "administrative capability

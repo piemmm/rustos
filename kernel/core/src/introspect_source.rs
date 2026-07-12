@@ -471,11 +471,14 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
 
     fn ramzip(&self) -> Result<Vec<u8>, Errno> {
         // Counters only — never page contents or key material. An
-        // undriven tier truthfully reports idle zeros.
-        Ok(crate::memstats::MEM_STATS
-            .ramzip_stats()
-            .to_le_bytes()
-            .to_vec())
+        // undriven tier truthfully reports idle zeros. The pinned
+        // aggregate rides the same record: it is the registry's live
+        // pinned footprint (`mem_pin`), composed here rather than inside
+        // a tier source because the exemption exists — and is worth
+        // observing — whether or not a tier is running.
+        let mut stats = crate::memstats::MEM_STATS.ramzip_stats();
+        stats.pinned_bytes = self.state.aspaces.read().pinned_total_bytes();
+        Ok(stats.to_le_bytes().to_vec())
     }
 
     fn cpu_load(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
@@ -519,13 +522,22 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         // reports zero — the honest "none measured" answer, never a
         // fabricated count (the array stays `LimitKind::COUNT` long and
         // positional, never omitting a kind).
-        let (limits, aspace_usage, stack_usage) = {
+        let (limits, aspace_usage, stack_usage, pinned_usage) = {
             let aspaces = self.state.aspaces.read();
             let task = SecTaskId(task_id.0);
+            // Pinned usage is the whole footprint while the task is
+            // pinned and zero otherwise — the budget is only consumed by
+            // a live pin, so an unpinned task honestly reports none.
+            let pinned_usage = if aspaces.is_pinned(task) {
+                aspaces.pinned_footprint_bytes(task)
+            } else {
+                0
+            };
             (
                 aspaces.limits(task),
                 aspaces.mapped_aspace_bytes(task),
                 aspaces.stack_committed_bytes(task),
+                pinned_usage,
             )
         };
         let mut out = Vec::with_capacity(RESOURCE_LIMITS_REPORT_LEN);
@@ -533,6 +545,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
             let usage = match kind {
                 LimitKind::AddressSpaceBytes => aspace_usage,
                 LimitKind::StackBytes => stack_usage,
+                LimitKind::PinnedMemoryBytes => pinned_usage,
                 _ => 0,
             };
             let record = ResourceLimitRecord::new(kind, limits.get(kind), usage);

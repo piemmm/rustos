@@ -1,0 +1,26 @@
+[package]
+name = "rustos-test-mem-pin"
+description = "STRESSTEST ST2 memory-pinning fixture: a minimal, separately-linked pure-Rust EL0 program built once and driven in four argv-selected roles (parent / deny / pin / child). deny holds no CAP_MEM_PIN and asserts mem_pin is refused PermissionDenied while the ungated mem_unpin still answers success; pin lowers its own pinned-memory-bytes bound through rlimit_set, pins itself (idempotently), asserts an over-budget mem_map is refused OutOfRange while a within-budget one succeeds, unpins, and asserts the formerly refused map now succeeds; child simply maps past the parent's pinned budget, proving the pin mark is never inherited across spawn even though the limit is. The parent reaps deny and pin, then pins itself under a lowered bound and spawns child through the production spawn + wait syscalls. Built PIE for a native Tier-1 target and converted to an rxe blob by the consuming test's build script."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "rustos-test-mem-pin"
+path = "src/main.rs"
+
+# The program is a pure-Rust RustOS program, so it links the pure-Rust
+# userland runtime `rustos-rt` — never the C ABI (`crt0` + `abi-sys`), which
+# exists solely for non-Rust programs. It names `rustos-abi` only for the
+# rlimit/errno wire types. Only on the native Tier-1 targets
+# (`target_os = "none"`); on the host it is an inert stub so
+# `cargo build --workspace` / clippy still cover it.
+[target.'cfg(target_os = "none")'.dependencies]
+rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }

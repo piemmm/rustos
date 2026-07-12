@@ -1,6 +1,6 @@
 # STRESSTEST.md — System stress testing and live kernel monitoring
 
-Status: ST1 done; ST2–ST6 planned
+Status: ST1–ST2 done; ST3–ST6 planned
 Target: RustOS
 Primary code areas: `lib/abi`, `kernel/mem`, `kernel/core`, `userland/system/sysinfod`, `lib/procinfo`, `userland/apps/`
 Secondary code areas: `lib/rt`, `lib/curses`, `userland/shell/sysinfo`, `kernel/sched`, `docs/src/`
@@ -486,17 +486,61 @@ implementation fixed):
   the aggregated figures move when a registered ledger moves, and the
   conformance rows for the scheduler observations.
 
-### ST2 — Memory pinning
+### ST2 — Memory pinning — **done**
 
-Deliverables: `mem_pin`/`mem_unpin` (+ generated table/C headers),
-`CAP_MEM_PIN` with manifest grants, `LimitKind::PinnedMemory` with a
-discovered-RAM default policy, the `kernel/mem` process-pin state wired
-into the one `ramzip` eligibility classifier, `lib/rt` wrappers,
-`stats:mem/pinned` (extends ST1's payloads, reserved-field evolution).
-Tests: pin honoured (pinned pages never selected under simulated
-pressure), unpin restores eligibility, limit crossing fails closed,
-capability denial fails closed, no inheritance across spawn, cleared on
-exit, audit events emitted; host + QEMU pressure vertical.
+What now holds (the deliverables of §4, with the reconciliations the
+implementation fixed):
+
+- `mem_pin` (92, `CAP_MEM_PIN` = id 34, audited) and `mem_unpin` (93,
+  ungated — releasing one's own exemption grants nothing, the `mem_unmap`
+  posture — but audited so the trail carries both pin edges) ship in the
+  abi table with dispatcher-enforced gate/audit, `lib/rt` wrappers,
+  `ros_sys_*` stubs, and regenerated C headers. Both are idempotent:
+  already in the requested state is success.
+- **Reconciliation — the pin state's home.** The plan said "process-scoped
+  state in `kernel/mem`"; `kernel/mem` has no task vocabulary, so the mark
+  lives in the per-task `AddressSpaceRegistry` (kernel/core) beside every
+  other per-task memory fact — `is_pinned` is the one pin decision, the
+  declared source of the classifier's `PageCandidate::pinned` attribute
+  when the tier's candidate walk lands, and `withdraw` clears it on exit
+  (never inherited: a fresh task id is never in the set).
+- **Reconciliation — naming and measure.** The limit is
+  `LimitKind::PinnedMemoryBytes` ("pinned-memory-bytes", sibling-consistent
+  with `stack-bytes`), enforced over the pinned footprint = mapped address
+  space + committed stack — the same single accounting the
+  `AddressSpaceBytes` ceiling reads (file maps counted: that only tightens
+  the cap). Enforced at `mem_pin` (over-budget refused `OutOfRange`,
+  nothing stored) and, while pinned, at the shared `check_map_growth`
+  (`mem_map` + `file_map`) and the stack-growth resolver.
+- The discovered-RAM default is `default_pinned_limit_bytes` (installed
+  RAM / 8, soft = hard) installed at boot as the registry-held per-boot
+  default limit set (`set_default_limits`; `LimitSet::inherit` now
+  intersects against it), so every task inherits it, `ulimit`/`rlimit_get`
+  report it, and raising past it takes `CAP_RLIMIT_RAISE`. An unknown
+  installed total keeps the compile-time floor. `CAP_MEM_PIN` joined the
+  administrative ceiling (`rustos_users::ADMINISTRATIVE_SET`), the intended
+  grant path for the ST4/ST5 tool manifests.
+- **Reconciliation — the aggregate's carrier.** `RamzipStats.reserved`
+  became `pinned_bytes` (reserved-field evolution, wire length unchanged):
+  the live system-wide pinned footprint the introspect export composes
+  from the registry — observable whether or not a tier runs — resolved by
+  `stats:mem/pinned` and rendered by `sysinfo ramzip`; the per-task
+  `RESOURCE_LIMITS` usage reports the footprint while pinned, zero
+  otherwise.
+- Tests land per §10's pinning rows: registry/handler host tests (pin
+  idempotence + withdraw, over-budget pin refused and nothing stored,
+  growth-while-pinned bounded before the producer, stack growth bounded by
+  the remaining budget, aggregate walks only pinned tasks), dispatcher
+  gate/audit table tests, resolver + CLI fixtures, and the
+  `mem_pin_qemu_aarch64` vertical — the production `KernelDispatchHook` on
+  real traps driving `deny` (refused `PermissionDenied`, ungated unpin
+  still succeeds), `pin` (the full bound/pin/map/unpin dance), and `child`
+  (spawned by the pinned parent, its over-budget map succeeds: the mark is
+  never inherited even though the limit is). "Pinned pages never selected
+  under simulated pressure" binds through the classifier's existing
+  `Ineligible::Pinned` refusal tests plus the registry-sourced attribute;
+  the tier-driving pressure assertion stays with the §0
+  restartable-user-fault prerequisite.
 
 ### ST3 — Signal observation
 

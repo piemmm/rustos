@@ -43,9 +43,12 @@ frozen from the first release.
 
 - **`LimitKind`** is the closed, versioned set of resources a limit can
   govern. Today: `AddressSpaceBytes` (the `mem_map` capacity), `OpenStreams`
-  (the descriptor-table capacity), `Processes` (the `spawn` fan-out), and
-  `StackBytes` (the per-task stack). Discriminants never move; a new resource
-  takes the next free discriminant and bumps `LimitKind::COUNT`.
+  (the descriptor-table capacity), `Processes` (the `spawn` fan-out),
+  `StackBytes` (the per-task stack), and `PinnedMemoryBytes` (the bytes a
+  process may hold pinned — exempt from the compressed `ramzip` tier —
+  through `mem_pin`, `plans/STRESSTEST.md` ST2). Discriminants never move; a
+  new resource takes the next free discriminant and bumps
+  `LimitKind::COUNT`.
 - **`ResourceLimit { soft, hard }`** is the soft/hard pair, each a `u64`.
   `RLIMIT_INFINITY` (`u64::MAX`) means "no ceiling imposed", leaving the
   resource governed only by the discovered, growable default policy. The
@@ -84,8 +87,19 @@ stack, whose default bound (`DEFAULT_STACK_LIMIT_BYTES`, 8 MiB, soft and
 hard) is the one policy value the spawn layout also derives its reserved
 stack span from — the settable default and the structural span can never
 silently diverge, and by default a stack may grow to the whole span.
-`LimitSet::DEFAULT` stays the single place a discovered-hardware default
-policy slots in later (L3) without a second code path.
+`LimitSet::DEFAULT` is the compile-time floor; the *operative* per-boot
+default is the registry-held set the boot path derives from discovered
+hardware and installs once (`AddressSpaceRegistry::set_default_limits`),
+which every fallback, `rlimit_get`, and spawn inheritance then reads — one
+definition, no second code path. Today's one derived bound is the
+pinned-memory budget: `default_pinned_limit_bytes` grants each process one
+eighth of the discovered installed RAM (soft and hard), so a monitor-scale
+process always fits while a single `CAP_MEM_PIN` holder can never exempt
+more than a fraction of the machine from pressure management — the
+capability gates *who* may pin, the derived limit bounds *how much*, and
+raising it past the derived hard bound takes `CAP_RLIMIT_RAISE` like any
+other hard raise. A boot that never learned the installed total keeps the
+compile-time floor rather than fabricating a zero bound.
 
 - **`rlimit_get`** validates `kind` against the closed `LimitKind` set, reads
   the caller's *own* effective limit, and copies it out through the validated
@@ -130,6 +144,21 @@ resource**, before the resource is committed, and fails closed (`AGENTS.md`
   usage the `sysinfo limits` query reports for `stack-bytes`. A task at
   the default bound (the span itself) grows to the structural span bound;
   a lowered `ulimit` stack bound stops growth exactly where it says.
+- **`PinnedMemoryBytes` on `mem_pin` and every growth path while pinned.**
+  The pinned footprint is the task's mapped address space plus its
+  committed stack — the same single accounting the `AddressSpaceBytes`
+  ceiling reads, so the two bounds can never drift (file-backed pages are
+  counted although the compressed tier never takes them: that only
+  tightens the cap). `mem_pin` refuses a footprint already past the soft
+  bound with `OutOfRange` and stores nothing; while the task is pinned the
+  shared `check_map_growth` projection bounds `mem_map` and `file_map`
+  growth by the same budget, and the stack-growth resolver refuses a
+  committed extent past the remaining budget exactly as it refuses the
+  `StackBytes` bound. Unpinning lifts the budget; the limit itself stays
+  settable and inherited like every other kind, and the live usage the
+  `sysinfo limits` query reports for `pinned-memory-bytes` is the whole
+  footprint while pinned and zero otherwise — the budget is only consumed
+  by a live pin.
 
 The remaining `LimitKind`s (`OpenStreams`, `Processes`) carry their
 soft/hard bounds and inherit correctly, but their *consuming-path*

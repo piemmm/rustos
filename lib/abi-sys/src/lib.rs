@@ -76,6 +76,8 @@ const NUM_STREAM_READ: u64 = SyscallNumber::STREAM_READ.as_u16() as u64;
 const NUM_SPAWN: u64 = SyscallNumber::SPAWN.as_u16() as u64;
 const NUM_MEM_MAP: u64 = SyscallNumber::MEM_MAP.as_u16() as u64;
 const NUM_MEM_UNMAP: u64 = SyscallNumber::MEM_UNMAP.as_u16() as u64;
+const NUM_MEM_PIN: u64 = SyscallNumber::MEM_PIN.as_u16() as u64;
+const NUM_MEM_UNPIN: u64 = SyscallNumber::MEM_UNPIN.as_u16() as u64;
 const NUM_FILE_MAP: u64 = SyscallNumber::FILE_MAP.as_u16() as u64;
 const NUM_FILE_UNMAP: u64 = SyscallNumber::FILE_UNMAP.as_u16() as u64;
 const NUM_VOLUME_ATTACH: u64 = SyscallNumber::VOLUME_ATTACH.as_u16() as u64;
@@ -848,6 +850,37 @@ pub extern "C" fn sys_mem_unmap(base: u64, len: usize) -> i32 {
     // SAFETY: see `sys_yield`. The kernel validates the `(base, len)` range
     // against the caller's address space before unmapping it.
     unsafe { ret_i32(raw_syscall(NUM_MEM_UNMAP, [base, len as u64, 0, 0, 0, 0])) }
+}
+
+/// `mem_pin`: mark the calling process's entire anonymous memory — current
+/// and future — as pinned, ineligible for the compressed `ramzip` tier and
+/// any future lower swap tier (`SyscallNumber::MEM_PIN`,
+/// `plans/STRESSTEST.md` ST2). Returns a `ROS_E_*` code.
+///
+/// Gated kernel-side on `ROS_CAP_MEM_PIN` and bounded by the caller's
+/// effective pinned-memory limit; both refusals fail closed. Already
+/// pinned is success. The pin is not inherited across spawn and is
+/// cleared on exit.
+#[must_use]
+#[export_name = "ros_sys_mem_pin"]
+pub extern "C" fn sys_mem_pin() -> i32 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
+    // kernel checks the capability and the bound on the far side.
+    unsafe { ret_i32(raw_syscall(NUM_MEM_PIN, [0; 6])) }
+}
+
+/// `mem_unpin`: clear the calling process's [`sys_mem_pin`] mark,
+/// restoring its anonymous memory's eligibility for the swap tiers
+/// (`SyscallNumber::MEM_UNPIN`). Returns a `ROS_E_*` code.
+///
+/// Unprivileged — releasing the caller's own exemption grants nothing —
+/// and idempotent: already unpinned is success.
+#[must_use]
+#[export_name = "ros_sys_mem_unpin"]
+pub extern "C" fn sys_mem_unpin() -> i32 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
+    // kernel only clears the caller's own pin mark.
+    unsafe { ret_i32(raw_syscall(NUM_MEM_UNPIN, [0; 6])) }
 }
 
 /// `file_map`: map `len` bytes of the open, readable, filesystem-backed
@@ -2328,6 +2361,8 @@ mod tests {
         (NUM_POINTER_READ, "pointer_read", 3),
         (NUM_FD_GRANT, "fd_grant", 2),
         (NUM_FD_REDEEM, "fd_redeem", 1),
+        (NUM_MEM_PIN, "mem_pin", 0),
+        (NUM_MEM_UNPIN, "mem_unpin", 0),
     ];
 
     #[test]

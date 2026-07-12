@@ -559,6 +559,41 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Mark the calling process's entire anonymous memory — current and
+    /// future — as pinned: ineligible for the compressed `ramzip` tier
+    /// and any future lower swap tier (`plans/STRESSTEST.md` ST2).
+    ///
+    /// The dispatcher has already checked
+    /// [`rustos_abi::CapabilityId::MEM_PIN`] and emitted the audit
+    /// record. The implementation bounds the pin by the caller's
+    /// effective `PinnedMemoryBytes` soft limit — a footprint already
+    /// past the bound fails closed with [`Errno::OutOfRange`] — and
+    /// stores the mark against the kernel-trusted caller id. Already
+    /// pinned is success (the process is in the requested state).
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]: a kernel build with no pin bookkeeping
+    /// wired never pretends a pin took effect. The enforcement is
+    /// installed in `kernel/core`.
+    fn mem_pin(&self, _caller: &CallerContext<'_>) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Clear the calling process's `mem_pin` mark, restoring its
+    /// anonymous memory's eligibility for the swap tiers
+    /// (`plans/STRESSTEST.md` ST2).
+    ///
+    /// Ungated (releasing the caller's own exemption grants nothing) but
+    /// audited by the dispatcher like `mem_pin`, so the trail carries
+    /// both edges of every pin window. Already unpinned is success.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the bookkeeping is installed in
+    /// `kernel/core`.
+    fn mem_unpin(&self, _caller: &CallerContext<'_>) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Copy the system user database (`/System/Security/Users`) the kernel
     /// loaded at boot out to the user buffer at `buf` (
     /// `plans/PI.md` P11).
@@ -2318,6 +2353,8 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let len = decode_len(args.0[1])?;
                 self.handlers.mem_unmap(caller, args.0[0], len)
             }
+            SyscallNumber::MEM_PIN => self.handlers.mem_pin(caller),
+            SyscallNumber::MEM_UNPIN => self.handlers.mem_unpin(caller),
             SyscallNumber::WAIT => {
                 // `validate_arg` guarantees args[0] is a sign-extended
                 // `i32`; recover it by truncating the low 32 bits (the
@@ -3315,6 +3352,14 @@ mod tests {
             self.record("rlimit_set");
             Ok(u64::from(kind))
         }
+        fn mem_pin(&self, _c: &CallerContext<'_>) -> SyscallResult {
+            self.record("mem_pin");
+            Ok(0)
+        }
+        fn mem_unpin(&self, _c: &CallerContext<'_>) -> SyscallResult {
+            self.record("mem_unpin");
+            Ok(0)
+        }
         fn users_db_read(&self, _c: &CallerContext<'_>, _buf: u64, len: usize) -> SyscallResult {
             self.record("users_db_read");
             // Echo the capacity back so the reachability test can assert
@@ -4052,6 +4097,7 @@ mod tests {
                 CapabilityId::SYSINFO_INTROSPECT,
                 CapabilityId::SEAT_ADMIN,
                 CapabilityId::FS_MOUNT,
+                CapabilityId::MEM_PIN,
             ],
             &sink,
         );
@@ -5193,6 +5239,64 @@ mod tests {
             Err(Errno::BadAlignment)
         );
         assert_eq!(h2.last(), None);
+    }
+
+    #[test]
+    fn mem_pin_requires_capability_and_is_audited() {
+        // Without `CAP_MEM_PIN` the dispatcher refuses before the handler
+        // is reached and audits the denial; with it the call dispatches
+        // and the invocation is audited (a pin is a security-relevant
+        // resource decision).
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+        assert_eq!(
+            d.dispatch(&ctx, SyscallNumber::MEM_PIN.as_u16(), RawArgs::ZERO),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(h.last(), None, "handler must not be reached");
+        assert_eq!(sink.ids(), [AuditEvent::SyscallPermissionDenied.id().0]);
+
+        let sink2 = RecordingSink::new();
+        let caps2 = build_caps(&[CapabilityId::MEM_PIN], &sink2);
+        let ctx2 = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps2,
+        };
+        let h2 = MockHandlers::default();
+        let d2 = Dispatcher::new(&h2, &sink2);
+        assert_eq!(
+            d2.dispatch(&ctx2, SyscallNumber::MEM_PIN.as_u16(), RawArgs::ZERO),
+            Ok(0)
+        );
+        assert_eq!(h2.last(), Some("mem_pin"));
+        assert_eq!(sink2.ids(), [AuditEvent::SyscallInvoked.id().0]);
+    }
+
+    #[test]
+    fn mem_unpin_is_ungated_and_audited() {
+        // Releasing the caller's own exemption needs no capability, but
+        // the unpin edge is still audited so the trail carries both edges
+        // of every pin window.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+        assert_eq!(
+            d.dispatch(&ctx, SyscallNumber::MEM_UNPIN.as_u16(), RawArgs::ZERO),
+            Ok(0)
+        );
+        assert_eq!(h.last(), Some("mem_unpin"));
+        assert_eq!(sink.ids(), [AuditEvent::SyscallInvoked.id().0]);
     }
 
     #[test]

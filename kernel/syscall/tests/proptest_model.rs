@@ -190,6 +190,14 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn mem_pin(&self, _c: &CallerContext<'_>) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn mem_unpin(&self, _c: &CallerContext<'_>) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn wait(
         &self,
         _c: &CallerContext<'_>,

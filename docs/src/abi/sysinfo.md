@@ -99,10 +99,14 @@ and audited — because each exposes kernel-wide operational state:
   stable names in `RECLAIM_CLASS_NAMES` are the shared vocabulary the
   `stats:mem/reclaim/<class>` selectors resolve through.
 - `RAMZIP_STATS` — a single `RamzipStats`: the compressed anonymous-
-  memory tier's byte/entry gauges, derived min/soft/hard caps, and every
-  monotonic event counter. Counters only — never page contents or key
-  material; a build whose tier is not yet driven truthfully reports an
-  idle tier (all zeros) rather than refusing or fabricating.
+  memory tier's byte/entry gauges, derived min/soft/hard caps, every
+  monotonic event counter, and `pinned_bytes` — the live system-wide
+  aggregate of anonymous memory exempted from the tier by process pins
+  (`mem_pin`, `plans/STRESSTEST.md` ST2), composed from the per-task
+  registry so the exemption is observable whether or not a tier is
+  running. Counters only — never page contents or key material; a build
+  whose tier is not yet driven truthfully reports an idle tier (all
+  zeros) rather than refusing or fabricating.
 - `CPU_LOAD` — one `CpuLoadRecord` per online CPU (paged by a
   `CpuLoadRequest`): the run-queue depth sample plus the context-switch
   and preemption counters. The cumulative busy/idle time split stays in
