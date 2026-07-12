@@ -6,14 +6,15 @@
 //! transport seam, so every decision is host-tested and the freestanding
 //! `Run` binary adds only the raw syscall. The auto-allocated gid comes
 //! from the one `lib/users` policy definition
-//! ([`rustos_users::next_id`]), never a private copy.
+//! ([`rustos_users::next_id`], interactive-user range), never a private
+//! copy.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use rustos_abi::users_admin::{decode_group_list, UsersAdminRequest, USERS_ADMIN_MAX_REQUEST};
 use rustos_abi::Errno;
-use rustos_users::{next_id, MAX_GROUPS_DB_LEN};
+use rustos_users::{next_id, IdRange, MAX_GROUPS_DB_LEN};
 
 use crate::io::{GroupDb, GroupSpec};
 
@@ -72,9 +73,8 @@ impl GroupDb for GroupsAdminDb<'_> {
     fn create(&self, spec: &GroupSpec<'_>) -> Result<(), Errno> {
         let gid = match spec.gid {
             Some(gid) => gid,
-            None => {
-                next_id(self.list()?.into_iter().map(|(_, gid)| gid)).ok_or(Errno::OutOfRange)?
-            }
+            None => next_id(IdRange::User, self.list()?.into_iter().map(|(_, gid)| gid))
+                .ok_or(Errno::OutOfRange)?,
         };
         let request = UsersAdminRequest::CreateGroup {
             name: spec.name,
@@ -171,11 +171,19 @@ mod tests {
     }
 
     #[test]
-    fn an_omitted_gid_is_allocated_above_the_highest_existing() {
+    fn an_omitted_gid_is_allocated_in_the_user_band() {
+        // System-band gids never steer the allocation: a registry holding
+        // only reserved gids yields the band's first id…
         let channel = MemChannel::new(&[("wheel", 0), ("staff", 100)]);
         let db = GroupsAdminDb::new(&channel);
         assert_eq!(db.create(&spec("audio", None)), Ok(()));
-        assert_eq!(channel.created(), [("audio".to_string(), 101)]);
+        assert_eq!(channel.created(), [("audio".to_string(), 1000)]);
+
+        // …and an existing user-band gid is allocated above.
+        let channel = MemChannel::new(&[("wheel", 0), ("ada", 1004)]);
+        let db = GroupsAdminDb::new(&channel);
+        assert_eq!(db.create(&spec("audio", None)), Ok(()));
+        assert_eq!(channel.created(), [("audio".to_string(), 1005)]);
     }
 
     #[test]

@@ -140,6 +140,77 @@ impl PasswordRecord {
     }
 }
 
+/// The stored spelling of "this account has no password and never
+/// authenticates" — the principled `*` of `/etc/shadow`. It can never
+/// collide with a real record, which always begins with
+/// [`PASSWORD_SCHEME`].
+pub const NO_PASSWORD_MARKER: &str = "*";
+
+/// What the password field of a user record stores: a real, verifiable
+/// [`PasswordRecord`], or the explicit typed statement that the account
+/// has no password and can never authenticate.
+///
+/// A system or service account carries [`Self::NeverAuthenticates`]
+/// rather than a random throwaway hash: a hash that "should" never match
+/// is a lie waiting to be brute-forced or misread, while the typed marker
+/// is structurally incapable of verifying anything —
+/// [`Self::verify`] is unconditionally `false` for it, fail closed by
+/// construction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StoredPassword {
+    /// A real salted PBKDF2 record an interactive account authenticates
+    /// against.
+    Password(PasswordRecord),
+    /// No password exists and none will ever verify (stored as
+    /// [`NO_PASSWORD_MARKER`]).
+    NeverAuthenticates,
+}
+
+impl StoredPassword {
+    /// Decode the password field of a user record: the
+    /// [`NO_PASSWORD_MARKER`], or a full [`PasswordRecord`].
+    ///
+    /// # Errors
+    ///
+    /// [`ParseError::PasswordRecord`] for anything that is neither.
+    pub fn decode(text: &str) -> Result<Self, ParseError> {
+        if text == NO_PASSWORD_MARKER {
+            return Ok(Self::NeverAuthenticates);
+        }
+        PasswordRecord::decode(text).map(Self::Password)
+    }
+
+    /// Encode into the stored text form [`Self::decode`] accepts.
+    #[must_use]
+    pub fn encode(&self) -> String {
+        match self {
+            Self::Password(record) => record.encode(),
+            Self::NeverAuthenticates => String::from(NO_PASSWORD_MARKER),
+        }
+    }
+
+    /// Verify an offered `password`: constant-time against a real record,
+    /// unconditionally `false` for [`Self::NeverAuthenticates`] (the
+    /// caller equalises the timing of that refusal; see
+    /// `UsersDb::authenticate`).
+    #[must_use]
+    pub fn verify(&self, password: &[u8]) -> bool {
+        match self {
+            Self::Password(record) => record.verify(password),
+            Self::NeverAuthenticates => false,
+        }
+    }
+
+    /// The PBKDF2 cost of a real record, or [`None`] for the marker.
+    #[must_use]
+    pub fn iterations(&self) -> Option<u32> {
+        match self {
+            Self::Password(record) => Some(record.iterations()),
+            Self::NeverAuthenticates => None,
+        }
+    }
+}
+
 /// Validate an iteration count into the accepted [`NonZeroU32`] range.
 fn checked_iterations(iterations: u32) -> Result<NonZeroU32, ParseError> {
     if !(MIN_ITERATIONS..=MAX_ITERATIONS).contains(&iterations) {

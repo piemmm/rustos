@@ -609,6 +609,32 @@ fn encode_gids(w: &mut Writer<'_>, gids: &GidList<'_>) -> Result<(), Errno> {
     w.bytes(gids.raw)
 }
 
+/// The account state a [`UserEntry`] reports, mirroring the `users-v1`
+/// states (`lib/users`): a no-login system/service account is reported
+/// truthfully, never disguised as merely locked or unlocked.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum AccountStateCode {
+    /// The account may log in.
+    Active = 0,
+    /// The account is administratively barred from logging in.
+    Locked = 1,
+    /// A system/service identity that never starts a session.
+    NoLogin = 2,
+}
+
+impl AccountStateCode {
+    /// Decode the one-byte wire form, failing closed on anything unknown.
+    fn decode(byte: u8) -> Result<Self, Errno> {
+        match byte {
+            0 => Ok(Self::Active),
+            1 => Ok(Self::Locked),
+            2 => Ok(Self::NoLogin),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
 /// One account's non-secret fields in a [`UsersAdminOp::ListUsers`]
 /// response.
 ///
@@ -628,14 +654,16 @@ pub struct UserEntry<'a> {
     pub supplementary_gids: GidList<'a>,
     /// Display name (may be empty).
     pub display_name: &'a str,
-    /// Absolute home directory path.
+    /// Absolute home directory path, or the `users-v1` `none` marker on a
+    /// no-login account.
     pub home: &'a str,
-    /// Absolute shell path.
+    /// Absolute shell path, or the `users-v1` `none` marker on a no-login
+    /// account.
     pub shell: &'a str,
     /// The account's capability grant ceiling.
     pub grants: GrantList<'a>,
-    /// `true` when the account is locked.
-    pub locked: bool,
+    /// The account's state.
+    pub state: AccountStateCode,
 }
 
 impl<'a> UserEntry<'a> {
@@ -649,7 +677,7 @@ impl<'a> UserEntry<'a> {
         w.str(self.home)?;
         w.str(self.shell)?;
         encode_grants(w, &self.grants)?;
-        w.u8(u8::from(self.locked))
+        w.u8(self.state as u8)
     }
 
     /// Decode one entry at the cursor.
@@ -663,11 +691,7 @@ impl<'a> UserEntry<'a> {
             home: cur.str()?,
             shell: cur.str()?,
             grants: GrantList::decode(cur)?,
-            locked: match cur.u8()? {
-                0 => false,
-                1 => true,
-                _ => return Err(Errno::OutOfRange),
-            },
+            state: AccountStateCode::decode(cur.u8()?)?,
         })
     }
 }
@@ -994,7 +1018,7 @@ mod tests {
             home: "/Users/root",
             shell: "/System/Apps/elsh.app/Run",
             grants,
-            locked: false,
+            state: AccountStateCode::Locked,
         };
 
         let mut out = [0u8; 256];
@@ -1005,6 +1029,27 @@ mod tests {
         let mut iter = decode_user_list(&out[..len]).expect("decodes");
         assert_eq!(iter.next(), Some(Ok(entry)));
         assert_eq!(iter.next(), None);
+
+        // Every state code round-trips; an unknown byte is refused.
+        for state in [
+            AccountStateCode::Active,
+            AccountStateCode::Locked,
+            AccountStateCode::NoLogin,
+        ] {
+            let mut buf = [0u8; 256];
+            let mut b = ListResponseBuilder::new(&mut buf).expect("header fits");
+            b.push_user(&UserEntry { state, ..entry }).expect("fits");
+            let n = b.finish();
+            let mut iter = decode_user_list(&buf[..n]).expect("decodes");
+            assert_eq!(iter.next(), Some(Ok(UserEntry { state, ..entry })));
+        }
+        let mut buf = [0u8; 256];
+        let mut b = ListResponseBuilder::new(&mut buf).expect("header fits");
+        b.push_user(&entry).expect("fits");
+        let n = b.finish();
+        buf[n - 1] = 3;
+        let mut iter = decode_user_list(&buf[..n]).expect("header decodes");
+        assert_eq!(iter.next(), Some(Err(Errno::OutOfRange)));
 
         // Truncating the encoded body surfaces an error, then stops.
         let mut truncated = decode_user_list(&out[..len - 1]).expect("header decodes");

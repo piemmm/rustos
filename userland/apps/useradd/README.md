@@ -82,7 +82,8 @@ syscall; `db::Entropy` — the kernel CSPRNG through `sys:random`), so the
 whole client policy is host-tested against an in-memory endpoint:
 
 - an omitted uid is allocated by the shared `rustos_users::next_id`
-  policy (one above the highest existing id, fail closed on exhaustion);
+  policy (interactive-user range, `1000..`: one above the highest taken
+  id in the band, fail closed on band exhaustion);
 - an omitted home is the shared `rustos_users::default_home` layout
   (`/Users/NAME`), the shell is `rustos_users::DEFAULT_SHELL`, and the
   created ceiling is `rustos_users::SESSION_BASELINE` — an administrator

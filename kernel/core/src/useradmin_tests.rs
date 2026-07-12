@@ -8,8 +8,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use rustos_abi::users_admin::{
-    decode_group_list, decode_user_list, gid_list_into, grant_list_into, CreateUser, ModifyUser,
-    UsersAdminRequest,
+    decode_group_list, decode_user_list, gid_list_into, grant_list_into, AccountStateCode,
+    CreateUser, ModifyUser, UsersAdminRequest,
 };
 use rustos_abi::{CapabilityId, CapabilityQuery, Errno};
 use rustos_caps::CapabilitySet;
@@ -87,8 +87,8 @@ fn record(username: &str, uid: u32, grants: CapabilitySet, password: &[u8]) -> U
             primary_gid: Gid(0),
             supplementary_gids: &[],
             display_name: "",
-            home: "/Users/test",
-            shell: "/System/Apps/elsh.app/Run",
+            home: Some("/Users/test"),
+            shell: Some("/System/Apps/elsh.app/Run"),
             capabilities: grants,
             state: AccountState::Active,
         },
@@ -515,7 +515,7 @@ fn list_users_and_groups_answer_the_non_secret_view() {
         .expect("all entries decode");
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].username, "root");
-    assert!(!entries[0].locked);
+    assert_eq!(entries[0].state, AccountStateCode::Active);
     assert!(entries[0]
         .grants
         .iter()

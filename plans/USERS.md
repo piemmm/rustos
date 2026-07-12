@@ -12,7 +12,7 @@ directory.
 on) first. Every rule in this file is binding too. One fully-gated
 increment (one `U`-stage) per landing.
 
-Status: **planned** (no stage started).
+Status: **U1 done**; U2–U4 planned.
 
 ---
 
@@ -44,32 +44,29 @@ Status: **planned** (no stage started).
    `ls -l`, audit output, and `ps`.
 
 3. **Reserved id ranges.** System uids/gids occupy 0–999; interactive
-   users start at 1000. `lib/users/src/policy.rs` gains
-   `FIRST_USER_UID` / `FIRST_USER_GID` constants and range-aware
-   allocation (system-range for service accounts, user-range for
-   `useradd`/the installer/the `users` app), replacing the current
-   unpartitioned `next_id` (one-above-highest from 0). Allocation fails
-   closed on range exhaustion, exactly as `next_id` already does at
-   `u32::MAX`.
+   users start at 1000. `lib/users/src/policy.rs` defines
+   `FIRST_USER_UID` / `FIRST_USER_GID` and the range-aware
+   `next_id(IdRange, taken)` (system band for service accounts, user
+   band for `useradd`/`groupadd`/the installer/the `users` app).
+   Allocation ignores out-of-band ids, starts at the band's first id,
+   and fails closed on band exhaustion — never spilling into the
+   neighbouring band.
 
-4. **No home, no shell — honestly absent, never faked.** `UserRecord`
-   today makes `home` and `shell` mandatory absolute paths. The
-   versioned, unfrozen format evolves in place (§2.13): a
-   non-interactive account carries an explicit *none* spelling for
-   both, and the parser enforces the pairing — an `Active`,
-   login-capable account still requires both; a no-login account
-   carries neither. No fake `/Users/system` directory, no dangling
-   path.
+4. **No home, no shell — honestly absent, never faked.** A
+   non-interactive account carries the explicit `none` spelling for
+   both `home` and `shell`, and the constructor and parser enforce the
+   pairing — an `Active`/`Locked`, login-capable account requires both;
+   a no-login account carries neither. No fake `/Users/system`
+   directory, no dangling path.
 
 5. **No password record either — a typed never-authenticates marker.**
-   Every record today must carry a PBKDF2 `PasswordRecord`. A service
-   account with a random throwaway hash is a lie waiting to be
-   brute-forced or misread. The format gains an explicit typed
-   "no password / never authenticates" marker (the principled `*` of
-   `/etc/shadow`); `UsersDb::authenticate` treats it as an
-   unconditional, timing-equalised refusal. Combined with a dedicated
-   no-login `AccountState` variant (intent stated explicitly, not
-   "administratively `Locked`"), a system/service account is
+   A service account with a random throwaway hash would be a lie
+   waiting to be brute-forced or misread. The format carries an
+   explicit typed "no password / never authenticates" marker (the
+   principled `*` of `/etc/shadow`); `UsersDb::authenticate` treats it
+   as an unconditional, timing-equalised refusal. Combined with the
+   dedicated no-login `AccountState` variant (intent stated explicitly,
+   not "administratively `Locked`"), a system/service account is
    structurally incapable of starting a session — fail closed by
    construction, not by configuration.
 
@@ -131,15 +128,30 @@ identity.
 ## 2. Stages
 
 - **U1 — `lib/users` format + policy (host-testable, the foundation).**
-  The typed no-password marker; optional (none) home/shell with the
-  parser-enforced pairing against account state; the no-login
-  `AccountState` variant with `authenticate` refusing it
-  timing-equalised; `FIRST_USER_UID`/`FIRST_USER_GID` and range-aware
-  id allocation; the canonical default-accounts/groups provisioning
-  definition; per-service grant-ceiling sets in `grants.rs`. Parser
-  round-trip, authenticate-refusal, and range-allocation tests; rustdoc
-  and the `docs/src/security/` page updated in the same change.
-  Status: planned.
+  Status: **done**. What now holds:
+  - `StoredPassword::{Password, NeverAuthenticates}` (on-disk `*`,
+    `NO_PASSWORD_MARKER`); `AccountState::NoLogin` (`nologin`); optional
+    home/shell spelled `none` (`NO_PATH_MARKER`). Constructor and parser
+    enforce the pairing (`ParseError::AccountShape`): active/locked ⇒
+    home+shell+password, nologin ⇒ none of them. `UsersDb::authenticate`
+    refuses a no-login account timing-equalised (the dummy-derivation
+    burn covers records without a cost).
+  - Range-aware `next_id(IdRange::{System,User}, …)` +
+    `FIRST_USER_UID`/`FIRST_USER_GID` (§0.3); `useradd`/`groupadd`
+    allocate from the user band.
+  - Per-service ceilings in `grants.rs` (`DEVMGR_CEILING`,
+    `SYSINFOD_CEILING`, `SEATMGR_CEILING`, `LOGIN_CEILING`), pinned and
+    sibling-disjoint by test; `capability_set` builds the stored set.
+  - The canonical provisioning definition in `provision.rs`:
+    `default_system_accounts()` (`system:0` empty ceiling, `devmgr:10`,
+    `sysinfod:11`, `seatmgr:12`, `login:13`, all no-login, primary group
+    `services`) and `default_groups()` (`system:0`, `services:101`,
+    `storage:100`), with pinning + round-trip + refuse-all-logins tests.
+  - The `users_admin` `ListUsers` entry reports the truthful tri-state
+    (`AccountStateCode::{Active, Locked, NoLogin}`, fail-closed decode)
+    and spells absent home/shell as `none`; the `users` tool renders all
+    three states. Rustdoc + `docs/src/lib/users.md` +
+    `plans/CAPABILITY_USE.md` §4.3 updated.
 
 - **U2 — provisioning consumers.** `tools/mkimage` authors the U1
   default set for **both** profiles (debug additionally appends the

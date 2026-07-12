@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use rustos_abi::CapabilityId;
 use rustos_caps::CapabilitySet;
 
-use crate::password::{PasswordRecord, Salt};
+use crate::password::{PasswordRecord, Salt, StoredPassword};
 use crate::ParseError;
 
 /// Numeric user identifier. `uid == 0` carries **no**
@@ -38,17 +38,28 @@ pub const MAX_PATH_LEN: usize = 128;
 /// Most supplementary groups one account may carry.
 pub const MAX_SUPPLEMENTARY_GIDS: usize = 16;
 
+/// The explicit stored spelling of an absent home or shell — a
+/// non-interactive account states "none", never a fake path. It can
+/// never collide with a real value: every stored path begins with `/`.
+pub const NO_PATH_MARKER: &str = "none";
+
 /// Whether an account may start sessions.
 ///
 /// A locked account keeps its full record (identity, grants, password hash)
 /// but authentication refuses it — indistinguishably from a wrong password,
-/// so an attacker learns nothing from the lock.
+/// so an attacker learns nothing from the lock. A no-login account states
+/// the *intent* that it never starts a session: it carries no home, no
+/// shell, and no password ([`StoredPassword::NeverAuthenticates`]), so it
+/// is structurally incapable of one — fail closed by construction, not by
+/// configuration.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum AccountState {
     /// The account may log in.
     Active,
     /// The account is administratively barred from logging in.
     Locked,
+    /// A system or service identity that never starts a session.
+    NoLogin,
 }
 
 impl AccountState {
@@ -58,6 +69,7 @@ impl AccountState {
         match self {
             Self::Active => "active",
             Self::Locked => "locked",
+            Self::NoLogin => "nologin",
         }
     }
 
@@ -65,6 +77,7 @@ impl AccountState {
         match label {
             "active" => Ok(Self::Active),
             "locked" => Ok(Self::Locked),
+            "nologin" => Ok(Self::NoLogin),
             _ => Err(ParseError::AccountState),
         }
     }
@@ -78,11 +91,11 @@ pub struct UserRecord {
     primary_gid: Gid,
     supplementary_gids: Vec<Gid>,
     display_name: String,
-    home: String,
-    shell: String,
+    home: Option<String>,
+    shell: Option<String>,
     capabilities: CapabilitySet,
     state: AccountState,
-    password: PasswordRecord,
+    password: StoredPassword,
 }
 
 /// The non-secret identity fields of a [`UserRecord`], grouped so
@@ -100,10 +113,12 @@ pub struct Identity<'a> {
     pub supplementary_gids: &'a [Gid],
     /// Human-readable name; may be empty.
     pub display_name: &'a str,
-    /// Absolute home directory path.
-    pub home: &'a str,
-    /// Absolute path of the user's shell of choice.
-    pub shell: &'a str,
+    /// Absolute home directory path; [`None`] only on a
+    /// [`AccountState::NoLogin`] account.
+    pub home: Option<&'a str>,
+    /// Absolute path of the user's shell of choice; [`None`] only on a
+    /// [`AccountState::NoLogin`] account.
+    pub shell: Option<&'a str>,
     /// Capability grant ceiling.
     pub capabilities: CapabilitySet,
     /// Whether the account may start sessions.
@@ -116,13 +131,34 @@ impl UserRecord {
     /// # Errors
     ///
     /// The matching [`ParseError`] if any identity field violates its
-    /// bounds or charset, or if `capabilities` contains an id `abi-v1` has
-    /// not named (an unnamed grant could not be re-read from disk).
-    pub fn new(identity: Identity<'_>, password: PasswordRecord) -> Result<Self, ParseError> {
+    /// bounds or charset, if `capabilities` contains an id `abi-v1` has
+    /// not named (an unnamed grant could not be re-read from disk), or
+    /// [`ParseError::AccountShape`] when the state and the home/shell/
+    /// password presence disagree: a login-capable ([`AccountState::Active`]
+    /// or [`AccountState::Locked`]) account requires all three; a
+    /// [`AccountState::NoLogin`] account carries none of them.
+    pub fn new(identity: Identity<'_>, password: StoredPassword) -> Result<Self, ParseError> {
         check_username(identity.username)?;
         check_display_name(identity.display_name)?;
-        check_path(identity.home)?;
-        check_path(identity.shell)?;
+        if let Some(home) = identity.home {
+            check_path(home)?;
+        }
+        if let Some(shell) = identity.shell {
+            check_path(shell)?;
+        }
+        let login_shaped = identity.home.is_some()
+            && identity.shell.is_some()
+            && matches!(password, StoredPassword::Password(_));
+        let nologin_shaped = identity.home.is_none()
+            && identity.shell.is_none()
+            && password == StoredPassword::NeverAuthenticates;
+        let well_shaped = match identity.state {
+            AccountState::Active | AccountState::Locked => login_shaped,
+            AccountState::NoLogin => nologin_shaped,
+        };
+        if !well_shaped {
+            return Err(ParseError::AccountShape);
+        }
         if identity.supplementary_gids.len() > MAX_SUPPLEMENTARY_GIDS {
             return Err(ParseError::SupplementaryGids);
         }
@@ -135,8 +171,8 @@ impl UserRecord {
             primary_gid: identity.primary_gid,
             supplementary_gids: identity.supplementary_gids.to_vec(),
             display_name: String::from(identity.display_name),
-            home: String::from(identity.home),
-            shell: String::from(identity.shell),
+            home: identity.home.map(String::from),
+            shell: identity.shell.map(String::from),
             capabilities: identity.capabilities,
             state: identity.state,
             password,
@@ -156,7 +192,10 @@ impl UserRecord {
         salt: Salt,
         iterations: u32,
     ) -> Result<Self, ParseError> {
-        Self::new(identity, PasswordRecord::new(password, salt, iterations)?)
+        Self::new(
+            identity,
+            StoredPassword::Password(PasswordRecord::new(password, salt, iterations)?),
+        )
     }
 
     /// Decode one database line.
@@ -177,7 +216,7 @@ impl UserRecord {
         let shell = next()?;
         let caps = next()?;
         let state = AccountState::from_label(next()?)?;
-        let password = PasswordRecord::decode(next()?)?;
+        let password = StoredPassword::decode(next()?)?;
         if fields.next().is_some() {
             return Err(ParseError::FieldCount);
         }
@@ -191,8 +230,8 @@ impl UserRecord {
                 primary_gid: Gid(primary_gid),
                 supplementary_gids: &supplementary_gids,
                 display_name,
-                home,
-                shell,
+                home: parse_optional_path(home),
+                shell: parse_optional_path(shell),
                 capabilities,
                 state,
             },
@@ -215,8 +254,8 @@ impl UserRecord {
             out.push_str(&decimal(gid.0));
         }
         push_field(&mut out, &self.display_name);
-        push_field(&mut out, &self.home);
-        push_field(&mut out, &self.shell);
+        push_field(&mut out, self.home.as_deref().unwrap_or(NO_PATH_MARKER));
+        push_field(&mut out, self.shell.as_deref().unwrap_or(NO_PATH_MARKER));
         out.push(':');
         let mut first = true;
         for cap in &self.capabilities {
@@ -263,16 +302,18 @@ impl UserRecord {
         &self.display_name
     }
 
-    /// The absolute home directory path.
+    /// The absolute home directory path; [`None`] only on a
+    /// [`AccountState::NoLogin`] account.
     #[must_use]
-    pub fn home(&self) -> &str {
-        &self.home
+    pub fn home(&self) -> Option<&str> {
+        self.home.as_deref()
     }
 
-    /// The absolute path of the user's shell of choice.
+    /// The absolute path of the user's shell of choice; [`None`] only on
+    /// a [`AccountState::NoLogin`] account.
     #[must_use]
-    pub fn shell(&self) -> &str {
-        &self.shell
+    pub fn shell(&self) -> Option<&str> {
+        self.shell.as_deref()
     }
 
     /// The capability grant ceiling.
@@ -287,9 +328,10 @@ impl UserRecord {
         self.state
     }
 
-    /// The stored password record.
+    /// The stored password: a real record, or the typed
+    /// never-authenticates marker.
     #[must_use]
-    pub fn password(&self) -> &PasswordRecord {
+    pub fn password(&self) -> &StoredPassword {
         &self.password
     }
 }
@@ -365,6 +407,17 @@ fn check_path(path: &str) -> Result<(), ParseError> {
     }
 }
 
+/// Decode a stored home/shell field: the explicit [`NO_PATH_MARKER`], or a
+/// path the constructor then validates. Anything else is also handed to
+/// path validation, which rejects it (a path must begin with `/`).
+fn parse_optional_path(field: &str) -> Option<&str> {
+    if field == NO_PATH_MARKER {
+        None
+    } else {
+        Some(field)
+    }
+}
+
 /// Parse a `u32` with no sign, no leading `+`, and no leading zeros (other
 /// than `"0"` itself), so every value has exactly one accepted spelling.
 fn parse_u32(text: &str) -> Option<u32> {
@@ -430,7 +483,7 @@ fn push_field(out: &mut String, field: &str) {
 #[cfg(test)]
 mod tests {
     use super::{AccountState, Gid, Identity, Uid, UserRecord, MAX_SUPPLEMENTARY_GIDS};
-    use crate::password::{PasswordRecord, MIN_ITERATIONS};
+    use crate::password::{PasswordRecord, StoredPassword, MIN_ITERATIONS};
     use crate::ParseError;
 
     use alloc::string::String;
@@ -453,15 +506,31 @@ mod tests {
             primary_gid: Gid(1000),
             supplementary_gids: supplementary,
             display_name: "Ada Lovelace",
-            home: "/Users/ada",
-            shell: "/System/Apps/elsh.app/Run",
+            home: Some("/Users/ada"),
+            shell: Some("/System/Apps/elsh.app/Run"),
             capabilities: caps(&[CapabilityId::FS_MOUNT, CapabilityId::PROC_SPAWN]),
             state: AccountState::Active,
         }
     }
 
-    fn password() -> PasswordRecord {
-        PasswordRecord::new(b"byron", [0x5A; 16], MIN_ITERATIONS).expect("valid")
+    fn password() -> StoredPassword {
+        StoredPassword::Password(
+            PasswordRecord::new(b"byron", [0x5A; 16], MIN_ITERATIONS).expect("valid"),
+        )
+    }
+
+    fn no_login_identity() -> Identity<'static> {
+        Identity {
+            username: "devmgr",
+            uid: Uid(10),
+            primary_gid: Gid(101),
+            supplementary_gids: &[],
+            display_name: "Device Manager",
+            home: None,
+            shell: None,
+            capabilities: CapabilitySet::empty(),
+            state: AccountState::NoLogin,
+        }
     }
 
     fn record() -> UserRecord {
@@ -483,11 +552,71 @@ mod tests {
         assert_eq!(record.primary_gid(), Gid(1000));
         assert_eq!(record.supplementary_gids(), &[Gid(4), Gid(7)]);
         assert_eq!(record.display_name(), "Ada Lovelace");
-        assert_eq!(record.home(), "/Users/ada");
-        assert_eq!(record.shell(), "/System/Apps/elsh.app/Run");
+        assert_eq!(record.home(), Some("/Users/ada"));
+        assert_eq!(record.shell(), Some("/System/Apps/elsh.app/Run"));
         assert!(record.capabilities().contains(CapabilityId::FS_MOUNT));
         assert_eq!(record.state(), AccountState::Active);
         assert!(record.password().verify(b"byron"));
+    }
+
+    #[test]
+    fn a_no_login_record_round_trips_with_the_explicit_markers() {
+        let record = UserRecord::new(no_login_identity(), StoredPassword::NeverAuthenticates)
+            .expect("valid record");
+        let line = record.encode_line();
+        assert_eq!(line, "devmgr:10:101::Device Manager:none:none::nologin:*");
+        assert_eq!(UserRecord::decode_line(&line), Ok(record.clone()));
+        assert_eq!(record.home(), None);
+        assert_eq!(record.shell(), None);
+        assert_eq!(record.state(), AccountState::NoLogin);
+        assert!(!record.password().verify(b""));
+        assert!(!record.password().verify(b"*"));
+    }
+
+    #[test]
+    fn mismatched_state_and_shape_are_rejected() {
+        // A login-capable state must carry home, shell, and a password.
+        for state in [AccountState::Active, AccountState::Locked] {
+            let mut id = no_login_identity();
+            id.state = state;
+            assert_eq!(
+                UserRecord::new(id, StoredPassword::NeverAuthenticates),
+                Err(ParseError::AccountShape),
+                "accepted a bare {state:?} record"
+            );
+        }
+        // A no-login account carries none of them, in any combination.
+        let mut id = identity(&[]);
+        id.state = AccountState::NoLogin;
+        assert_eq!(
+            UserRecord::new(id, password()),
+            Err(ParseError::AccountShape)
+        );
+        let mut home_only = no_login_identity();
+        home_only.home = Some("/Users/devmgr");
+        assert_eq!(
+            UserRecord::new(home_only, StoredPassword::NeverAuthenticates),
+            Err(ParseError::AccountShape)
+        );
+        let mut shell_only = no_login_identity();
+        shell_only.shell = Some("/System/Apps/elsh.app/Run");
+        assert_eq!(
+            UserRecord::new(shell_only, StoredPassword::NeverAuthenticates),
+            Err(ParseError::AccountShape)
+        );
+        assert_eq!(
+            UserRecord::new(no_login_identity(), password()),
+            Err(ParseError::AccountShape)
+        );
+        // An active account with a real password but no home/shell is
+        // equally malformed.
+        let mut pathless = identity(&[]);
+        pathless.home = None;
+        pathless.shell = None;
+        assert_eq!(
+            UserRecord::new(pathless, password()),
+            Err(ParseError::AccountShape)
+        );
     }
 
     #[test]
@@ -529,7 +658,7 @@ mod tests {
     fn bad_paths_are_rejected() {
         for path in ["", "/", "Apps/Run", "/with space", "/with:colon"] {
             let mut id = identity(&[]);
-            id.shell = path;
+            id.shell = Some(path);
             assert_eq!(
                 UserRecord::new(id, password()),
                 Err(ParseError::Path),

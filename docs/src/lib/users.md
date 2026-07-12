@@ -19,7 +19,8 @@ blank, a `#` comment, or one record of ten `:`-separated fields:
 
 ```text
 rustos-users-v1
-root:0:0::System Administrator:/Users/root:/System/Apps/elsh.app/Run:CAP_USER_ADMIN:active:pbkdf2-sha256$600000$<salt>$<hash>
+root:1000:1000::System Administrator:/Users/root:/System/Apps/elsh.app/Run:CAP_USER_ADMIN:active:pbkdf2-sha256$600000$<salt>$<hash>
+devmgr:10:101::Device Manager:none:none:CAP_DRV_LOAD:nologin:*
 ```
 
 A record carries the full §5.1 identity: username, uid, primary gid, the
@@ -27,12 +28,23 @@ comma-separated supplementary gids, a display name, the absolute home
 directory, the user's **shell of choice** (the program their text session
 runs), the comma-separated `CAP_*` capability grant ceiling (`AGENTS.md`
 §5.2 — spelled with the canonical `abi-v1` names), the account state
-(`active` / `locked`), and the stored password record.
+(`active` / `locked` / `nologin`), and the stored password field.
 
-The password record is `pbkdf2-sha256$<iterations>$<salt-hex>$<hash-hex>`:
+The password field is `pbkdf2-sha256$<iterations>$<salt-hex>$<hash-hex>`:
 a per-record 16-byte random salt and a PBKDF2-HMAC-SHA256 hash
 (`lib/crypto`) at a per-record cost bounded into `1_000..=10_000_000`
-(default `600_000`). The password itself is never stored.
+(default `600_000`). The password itself is never stored. Alternatively
+the field is the explicit `*` marker — the typed statement that the
+account has no password and never authenticates (`StoredPassword`).
+
+A `nologin` record is a system/service identity that never starts a
+session (`plans/USERS.md`): it spells its absent home and shell as the
+explicit `none` marker and its password as `*`, and the constructor and
+parser both enforce the pairing — an `active`/`locked` account carries
+all three real values, a `nologin` account none of them
+(`ParseError::AccountShape`). No fake `/Users/<service>` path, no
+throwaway hash that "should" never match: the record is structurally
+incapable of a session, fail closed by construction.
 
 ## Fail-closed parsing
 
@@ -106,12 +118,14 @@ never-panic + round-trip invariants.
 ## Authentication without information leaks
 
 `UsersDb::authenticate(username, password)` exposes exactly one refusal,
-`AuthError::InvalidCredentials`, whether the account is unknown, locked, or
-the password is wrong (`AGENTS.md` §5.4). The stored-hash comparison is
-constant-time (`lib/crypto`'s `ct_eq`, `AGENTS.md` §19.1), and a refusal
-for an unknown or locked account still pays one PBKDF2 derivation at the
-database's highest record cost, so response timing does not reveal whether
-an account exists. An over-long password (> 256 bytes) is rejected without
+`AuthError::InvalidCredentials`, whether the account is unknown, locked,
+no-login, or the password is wrong (`AGENTS.md` §5.4). The stored-hash
+comparison is constant-time (`lib/crypto`'s `ct_eq`, `AGENTS.md` §19.1),
+and a refusal for an unknown, locked, or no-login account still pays one
+PBKDF2 derivation at the highest cost any record carries (the default
+cost when no record carries one), so response timing reveals neither
+whether an account exists nor whether it holds a password at all. An
+over-long password (> 256 bytes) is rejected without
 deriving anything — a work-factor bound, not a capacity (`AGENTS.md`
 §24.4).
 
@@ -128,9 +142,27 @@ boot).
 The shared **account-authoring policy** lives beside the format so every
 author agrees on it (`AGENTS.md` §2.2): `DEFAULT_SHELL` (the default
 shell's store-bundle `Run` binary, drift-pinned to the `lib/abi` store
-spellings), `default_home` (the §16 `/Users/<name>` layout), and
-`next_id` (auto-allocation of a free uid/gid: one above the highest
-existing id, fail closed on exhaustion — ids below the current maximum
-are deliberately not re-used). The interactive `users` session, the
-one-shot `useradd`/`groupadd` command apps, and the image builder all
-import these definitions rather than carrying private copies.
+spellings), `default_home` (the §16 `/Users/<name>` layout), and the
+range-aware `next_id` (auto-allocation of a free uid/gid inside a
+reserved band: one above the highest taken id in the band, fail closed on
+band exhaustion — ids below the current maximum are deliberately not
+re-used, and an allocation never spills into the neighbouring band).
+System uids/gids occupy `0..=999` (`IdRange::System`); interactive users
+start at `FIRST_USER_UID`/`FIRST_USER_GID` = 1000 (`IdRange::User`). The
+interactive `users` session, the one-shot `useradd`/`groupadd` command
+apps (user range), and the image builder all import these definitions
+rather than carrying private copies.
+
+The canonical **default account set** (`plans/USERS.md`) is defined here
+too: `default_system_accounts()` — the no-login `system` record (uid 0,
+group `system` gid 0, empty ceiling; the *name* the loaded registry gives
+the kernel's bootstrap identity) plus one no-login account per system
+service (`devmgr` 10, `sysinfod` 11, `seatmgr` 12, `login` 13, primary
+group `services` gid 101), each carrying exactly its own service's grant
+ceiling (`DEVMGR_CEILING`, `SYSINFOD_CEILING`, `SEATMGR_CEILING`,
+`LOGIN_CEILING`) so the §5.2 ceiling∩manifest intersection does real
+work — and `default_groups()` (`system:0`, `services:101`,
+`storage:100`). Every author of a fresh `/System/Security` pair imports
+this one definition; the uid/gid constants seed provisioning only, and
+runtime consumers resolve accounts and groups by name, failing closed
+when a record is missing (the `storage` precedent).

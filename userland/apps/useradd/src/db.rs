@@ -19,7 +19,8 @@
 //!
 //! # Defaults are the shared account policy
 //!
-//! The auto-allocated uid ([`rustos_users::next_id`]), the home layout
+//! The auto-allocated uid ([`rustos_users::next_id`], interactive-user
+//! range), the home layout
 //! ([`rustos_users::default_home`]), the login shell
 //! ([`rustos_users::DEFAULT_SHELL`]), and the created ceiling
 //! ([`rustos_users::SESSION_BASELINE`] — an administrator widens it
@@ -36,8 +37,8 @@ use rustos_abi::users_admin::{
 };
 use rustos_abi::Errno;
 use rustos_users::{
-    default_home, next_id, PasswordRecord, Salt, DEFAULT_SHELL, MAX_DB_LEN, MIN_ITERATIONS,
-    SALT_LEN, SESSION_BASELINE,
+    default_home, next_id, IdRange, PasswordRecord, Salt, DEFAULT_SHELL, MAX_DB_LEN,
+    MIN_ITERATIONS, SALT_LEN, SESSION_BASELINE,
 };
 
 use crate::io::{UserDb, UserSpec};
@@ -136,9 +137,8 @@ impl UserDb for UsersAdminDb<'_> {
     fn create(&self, spec: &UserSpec<'_>) -> Result<(), Errno> {
         let uid = match spec.uid {
             Some(uid) => uid,
-            None => {
-                next_id(self.list()?.into_iter().map(|(_, uid)| uid)).ok_or(Errno::OutOfRange)?
-            }
+            None => next_id(IdRange::User, self.list()?.into_iter().map(|(_, uid)| uid))
+                .ok_or(Errno::OutOfRange)?,
         };
         let password_record = self.unusable_password_record()?;
         let mut grant_backing = [0u8; 2 * SESSION_BASELINE.len()];
@@ -243,7 +243,7 @@ mod tests {
                             home: "/Users/x",
                             shell: DEFAULT_SHELL,
                             grants: rustos_abi::users_admin::grant_list_into(&[], &mut [])?,
-                            locked: false,
+                            state: rustos_abi::users_admin::AccountStateCode::Active,
                         })?;
                     }
                     Ok(builder.finish())
@@ -311,13 +311,21 @@ mod tests {
     }
 
     #[test]
-    fn an_omitted_uid_is_allocated_above_the_highest_existing() {
-        let channel = MemChannel::new(&[("root", 0), ("alice", 7)]);
+    fn an_omitted_uid_is_allocated_in_the_user_band() {
+        // System-band uids never steer the allocation: a database holding
+        // only reserved uids yields the band's first id…
+        let channel = MemChannel::new(&[("root", 0), ("devmgr", 7)]);
         let db = UsersAdminDb::new(&channel, &ENTROPY);
         assert_eq!(db.create(&spec("bob", None)), Ok(()));
         let created = channel.created();
         assert_eq!(created.len(), 1);
-        assert_eq!(created[0].uid, 8);
+        assert_eq!(created[0].uid, 1000);
+
+        // …and an existing user-band uid is allocated above.
+        let channel = MemChannel::new(&[("root", 0), ("alice", 1004)]);
+        let db = UsersAdminDb::new(&channel, &ENTROPY);
+        assert_eq!(db.create(&spec("bob", None)), Ok(()));
+        assert_eq!(channel.created()[0].uid, 1005);
     }
 
     #[test]

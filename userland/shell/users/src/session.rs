@@ -8,8 +8,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use rustos_abi::users_admin::{
-    decode_group_list, decode_user_list, gid_list_into, grant_list_into, CreateUser,
-    UsersAdminRequest, USERS_ADMIN_MAX_REQUEST,
+    decode_group_list, decode_user_list, gid_list_into, grant_list_into, AccountStateCode,
+    CreateUser, UsersAdminRequest, USERS_ADMIN_MAX_REQUEST,
 };
 use rustos_abi::{CapabilityId, Errno};
 use rustos_users::{
@@ -207,7 +207,11 @@ fn list_users(io: &mut dyn ToolIo, channel: &mut dyn AdminChannel) {
             entry.username,
             entry.uid,
             entry.primary_gid,
-            if entry.locked { "locked" } else { "active" },
+            match entry.state {
+                AccountStateCode::Active => "active",
+                AccountStateCode::Locked => "locked",
+                AccountStateCode::NoLogin => "nologin",
+            },
             grants,
         ));
     }

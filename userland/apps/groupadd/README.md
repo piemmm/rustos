@@ -54,7 +54,8 @@ syscall in production, an in-memory registry in tests), so the whole
 client policy is host-tested:
 
 - an omitted gid is allocated by the shared `rustos_users::next_id`
-  policy (one above the highest existing id, fail closed on exhaustion);
+  policy (interactive-user range, `1000..`: one above the highest taken
+  id in the band, fail closed on band exhaustion);
 - the registry — not this tool — is the policy point: it enforces
   `CAP_USER_ADMIN` and gid uniqueness (`AGENTS.md` §5.4).
 

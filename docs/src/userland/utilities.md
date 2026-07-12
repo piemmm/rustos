@@ -1948,7 +1948,8 @@ confused for a numeric id or an option.
 
 `-g` is required rather than defaulted: there is no default-group policy
 to invent (`AGENTS.md` §2.1). A missing `-u` is allocated by the shared
-`rustos_users::next_id` policy (one above the highest existing id) and a
+`rustos_users::next_id` policy (interactive-user range, `1000..`: one
+above the highest taken id in the band) and a
 missing `-d` is the shared `rustos_users::default_home` layout (the §16
 `/Users/<name>` shape) — both applied by the production database client,
 never guessed in the parser.
@@ -2068,8 +2069,9 @@ which admits no name that could be confused for a numeric id or an
 option.
 
 A missing `-g` is allocated by the shared `rustos_users::next_id` policy
-(one above the highest existing id) in the production database client,
-never guessed in the parser (`AGENTS.md` §2.1).
+(interactive-user range, `1000..`: one above the highest taken id in the
+band) in the production database client, never guessed in the parser
+(`AGENTS.md` §2.1).
 
 ### A group-spec parser, not a policy point
 

@@ -14,8 +14,15 @@
 //! ```text
 //! rustos-users-v1
 //! # username:uid:gid:supplementary:display name:home:shell:caps:state:password
-//! root:0:0::System Administrator:/Users/root:/System/Apps/elsh.app/Run:CAP_USER_ADMIN:active:pbkdf2-sha256$600000$…$…
+//! root:1000:1000::System Administrator:/Users/root:/System/Apps/elsh.app/Run:CAP_USER_ADMIN:active:pbkdf2-sha256$600000$…$…
+//! devmgr:10:101::Device Manager:none:none:CAP_DRV_LOAD:nologin:*
 //! ```
+//!
+//! A no-login system/service record spells its absent home and shell as
+//! the explicit `none` marker and its absent password as `*` — see
+//! [`crate::NO_PATH_MARKER`] / [`crate::NO_PASSWORD_MARKER`]; the parser
+//! enforces the pairing with the `nologin` state
+//! ([`crate::ParseError::AccountShape`]).
 
 use core::num::NonZeroU32;
 
@@ -132,10 +139,11 @@ impl UsersDb {
 
     /// Verify a `(username, password)` pair, returning the matched record.
     ///
-    /// Refusals are indistinguishable: an unknown username, a locked
-    /// account, and a wrong password all cost one PBKDF2 derivation and all
-    /// return the same [`AuthError::InvalidCredentials`], so a caller cannot
-    /// probe for valid usernames or locked accounts.
+    /// Refusals are indistinguishable: an unknown username, a locked or
+    /// no-login account, and a wrong password all cost one PBKDF2
+    /// derivation and all return the same
+    /// [`AuthError::InvalidCredentials`], so a caller cannot probe for
+    /// valid usernames or locked accounts.
     ///
     /// # Errors
     ///
@@ -164,9 +172,9 @@ impl UsersDb {
     }
 
     /// Pay the PBKDF2 cost a real verification would have paid, so a refusal
-    /// for an unknown or locked account takes as long as a wrong password on
-    /// a real one. The burn uses the database's highest
-    /// record cost (the default cost when the database is empty) against an
+    /// for an unknown, locked, or no-login account takes as long as a wrong
+    /// password on a real one. The burn uses the database's highest
+    /// record cost (the default cost when no record carries one) against an
     /// all-zero salt and hash; the discarded result is always `false`.
     fn burn_dummy_derivation(&self, password: &[u8]) {
         if password.len() > MAX_PASSWORD_LEN {
@@ -175,7 +183,7 @@ impl UsersDb {
         let cost = self
             .records
             .iter()
-            .map(|record| record.password().iterations())
+            .filter_map(|record| record.password().iterations())
             .max()
             .unwrap_or(DEFAULT_ITERATIONS);
         if let Some(iterations) = NonZeroU32::new(cost) {
@@ -211,8 +219,8 @@ mod tests {
                 primary_gid: Gid(uid),
                 supplementary_gids: &[],
                 display_name: "",
-                home: "/Users/test",
-                shell: "/System/Apps/elsh.app/Run",
+                home: Some("/Users/test"),
+                shell: Some("/System/Apps/elsh.app/Run"),
                 capabilities,
                 state,
             },
@@ -223,11 +231,30 @@ mod tests {
         .expect("valid record")
     }
 
+    fn no_login_record(username: &str, uid: u32) -> UserRecord {
+        UserRecord::new(
+            Identity {
+                username,
+                uid: Uid(uid),
+                primary_gid: Gid(uid),
+                supplementary_gids: &[],
+                display_name: "",
+                home: None,
+                shell: None,
+                capabilities: CapabilitySet::empty(),
+                state: AccountState::NoLogin,
+            },
+            crate::password::StoredPassword::NeverAuthenticates,
+        )
+        .expect("valid record")
+    }
+
     fn db() -> UsersDb {
         UsersDb::new(alloc::vec![
             record("root", 0, AccountState::Active, b"root"),
             record("ada", 1000, AccountState::Active, b"byron"),
             record("mallory", 1001, AccountState::Locked, b"evil"),
+            no_login_record("devmgr", 10),
         ])
         .expect("valid db")
     }
@@ -332,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_and_locked_accounts_are_indistinguishable_refusals() {
+    fn unknown_locked_and_no_login_accounts_are_indistinguishable_refusals() {
         let db = db();
         assert_eq!(
             db.authenticate("nobody", b"anything"),
@@ -342,9 +369,21 @@ mod tests {
             db.authenticate("mallory", b"evil"),
             Err(AuthError::InvalidCredentials)
         );
+        for offered in [&b""[..], b"*", b"anything"] {
+            assert_eq!(
+                db.authenticate("devmgr", offered),
+                Err(AuthError::InvalidCredentials)
+            );
+        }
         let empty = UsersDb::new(Vec::new()).expect("empty db");
         assert_eq!(
             empty.authenticate("root", b""),
+            Err(AuthError::InvalidCredentials)
+        );
+        let passwordless_only =
+            UsersDb::new(alloc::vec![no_login_record("devmgr", 10)]).expect("valid db");
+        assert_eq!(
+            passwordless_only.authenticate("devmgr", b""),
             Err(AuthError::InvalidCredentials)
         );
     }

@@ -127,7 +127,7 @@ fn user_list_response() -> Vec<u8> {
             home: "/Users/ada",
             shell: "/System/Apps/elsh.app/Run",
             grants,
-            locked: false,
+            state: rustos_abi::users_admin::AccountStateCode::Active,
         })
         .expect("entry fits");
     let len = builder.finish();

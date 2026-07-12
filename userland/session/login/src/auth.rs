@@ -35,14 +35,20 @@ impl Authenticator for UsersAuthenticator<'_> {
             .db
             .authenticate(credentials.username, credentials.password.as_bytes())
             .map_err(|_| Errno::PermissionDenied)?;
+        // Only an active account authenticates, and the record format
+        // guarantees an active account carries both paths — but a session
+        // without them is refused rather than fabricated (fail closed).
+        let (Some(home), Some(shell)) = (record.home(), record.shell()) else {
+            return Err(Errno::PermissionDenied);
+        };
         Ok(AuthenticatedUser {
             username: record.username().to_string(),
             uid: record.uid(),
             primary_gid: record.primary_gid(),
             supplementary_gids: record.supplementary_gids().to_vec(),
             capabilities: record.capabilities(),
-            home: record.home().to_string(),
-            shell: record.shell().to_string(),
+            home: home.to_string(),
+            shell: shell.to_string(),
         })
     }
 }
@@ -70,7 +76,9 @@ mod tests {
     use alloc::vec;
     use rustos_abi::{CapabilityId, Errno};
     use rustos_caps::CapabilitySet;
-    use rustos_users::{AccountState, Gid, Identity, Uid, UserRecord, UsersDb, MIN_ITERATIONS};
+    use rustos_users::{
+        AccountState, Gid, Identity, StoredPassword, Uid, UserRecord, UsersDb, MIN_ITERATIONS,
+    };
 
     fn db() -> UsersDb {
         let mut capabilities = CapabilitySet::empty();
@@ -82,8 +90,8 @@ mod tests {
                 primary_gid: Gid(1000),
                 supplementary_gids: &[Gid(4)],
                 display_name: "Ada Lovelace",
-                home: "/Users/ada",
-                shell: "/System/Apps/elsh.app/Run",
+                home: Some("/Users/ada"),
+                shell: Some("/System/Apps/elsh.app/Run"),
                 capabilities,
                 state: AccountState::Active,
             },
@@ -99,8 +107,8 @@ mod tests {
                 primary_gid: Gid(1001),
                 supplementary_gids: &[],
                 display_name: "",
-                home: "/Users/mallory",
-                shell: "/System/Apps/elsh.app/Run",
+                home: Some("/Users/mallory"),
+                shell: Some("/System/Apps/elsh.app/Run"),
                 capabilities: CapabilitySet::empty(),
                 state: AccountState::Locked,
             },
@@ -109,7 +117,22 @@ mod tests {
             MIN_ITERATIONS,
         )
         .expect("valid record");
-        UsersDb::new(vec![ada, locked]).expect("valid db")
+        let service = UserRecord::new(
+            Identity {
+                username: "devmgr",
+                uid: Uid(10),
+                primary_gid: Gid(101),
+                supplementary_gids: &[],
+                display_name: "",
+                home: None,
+                shell: None,
+                capabilities: CapabilitySet::empty(),
+                state: AccountState::NoLogin,
+            },
+            StoredPassword::NeverAuthenticates,
+        )
+        .expect("valid record");
+        UsersDb::new(vec![ada, locked, service]).expect("valid db")
     }
 
     fn credentials<'a>(username: &'a str, password: &'a str) -> Credentials<'a> {
@@ -139,6 +162,8 @@ mod tests {
             ("ada", "wrong"),
             ("nobody", "byron"),
             ("mallory", "evil"),
+            ("devmgr", ""),
+            ("devmgr", "*"),
             ("", ""),
         ] {
             assert_eq!(

@@ -19,12 +19,20 @@
 //! * [`administrator_ceiling`] — the union of the two, the ceiling an
 //!   administrator account (the debug image's `root`, the installer's
 //!   first user) is seeded with.
+//! * The per-service ceilings ([`DEVMGR_CEILING`], [`SYSINFOD_CEILING`],
+//!   [`SEATMGR_CEILING`], [`LOGIN_CEILING`]) — each service account's
+//!   grant ceiling holds exactly its own service's needs, so the
+//!   ceiling∩manifest intersection does real work: a compromised service
+//!   cannot borrow a sibling's authority even if its manifest lied
+//!   (`plans/USERS.md`).
 //!
 //! Driver-class (`CAP_MEM_DMA`, `CAP_IRQ_BIND`, …) and service-class
 //! (`CAP_SPAWN_AS_USER`, `CAP_USERS_READ`, …) capabilities are never part
-//! of an account ceiling: they belong to the specific system program whose
-//! manifest requests them. An administrator administers the system; they
-//! do not impersonate its services.
+//! of an *interactive* account ceiling: they belong to the specific system
+//! program whose manifest requests them — and, through that service's own
+//! no-login account, to its dedicated per-service ceiling. An
+//! administrator administers the system; they do not impersonate its
+//! services.
 
 use rustos_abi::CapabilityId;
 use rustos_caps::CapabilitySet;
@@ -98,6 +106,48 @@ pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::TIME_HIRES,
 ];
 
+/// The `devmgr` service account's grant ceiling: read the hardware tree
+/// and load matched drivers, nothing else.
+pub const DEVMGR_CEILING: &[CapabilityId] = &[
+    CapabilityId::SYSINFO_HW,
+    CapabilityId::DRV_LOAD,
+    CapabilityId::LOG_EMIT,
+];
+
+/// The `sysinfod` service account's grant ceiling: introspect the kernel
+/// for the System Information broker and serve its privileged endpoint.
+pub const SYSINFOD_CEILING: &[CapabilityId] = &[
+    CapabilityId::SYSINFO_INTROSPECT,
+    CapabilityId::SYSINFO_HW,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::LOG_EMIT,
+];
+
+/// The `seatmgr` service account's grant ceiling: administer seats and
+/// serve the privileged seat endpoint.
+pub const SEATMGR_CEILING: &[CapabilityId] = &[
+    CapabilityId::SEAT_ADMIN,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::LOG_EMIT,
+];
+
+/// The `login` service account's grant ceiling: run the prompt on the
+/// console, read the user database, and drop the authenticated session
+/// into the target account — the instructive shape: it holds
+/// `CAP_SPAWN_AS_USER` while itself being an unprivileged no-login
+/// service account (authority from ceiling∩manifest, never identity).
+pub const LOGIN_CEILING: &[CapabilityId] = &[
+    CapabilityId::CONSOLE_WRITE,
+    CapabilityId::CONSOLE_READ,
+    CapabilityId::PROC_SPAWN,
+    CapabilityId::USERS_READ,
+    CapabilityId::SPAWN_AS_USER,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::LOG_EMIT,
+    CapabilityId::SYSINFO_KERNEL,
+    CapabilityId::FS_ACCESS,
+];
+
 /// The administrator account ceiling: [`SESSION_BASELINE`] ∪
 /// [`ADMINISTRATIVE_SET`].
 ///
@@ -119,11 +169,19 @@ pub fn administrator_ceiling() -> CapabilitySet {
 /// (non-administrator) interactive account is seeded with.
 #[must_use]
 pub fn session_baseline() -> CapabilitySet {
-    let mut caps = CapabilitySet::empty();
-    for cap in SESSION_BASELINE {
-        caps.insert(*cap);
+    capability_set(SESSION_BASELINE)
+}
+
+/// Collect a grant list into a [`CapabilitySet`] — how a seeded account's
+/// ceiling (a per-service ceiling above, or [`SESSION_BASELINE`]) becomes
+/// the set its [`crate::UserRecord`] stores.
+#[must_use]
+pub fn capability_set(caps: &[CapabilityId]) -> CapabilitySet {
+    let mut set = CapabilitySet::empty();
+    for cap in caps {
+        set.insert(*cap);
     }
-    caps
+    set
 }
 
 #[cfg(test)]
@@ -173,9 +231,44 @@ mod tests {
         }
     }
 
-    /// No service- or driver-class capability ever enters an account
-    /// ceiling: the administrator administers the system, never
-    /// impersonates its services or drivers.
+    /// Each service ceiling is exactly its service's needs — pinned, so
+    /// widening a service's authority is a reviewed test diff, and no
+    /// service ceiling contains a sibling's defining capability.
+    #[test]
+    fn service_ceilings_are_pinned_and_disjoint_in_authority() {
+        assert_eq!(DEVMGR_CEILING.len(), 3);
+        assert_eq!(SYSINFOD_CEILING.len(), 4);
+        assert_eq!(SEATMGR_CEILING.len(), 3);
+        assert_eq!(LOGIN_CEILING.len(), 9);
+        let devmgr = capability_set(DEVMGR_CEILING);
+        let sysinfod = capability_set(SYSINFOD_CEILING);
+        let seatmgr = capability_set(SEATMGR_CEILING);
+        let login = capability_set(LOGIN_CEILING);
+        // The capability that defines each service stays that service's
+        // alone.
+        assert!(devmgr.contains(CapabilityId::DRV_LOAD));
+        for other in [&sysinfod, &seatmgr, &login] {
+            assert!(!other.contains(CapabilityId::DRV_LOAD));
+        }
+        assert!(sysinfod.contains(CapabilityId::SYSINFO_INTROSPECT));
+        for other in [&devmgr, &seatmgr, &login] {
+            assert!(!other.contains(CapabilityId::SYSINFO_INTROSPECT));
+        }
+        assert!(seatmgr.contains(CapabilityId::SEAT_ADMIN));
+        for other in [&devmgr, &sysinfod, &login] {
+            assert!(!other.contains(CapabilityId::SEAT_ADMIN));
+        }
+        assert!(login.contains(CapabilityId::SPAWN_AS_USER));
+        assert!(login.contains(CapabilityId::USERS_READ));
+        for other in [&devmgr, &sysinfod, &seatmgr] {
+            assert!(!other.contains(CapabilityId::SPAWN_AS_USER));
+            assert!(!other.contains(CapabilityId::USERS_READ));
+        }
+    }
+
+    /// No service- or driver-class capability ever enters an
+    /// *interactive* account ceiling: the administrator administers the
+    /// system, never impersonates its services or drivers.
     #[test]
     fn ceiling_excludes_service_and_driver_class_capabilities() {
         let set = administrator_ceiling();

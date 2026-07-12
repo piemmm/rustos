@@ -232,9 +232,13 @@ ceiling a bring-up session needs" its rustdoc already promises. Driver-class
 (`CAP_MEM_DMA`, `CAP_IRQ_BIND`, `CAP_MMIO_MAP`, `CAP_HW_EMIT`, …) and
 service-class (`CAP_SPAWN_AS_USER`, `CAP_USERS_READ`,
 `CAP_SYSINFO_INTROSPECT`, `CAP_INPUT_INJECT`, …) capabilities are **never**
-part of any account ceiling: they belong to the specific system program
-whose manifest requests them. An administrator administers the system; they
-do not impersonate its services.
+part of an *interactive* account ceiling: they belong to the specific system
+program whose manifest requests them — and, through that service's own
+no-login account (`plans/USERS.md`), to its dedicated per-service ceiling
+(`rustos_users::{DEVMGR_CEILING, SYSINFOD_CEILING, SEATMGR_CEILING,
+LOGIN_CEILING}`), which holds exactly that one service's needs so the
+ceiling∩manifest intersection does real work. An administrator administers
+the system; they do not impersonate its services.
 
 ### 4.4 Elevation (running with more than your ceiling)
 

@@ -31,14 +31,15 @@
 use alloc::vec::Vec;
 
 use rustos_abi::users_admin::{
-    gid_list_into, grant_list_into, GroupEntry, ListResponseBuilder, UserEntry, UsersAdminRequest,
+    gid_list_into, grant_list_into, AccountStateCode, GroupEntry, ListResponseBuilder, UserEntry,
+    UsersAdminRequest,
 };
 use rustos_abi::{CapabilityId, CapabilityQuery, Errno};
 use rustos_caps::CapabilitySet;
 use rustos_log::{Field, FieldValue, Level, Sink};
 use rustos_users::{
-    AccountState, Gid, GroupRecord, GroupsDb, Identity, ParseError, PasswordRecord, Uid,
-    UserRecord, UsersDb, MAX_DB_LEN, MAX_GROUPS_DB_LEN,
+    AccountState, Gid, GroupRecord, GroupsDb, Identity, ParseError, PasswordRecord, StoredPassword,
+    Uid, UserRecord, UsersDb, MAX_DB_LEN, MAX_GROUPS_DB_LEN, NO_PATH_MARKER,
 };
 use rustos_util::fmt::format_usize;
 
@@ -388,12 +389,12 @@ impl UserAdminEngine {
                 primary_gid: Gid(req.primary_gid),
                 supplementary_gids: &supplementary,
                 display_name: req.display_name,
-                home: req.home,
-                shell: req.shell,
+                home: Some(req.home),
+                shell: Some(req.shell),
                 capabilities: grants,
                 state: AccountState::Active,
             },
-            password,
+            StoredPassword::Password(password),
         )
         .map_err(parse_errno)?;
 
@@ -424,8 +425,8 @@ impl UserAdminEngine {
                 primary_gid: Gid(req.primary_gid),
                 supplementary_gids: &supplementary,
                 display_name: req.display_name,
-                home: req.home,
-                shell: req.shell,
+                home: Some(req.home),
+                shell: Some(req.shell),
                 capabilities: old.capabilities(),
                 state: old.state(),
             },
@@ -433,7 +434,7 @@ impl UserAdminEngine {
         )
         .map_err(parse_errno)?;
 
-        let home_changed = old.home() != req.home;
+        let home_changed = old.home() != Some(req.home);
         let (uid, gid) = (old.uid().0, Gid(req.primary_gid).0);
         let mut records = state.users.records().to_vec();
         records[index] = rebuilt;
@@ -519,7 +520,8 @@ impl UserAdminEngine {
         password_record: &str,
         state: &mut AdminState,
     ) -> Result<(), Errno> {
-        let password = PasswordRecord::decode(password_record).map_err(parse_errno)?;
+        let password =
+            StoredPassword::Password(PasswordRecord::decode(password_record).map_err(parse_errno)?);
         Self::rebuild_user(state, username, |old, supplementary| {
             UserRecord::new(
                 Identity {
@@ -605,10 +607,14 @@ impl UserAdminEngine {
                 primary_gid: record.primary_gid().0,
                 supplementary_gids,
                 display_name: record.display_name(),
-                home: record.home(),
-                shell: record.shell(),
+                home: record.home().unwrap_or(NO_PATH_MARKER),
+                shell: record.shell().unwrap_or(NO_PATH_MARKER),
                 grants,
-                locked: record.state() == AccountState::Locked,
+                state: match record.state() {
+                    AccountState::Active => AccountStateCode::Active,
+                    AccountState::Locked => AccountStateCode::Locked,
+                    AccountState::NoLogin => AccountStateCode::NoLogin,
+                },
             })?;
         }
         Ok(builder.finish() as u64)

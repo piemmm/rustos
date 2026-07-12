@@ -27,7 +27,8 @@
 use rustos_abi::CapabilityId;
 use rustos_caps::CapabilitySet;
 use rustos_users::{
-    AccountState, Gid, Identity, Uid, UserRecord, UsersDb, FORMAT_HEADER, MIN_ITERATIONS,
+    AccountState, Gid, Identity, StoredPassword, Uid, UserRecord, UsersDb, FORMAT_HEADER,
+    MIN_ITERATIONS,
 };
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -38,7 +39,8 @@ const MAX_NOISE: usize = 2048;
 
 /// Bytes the noise generator draws from: the format's own alphabet, so the
 /// mutations reach past the first charset check instead of bouncing off it.
-const ALPHABET: &[u8] = b"abcdefxyz0123456789:,$#/_-. \nACTIVELOCKEDpbkdf2sha256rustos-users-v1";
+const ALPHABET: &[u8] =
+    b"abcdefxyz0123456789:,$#/_-.* \nACTIVELOCKEDpbkdf2sha256rustos-users-v1nologin";
 
 /// Build the corpus of real, well-formed databases through the public
 /// constructors, so this harness encodes no second copy of the format.
@@ -54,8 +56,8 @@ fn templates() -> Vec<String> {
                 primary_gid: Gid(uid),
                 supplementary_gids: &[Gid(4), Gid(100)],
                 display_name: "Fuzz Fixture",
-                home: "/Users/fuzz",
-                shell: "/System/Apps/elsh.app/Run",
+                home: Some("/Users/fuzz"),
+                shell: Some("/System/Apps/elsh.app/Run"),
                 capabilities,
                 state,
             },
@@ -66,11 +68,28 @@ fn templates() -> Vec<String> {
         .expect("fixture record is valid")
     };
 
+    let no_login = UserRecord::new(
+        Identity {
+            username: "devmgr",
+            uid: Uid(10),
+            primary_gid: Gid(101),
+            supplementary_gids: &[],
+            display_name: "Fuzz Service",
+            home: None,
+            shell: None,
+            capabilities: CapabilitySet::empty(),
+            state: AccountState::NoLogin,
+        },
+        StoredPassword::NeverAuthenticates,
+    )
+    .expect("fixture record is valid");
+
     let single = UsersDb::new(vec![record("root", 0, AccountState::Active)]).expect("valid");
     let multi = UsersDb::new(vec![
         record("root", 0, AccountState::Active),
         record("ada", 1000, AccountState::Active),
         record("mallory", 1001, AccountState::Locked),
+        no_login,
     ])
     .expect("valid");
     let empty = UsersDb::new(Vec::new()).expect("valid");

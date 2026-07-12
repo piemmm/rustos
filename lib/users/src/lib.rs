@@ -9,13 +9,24 @@
 //! * [`UserRecord`] — one account: username, [`Uid`], primary [`Gid`],
 //!   supplementary groups, display name, home directory, the user's shell
 //!   of choice, the capability grant ceiling, the
-//!   [`AccountState`], and the stored [`PasswordRecord`].
+//!   [`AccountState`], and the stored password. An interactive account
+//!   carries all of home, shell, and a real [`PasswordRecord`]; a
+//!   [`AccountState::NoLogin`] system/service account carries none of
+//!   them — the explicit [`NO_PATH_MARKER`] / [`NO_PASSWORD_MARKER`]
+//!   spellings, never a fake path or a throwaway hash — and the
+//!   constructor and parser both enforce that pairing
+//!   ([`ParseError::AccountShape`]).
 //! * [`UsersDb`] — the whole database: fail-closed [`UsersDb::parse`],
 //!   exact-round-trip [`UsersDb::serialise`], and the timing-equalised
 //!   [`UsersDb::authenticate`].
-//! * [`PasswordRecord`] — the salted PBKDF2-HMAC-SHA256 password hash
-//!   (`lib/crypto`), verified in constant time with
-//!   respect to the stored hash.
+//! * [`StoredPassword`] — what the password field stores: a
+//!   [`PasswordRecord`] (the salted PBKDF2-HMAC-SHA256 hash via
+//!   `lib/crypto`, verified in constant time with respect to the stored
+//!   hash), or the typed never-authenticates marker.
+//! * The canonical default system/service accounts and groups every
+//!   image author seeds ([`default_system_accounts`], [`default_groups`]),
+//!   defined once here and imported by the image builder, the installer,
+//!   and the test fixtures — never three hand-maintained copies.
 //!
 //! The database text is untrusted input: every
 //! bound and field shape is validated and the first defect rejects the
@@ -34,22 +45,31 @@ mod grants;
 mod groups;
 mod password;
 mod policy;
+mod provision;
 mod record;
 
 pub use db::{UsersDb, FORMAT_HEADER, MAX_DB_LEN, MAX_LINE_LEN, MAX_USERS};
-pub use grants::{administrator_ceiling, session_baseline, ADMINISTRATIVE_SET, SESSION_BASELINE};
+pub use grants::{
+    administrator_ceiling, capability_set, session_baseline, ADMINISTRATIVE_SET, DEVMGR_CEILING,
+    LOGIN_CEILING, SEATMGR_CEILING, SESSION_BASELINE, SYSINFOD_CEILING,
+};
 pub use groups::{
     GroupRecord, GroupsDb, GROUPS_FORMAT_HEADER, MAX_GROUPNAME_LEN, MAX_GROUPS, MAX_GROUPS_DB_LEN,
     MAX_GROUP_LINE_LEN, STORAGE_GID, STORAGE_GROUP,
 };
 pub use password::{
-    PasswordRecord, Salt, DEFAULT_ITERATIONS, MAX_ITERATIONS, MAX_PASSWORD_LEN, MIN_ITERATIONS,
-    PASSWORD_SCHEME, SALT_LEN,
+    PasswordRecord, Salt, StoredPassword, DEFAULT_ITERATIONS, MAX_ITERATIONS, MAX_PASSWORD_LEN,
+    MIN_ITERATIONS, NO_PASSWORD_MARKER, PASSWORD_SCHEME, SALT_LEN,
 };
-pub use policy::{default_home, next_id, DEFAULT_SHELL};
+pub use policy::{default_home, next_id, IdRange, DEFAULT_SHELL, FIRST_USER_GID, FIRST_USER_UID};
+pub use provision::{
+    default_groups, default_system_accounts, DEVMGR_UID, DEVMGR_USERNAME, LOGIN_UID,
+    LOGIN_USERNAME, SEATMGR_UID, SEATMGR_USERNAME, SERVICES_GID, SERVICES_GROUP, SYSINFOD_UID,
+    SYSINFOD_USERNAME, SYSTEM_GID, SYSTEM_GROUP, SYSTEM_UID, SYSTEM_USERNAME,
+};
 pub use record::{
     AccountState, Gid, Identity, Uid, UserRecord, MAX_DISPLAY_NAME_LEN, MAX_PATH_LEN,
-    MAX_SUPPLEMENTARY_GIDS, MAX_USERNAME_LEN,
+    MAX_SUPPLEMENTARY_GIDS, MAX_USERNAME_LEN, NO_PATH_MARKER,
 };
 
 use core::fmt;
@@ -83,8 +103,12 @@ pub enum ParseError {
     Path,
     /// A capability grant names no `abi-v1` capability, or repeats one.
     Capability,
-    /// An account state is neither `active` nor `locked`.
+    /// An account state is not `active`, `locked`, or `nologin`.
     AccountState,
+    /// The account state and the home/shell/password presence disagree: a
+    /// login-capable account requires all three; a no-login account
+    /// carries none of them.
+    AccountShape,
     /// A stored password record violates its scheme, cost, or encoding.
     PasswordRecord,
     /// Two records share a username.
@@ -118,6 +142,9 @@ impl fmt::Display for ParseError {
             Self::Path => "user record carries an invalid home or shell path",
             Self::Capability => "user record carries an invalid capability grant",
             Self::AccountState => "user record carries an unknown account state",
+            Self::AccountShape => {
+                "user record pairs its state with the wrong home/shell/password shape"
+            }
             Self::PasswordRecord => "user record carries an invalid password record",
             Self::DuplicateUsername => "users database repeats a username",
             Self::DuplicateUserId => "users database repeats a uid",
