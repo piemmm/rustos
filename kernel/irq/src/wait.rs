@@ -68,13 +68,19 @@ pub trait IrqWaiter {
 ///
 /// The blocking loop has no scheduler vocabulary of its own; each
 /// caller maps these reasons onto its own error surface (the syscall
-/// handler maps [`Self::TaskVanished`] to `Errno::NotFound` and
+/// handler maps [`Self::TaskVanished`] to `Errno::NotFound`,
+/// [`Self::Interrupted`] to `Errno::Interrupted`, and
 /// [`Self::SchedulerError`] to `Errno::OutOfRange`).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum IrqWaitAbort {
     /// The waiting task can no longer be scheduled — it has been torn
     /// down between two polls. Fail closed.
     TaskVanished,
+    /// The waiting task has a termination pending against it: the wait
+    /// unwinds so the task can exit at its syscall boundary instead of
+    /// sleeping on as an unkillable waiter. The aborted result never
+    /// reaches user space — the kernel lands the pending kill first.
+    Interrupted,
     /// The yield seam refused for any other reason. Defensive; not
     /// expected during normal operation.
     SchedulerError,

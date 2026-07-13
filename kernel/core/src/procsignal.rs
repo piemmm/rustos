@@ -133,6 +133,81 @@ pub fn clear_intake(task: u64) {
     SIGNAL_INTAKE.lock().remove(&task);
 }
 
+/// The kill gate: which tasks are currently inside a syscall dispatch,
+/// and the termination signal deferred against each of them.
+///
+/// A task inside a syscall may hold kernel state only its own unwind can
+/// release — a mount's `SleepLock`, an in-flight block-I/O descriptor the
+/// device is still writing, heap allocations owned by handler stack
+/// frames. Destroying it mid-flight leaks that state: the observed shape
+/// is a killed writer leaving its volume's lock held forever, deadlocking
+/// every later filesystem call on that mount. The terminate path
+/// therefore never ends an in-syscall task directly; it records the
+/// signal here and wakes the task, and the syscall dispatch boundary
+/// lands the kill once the handler has unwound and released everything
+/// it held. Both maps grow with live tasks, never a fixed ceiling; the
+/// shared task reclaim clears a dead task's entries.
+struct KillGate {
+    /// Tasks currently between [`syscall_enter`] and
+    /// [`syscall_exit_take_kill`] — i.e. inside a syscall dispatch,
+    /// parked or running.
+    in_syscall: BTreeSet<u64>,
+    /// The first termination signal deferred against each in-syscall
+    /// task. First request wins: a later `Kill` against an
+    /// already-doomed task changes nothing (it is already dying at the
+    /// same boundary), matching the immediate path where a second
+    /// signal finds the child already gone.
+    pending: BTreeMap<u64, Signal>,
+}
+
+/// The one kill-gate instance shared by the signal producer and the
+/// syscall dispatch boundary.
+static KILL_GATE: SpinLock<KillGate> = SpinLock::new(KillGate {
+    in_syscall: BTreeSet::new(),
+    pending: BTreeMap::new(),
+});
+
+/// Mark `task` as inside a syscall dispatch. Paired with
+/// [`syscall_exit_take_kill`] by the dispatch hook around every syscall.
+pub fn syscall_enter(task: u64) {
+    KILL_GATE.lock().in_syscall.insert(task);
+}
+
+/// Mark `task` as leaving its syscall dispatch and take any termination
+/// deferred against it while it was inside.
+///
+/// `Some(signal)` obliges the caller to land the kill now: the handler
+/// has unwound (every lock and buffer it held is released), so this is
+/// the first safe point the task can die at.
+#[must_use]
+pub fn syscall_exit_take_kill(task: u64) -> Option<Signal> {
+    let mut gate = KILL_GATE.lock();
+    gate.in_syscall.remove(&task);
+    gate.pending.remove(&task)
+}
+
+/// Whether a termination is deferred against `task`.
+///
+/// The in-kernel park loops consult this after every wake and unwind
+/// with `Errno::Interrupted` instead of re-parking, so a doomed task
+/// reaches its syscall boundary promptly rather than sleeping on as an
+/// unkillable waiter. The errno never reaches user space — the boundary
+/// lands the kill first.
+#[must_use]
+pub fn kill_pending(task: u64) -> bool {
+    KILL_GATE.lock().pending.contains_key(&task)
+}
+
+/// Drop `task`'s kill-gate state on teardown. Idempotent; driven by the
+/// one shared task-reclaim path exactly like [`clear_intake`], so a task
+/// that exits on its own while a kill is deferred against it leaves no
+/// stale entry behind (task ids are never reused).
+pub fn clear_kill_gate(task: u64) {
+    let mut gate = KILL_GATE.lock();
+    gate.in_syscall.remove(&task);
+    gate.pending.remove(&task);
+}
+
 /// Try to record a termination-request `signal` as `target`'s observable
 /// pending event instead of terminating it.
 ///
@@ -473,7 +548,38 @@ where
     /// termination status so the parent's `wait` reaps the child and reports
     /// `128 + n`. A child the scheduler no longer knows fails closed with
     /// [`Errno::NotFound`] and records nothing (never a fabricated zombie).
+    ///
+    /// A child currently **inside a syscall** is never destroyed mid-flight:
+    /// its handler may hold kernel state only its own unwind can release (a
+    /// mount's `SleepLock`, an in-flight block-I/O descriptor), so ending it
+    /// here would leak that state and wedge every later user of it. The kill
+    /// is instead deferred through the kill gate — recorded pending, the
+    /// child woken out of any park so an indefinite wait unwinds
+    /// (`Errno::Interrupted`) — and the syscall dispatch boundary lands it
+    /// the moment the handler has unwound. The delivery is complete from the
+    /// caller's perspective either way: the child is doomed and the parent's
+    /// `wait` reaps it when the exit is recorded.
     fn terminate(&self, child: TaskId, signal: Signal) -> Result<(), Errno> {
+        {
+            let mut gate = KILL_GATE.lock();
+            if gate.in_syscall.contains(&child.0) {
+                gate.pending.entry(child.0).or_insert(signal);
+                drop(gate);
+                // A stopped child must still die: lift its overlay entry so
+                // the wake below runs it to its boundary instead of the
+                // dispatch shim re-parking it forever.
+                STOPPED_TASKS.lock().remove(&child.0);
+                // Wake the child out of any in-kernel park. Every park loop
+                // re-tests its condition after a wake and consults the kill
+                // gate, so a spurious wake is harmless and a doomed waiter
+                // unwinds promptly. `InvalidState` means the child is
+                // runnable or running — it reaches its boundary by itself.
+                match self.scheduler.unpark(child.0) {
+                    Ok(()) | Err(SchedError::InvalidState) => return Ok(()),
+                    Err(_) => return Err(Errno::NotFound),
+                }
+            }
+        }
         match self.scheduler.exit(child.0) {
             Ok(()) => {
                 // A stopped child can be killed: lift its overlay entry so
@@ -721,6 +827,69 @@ mod tests {
                 status: WaitStatus::Exited(143)
             })
         );
+    }
+
+    #[test]
+    fn the_kill_gate_round_trips_enter_take_and_clear() {
+        // Pure gate bookkeeping, on raw ids no scheduler-backed test uses.
+        syscall_enter(0x00de_ad01);
+        assert!(!kill_pending(0x00de_ad01));
+        assert_eq!(syscall_exit_take_kill(0x00de_ad01), None);
+        // Clearing an open window leaves nothing behind.
+        syscall_enter(0x00de_ad02);
+        clear_kill_gate(0x00de_ad02);
+        assert_eq!(syscall_exit_take_kill(0x00de_ad02), None);
+    }
+
+    #[test]
+    fn terminating_a_task_inside_a_syscall_defers_the_kill_to_its_boundary() {
+        let _overlay = stopped_overlay_test_lock();
+        let (wait, scheduler) = scaffold();
+        let (child, child_pid) = spawn_child(scheduler);
+        wait.register_child(TaskId(7), TaskId(child));
+        let signaller = KernelProcessSignal::new(wait, scheduler);
+
+        // The child is mid-syscall: its handler may hold kernel state only
+        // its own unwind can release (a mount's `SleepLock`, an in-flight
+        // block-I/O descriptor), so the kill must not land here — the
+        // regression this pins down is a killed writer leaving its volume's
+        // lock held forever, deadlocking every later filesystem call.
+        syscall_enter(child);
+        assert_eq!(signaller.signal(TaskId(7), child_pid, Signal::Kill), Ok(()));
+        // The child was not destroyed mid-handler: it is still live on the
+        // scheduler, the kill is pending against it, and the parent cannot
+        // reap it yet.
+        assert_eq!(scheduler.live_task_count(), 1);
+        assert!(kill_pending(child));
+        assert_eq!(
+            wait.poll(TaskId(7), rustos_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            Err(Errno::WouldBlock)
+        );
+        // The syscall boundary takes the deferred kill exactly once.
+        assert_eq!(syscall_exit_take_kill(child), Some(Signal::Kill));
+        assert_eq!(syscall_exit_take_kill(child), None);
+    }
+
+    #[test]
+    fn a_deferred_kill_keeps_the_first_termination_request() {
+        let _overlay = stopped_overlay_test_lock();
+        let (wait, scheduler) = scaffold();
+        let (child, child_pid) = spawn_child(scheduler);
+        wait.register_child(TaskId(7), TaskId(child));
+        let signaller = KernelProcessSignal::new(wait, scheduler);
+
+        syscall_enter(child);
+        assert_eq!(
+            signaller.signal(TaskId(7), child_pid, Signal::Terminate),
+            Ok(())
+        );
+        // A follow-up `Kill` against the already-doomed child changes
+        // nothing: it dies at the same boundary, with the first request's
+        // status — matching the immediate path, where a second signal finds
+        // the child already gone.
+        assert_eq!(signaller.signal(TaskId(7), child_pid, Signal::Kill), Ok(()));
+        assert_eq!(syscall_exit_take_kill(child), Some(Signal::Terminate));
+        assert_eq!(scheduler.live_task_count(), 1);
     }
 
     /// Every task id the test [`TaskReclaim`] hook was handed — the

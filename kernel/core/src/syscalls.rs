@@ -1425,6 +1425,38 @@ where
         self.reclaim_task_resources(task);
     }
 
+    /// Land a termination that was deferred while `task` was inside the
+    /// just-completed syscall — the involuntary sibling of the `exit`
+    /// handler, driven by the dispatch boundary once the handler has
+    /// unwound and released everything it held (the mount `SleepLock`, any
+    /// in-flight block-I/O descriptor, every handler-local buffer).
+    ///
+    /// Records the signal's `128 + n` status so the parent's `wait` reaps
+    /// a signalled exit, reclaims the task's kernel resources exactly as
+    /// the immediate terminate path does, and suspends the task with an
+    /// `Exit` action so the scheduler reaps it — the completed syscall's
+    /// result never reaches user space.
+    pub(crate) fn land_pending_kill(
+        &self,
+        task: SecTaskId,
+        signal: Signal,
+        result: SyscallResult,
+        cpu: CpuId,
+    ) -> DispatchOutcome {
+        // `termination_status` is `Some` for every signal the terminate
+        // path defers (Terminate/Interrupt/Kill); mirror the immediate
+        // path's shape rather than fabricate a status.
+        if let Some(status) = signal.termination_status() {
+            self.process_wait.record_exit(task, status);
+        }
+        self.reclaim_task_resources(task);
+        DispatchOutcome::Reschedule {
+            result,
+            action: RescheduleAction::Exit,
+            cpu,
+        }
+    }
+
     /// Resolve a user-mode data abort at `fault_va` as demand-paged file
     /// backing for `task`, returning `true` when the faulting page is now
     /// resident and the access should simply be retried.
@@ -1688,6 +1720,16 @@ where
         // task ids are never reused, so a leaked entry could never be
         // reclaimed later.
         crate::procsignal::clear_intake(task.0);
+        // Drop the task's kill-gate state for the same reason — and so a
+        // task that exits on its own while a termination was deferred
+        // against it (both raced) leaves no pending kill behind.
+        crate::procsignal::clear_kill_gate(task.0);
+        // Prune the dead task's own child rows from the wait bookkeeping:
+        // a dead parent can never reap, so a row it never collected — a
+        // running orphan's link or an unreaped zombie — would be stranded
+        // forever (task ids are never reused). The orphans themselves keep
+        // running and are reclaimed through this same path when they die.
+        self.process_wait.parent_exited(task);
         // Release any console foreground ownership the dead task holds,
         // so the console returns to its open state the moment the owner
         // is gone rather than waiting for a reader to prove the owner
@@ -2006,6 +2048,13 @@ where
                     if !parked {
                         return Err(Errno::NotImplemented);
                     }
+                    // A doomed waiter never re-parks: a termination deferred
+                    // against this task unwinds the wait so the kill lands at
+                    // the syscall boundary (the errno never reaches user
+                    // space).
+                    if crate::procsignal::kill_pending(caller.task_id.0) {
+                        return Err(Errno::Interrupted);
+                    }
                 }
             }
         }
@@ -2051,6 +2100,13 @@ where
                     crate::waitq::PIPE_WAITQ.deregister(caller.task_id.0);
                     if !parked {
                         return Err(Errno::NotImplemented);
+                    }
+                    // A doomed waiter never re-parks: a termination deferred
+                    // against this task unwinds the wait so the kill lands at
+                    // the syscall boundary (the errno never reaches user
+                    // space).
+                    if crate::procsignal::kill_pending(caller.task_id.0) {
+                        return Err(Errno::Interrupted);
                     }
                 }
             }
@@ -2372,6 +2428,12 @@ where
                     Err(SchedError::NoSuchTask) => break Err(Errno::NotFound),
                     Err(_) => break Err(Errno::OutOfRange),
                 }
+            }
+            // A doomed waiter never re-parks: a termination deferred against
+            // this task unwinds the wait so the kill lands at the syscall
+            // boundary (the errno never reaches user space).
+            if crate::procsignal::kill_pending(task) {
+                break Err(Errno::Interrupted);
             }
         };
         crate::waitq::APP_STORE_WAITQ.deregister(task);
@@ -3074,6 +3136,10 @@ where
             WaitOutcome::NotFound | WaitOutcome::Aborted(IrqWaitAbort::TaskVanished) => {
                 Err(Errno::NotFound)
             }
+            // A termination deferred against the waiter unwound the wait;
+            // the kill lands at the syscall boundary and this errno never
+            // reaches user space.
+            WaitOutcome::Aborted(IrqWaitAbort::Interrupted) => Err(Errno::Interrupted),
             // Any other scheduler error fails closed to
             // `Errno::OutOfRange`.
             WaitOutcome::Aborted(IrqWaitAbort::SchedulerError) => Err(Errno::OutOfRange),
@@ -3423,19 +3489,18 @@ where
         let mut path_buf = alloc::vec![0u8; path_len];
         self.copy_in_user(caller, path, &mut path_buf)?;
 
-        // The reserved self token (`@self`): a parser-sandbox worker is by
+        // The reserved self token (`@self`): a re-entered worker — a
+        // parser-sandbox child or a load generator's worker mode — is by
         // definition the caller's own program, and `argv[0]` is data a
         // spawner chose, so the kernel substitutes the path it admitted
         // the *caller* from — its own attested record, never a
-        // caller-supplied spelling. Honoured only for a sandbox spawn (the
-        // token's one consumer) and only when the caller carries a
-        // spawnable path; every other use fails closed. The substituted
-        // path then runs the ordinary resolution and load gate below —
-        // the token never bypasses a check.
+        // caller-supplied spelling. It serves any spawn of the caller's
+        // own binary (sandboxed or plain), and only when the caller
+        // carries a spawnable path; a caller with no attested path (a
+        // kernel thread) fails closed. The substituted path then runs the
+        // ordinary resolution and load gate below — the token never
+        // bypasses a check.
         if path_buf == rustos_abi::SPAWN_SELF {
-            if !attach.is_sandbox() {
-                return Err(Errno::NotFound);
-            }
             let own = caller.caps.spawn_path();
             if own.is_empty() {
                 return Err(Errno::NotFound);
@@ -4874,6 +4939,12 @@ where
                     Err(_) => break Err(Errno::OutOfRange),
                 }
             }
+            // A doomed waiter never re-parks: a termination deferred against
+            // this task unwinds the wait so the kill lands at the syscall
+            // boundary (the errno never reaches user space).
+            if crate::procsignal::kill_pending(task) {
+                break Err(Errno::Interrupted);
+            }
         };
         // Leave the wait set and re-point the one-shot at the nearest
         // deadline any remaining waiter on *any* timed wait-queue needs (or
@@ -4951,6 +5022,12 @@ where
                     Err(SchedError::NoSuchTask) => break Err(Errno::NotFound),
                     Err(_) => break Err(Errno::OutOfRange),
                 }
+            }
+            // A doomed waiter never re-parks: a termination deferred against
+            // this task unwinds the wait so the kill lands at the syscall
+            // boundary (the errno never reaches user space).
+            if crate::procsignal::kill_pending(task) {
+                break Err(Errno::Interrupted);
             }
         };
         // Leave the wait set and re-point the one-shot at the nearest
@@ -5078,6 +5155,13 @@ where
                             Err(SchedError::NoSuchTask) => break Err(Errno::NotFound),
                             Err(_) => break Err(Errno::OutOfRange),
                         }
+                    }
+                    // A doomed waiter never re-parks: a termination deferred
+                    // against this task unwinds the wait so the kill lands at
+                    // the syscall boundary (the errno never reaches user
+                    // space).
+                    if crate::procsignal::kill_pending(sched_task) {
+                        break Err(Errno::Interrupted);
                     }
                 }
             }
@@ -5286,6 +5370,13 @@ where
                             Err(SchedError::NoSuchTask) => break Err(Errno::NotFound),
                             Err(_) => break Err(Errno::OutOfRange),
                         }
+                    }
+                    // A doomed waiter never re-parks: a termination deferred
+                    // against this task unwinds the wait so the kill lands at
+                    // the syscall boundary (the errno never reaches user
+                    // space).
+                    if crate::procsignal::kill_pending(sched_task) {
+                        break Err(Errno::Interrupted);
                     }
                 }
             }
@@ -6107,6 +6198,12 @@ where
                     Err(SchedError::NoSuchTask) => break Err(Errno::NotFound),
                     Err(_) => break Err(Errno::OutOfRange),
                 }
+            }
+            // A doomed waiter never re-parks: a termination deferred against
+            // this task unwinds the wait so the kill lands at the syscall
+            // boundary (the errno never reaches user space).
+            if crate::procsignal::kill_pending(sched_task) {
+                break Err(Errno::Interrupted);
             }
         };
 
@@ -7461,6 +7558,12 @@ where
                 Err(_) => return Err(IrqWaitAbort::SchedulerError),
             }
         }
+        // A doomed waiter never re-parks: a termination deferred against
+        // this task aborts the wait so the kill lands at the syscall
+        // boundary (the errno never reaches user space).
+        if crate::procsignal::kill_pending(self.task.0) {
+            return Err(IrqWaitAbort::Interrupted);
+        }
         Ok(())
     }
 }
@@ -7938,11 +8041,32 @@ where
             caps: &caps_snapshot,
         };
 
+        // Open the kill gate's in-syscall window: from here until the
+        // boundary check below, a termination aimed at this task is
+        // deferred instead of destroying it mid-handler (the handler may
+        // hold kernel state only its own unwind can release). Both early
+        // returns above sit before this point, so the window never leaks.
+        crate::procsignal::syscall_enter(sched_task_id);
+
         // Steps 2–5: hand off to the dispatcher, which performs the
         // capability check, argument validation, handler dispatch,
         // and audit emission.
         let dispatcher = Dispatcher::new(&self.handlers, self.audit);
         let result = dispatcher.dispatch(&caller, raw_number, args);
+
+        // The kill boundary: a termination deferred while this task was
+        // inside the handler lands now, after the unwind released
+        // everything the handler held. The task never returns to user
+        // space. A completing `exit` syscall already recorded its own
+        // death and reclaimed — the taken (and cleared) pending kill is
+        // then simply superseded by the exit in flight.
+        if let Some(signal) = crate::procsignal::syscall_exit_take_kill(sched_task_id) {
+            if raw_number != SyscallNumber::EXIT.as_u16() {
+                return self
+                    .handlers
+                    .land_pending_kill(task_id, signal, result, cpu);
+            }
+        }
 
         // SP2b producer (`plans/SPAWN.md` SP2): a rescheduling syscall from
         // a resumable user kthread must suspend its caller back to the
@@ -13233,12 +13357,13 @@ mod tests {
         assert_eq!(record.spawn_path(), SPAWN_PATH);
     }
 
-    /// The `@self` token is honoured only for its one consumer, the
-    /// sandbox spawn: a non-sandbox attach block using it is refused
-    /// `NotFound` — the token never becomes a general "my own binary"
-    /// spawn convenience.
+    /// The `@self` token serves any spawn of the caller's own binary, not
+    /// only the sandbox form: a plain spawn (no attach block) re-enters
+    /// the caller's own attested program as an ordinary, unsandboxed
+    /// child — the load generator's worker re-entry — still resolved and
+    /// admitted through the full load gate.
     #[test]
-    fn spawn_self_token_refuses_a_non_sandbox_spawn() {
+    fn spawn_self_token_serves_a_plain_spawn_of_the_callers_own_binary() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -13276,10 +13401,20 @@ mod tests {
             producer,
         );
 
-        assert_eq!(
-            h.spawn(&ctx, 0x1000, rustos_abi::SPAWN_SELF.len(), 0, 0, 0, 0),
-            Err(Errno::NotFound)
-        );
+        let pid = h
+            .spawn(&ctx, 0x1000, rustos_abi::SPAWN_SELF.len(), 0, 0, 0, 0)
+            .expect("plain self-token spawn succeeds");
+
+        let guard = table.read();
+        let record = guard.caps_for(SecTaskId(pid)).expect("child record");
+        // An ordinary child, not a sandbox brand: the token widens to any
+        // spawn of the caller's own binary without touching the sandbox
+        // posture.
+        assert!(!record.is_sandboxed());
+        // The child is the caller's own program: named and recorded from
+        // the substituted kernel-resolved path, never the token spelling.
+        assert_eq!(record.name(), ProcName::from_path(SPAWN_PATH).as_str());
+        assert_eq!(record.spawn_path(), SPAWN_PATH);
     }
 
     /// A caller whose record carries no spawnable path (a boot principal,
@@ -13830,6 +13965,63 @@ mod tests {
         wait.record_exit(SecTaskId(9), 0);
         assert_eq!(h.console_foreground(&ctx, STDIN, 9), Err(Errno::NotFound));
         assert_eq!(consoles[0].foreground(), None);
+    }
+
+    /// A termination deferred while the victim sat inside a syscall lands
+    /// at the dispatch boundary through `land_pending_kill`: the child's
+    /// wait row records the signal's `128 + n` status (reapable by its
+    /// parent), the task's kernel resources are reclaimed (its capability
+    /// record is gone), and the task is suspended with an `Exit` action —
+    /// the completed syscall's result never reaches user space.
+    #[test]
+    fn land_pending_kill_records_the_signalled_exit_and_reclaims() {
+        use crate::procwait::ProcessWait as _;
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        // The victim (9) is a live child of parent 2 with a registered
+        // capability record — the state a real mid-syscall task carries.
+        table.write().insert(make_caps_record(9, &[], sink));
+        let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+        let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
+            Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
+        wait.register_child(SecTaskId(2), SecTaskId(9));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_wait(wait);
+
+        let outcome = h.land_pending_kill(SecTaskId(9), Signal::Terminate, Ok(0), 0);
+
+        // The task is suspended with an `Exit` action on its own CPU; the
+        // completed syscall's result rides along but never reaches user
+        // space (the task is reaped before it could resume).
+        assert!(matches!(
+            outcome,
+            DispatchOutcome::Reschedule {
+                action: RescheduleAction::Exit,
+                cpu: 0,
+                ..
+            }
+        ));
+        // The parent reaps the signalled exit with Terminate's `128 + n`
+        // status, exactly as the immediate terminate path records it.
+        assert_eq!(
+            wait.poll(SecTaskId(2), rustos_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            Ok(crate::procwait::WaitedChild {
+                pid: 9,
+                status: rustos_abi::WaitStatus::Exited(143)
+            })
+        );
+        // The one shared teardown ran: the capability record is withdrawn.
+        assert!(table.read().caps_for(SecTaskId(9)).is_none());
     }
 
     /// Only the console's controlling (foreground) owner drains its input

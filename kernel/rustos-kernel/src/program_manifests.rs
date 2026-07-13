@@ -224,6 +224,27 @@ pub const SYSMON_MANIFEST: &[CapabilityId] = &[
     CapabilityId::MEM_PIN,
 ];
 
+/// The `stress` load generator's manifest (`plans/STRESSTEST.md` ST5):
+/// `CAP_CONSOLE_WRITE` for the dispatch/summary lines on fd 1 and
+/// diagnostics on fd 2, `CAP_FS_ACCESS` because the disk-touching workers
+/// write beneath the run's scratch directory (the secured VFS still
+/// authorises every path per-inode under the caller's attested identity),
+/// `CAP_PROC_SPAWN` because the controller re-enters its own attested
+/// binary as the workers through the `@self` token (and starts the
+/// installed `sysmon` bundle under `--monitor`), and `CAP_MEM_PIN` for
+/// the startup `mem_pin` that keeps the controller responsive under the
+/// very pressure it creates. No `CAP_CONSOLE_READ`: the tool reads
+/// nothing from fd 0 (`^C` arrives through the audited signal intake).
+/// Loading the machine needs no privilege beyond the caller's own
+/// resource limits — the limits are the defence.
+#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
+pub const STRESS_MANIFEST: &[CapabilityId] = &[
+    CapabilityId::CONSOLE_WRITE,
+    CapabilityId::FS_ACCESS,
+    CapabilityId::PROC_SPAWN,
+    CapabilityId::MEM_PIN,
+];
+
 /// The `ls` tool's manifest: `CAP_CONSOLE_WRITE` for the listing on fd 1
 /// and diagnostics on fd 2, plus `CAP_FS_ACCESS` because inspecting paths
 /// and reading directories *is* the tool's job — the secured VFS still
@@ -472,6 +493,19 @@ mod tests {
                 CapabilityId::FS_ACCESS,
                 CapabilityId::SYSINFO_GLOBAL,
                 CapabilityId::SYSINFO_KERNEL,
+                CapabilityId::MEM_PIN,
+            ])
+        );
+    }
+
+    #[test]
+    fn stress_manifest_is_pinned() {
+        assert_eq!(
+            set(STRESS_MANIFEST),
+            set(&[
+                CapabilityId::CONSOLE_WRITE,
+                CapabilityId::FS_ACCESS,
+                CapabilityId::PROC_SPAWN,
                 CapabilityId::MEM_PIN,
             ])
         );
@@ -833,6 +867,7 @@ mod tests {
             ("rmdir", AppKind::Command, PURE_TOOL_REQUEST),
             ("seatmgr", AppKind::Service, SEATMGR_MANIFEST),
             ("seq", AppKind::Command, PURE_TOOL_REQUEST),
+            ("stress", AppKind::Command, STRESS_MANIFEST),
             ("sysinfo", AppKind::Command, SYSINFO_MANIFEST),
             ("sysinfod", AppKind::Service, SYSINFOD_MANIFEST),
             ("sysmon", AppKind::Command, SYSMON_MANIFEST),

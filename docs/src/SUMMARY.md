@@ -110,6 +110,7 @@
 - [System-log tool (`log`)](./userland/log.md)
 - [Building a curses TUI (`top`)](./userland/curses-porting.md)
 - [Live kernel monitor (`sysmon`)](./userland/sysmon.md)
+- [Load generator (`stress`)](./userland/stress.md)
 - [The `vim` editor](./userland/vim.md)
 - [The `fstree` file manager](./userland/fstree.md)
 

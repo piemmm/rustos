@@ -1,0 +1,22 @@
+# Signed-AppInfo manifest source for the `stress` command app
+# (plans/STRESSTEST.md ST5). Discovered by the build's app-bundle composer;
+# the capability list is the bundle's request, intersected with the
+# launching user's grants. CAP_CONSOLE_WRITE drives the dispatch/summary
+# lines on fd 1 and diagnostics on fd 2. CAP_FS_ACCESS because the
+# disk-touching workers write beneath the run's scratch directory (and the
+# short-help switches read the bundle's own Help/ tree) — the secured VFS
+# still authorises every path per-inode under the caller's attested
+# identity, so a worker can load only what its user could already write.
+# CAP_PROC_SPAWN because the controller re-enters this same binary as its
+# workers through the kernel's attested `@self` token (and starts the
+# installed sysmon bundle under --monitor). CAP_MEM_PIN because the
+# controller pins its own memory so it never stalls on its own page
+# fault-in under the very pressure it creates; a refused pin is a stderr
+# notice and the run continues unpinned — loading a machine needs no
+# privilege beyond the caller's own resource limits, which are the defence:
+# stress respects them and reports refusals rather than asking for more.
+id = "os.rustos.stress"
+name = "stress"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_PROC_SPAWN", "CAP_MEM_PIN"]

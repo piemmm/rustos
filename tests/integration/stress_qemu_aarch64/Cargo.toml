@@ -1,0 +1,35 @@
+[package]
+name = "rustos-test-stress-qemu-aarch64"
+description = "plans/STRESSTEST.md ST5 stress QEMU vertical: boot the production aarch64 rustos-kernel pipeline (boot_aarch64::boot) on the virt board with the planted whole-disk encrypted-root image, unlock the root, authenticate root/root at the console login, run a short `stress` `--cpu/--vm/--io` load under `--timeout` from the store bundle (the controller pins itself, opts into the signal intake, re-enters its own attested binary as workers through the `@self` token, and tears everything down at the deadline), watch the dispatch and successful-completion lines return the prompt clean, then render `sysinfo pressure` and `sysinfo reclaim` on the transcript. PASS once the stress controller's audited exit arms the sink and the shell's scripted exit, typed only after both post-load renders appeared, follows it — so the verified lines provably reached the transcript before the run ended."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "rustos-test-stress-qemu-aarch64"
+path = "src/main.rs"
+
+# Freestanding "boot the production aarch64 pipeline with the planted
+# encrypted-root disk and prove the stress load generator end to end"
+# integration test. It reuses the entire production boot pipeline through
+# `rustos-kernel`'s library half — discovery, the unlock kthread, PID 1
+# supervision, login's spawn-as-user, the shell's launch path, and the
+# disk-backed bundle spawn path (including the widened `@self` worker
+# re-entry) — and only swaps the audit sink (no duplication). Keeping the
+# QEMU-exit shortcut in a dedicated bin (not a Cargo feature on a
+# production crate) prevents feature unification from leaking it into any
+# production build (fail closed).
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
+rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

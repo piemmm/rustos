@@ -108,9 +108,10 @@ sandboxes a parse imports it:
   spawner chose, not a spawnable spelling): the kernel substitutes the
   exact path it admitted the *caller* from — the `spawn_path` attested
   on its capability record — and runs the ordinary resolution and load
-  gate over it. The token is honoured only for a sandbox spawn and only
-  when the caller carries a spawnable path; every other use fails
-  closed `NotFound`.
+  gate over it. The token serves any spawn of the caller's own binary
+  (sandboxed or plain — `plans/STRESSTEST.md`'s worker re-entry is the
+  plain consumer) and only when the caller carries a spawnable path; a
+  caller without one fails closed `NotFound`.
 - **First consumers** (`decode`): executable-container summaries
   (`lib/binfmt`) and per-window instruction disassembly (`lib/disasm`)
   run inside the worker; the client-side helpers validate every reply

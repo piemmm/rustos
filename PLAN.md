@@ -4772,7 +4772,7 @@ per-increment guarantees.
 
 ## STRESSTEST — stress testing + live kernel monitoring (`plans/STRESSTEST.md`)
 
-**Status: ST1–ST4 done; ST5–ST6 planned.** Makes RustOS's behaviour under
+**Status: ST1–ST5 done; ST6 planned.** Makes RustOS's behaviour under
 load observable and provokable with first-party tools. ST1 (done) exports the
 counters the kernel keeps — the `kernel/mem` pressure gauge, reclaim ledger,
 and `ramzip` accounting, plus per-CPU load — as four audited
@@ -4822,10 +4822,29 @@ GNU `-d` delay grammar into `rustos_curses::delay`, and the viewer figure
 formatters into `rustos_procinfo::human` so `top`/`sysmon` share one
 definition; proved by exhaustive host model/render/loop tests and the
 `sysmon_qemu_aarch64` full-boot vertical (login → `sysmon` → pressure +
-reclaim figures on the transcript → `q` → intact prompt). ST5 is `stress`, the
-stress-ng-style load generator (pinned controller + swappable cpu/vm/io/hdd/
-cache workers, `--overcommit`, `--timeout`, `--quiet`, `--background`,
-`--monitor`, clean signal teardown); ST6 is the combined QEMU vertical,
+reclaim figures on the transcript → `q` → intact prompt). ST5 (done) is
+`stress` (`userland/apps/stress`), the stress-ng-style load generator: a
+pinned, signal-observing controller dispatching swappable cpu/vm/io/hdd/cache
+workers re-entered through the kernel's `@self` spawn token (widened in place
+to serve any spawn of the caller's own attested binary), byte targets sized
+from discovered RAM / mount free space with `--overcommit` rescale, the
+closed GNU-style option set (`--timeout`, `--quiet`, `--background` via a
+detached `@self` re-spawn, `--monitor` running the installed `sysmon`),
+typed worker refusals counted as expected outcomes (`REFUSED_EXIT` 3, GNU
+exit conventions 0/1/130/143), total scratch-tree hygiene on every exit
+path, and an fd-3 `summary` record; the stage also landed
+`MetaPolicy::stamp_creation` (the secured VFS stamps a created node with
+its creator's uid/gid — RustFS's raw create stamped the system user, locking
+creators out of their own files) and `ProcessWait::parent_exited` (the
+shared task reclaim severs a dead parent's child rows: zombies dropped,
+running children orphaned without breaking `is_live`, an orphan's exit
+never strands a zombie); proved by exhaustive host tests (parser, worker
+codec, sizing, load units over a scratch seam, every controller teardown
+path) and the `stress_qemu_aarch64` full-boot vertical (login → a
+`--cpu/--vm/--io --timeout 2s` run → dispatch + successful-completion lines
+→ post-load `sysinfo pressure`/`reclaim` renders → intact prompt); the
+`RAMZIP_STATS` movement assertion stays behind the §0
+restartable-user-fault prerequisite. ST6 is the combined QEMU vertical,
 benchmarks, and docs sweep. See `plans/STRESSTEST.md` for the binding design
 and staging.
 

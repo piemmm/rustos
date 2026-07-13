@@ -48,5 +48,6 @@
 #define ROS_E_DEVICE_FAULT 30
 #define ROS_E_NO_DATA 31
 #define ROS_E_NOT_SUPPORTED 32
+#define ROS_E_INTERRUPTED 33
 
 #endif /* ROS_ERROR_H */

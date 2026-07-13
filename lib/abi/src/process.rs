@@ -597,21 +597,22 @@ pub const SPAWN_FLAGS_ALL: u64 = SPAWN_FLAG_SANDBOX;
 
 /// Reserved `spawn` path token: re-spawn the **caller's own program**.
 ///
-/// A parser-sandbox worker is by definition the same binary as its parent
-/// (`docs/src/security/sandbox.md`), but a program has no trustworthy
-/// spelling of its own path — `argv[0]` is data its spawner chose, not
-/// authority. Passing this token as the `spawn` path makes the kernel
-/// substitute the exact registry or store-bundle path it admitted the
-/// *caller* from (its own attested record), then run the ordinary
-/// resolution and load gate over it — the token never bypasses a check,
-/// it only supplies the path.
+/// A re-entered worker — a parser-sandbox child
+/// (`docs/src/security/sandbox.md`) or a load generator's worker mode
+/// (`plans/STRESSTEST.md`) — is by definition the same binary as its
+/// parent, but a program has no trustworthy spelling of its own path —
+/// `argv[0]` is data its spawner chose, not authority. Passing this token
+/// as the `spawn` path makes the kernel substitute the exact registry or
+/// store-bundle path it admitted the *caller* from (its own attested
+/// record), then run the ordinary resolution and load gate over it — the
+/// token never bypasses a check, it only supplies the path.
 ///
-/// The token is honoured **only** for a sandbox spawn (an attach block
-/// with [`SPAWN_FLAG_SANDBOX`]) — its one consumer — and only when the
-/// caller's record carries a spawnable path; any other use fails closed
-/// with `NotFound`. The leading `@` can never collide with a real
-/// program: a registry path or `<Name>.app/Run` bundle path always
-/// starts with `/`.
+/// The token serves **any** spawn of the caller's own binary — sandboxed
+/// ([`SPAWN_FLAG_SANDBOX`]) or plain — but only when the caller's record
+/// carries a spawnable path; a caller with no attested path (a kernel
+/// thread, a boot principal) fails closed with `NotFound`. The leading
+/// `@` can never collide with a real program: a registry path or
+/// `<Name>.app/Run` bundle path always starts with `/`.
 pub const SPAWN_SELF: &[u8] = b"@self";
 
 /// How one of a spawned child's standard descriptors (fd 0–3) is backed —

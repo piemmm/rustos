@@ -122,6 +122,18 @@ pub struct DelegatedFs<'fs, R: FilesystemRead + ?Sized, P = Uniform> {
 pub trait MetaPolicy<R: FilesystemRead + ?Sized> {
     /// The permission metadata governing `node`.
     fn metadata(fs: &mut R, node: NodeId, template: &Metadata) -> Result<Metadata, VfsError>;
+
+    /// Stamp the freshly created `node` with its creator's identity.
+    ///
+    /// A driver's raw `create` mints the node with the format's own
+    /// default record (`RustFS` stamps the system user), which would lock
+    /// an ordinary creator out of a file it just made. Under [`PerInode`]
+    /// the stored record's ownership is rewritten to the creating
+    /// caller's `(uid, gid)` — mode, ACL, and capability gate untouched —
+    /// in the same VFS operation that created the node, so ownership is
+    /// never observably wrong. Under [`Uniform`] there is no per-node
+    /// record to stamp, so the mount template stays the whole story.
+    fn stamp_creation(fs: &mut R, node: NodeId, cred: &Credentials<'_>) -> Result<(), VfsError>;
 }
 
 /// Apply the mount point's [`Metadata`] uniformly to every delegated node.
@@ -135,12 +147,23 @@ impl<R: FilesystemRead + ?Sized> MetaPolicy<R> for Uniform {
     fn metadata(_fs: &mut R, _node: NodeId, template: &Metadata) -> Result<Metadata, VfsError> {
         Ok(template.clone())
     }
+
+    fn stamp_creation(_fs: &mut R, _node: NodeId, _cred: &Credentials<'_>) -> Result<(), VfsError> {
+        Ok(())
+    }
 }
 
 impl<R: FilesystemRead + FilesystemSecurity + ?Sized> MetaPolicy<R> for PerInode {
     fn metadata(fs: &mut R, node: NodeId, _template: &Metadata) -> Result<Metadata, VfsError> {
         let sec = fs.security(node).map_err(map_driver_error)?;
         Ok(Metadata::from_node_security(&sec))
+    }
+
+    fn stamp_creation(fs: &mut R, node: NodeId, cred: &Credentials<'_>) -> Result<(), VfsError> {
+        let mut sec = fs.security(node).map_err(map_driver_error)?;
+        sec.uid = cred.uid.0;
+        sec.gid = cred.gid.0;
+        fs.set_security(node, sec).map_err(map_driver_error)
     }
 }
 
@@ -587,9 +610,14 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
             Err(DriverError::NotFound) => {}
             Err(e) => return Err(map_driver_error(e)),
         }
-        self.fs
+        let node = self
+            .fs
             .create(parent, name, kind)
             .map_err(map_driver_error)?;
+        // The driver minted the node with its format's default record;
+        // hand it to its creator before the create is observable, so the
+        // caller is never locked out of a node it just made.
+        P::stamp_creation(self.fs, node, cred)?;
         Ok(())
     }
 

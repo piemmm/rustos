@@ -67,6 +67,12 @@ pub const SYSINFO_PATH: &[u8] = b"/System/Apps/sysinfo.app/Run";
 /// identical on every target.
 pub const SYSMON_PATH: &[u8] = b"/System/Apps/sysmon.app/Run";
 
+/// Absolute path the `stress` load-generator tool is registered under: the
+/// system app store's command-named bundle, so the shell resolves the bare
+/// word `stress` to it (`plans/APPS.md` §8). One OS-wide path contract,
+/// identical on every target.
+pub const STRESS_PATH: &[u8] = b"/System/Apps/stress.app/Run";
+
 /// Absolute path the `top` tool program is registered under: the system app
 /// store's command-named bundle, so the shell resolves the bare word `top`
 /// to it (`plans/APPS.md` §8). One OS-wide path contract, identical on
@@ -114,7 +120,7 @@ pub const USERS_CLI_PATH: &[u8] = b"/System/Apps/users.app/Run";
 mod tests {
     use super::{
         CAT_PATH, CLEAR_PATH, DEVMGR_PATH, LOGIN_PATH, LS_PATH, MAN_PATH, PS_PATH, RESET_PATH,
-        SEATMGR_PATH, SHELL_PATH, SYSINFOD_PATH, SYSINFO_PATH, SYSMON_PATH, TOP_PATH,
+        SEATMGR_PATH, SHELL_PATH, STRESS_PATH, SYSINFOD_PATH, SYSINFO_PATH, SYSMON_PATH, TOP_PATH,
         USERS_CLI_PATH,
     };
     use rustos_abi::{BundleEntry, BUNDLE_SUFFIX, SYSTEM_APP_STORE, SYSTEM_SERVICE_STORE};
@@ -157,6 +163,7 @@ mod tests {
             (MAN_PATH, "man"),
             (PS_PATH, "ps"),
             (RESET_PATH, "reset"),
+            (STRESS_PATH, "stress"),
             (SYSINFO_PATH, "sysinfo"),
             (SYSMON_PATH, "sysmon"),
             (TOP_PATH, "top"),

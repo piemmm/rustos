@@ -178,6 +178,13 @@ const PROGRAMS: &[Program] = &[
         prefix: "SYSMON",
     },
     Program {
+        pkg: "rustos-stress",
+        bin: "rustos-stress-run",
+        rel_dir: "../../userland/apps/stress",
+        fixture: "stress_rxe.rs",
+        prefix: "STRESS",
+    },
+    Program {
         pkg: "rustos-top",
         bin: "rustos-top-run",
         rel_dir: "../../userland/apps/top",

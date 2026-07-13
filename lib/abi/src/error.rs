@@ -266,6 +266,19 @@ pub enum Errno {
     /// backing simply cannot represent the request, and retrying can
     /// never succeed on that mount.
     NotSupported = 32,
+    /// A blocking wait was cut short because the calling task has a
+    /// pending termination.
+    ///
+    /// The RustOS analogue of POSIX `EINTR`, deliberately narrower: it is
+    /// emitted only by the kernel's in-kernel park loops (a pipe or
+    /// console read, `waitset_wait`, `irq_wait`, a blocking `wait`, …)
+    /// when a `Terminate`/`Kill` was deferred against the parked caller,
+    /// so the syscall unwinds — releasing everything it holds — and the
+    /// task exits at its syscall boundary. A user program never observes
+    /// this code: the kernel lands the pending kill before the result
+    /// could return to user space. It exists on the ABI so the decode
+    /// table is total and diagnostics stay honest.
+    Interrupted = 33,
 }
 
 impl Errno {
@@ -333,6 +346,7 @@ impl Errno {
             30 => Some(Self::DeviceFault),
             31 => Some(Self::NoData),
             32 => Some(Self::NotSupported),
+            33 => Some(Self::Interrupted),
             _ => None,
         }
     }
@@ -373,6 +387,7 @@ impl fmt::Display for Errno {
             Self::DeviceFault => "device fault",
             Self::NoData => "no such attribute",
             Self::NotSupported => "not supported by the backing",
+            Self::Interrupted => "wait interrupted by pending termination",
         };
         f.write_str(message)
     }
@@ -417,6 +432,7 @@ mod tests {
         assert_eq!(Errno::DeviceFault.as_i32(), 30);
         assert_eq!(Errno::NoData.as_i32(), 31);
         assert_eq!(Errno::NotSupported.as_i32(), 32);
+        assert_eq!(Errno::Interrupted.as_i32(), 33);
     }
 
     #[test]
@@ -456,11 +472,12 @@ mod tests {
             Errno::DeviceFault,
             Errno::NoData,
             Errno::NotSupported,
+            Errno::Interrupted,
         ] {
             assert_eq!(Errno::from_i32(errno.as_i32()), Some(errno));
         }
         assert_eq!(Errno::from_i32(0), None);
-        assert_eq!(Errno::from_i32(33), None);
+        assert_eq!(Errno::from_i32(34), None);
         assert_eq!(Errno::from_i32(-1), None);
     }
 
