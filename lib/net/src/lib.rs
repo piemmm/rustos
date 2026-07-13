@@ -7,7 +7,7 @@
 //! exact code the live `netstack` service runs is the code the unit
 //! tests, property tests, and fuzz harnesses exercise.
 //!
-//! # Contents (increments N1–N2 of `plans/NETWORK.md`)
+//! # Contents (increments N1–N3a of `plans/NETWORK.md`)
 //!
 //! - [`addr`] — the dual-stack address vocabulary: IPv4 and IPv6 as
 //!   equals, IPv6 scope classification and zone handling for link-local
@@ -36,6 +36,12 @@
 //! - [`neigh`] — the provider-agnostic neighbour cache: one bounded
 //!   RFC 4861 §7.3.2 state machine that ARP and Neighbour Discovery
 //!   both drive (one table, two providers).
+//! - [`iface`] — the per-interface address engine: static IPv4/IPv6
+//!   assignment plus RFC 4862 SLAAC (DAD, router solicitation,
+//!   lifetimes) over an injected interface identifier.
+//! - [`stack`] — the dual-stack host engine composing all of the
+//!   above: frames in, frames + typed events out, one folded one-shot
+//!   timer deadline.
 //!
 //! Later increments extend this crate in place with `igmp`/`mld`, `udp`,
 //! and `tcp` (`plans/NETWORK.md` §2.1); none of that surface is
@@ -62,11 +68,13 @@ pub mod checksum;
 pub mod eth;
 pub mod frag;
 pub mod icmp;
+pub mod iface;
 pub mod ipv4;
 pub mod ipv6;
 pub mod nd;
 pub mod neigh;
 pub mod route;
+pub mod stack;
 
 pub use addr::{IpAddr, Ipv4Addr, Ipv6Addr};
 pub use checksum::internet_checksum;

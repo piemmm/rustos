@@ -89,6 +89,11 @@ pub const TARGETS: &[Target] = &[
         description: "lib/net Neighbour Discovery codecs + neighbour-table glue",
     },
     Target {
+        package: "rustos-net",
+        test: "fuzz_net_stack",
+        description: "lib/net dual-stack host engine frame entry point",
+    },
+    Target {
         package: "rustos-net-icmp",
         test: "fuzz_parse",
         description: "userland/net composed ARP/ICMP responder + client paths",

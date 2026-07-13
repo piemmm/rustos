@@ -533,7 +533,9 @@ pub fn virtio_net_ping<Tr: Transport>(
     vhost: &dyn VirtioHost,
 ) -> Result<(), &'static str> {
     let mut net = VirtioNet::open(transport, vhost).map_err(|_| "virtio-net open")?;
-    let mac = net.mac_address().map_err(|_| "read device MAC")?;
+    let facts = net.device_facts().map_err(|_| "read device facts")?;
+    facts.validate().map_err(|_| "device facts invalid")?;
+    let mac = facts.mac;
     env.log("virtio-qemu: virtio-net online");
 
     let client = Client::new(mac, GUEST_IP);

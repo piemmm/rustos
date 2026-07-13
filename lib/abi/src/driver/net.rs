@@ -5,6 +5,7 @@
 //! trait in user space and are out of scope for `abi-v1`.
 
 use super::{BufferClass, DriverError};
+use crate::Errno;
 
 /// Length of an Ethernet MAC address.
 pub const MAC_ADDRESS_LEN: usize = 6;
@@ -28,6 +29,145 @@ impl MacAddress {
     }
 }
 
+/// Current link state a network device reports.
+///
+/// The closed two-state vocabulary of [`DeviceFacts::link`]: a link is
+/// either carrying frames or it is not. A device that cannot sense its
+/// link (no status feature negotiated, no PHY report) reports [`Up`]
+/// once it is operational — an unsensed link is not a third state the
+/// stack could act on differently.
+///
+/// [`Up`]: LinkState::Up
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum LinkState {
+    /// The link carries frames.
+    Up,
+    /// The link is down; transmits will not reach a peer.
+    Down,
+}
+
+/// Closed set of hardware offload capabilities a network device has
+/// **verified** it can perform (`plans/NETWORK.md` §2.3).
+///
+/// A `#[repr(transparent)]` newtype over the flag bits (the
+/// [`crate::ipc::CallRecvFlags`] pattern): only the bits named here are
+/// defined, every other bit is reserved, and [`NetOffloads::from_bits`]
+/// rejects a value with any reserved bit set so an unknown claim is
+/// refused rather than silently carried. The software path remains the
+/// canonical implementation of every offloadable operation; a driver
+/// advertises only what it implements and tests, and the stack opts in
+/// per flag. No offload is ever load-bearing for security: a device
+/// claim is trust in the *device*, never in the peer.
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
+pub struct NetOffloads(u32);
+
+impl NetOffloads {
+    /// Device computes the IPv4 header checksum on transmit.
+    pub const TX_CSUM_IPV4: Self = Self(1 << 0);
+    /// Device computes the TCP checksum on transmit (v4 and v6).
+    pub const TX_CSUM_TCP: Self = Self(1 << 1);
+    /// Device computes the UDP checksum on transmit (v4 and v6).
+    pub const TX_CSUM_UDP: Self = Self(1 << 2);
+    /// Device validates receive checksums and marks frames it verified.
+    pub const RX_CSUM_VALIDATED: Self = Self(1 << 3);
+    /// Device segments an over-size TCP payload against a template
+    /// header on transmit (TSO-equivalent).
+    pub const TX_SEGMENT_TCP: Self = Self(1 << 4);
+
+    /// The set of all defined flag bits; anything else is reserved.
+    const DEFINED_BITS: u32 = Self::TX_CSUM_IPV4.0
+        | Self::TX_CSUM_TCP.0
+        | Self::TX_CSUM_UDP.0
+        | Self::RX_CSUM_VALIDATED.0
+        | Self::TX_SEGMENT_TCP.0;
+
+    /// No offloads: every operation runs on the canonical software path.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// Raw flag bits, as carried on the ABI.
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// Build an offload set from raw bits, rejecting any reserved bit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Errno::OutOfRange`] if `bits` sets any reserved
+    /// (currently-undefined) bit.
+    pub const fn from_bits(bits: u32) -> Result<Self, Errno> {
+        if bits & !Self::DEFINED_BITS != 0 {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self(bits))
+    }
+
+    /// Whether every flag in `other` is present in `self`.
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
+/// Typed report of a network device's facts (`plans/NETWORK.md` §2.3):
+/// its link-layer address, MTU, live link state, verified offload set,
+/// and receive-queue count.
+///
+/// The report describes the *device*, never the network: nothing in it
+/// is attacker-controlled, but the stack still validates it whole
+/// through [`DeviceFacts::validate`] before acting on it, because a
+/// buggy driver is inside the fault boundary the stack defends (fail
+/// closed, never "trusted driver").
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DeviceFacts {
+    /// The device's 48-bit IEEE 802 link-layer address.
+    pub mac: MacAddress,
+    /// Link MTU: the largest link-layer *payload* (IP packet) in
+    /// bytes, excluding the Ethernet header — 1500 for standard
+    /// Ethernet. The largest frame the device moves is therefore
+    /// `mtu` plus the 14-byte Ethernet header.
+    pub mtu: u32,
+    /// Current link state.
+    pub link: LinkState,
+    /// The offload capabilities the device verified it can perform.
+    pub offloads: NetOffloads,
+    /// Number of receive queues the device serves (`RX_MULTIQUEUE`).
+    /// At least 1: a device with no receive queue is not a network
+    /// device.
+    pub rx_queues: u16,
+}
+
+impl DeviceFacts {
+    /// Smallest link MTU the stack will drive: the RFC 791 §3.2
+    /// 68-byte IPv4 reassembly floor. IPv6 additionally requires 1280
+    /// (RFC 8200 §5), but that is a per-family policy the stack
+    /// enforces when it binds v6 to the interface, not a device fact.
+    pub const MIN_MTU: u32 = 68;
+
+    /// Largest link MTU accepted: a jumbo-frame ceiling that bounds
+    /// every buffer sized from this report, so a corrupt or hostile
+    /// report can never induce an attacker-sized allocation.
+    pub const MAX_MTU: u32 = 65_535;
+
+    /// Validate the whole report, fail-closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Errno::OutOfRange`] when `mtu` lies outside
+    /// [`Self::MIN_MTU`]..=[`Self::MAX_MTU`] or `rx_queues` is zero.
+    pub const fn validate(&self) -> Result<(), Errno> {
+        if self.mtu < Self::MIN_MTU || self.mtu > Self::MAX_MTU || self.rx_queues == 0 {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(())
+    }
+}
+
 /// Trait every link-layer network driver implements.
 ///
 /// # Capabilities
@@ -36,10 +176,11 @@ impl MacAddress {
 /// [`CapabilityId::NET_RAW`](crate::CapabilityId::NET_RAW) at the
 /// dispatch site, on top of the load-time
 /// [`CapabilityId::DRV_LOAD`](crate::CapabilityId::DRV_LOAD) check.
-/// `mac_address` is gated only by ownership of the
+/// `device_facts` is gated only by ownership of the
 /// [`DriverHandle`](crate::driver::DriverHandle).
 pub trait Net {
-    /// Report the device's link-layer address.
+    /// Report the device's facts: link-layer address, MTU, link
+    /// state, verified offload set, and receive-queue count.
     ///
     /// # Errors
     ///
@@ -51,7 +192,7 @@ pub trait Net {
     /// Caller must present the driver's [`DriverHandle`].
     ///
     /// [`DriverHandle`]: crate::driver::DriverHandle
-    fn mac_address(&self) -> Result<MacAddress, DriverError>;
+    fn device_facts(&self) -> Result<DeviceFacts, DriverError>;
 
     /// Transmit one frame.
     ///
@@ -156,15 +297,52 @@ mod tests {
         assert_eq!(mac.as_octets()[5], 0x01);
     }
 
+    #[test]
+    fn offloads_from_bits_rejects_reserved_bits() {
+        assert!(NetOffloads::from_bits(NetOffloads::TX_CSUM_IPV4.bits()).is_ok());
+        assert_eq!(NetOffloads::from_bits(1 << 31), Err(Errno::OutOfRange));
+        let set = NetOffloads::from_bits(
+            NetOffloads::TX_CSUM_TCP.bits() | NetOffloads::RX_CSUM_VALIDATED.bits(),
+        )
+        .expect("defined bits");
+        assert!(set.contains(NetOffloads::TX_CSUM_TCP));
+        assert!(!set.contains(NetOffloads::TX_SEGMENT_TCP));
+    }
+
+    #[test]
+    fn device_facts_validate_fails_closed() {
+        let good = facts(MacAddress::new([2, 0, 0, 0, 0, 1]));
+        assert!(good.validate().is_ok());
+        let mut runt = good;
+        runt.mtu = DeviceFacts::MIN_MTU - 1;
+        assert_eq!(runt.validate(), Err(Errno::OutOfRange));
+        let mut jumbo = good;
+        jumbo.mtu = DeviceFacts::MAX_MTU + 1;
+        assert_eq!(jumbo.validate(), Err(Errno::OutOfRange));
+        let mut no_queue = good;
+        no_queue.rx_queues = 0;
+        assert_eq!(no_queue.validate(), Err(Errno::OutOfRange));
+    }
+
     struct MockNet {
         mac: MacAddress,
         last_tx: [u8; 64],
         last_tx_len: usize,
     }
 
+    fn facts(mac: MacAddress) -> DeviceFacts {
+        DeviceFacts {
+            mac,
+            mtu: 1500,
+            link: LinkState::Up,
+            offloads: NetOffloads::empty(),
+            rx_queues: 1,
+        }
+    }
+
     impl Net for MockNet {
-        fn mac_address(&self) -> Result<MacAddress, DriverError> {
-            Ok(self.mac)
+        fn device_facts(&self) -> Result<DeviceFacts, DriverError> {
+            Ok(facts(self.mac))
         }
 
         fn transmit(&mut self, frame: &[u8]) -> Result<(), DriverError> {
@@ -218,8 +396,8 @@ mod tests {
     }
 
     impl Net for SensitiveStagingNet {
-        fn mac_address(&self) -> Result<MacAddress, DriverError> {
-            Ok(self.mac)
+        fn device_facts(&self) -> Result<DeviceFacts, DriverError> {
+            Ok(facts(self.mac))
         }
         fn transmit(&mut self, frame: &[u8]) -> Result<(), DriverError> {
             if frame.len() < 14 {

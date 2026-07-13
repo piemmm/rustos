@@ -154,6 +154,11 @@ pub enum WalkOutcome<'a> {
         protocol: u8,
         /// Its payload.
         payload: &'a [u8],
+        /// Byte offset, within the whole IPv6 packet, of the
+        /// next-header field that named this protocol — the pointer an
+        /// RFC 4443 §3.4 code-1 Parameter Problem carries when the
+        /// protocol is unrecognised.
+        nh_offset: u32,
     },
     /// The chain reached a fragment header: `payload` is this piece of
     /// the fragmented datagram, to be reassembled before any further
@@ -285,6 +290,7 @@ pub fn walk(
                 return Ok(WalkOutcome::Upper {
                     protocol,
                     payload: rest,
+                    nh_offset: u32::try_from(named_at).unwrap_or(u32::MAX),
                 })
             }
         }

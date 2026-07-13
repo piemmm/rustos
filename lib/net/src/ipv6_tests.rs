@@ -73,9 +73,12 @@ fn walk_reaches_upper_layer_directly() {
         Ok(WalkOutcome::Upper {
             protocol,
             payload: got,
+            nh_offset,
         }) => {
             assert_eq!(protocol, NEXT_HEADER_ICMPV6);
             assert_eq!(got, &payload);
+            // Named by byte 6 of the fixed header.
+            assert_eq!(nh_offset, 6);
         }
         other => panic!("unexpected outcome: {other:?}"),
     }
@@ -87,9 +90,16 @@ fn walk_traverses_hop_by_hop_and_dest_opts() {
     chain.extend_from_slice(&padded_ext(NEXT_HEADER_ICMPV6, 1));
     chain.extend_from_slice(&[0xEE; 3]);
     match walk(NEXT_HEADER_HOP_BY_HOP, &chain, false) {
-        Ok(WalkOutcome::Upper { protocol, payload }) => {
+        Ok(WalkOutcome::Upper {
+            protocol,
+            payload,
+            nh_offset,
+        }) => {
             assert_eq!(protocol, NEXT_HEADER_ICMPV6);
             assert_eq!(payload, &[0xEE; 3]);
+            // Named by byte 0 of the second (destination-options)
+            // extension header, one 8-byte header past the fixed 40.
+            assert_eq!(nh_offset, 48);
         }
         other => panic!("unexpected outcome: {other:?}"),
     }
@@ -164,9 +174,14 @@ fn walk_skips_routing_with_no_segments_left() {
     chain[3] = 0; // segments left
     chain.extend_from_slice(&[0x22; 2]);
     match walk(NEXT_HEADER_ROUTING, &chain, false) {
-        Ok(WalkOutcome::Upper { protocol, payload }) => {
+        Ok(WalkOutcome::Upper {
+            protocol,
+            payload,
+            nh_offset,
+        }) => {
             assert_eq!(protocol, NEXT_HEADER_ICMPV6);
             assert_eq!(payload, &[0x22; 2]);
+            assert_eq!(nh_offset, 40);
         }
         other => panic!("unexpected outcome: {other:?}"),
     }

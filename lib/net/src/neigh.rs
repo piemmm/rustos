@@ -394,6 +394,25 @@ impl NeighborTable {
         }
     }
 
+    /// Adopt router-advertised timing (RFC 4861 §6.3.4): a Router
+    /// Advertisement's non-zero `Reachable Time` / `Retrans Timer`
+    /// values are the ones hosts should use for reachability aging
+    /// and solicitation spacing; a zero field (`None` here) leaves
+    /// the current value. Applies to transitions from this call on;
+    /// deadlines already armed keep their original spacing.
+    pub fn set_timing(
+        &mut self,
+        reachable_time: Option<Duration64>,
+        retrans_timer: Option<Duration64>,
+    ) {
+        if let Some(reachable) = reachable_time {
+            self.config.reachable_time = reachable;
+        }
+        if let Some(retrans) = retrans_timer {
+            self.config.retrans_timer = retrans;
+        }
+    }
+
     /// Drop `ip`'s entry (interface reconfiguration, admin flush).
     pub fn remove(&mut self, ip: IpAddr) {
         if let Some(index) = self.find(ip) {

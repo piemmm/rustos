@@ -4687,7 +4687,7 @@ format-conformance defect the evidence window exposed). See
 
 ## NETWORK — full IPv4 + IPv6 networking (`plans/NETWORK.md`)
 
-**Status: N1–N2 done; N3–N9 planned.** N1 (done) landed the `lib/net`
+**Status: N1–N3a done; N3b–N9 planned.** N1 (done) landed the `lib/net`
 protocol-engine foundation: the dual-stack address vocabulary
 (`core::net` types + RFC 4007 `Ipv6Scope`/`ScopedIpv6Addr` zone rules),
 the one RFC 1071 checksum (incremental accumulator + v4/v6
@@ -4708,8 +4708,21 @@ neighbour table, budgeted fail-closed fragment reassembly (overlap ⇒
 drop, per-source/global budgets, oldest-first eviction), and routing
 (one generic LPM trie for v4/v6, default-router list, RFC 6724 source
 selection, RFC 8201 path-MTU cache) — property-tested and fuzzed via
-`fuzz_net_ipv4`/`fuzz_net_ipv6`/`fuzz_net_icmp`/`fuzz_net_nd`. The
-remaining increments
+`fuzz_net_ipv4`/`fuzz_net_ipv6`/`fuzz_net_icmp`/`fuzz_net_nd`. N3 is
+staged as three tree-green sub-increments (N3a/N3b/N3c). N3a (done)
+landed the per-interface RFC 4862 address engine (`iface`: static
+v4/v6, SLAAC with DAD, RS scheduling, the §5.5.3(e) two-hour rule,
+injected interface identifier), the dual-stack host engine (`stack`:
+one per-interface `Stack` — frames + explicit `now` in, bounded frames
++ typed `StackEvent`s out; event-driven `advance`/`next_deadline`;
+owned-address-only ARP/NS answering, bounded pending-transmit
+resolution, budgeted reassembly, gated + rate-limited ICMP errors,
+bounded RA application, first-hop-validated redirects, echo in/out),
+and the driver seam's facts half (`Net::device_facts` returning the
+fail-closed-validated `DeviceFacts` with the closed `NetOffloads`
+vocabulary; `virtio_net` serves it) — end-to-end host tests (two
+stacks ping each other over v4 and v6) and the `fuzz_net_stack`
+harness. The remaining increments
 deliver the complete dual-stack user-space network
 stack above the link-layer driver seam: one pure, host-testable,
 fuzzed protocol engine (`lib/net` — Ethernet, ARP/ND over one neighbour
@@ -4732,7 +4745,7 @@ configured declaratively: the fail-closed
 keys, with interface bonding (`active-backup` failover + flow-hashed
 `balance`) as a stack-composed virtual interface over unmodified NIC
 drivers (N9). The interim `userland/net/icmp` responder is subsumed and
-deleted in N3 (§2.14). See `plans/NETWORK.md` for the binding design and
+deleted in N3c (§2.14). See `plans/NETWORK.md` for the binding design and
 per-increment guarantees.
 
 ---

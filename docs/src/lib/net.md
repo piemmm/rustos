@@ -3,8 +3,9 @@
 `lib/net` is the RustOS network protocol engine: the single, pure,
 host-testable definition of the wire protocols the user-space network
 stack speaks. The staged build plan is `plans/NETWORK.md`; this page
-describes what exists today (increments N1–N2: the link and network
-layers) and the contract the rest of the stack builds on.
+describes what exists today (increments N1–N3a: the link and network
+layers plus the interface/address and host engines) and the contract
+the rest of the stack builds on.
 
 ## Design
 
@@ -15,9 +16,9 @@ own the frame buffers, and time enters as explicit monotonic
 — given the same inputs and time steps its outputs are byte-identical —
 which is what lets the unit tests, the property tests, the fuzz
 harnesses (`fuzz_net_eth`, `fuzz_net_addr`, `fuzz_net_ipv4`,
-`fuzz_net_ipv6`, `fuzz_net_icmp`, `fuzz_net_nd`, registered with
-`cargo xtask fuzz`), and the live `netstack` service all exercise the
-*same* code.
+`fuzz_net_ipv6`, `fuzz_net_icmp`, `fuzz_net_nd`, `fuzz_net_stack`,
+registered with `cargo xtask fuzz`), and the live `netstack` service
+all exercise the *same* code.
 
 Every decoder parses attacker-controlled bytes and is total (never
 panics for any input), bounded (fixed validation bounds, no
@@ -179,10 +180,45 @@ Defences against cache poisoning and exhaustion are structural:
   only degrade a `Reachable` entry to `Stale` (RFC 4861 §7.2.5); the
   cached address is kept.
 
+### `iface` — per-interface address configuration
+
+The RFC 4862 address lifecycle for one interface, pure and
+deterministic like everything else here: static IPv4/IPv6 assignment
+plus SLAAC. Each IPv6 address walks tentative → preferred → deprecated
+→ invalid; duplicate address detection sends the configured number of
+neighbour solicitations and a defending NA or observed duplicate marks
+the address `Duplicate` (never silently reused). Router solicitations
+are scheduled with the RFC 4861 §6.3.7 initial cadence and stop on a
+valid RA. Prefix-information options form addresses from an injected
+64-bit interface identifier (the stable-privacy RFC 7217 derivation is
+the service layer's job — the engine never hashes secrets), and
+lifetime updates apply the RFC 4862 §5.5.3(e) two-hour rule so an
+unauthenticated RA cannot instantly invalidate an address. Address
+count is capacity-bounded and fail-closed.
+
+### `stack` — the dual-stack host engine
+
+`Stack` composes the modules above into one per-interface host engine
+the `netstack` service drives: `receive_frame` takes an
+attacker-controlled frame and explicit `now`, and returns bounded
+output frames plus typed `StackEvent`s; `advance`/`next_deadline` keep
+it event-driven (the caller parks on a one-shot timer, never polls).
+It answers ARP requests and neighbour solicitations for owned
+addresses only, resolves next hops through the one `neigh` table with
+a bounded pending-transmit queue (fail-closed when full), reassembles
+through the budgeted `frag` engine, generates ICMP errors only through
+`error_allowed` + the rate limiter, applies Router Advertisements
+(SLAAC via `iface`, default routers, on-link prefixes, MTU within the
+link floor/ceiling, timing parameters — each bounded), and accepts a
+Redirect only from the destination's current first hop. Echo requests
+in either family are answered; `send_echo_request` and
+`EchoReplyReceived` support the diagnostic path.
+
 ## What lands next
 
 Later increments of `plans/NETWORK.md` evolve this crate in place:
-`igmp`/`mld`, `udp`, and `tcp`, alongside the `netstack` service (N3)
-that wires these engines to real interfaces and deletes the interim
-`userland/net/icmp` responder. None of that surface exists yet; it is
-added with its callers, tests, and fuzz harnesses per increment.
+`igmp`/`mld`, `udp`, and `tcp`, alongside the `netstack` service
+(N3b/N3c) that wires these engines to real interfaces and deletes the
+interim `userland/net/icmp` responder. None of that surface exists
+yet; it is added with its callers, tests, and fuzz harnesses per
+increment.

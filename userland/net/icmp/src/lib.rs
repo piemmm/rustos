@@ -47,6 +47,8 @@
 pub use rustos_net::addr::Ipv4Addr;
 pub use rustos_net::{arp, eth as ethernet, icmp, ipv4};
 
+#[cfg(test)]
+use rustos_abi::driver::net::{DeviceFacts, LinkState, NetOffloads};
 use rustos_abi::driver::net::{MacAddress, Net};
 use rustos_abi::DriverError;
 
@@ -508,9 +510,19 @@ mod tests {
         }
     }
 
+    fn local_facts() -> DeviceFacts {
+        DeviceFacts {
+            mac: LOCAL_MAC,
+            mtu: 1500,
+            link: LinkState::Up,
+            offloads: NetOffloads::empty(),
+            rx_queues: 1,
+        }
+    }
+
     impl Net for MockNet {
-        fn mac_address(&self) -> Result<MacAddress, DriverError> {
-            Ok(LOCAL_MAC)
+        fn device_facts(&self) -> Result<DeviceFacts, DriverError> {
+            Ok(local_facts())
         }
 
         fn transmit(&mut self, frame: &[u8]) -> Result<(), DriverError> {
@@ -685,8 +697,8 @@ mod tests {
         // A driver whose receive always faults surfaces as Driver(_).
         struct FaultyNet;
         impl Net for FaultyNet {
-            fn mac_address(&self) -> Result<MacAddress, DriverError> {
-                Ok(LOCAL_MAC)
+            fn device_facts(&self) -> Result<DeviceFacts, DriverError> {
+                Ok(local_facts())
             }
             fn transmit(&mut self, _frame: &[u8]) -> Result<(), DriverError> {
                 Ok(())
@@ -857,8 +869,8 @@ mod tests {
     fn client_resolve_propagates_driver_error() {
         struct FaultyTx;
         impl Net for FaultyTx {
-            fn mac_address(&self) -> Result<MacAddress, DriverError> {
-                Ok(LOCAL_MAC)
+            fn device_facts(&self) -> Result<DeviceFacts, DriverError> {
+                Ok(local_facts())
             }
             fn transmit(&mut self, _frame: &[u8]) -> Result<(), DriverError> {
                 Err(DriverError::Busy)

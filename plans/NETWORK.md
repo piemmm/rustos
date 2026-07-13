@@ -316,23 +316,62 @@ planned, `[~]` in progress, `[x]` done.
   harnesses registered in `cargo xtask fuzz`. Docs:
   `docs/src/lib/net.md` + `lib/net/README.md` refreshed.
 
-### N3 — the `netstack` service + evolved driver seam: frames flow end to end `[ ]`
-- `userland/net/netstack` process: interface/address/route state, the
-  event loop (wait set over NIC rings + timer), SLAAC + static v4/v6
-  address configuration, the timer wheel, `CAP_NET_ADMIN` admin surface
-  (typed IPC: interface list/addr add/route add/counters), and the
-  first `info:net`/`state:net` sysinfo queries (§5: interface facts,
-  link/address state) served through new `SysinfoQueryId` members.
-- The driver seam evolves in place: `Net` becomes the ring-transport +
-  `DeviceFacts` contract; `virtio_net` serves it (still no offloads);
-  the kernel provides only endpoint plumbing + `irq_wait` wake.
+### N3 — the `netstack` service + evolved driver seam: frames flow end to end
+
+N3 lands as three tree-green sub-increments (each complete with tests,
+docs, and the full gate) because the whole is too large for one change:
+
+#### N3a — interface/address engine + host engine in `lib/net` `[x]`
+- Landed: `iface` — the per-interface RFC 4862 address engine (static
+  v4/v6 assignment; SLAAC with DAD, RS scheduling per RFC 4861 §6.3.7,
+  preferred/valid lifetimes with the §5.5.3(e) two-hour rule; addresses
+  formed from an injected 64-bit interface identifier — RFC 7217
+  stable-privacy derivation is the service layer's job; capacity-bounded,
+  fail-closed) and `stack` — the dual-stack host engine composing eth/
+  arp/nd/ipv4/ipv6/icmp/frag/route/neigh/iface into one per-interface
+  `Stack`: `receive_frame(now)` → bounded output frames + typed
+  `StackEvent`s, `advance`/`next_deadline` event-driven (one-shot timer,
+  never polled), ARP/NS answered for owned addresses only, next-hop
+  resolution with a bounded pending queue, budgeted reassembly,
+  `error_allowed` + rate-limited ICMP errors, bounded RA application
+  (SLAAC, default routers, on-link routes, MTU within link floor/
+  ceiling, timing adoption), redirect accepted only from the
+  destination's current first hop, echo in/out for diagnostics.
+- Landed: the driver seam's *facts* half — `Net::mac_address` evolved
+  in place into `Net::device_facts` returning a typed, fail-closed-
+  validated `DeviceFacts` (MAC, link MTU within the 68..=65535 bounds,
+  `LinkState`, the closed `NetOffloads` flag set rejecting reserved
+  bits, `rx_queues >= 1`); `virtio_net` serves it (no offloads
+  advertised, none negotiated) and every consumer updated in the same
+  change. The ring-transport half of the seam is N3b.
+- Tests landed: `iface`/`stack` unit + end-to-end suites (two `Stack`s
+  wired back-to-back resolve neighbours and ping each other over v4 and
+  v6), and the `fuzz_net_stack` harness (random frames into a live
+  `Stack`, never panics, outputs bounded) registered in
+  `cargo xtask fuzz`. Docs: `docs/src/lib/net.md` + `lib/net/README.md`
+  refreshed.
+
+#### N3b — the `netstack` service process `[ ]`
+- `userland/net/netstack` process: owns the interfaces, the event loop
+  (wait set over NIC rings + timer), calls the `lib/net` engines,
+  `CAP_NET_ADMIN` admin surface (typed IPC: interface list/addr
+  add/route add/counters), and the first `info:net`/`state:net` sysinfo
+  queries (§5: interface facts, link/address state) served through new
+  `SysinfoQueryId` members + the `lib/procinfo` resolver mapping.
+- The driver seam's transport half evolves in place: `Net` frame I/O
+  becomes the shared-memory frame-ring transport; `virtio_net` serves
+  it (still no offloads); the kernel provides only endpoint plumbing +
+  `irq_wait` wake. (`DeviceFacts` landed in N3a.)
+- Tests: engine-level end-to-end over a loopback fake, audited-refusal
+  tests for the admin surface. Docs: `docs/src/userland/netstack.md`;
+  driver README updates.
+
+#### N3c — QEMU verticals + `userland/net/icmp` deletion `[ ]`
 - `userland/net/icmp` is **deleted**; its QEMU ARP/ping coverage is
   re-landed as the `netstack` vertical (ping in/out over v4 *and* v6:
-  answers echo, resolves neighbours both ways).
-- Tests: engine-level end-to-end over a loopback fake, QEMU vertical
-  (`tests/integration/netstack_*`), audited-refusal tests for the admin
-  surface.
-- Docs: `docs/src/userland/netstack.md`; driver README updates.
+  answers echo, resolves neighbours both ways) in
+  `tests/integration/netstack_*` on the covered arches.
+- Final N3 docs/plan marks; root `README.md` matrix rows updated.
 
 ### N4 — UDP + the socket ABI + multicast membership `[ ]`
 - UDP over both families; the socket ABI (`lib/abi/src/net.rs`) with

@@ -68,6 +68,21 @@ impl<'a> EthernetFrame<'a> {
     }
 }
 
+/// The Ethernet multicast address an IPv6 group maps to
+/// (`33:33` + the group's last four octets, RFC 2464 §7).
+#[must_use]
+pub fn ipv6_multicast_mac(group: &crate::addr::Ipv6Addr) -> MacAddress {
+    let octets = group.octets();
+    MacAddress([0x33, 0x33, octets[12], octets[13], octets[14], octets[15]])
+}
+
+/// True when `mac` is a group (multicast or broadcast) address: the
+/// I/G bit of the first octet is set (IEEE 802).
+#[must_use]
+pub fn is_group_mac(mac: MacAddress) -> bool {
+    mac.as_octets()[0] & 0x01 != 0
+}
+
 /// Write an Ethernet II header into `out`, returning its length.
 ///
 /// Returns `None` when `out` cannot hold the 14-byte header.

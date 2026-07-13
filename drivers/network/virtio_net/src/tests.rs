@@ -146,10 +146,16 @@ fn arp_frame() -> Vec<u8> {
 }
 
 #[test]
-fn open_reads_mac_from_device_config() {
+fn open_reports_device_facts() {
     let (t, _, _) = build_device();
     let net = open_net(t);
-    assert_eq!(net.mac_address().unwrap(), MacAddress::new(DEVICE_MAC));
+    let facts = net.device_facts().expect("facts");
+    facts.validate().expect("facts validate");
+    assert_eq!(facts.mac, MacAddress::new(DEVICE_MAC));
+    assert_eq!(facts.mtu, 1500);
+    assert_eq!(facts.link, LinkState::Up);
+    assert_eq!(facts.offloads, NetOffloads::empty());
+    assert_eq!(facts.rx_queues, 1);
 }
 
 #[test]

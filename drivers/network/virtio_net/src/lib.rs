@@ -55,7 +55,9 @@
 #![deny(missing_docs)]
 
 use core::convert::TryFrom;
-use rustos_abi::driver::net::{MacAddress, Net, MAC_ADDRESS_LEN};
+use rustos_abi::driver::net::{
+    DeviceFacts, LinkState, MacAddress, Net, NetOffloads, MAC_ADDRESS_LEN,
+};
 use rustos_abi::driver::BufferClass;
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use rustos_virtio::{
@@ -91,8 +93,10 @@ mod wire {
     pub const HEADER_LEN: usize = 10;
     /// Minimum Ethernet frame size (excluding FCS).
     pub const MIN_ETHERNET_FRAME: usize = 14;
-    /// Default MTU (1500-byte payload + 14-byte Ethernet header).
-    pub const DEFAULT_MTU: usize = 1500 + MIN_ETHERNET_FRAME;
+    /// Link MTU: the largest link-layer payload (IP packet) carried.
+    pub const LINK_MTU: usize = 1500;
+    /// Largest frame moved: the link MTU plus the Ethernet header.
+    pub const MAX_FRAME_LEN: usize = LINK_MTU + MIN_ETHERNET_FRAME;
     /// Receive queue index (virtio-net §5.1.2).
     pub const RX_QUEUE: u16 = 0;
     /// Transmit queue index (virtio-net §5.1.2).
@@ -119,7 +123,7 @@ pub struct VirtioNet<'h, T: Transport> {
     tx_queue: SplitQueue,
     host: &'h dyn VirtioHost,
     mac: MacAddress,
-    mtu: usize,
+    max_frame_len: usize,
     /// Persistent receive staging (virtio-net header + frame buffer)
     /// the pre-posted receive chain points at. Carved once at open and
     /// reused for every frame; `None` only while a `receive` call
@@ -174,13 +178,13 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
             .alloc_dma_zeroed(wire::HEADER_LEN)
             .map_err(|_| VirtioError::DeviceFault)?;
         let rx_data = host
-            .alloc_dma_zeroed(wire::DEFAULT_MTU)
+            .alloc_dma_zeroed(wire::MAX_FRAME_LEN)
             .map_err(|_| VirtioError::DeviceFault)?;
         let tx_header = host
             .alloc_dma_zeroed(wire::HEADER_LEN)
             .map_err(|_| VirtioError::DeviceFault)?;
         let tx_data = host
-            .alloc_dma_zeroed(wire::DEFAULT_MTU)
+            .alloc_dma_zeroed(wire::MAX_FRAME_LEN)
             .map_err(|_| VirtioError::DeviceFault)?;
         let mut net = Self {
             transport,
@@ -188,7 +192,7 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
             tx_queue,
             host,
             mac: MacAddress::new(mac),
-            mtu: wire::DEFAULT_MTU,
+            max_frame_len: wire::MAX_FRAME_LEN,
             rx_header: Some(rx_header),
             rx_data: Some(rx_data),
             tx_header: Some(tx_header),
@@ -263,7 +267,7 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         if frame.len() < wire::MIN_ETHERNET_FRAME {
             return Err(DriverError::BufferTooSmall);
         }
-        if frame.len() > self.mtu {
+        if frame.len() > self.max_frame_len {
             return Err(DriverError::LengthOutOfRange);
         }
         // Stage into the persistent buffers through the class-aware
@@ -376,8 +380,18 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
 }
 
 impl<T: Transport> Net for VirtioNet<'_, T> {
-    fn mac_address(&self) -> Result<MacAddress, DriverError> {
-        Ok(self.mac)
+    fn device_facts(&self) -> Result<DeviceFacts, DriverError> {
+        // No extended features are negotiated: no VIRTIO_NET_F_STATUS
+        // (an operational device reports its link up), no offloads,
+        // one receive queue.
+        Ok(DeviceFacts {
+            mac: self.mac,
+            mtu: u32::try_from(self.max_frame_len - wire::MIN_ETHERNET_FRAME)
+                .map_err(|_| DriverError::LengthOutOfRange)?,
+            link: LinkState::Up,
+            offloads: NetOffloads::empty(),
+            rx_queues: 1,
+        })
     }
     fn transmit(&mut self, frame: &[u8]) -> Result<(), DriverError> {
         self.run_transmit(frame, BufferClass::NonSensitive)

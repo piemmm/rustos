@@ -8,10 +8,10 @@ syscalls, no endpoints, no capability checks. The engine transforms
 caller-owned byte slices and explicit monotonic time values, so the exact
 code the live `netstack` service runs is the code the unit tests, property
 tests, and fuzz harnesses (`fuzz_net_eth`, `fuzz_net_addr`,
-`fuzz_net_ipv4`, `fuzz_net_ipv6`, `fuzz_net_icmp`, `fuzz_net_nd`)
-exercise.
+`fuzz_net_ipv4`, `fuzz_net_ipv6`, `fuzz_net_icmp`, `fuzz_net_nd`,
+`fuzz_net_stack`) exercise.
 
-## Contents (NETWORK.md increments N1–N2)
+## Contents (NETWORK.md increments N1–N3a)
 
 - `addr` — the dual-stack address vocabulary. IPv4 and IPv6 are peers,
   expressed as the `core::net` types (re-exported, never a drifting
@@ -61,6 +61,18 @@ exercise.
   `next_deadline` (event-driven, never polled). Bounded against cache
   poisoning: fixed capacity with LRU eviction of resolved entries only,
   and an unsolicited confirmation never creates state.
+- `iface` — the per-interface address engine: static IPv4/IPv6
+  assignment and RFC 4862 SLAAC (duplicate address detection, router
+  solicitation scheduling, preferred/valid lifetimes with the
+  §5.5.3(e) two-hour rule) over an injected 64-bit interface
+  identifier (RFC 7217 derivation is the service layer's job).
+- `stack` — the dual-stack host engine composing everything above:
+  one `Stack` per interface takes frames and explicit `now` values and
+  returns frames plus typed events — ARP/ND answering and resolution
+  with a bounded pending queue, echo in/out, budgeted reassembly,
+  rate-limited ICMP error generation, RA processing (SLAAC, default
+  routers, on-link routes, MTU, timing adoption — all bounded), and
+  redirect validation against the destination's current first hop.
 
 Later increments evolve this crate in place with `igmp`/`mld`, `udp`,
 and `tcp` (`plans/NETWORK.md` §2.1).

@@ -90,6 +90,31 @@ pub fn is_unicast_link_local(addr: &Ipv6Addr) -> bool {
     addr.segments()[0] & 0xFFC0 == 0xFE80
 }
 
+/// The solicited-node multicast group of `addr`
+/// (`ff02::1:ffXX:XXXX`, RFC 4291 §2.7.1): the last 24 bits of the
+/// unicast address appended to the fixed prefix. Neighbour and
+/// duplicate-address solicitations are sent to this group, so a host
+/// listens on it for every address it has, tentative included.
+#[must_use]
+pub fn solicited_node_multicast(addr: &Ipv6Addr) -> Ipv6Addr {
+    let unicast = addr.octets();
+    let mut octets = [0u8; 16];
+    octets[0] = 0xFF;
+    octets[1] = 0x02;
+    octets[11] = 0x01;
+    octets[12] = 0xFF;
+    octets[13] = unicast[13];
+    octets[14] = unicast[14];
+    octets[15] = unicast[15];
+    Ipv6Addr::from(octets)
+}
+
+/// The all-nodes link-local multicast group (`ff02::1`, RFC 4291).
+pub const ALL_NODES: Ipv6Addr = Ipv6Addr::new(0xFF02, 0, 0, 0, 0, 0, 0, 1);
+
+/// The all-routers link-local multicast group (`ff02::2`, RFC 4291).
+pub const ALL_ROUTERS: Ipv6Addr = Ipv6Addr::new(0xFF02, 0, 0, 0, 0, 0, 0, 2);
+
 /// Why an address/zone pairing was refused by [`ScopedIpv6Addr::new`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ScopeError {
