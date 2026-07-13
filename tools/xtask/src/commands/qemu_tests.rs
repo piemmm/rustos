@@ -3553,6 +3553,57 @@ const TESTS: &[QemuTest] = &[
             ("776005", "exit\n"),
         ],
     },
+    // `plans/STRESSTEST.md` ST4: the `sysmon` monitor acceptance vertical.
+    // `rustos-test-sysmon-qemu-aarch64` boots the *production* aarch64
+    // pipeline with the planted encrypted-root disk, unlocks the root,
+    // authenticates `root`/`root` at the console login, and starts
+    // `sysmon` from its store bundle (the load gate verifies the whole
+    // on-disk bundle; the granted `CAP_MEM_PIN` lets it pin itself). The
+    // `Pressure:` token on the transcript witnesses the gated
+    // `MEMORY_PRESSURE` figures rendered on the first frame; `r` then
+    // drives an immediate refresh over the raw console, and the
+    // `reclaimable` token (the detail-panel header naming the
+    // `RECLAIM_STATS` ledger table) witnesses the panel render. `q` quits,
+    // leaving the alternate screen; the shell prompt reappearing is the
+    // intact-screen witness, after which the runner types `exit`. Each
+    // line is typed only after its marker appeared; every marker is
+    // output, never an echo of a typed line. The guest audit sink arms on
+    // `sysmon`'s audited `exit` (`sc=exit`, `comm=sysmon`) and reports
+    // PASS on the next audited `exit` — the shell's, typed only after the
+    // restored prompt appeared — so the verified frames provably reached
+    // the transcript before the run ended (the session-ceiling
+    // arm-then-exit discipline). A 120-second budget covers boot + bounded
+    // PBKDF2 + the interactive session on QEMU TCG; single CPU like the
+    // other full-boot verticals.
+    QemuTest {
+        package: "rustos-test-sysmon-qemu-aarch64",
+        binary: "rustos-test-sysmon-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(120),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::EncryptedRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[
+            ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
+            ("Username:", SESSION_USERNAME_LINE),
+            ("Password", SESSION_PASSWORD_LINE),
+            ("root@rustos ~% ", "sysmon\n"),
+            // The first frame's pressure line rendered its gated figures.
+            ("Pressure:", "r"),
+            // The refresh key was accepted (raw-mode input works); the
+            // reclaim ledger panel header rendered.
+            ("reclaimable", "q"),
+            // The monitor quit and the shell repainted its prompt on the
+            // restored screen.
+            ("root@rustos ~% ", "exit\n"),
+        ],
+    },
     // `plans/PI.md` design B / B2 + `plans/DISPLAY.md` D7d (first stage): the
     // pre-unlock driver-loading-by-discovery autoload vertical, booted as a
     // *display* world. `rustos-test-autoload-input-qemu-aarch64` boots the

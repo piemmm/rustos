@@ -1841,6 +1841,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-sysmon"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-curses",
+ "rustos-help",
+ "rustos-procinfo",
+ "rustos-rt",
+ "rustos-termcap",
+ "rustos-vt",
+]
+
+[[package]]
 name = "rustos-taskbar"
 version = "0.0.0"
 dependencies = [
@@ -3377,6 +3390,17 @@ dependencies = [
  "rustos-arch-api",
  "rustos-arch-x86_64",
  "rustos-itest-harness",
+ "rustos-kernel",
+ "rustos-log",
+]
+
+[[package]]
+name = "rustos-test-sysmon-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-aarch64",
+ "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel",
  "rustos-log",
 ]

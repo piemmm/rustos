@@ -28,15 +28,16 @@ use alloc::vec::Vec;
 use rustos_abi::origin::{Origin, TrustDomain};
 
 use rustos_abi::sysinfo::{
-    reclaim_class_from_name, CpuLoadRecord, CpuLoadRequest, KernelMemoryStats, MemoryPressureStats,
-    RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SysinfoQueryId,
-    SystemIdentity, Uptime, PRESSURE_BAND_NAMES, RECLAIM_CLASS_COUNT, RESOURCE_LIMITS_REPORT_LEN,
+    reclaim_class_from_name, CpuLoadRecord, KernelMemoryStats, MemoryPressureStats, RamzipStats,
+    ReclaimClassRecord, ResourceLimitRecord, SysinfoQueryId, SystemIdentity, Uptime,
+    PRESSURE_BAND_NAMES, RESOURCE_LIMITS_REPORT_LEN,
 };
 use rustos_abi::time::Time64;
 use rustos_abi::{CapabilityId, Errno, LimitKind, ResourceLimit};
 use rustos_resref::{KnownNamespace, ResourceRef};
 
 use crate::cputime::for_each_cpu_time;
+use crate::kstats;
 use crate::list::{field_lossy, ListError};
 use crate::request::{call, CallError};
 use crate::resinfo::{
@@ -606,83 +607,59 @@ fn cpu_load_metric(
 }
 
 /// Query the live memory-pressure snapshot (gated on
-/// `CAP_SYSINFO_KERNEL` by the broker).
+/// `CAP_SYSINFO_KERNEL` by the broker) through the shared fetch.
 fn query_memory_pressure(
     transport: &dyn Transport,
 ) -> Result<MemoryPressureStats, ResolveInfoError> {
-    let reply = call(transport, SysinfoQueryId::MEMORY_PRESSURE, &[]).map_err(map_call_error)?;
-    MemoryPressureStats::from_bytes(&reply).map_err(|_| ResolveInfoError::Malformed)
+    kstats::memory_pressure(transport).map_err(map_kstat_error)
 }
 
-/// Query the `ramzip` tier counters (gated on `CAP_SYSINFO_KERNEL`).
+/// Query the `ramzip` tier counters (gated on `CAP_SYSINFO_KERNEL`)
+/// through the shared fetch.
 fn query_ramzip(transport: &dyn Transport) -> Result<RamzipStats, ResolveInfoError> {
-    let reply = call(transport, SysinfoQueryId::RAMZIP_STATS, &[]).map_err(map_call_error)?;
-    RamzipStats::from_bytes(&reply).map_err(|_| ResolveInfoError::Malformed)
+    kstats::ramzip_stats(transport).map_err(map_kstat_error)
 }
 
-/// Query the whole reclaim ledger (gated on `CAP_SYSINFO_KERNEL`). The
-/// class set is small and closed, so one page always carries it; a reply
-/// that is not a whole number of records fails closed.
+/// Query the whole reclaim ledger (gated on `CAP_SYSINFO_KERNEL`) through
+/// the shared paged walk.
 fn query_reclaim_records(
     transport: &dyn Transport,
 ) -> Result<Vec<ReclaimClassRecord>, ResolveInfoError> {
-    let request = ReclaimListRequest {
-        offset: 0,
-        limit: u16::try_from(RECLAIM_CLASS_COUNT).unwrap_or(u16::MAX),
-        flags: 0,
-    };
-    let reply = call(
-        transport,
-        SysinfoQueryId::RECLAIM_STATS,
-        &request.to_le_bytes(),
-    )
-    .map_err(map_call_error)?;
-    if reply.len() % ReclaimClassRecord::WIRE_LEN != 0 {
-        return Err(ResolveInfoError::Malformed);
-    }
     let mut records = Vec::new();
-    for chunk in reply.chunks_exact(ReclaimClassRecord::WIRE_LEN) {
-        records
-            .push(ReclaimClassRecord::from_bytes(chunk).map_err(|_| ResolveInfoError::Malformed)?);
-    }
+    kstats::for_each_reclaim_class(transport, |record| {
+        records.push(*record);
+        Ok(())
+    })
+    .map_err(map_list_error)?;
     Ok(records)
 }
 
-/// Page through the per-CPU load records (gated on `CAP_SYSINFO_KERNEL`).
+/// Page through the per-CPU load records (gated on `CAP_SYSINFO_KERNEL`)
+/// through the shared paged walk.
 fn query_cpu_loads(transport: &dyn Transport) -> Result<Vec<CpuLoadRecord>, ResolveInfoError> {
-    /// Records requested per page: bounds the reply size without bounding
-    /// how many CPUs the machine may have.
-    const CPU_LOAD_PAGE: u16 = 64;
     let mut records = Vec::new();
-    crate::list::walk_pages(
-        transport,
-        SysinfoQueryId::CPU_LOAD,
-        CpuLoadRecord::WIRE_LEN,
-        CPU_LOAD_PAGE,
-        |offset, limit| {
-            CpuLoadRequest {
-                offset,
-                limit,
-                flags: 0,
-            }
-            .to_le_bytes()
-            .to_vec()
-        },
-        |chunk| {
-            let record = CpuLoadRecord::from_bytes(chunk)
-                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
-            records.push(record);
-            Ok(())
-        },
-    )
+    kstats::for_each_cpu_load(transport, |record| {
+        records.push(*record);
+        Ok(())
+    })
     .map_err(map_list_error)?;
     Ok(records)
+}
+
+/// Map a shared kernel-stats fetch failure onto the resolver's error
+/// vocabulary: the walks' structurally-invalid-reply convention
+/// ([`Errno::BadMagic`]) is this resolver's [`ResolveInfoError::Malformed`].
+fn map_kstat_error(err: CallError) -> ResolveInfoError {
+    match err {
+        CallError::Service(Errno::BadMagic) => ResolveInfoError::Malformed,
+        other => map_call_error(other),
+    }
 }
 
 /// Map a paged-walk failure onto the resolver's error vocabulary.
 fn map_list_error(err: ListError) -> ResolveInfoError {
     match err {
-        ListError::Call(call) => map_call_error(call),
+        ListError::Call(call) => map_kstat_error(call),
         ListError::Sink(errno) => ResolveInfoError::Service(errno),
     }
 }

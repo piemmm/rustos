@@ -198,6 +198,32 @@ pub const TOP_MANIFEST: &[CapabilityId] = &[
     CapabilityId::SYSINFO_KERNEL,
 ];
 
+/// The `sysmon` monitor's manifest: the `top` console/help surface
+/// (`CAP_CONSOLE_WRITE` for the full-screen display on fd 1,
+/// `CAP_CONSOLE_READ` for raw-mode keystrokes on fd 0 — also authorising
+/// its `stream_input_mode` raw discipline — and `CAP_FS_ACCESS` for the
+/// short-help read of its own bundle's `Help/` tree through the secured
+/// VFS) plus the three privileged features its panels exercise:
+/// `CAP_SYSINFO_KERNEL` for the kernel-wide statistics every refresh
+/// issues (`KERNEL_MEMORY_STATS`, `MEMORY_PRESSURE`, `RECLAIM_STATS`,
+/// `RAMZIP_STATS`, `CPU_LOAD`), `CAP_SYSINFO_GLOBAL` for the all-process
+/// census, and `CAP_MEM_PIN` for the startup `mem_pin` that exempts the
+/// monitor's own memory from the swap tiers it observes
+/// (`plans/STRESSTEST.md` ST4). Each is an optional feature above the
+/// session baseline: armed only when the account ceiling carries it (an
+/// administrator's intersection keeps all three), degraded to the stated
+/// per-panel refusal — or an unpinned title-line notice — for everyone
+/// else while the session keeps running.
+#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
+pub const SYSMON_MANIFEST: &[CapabilityId] = &[
+    CapabilityId::CONSOLE_WRITE,
+    CapabilityId::CONSOLE_READ,
+    CapabilityId::FS_ACCESS,
+    CapabilityId::SYSINFO_GLOBAL,
+    CapabilityId::SYSINFO_KERNEL,
+    CapabilityId::MEM_PIN,
+];
+
 /// The `ls` tool's manifest: `CAP_CONSOLE_WRITE` for the listing on fd 1
 /// and diagnostics on fd 2, plus `CAP_FS_ACCESS` because inspecting paths
 /// and reading directories *is* the tool's job — the secured VFS still
@@ -437,6 +463,21 @@ mod tests {
     }
 
     #[test]
+    fn sysmon_manifest_is_pinned() {
+        assert_eq!(
+            set(SYSMON_MANIFEST),
+            set(&[
+                CapabilityId::CONSOLE_WRITE,
+                CapabilityId::CONSOLE_READ,
+                CapabilityId::FS_ACCESS,
+                CapabilityId::SYSINFO_GLOBAL,
+                CapabilityId::SYSINFO_KERNEL,
+                CapabilityId::MEM_PIN,
+            ])
+        );
+    }
+
+    #[test]
     fn ls_manifest_is_pinned() {
         assert_eq!(
             set(LS_MANIFEST),
@@ -532,6 +573,7 @@ mod tests {
             PS_MANIFEST,
             RESET_MANIFEST,
             SYSINFO_MANIFEST,
+            SYSMON_MANIFEST,
             TOP_MANIFEST,
         ] {
             for cap in manifest {
@@ -565,6 +607,16 @@ mod tests {
         assert_eq!(
             above(TOP_MANIFEST),
             set(&[CapabilityId::SYSINFO_GLOBAL, CapabilityId::SYSINFO_KERNEL])
+        );
+        // sysmon: the kernel-wide statistics panels, the all-process
+        // census, and the startup self-pin.
+        assert_eq!(
+            above(SYSMON_MANIFEST),
+            set(&[
+                CapabilityId::SYSINFO_GLOBAL,
+                CapabilityId::SYSINFO_KERNEL,
+                CapabilityId::MEM_PIN,
+            ])
         );
         // sysinfo: the global process, kernel-memory, and hardware-tree
         // queries of its reporting surface.
@@ -775,6 +827,7 @@ mod tests {
             ("seq", AppKind::Command, PURE_TOOL_REQUEST),
             ("sysinfo", AppKind::Command, SYSINFO_MANIFEST),
             ("sysinfod", AppKind::Service, SYSINFOD_MANIFEST),
+            ("sysmon", AppKind::Command, SYSMON_MANIFEST),
             ("tee", AppKind::Command, FILE_TOOL_REQUEST),
             ("terminal", AppKind::Command, TERMINAL_REQUEST),
             ("top", AppKind::Command, TOP_MANIFEST),

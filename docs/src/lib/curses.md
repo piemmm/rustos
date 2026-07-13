@@ -103,6 +103,18 @@ is a `CursesError`, an unknown input sequence yields no event, and an
 unrenderable colour is degraded (`AGENTS.md` §2.9). Nothing here writes to fd 3
 (`stdinfo`, §20).
 
+## The shared refresh-delay grammar
+
+The full-screen viewers (`top`, `sysmon`) all accept GNU `top`'s
+`-d, --delay secs.tenths` option, and its parsed value directly
+parameterises the `Screen` input timeout, so the grammar lives here once
+(`delay::parse_delay_tenths`): seconds with an optional fraction of which
+only the first digit (tenths) is kept, failing closed on anything else,
+with a parsed zero clamped up to `MIN_DELAY_TENTHS` — RustOS never
+busy-loops, a deliberate divergence each tool's Help documents. Each tool
+keeps its own usage banner and error enum and maps the parser's `None`
+onto its usage error.
+
 ## Layering and testing
 
 `lib/curses` depends on `rustos-vt` and `rustos-termcap` (and, behind the

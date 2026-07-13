@@ -1,0 +1,34 @@
+[package]
+name = "rustos-test-sysmon-qemu-aarch64"
+description = "plans/STRESSTEST.md ST4 sysmon QEMU vertical: boot the production aarch64 rustos-kernel pipeline (boot_aarch64::boot) on the virt board with the planted whole-disk encrypted-root image, unlock the root, authenticate root/root at the console login, start `sysmon` on the console, drive a refresh, assert the pressure-band and reclaim-ledger figures render on the transcript, quit with `q`, and get the shell prompt back on an intact screen. PASS once sysmon's audited exit arms the sink and the shell's scripted exit, typed only after the prompt reappeared, follows it — so the verified frames provably reached the transcript before the run ended."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "rustos-test-sysmon-qemu-aarch64"
+path = "src/main.rs"
+
+# Freestanding "boot the production aarch64 pipeline with the planted
+# encrypted-root disk and prove the sysmon monitor end to end"
+# integration test. It reuses the entire production boot pipeline through
+# `rustos-kernel`'s library half — discovery, the unlock kthread, PID 1
+# supervision, login's spawn-as-user, the shell's launch path, and the
+# disk-backed bundle spawn path — and only swaps the audit sink (no
+# duplication). Keeping the QEMU-exit shortcut in a dedicated bin (not a
+# Cargo feature on a production crate) prevents feature unification from
+# leaking it into any production build (fail closed).
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
+rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

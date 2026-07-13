@@ -18,9 +18,12 @@ use alloc::format;
 use alloc::string::String;
 use core::fmt::Write as _;
 
-use rustos_abi::sysinfo::LoadAverage;
 use rustos_curses::{str_width, truncate_to_width, Pos, Screen, Size, Tty, Window};
-use rustos_procinfo::{state_char, Transport};
+// The figure → text conversions (`format_*`) are the shared full-screen
+// viewer formatters in `lib/procinfo`, so `top` and `sysmon` render the
+// same figures identically.
+use rustos_procinfo::{format_load, format_mib, state_char, Transport};
+pub(crate) use rustos_procinfo::{format_size, format_tenths, format_uptime};
 use rustos_vt::{Attributes, BasicColor, Color};
 
 use crate::error::TopError;
@@ -323,74 +326,12 @@ fn shorten(text: &str, max: usize) -> String {
     out
 }
 
-/// Render a tenths-of-a-percent figure as `W.T`, saturating at `999.9` so
-/// the column never widens.
-pub(crate) fn format_tenths(tenths: u32) -> String {
-    let tenths = tenths.min(9_999);
-    format!("{}.{}", tenths / 10, tenths % 10)
-}
-
-/// Render a byte count for the `SIZE` column: whole KiB below ten MiB
-/// (`8432K`), tenths of MiB below ten GiB (`123.4M`), tenths of GiB above
-/// (`12.3G`). Zero (no registered address space) renders as `0`.
-pub(crate) fn format_size(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * KIB;
-    const GIB: u64 = 1024 * MIB;
-    if bytes == 0 {
-        return String::from("0");
-    }
-    if bytes < 10 * MIB {
-        return format!("{}K", bytes.div_ceil(KIB));
-    }
-    if bytes < 10 * GIB {
-        let tenths = bytes * 10 / MIB;
-        return format!("{}.{}M", tenths / 10, tenths % 10);
-    }
-    let tenths = bytes * 10 / GIB;
-    format!("{}.{}G", tenths / 10, tenths % 10)
-}
-
-/// Render a byte count as tenths of MiB (`986.2`), the unit of the GNU
-/// `top` memory summary line.
-fn format_mib(bytes: u64) -> String {
-    let tenths = bytes * 10 / (1024 * 1024);
-    format!("{}.{}", tenths / 10, tenths % 10)
-}
-
 /// Render cumulative CPU time as GNU `top`'s `TIME+` form:
 /// `minutes:seconds.hundredths`.
 pub(crate) fn format_time_plus(ns: u64) -> String {
     let centis = ns / 10_000_000;
     let seconds = centis / 100;
     format!("{}:{:02}.{:02}", seconds / 60, seconds % 60, centis % 100)
-}
-
-/// Render a monotonic-nanosecond uptime as `D days, H:MM` / `H:MM`.
-pub(crate) fn format_uptime(ns: u64) -> String {
-    let minutes = ns / 60_000_000_000;
-    let hours = minutes / 60;
-    let days = hours / 24;
-    if days > 0 {
-        format!(
-            "{} day{}, {}:{:02}",
-            days,
-            if days == 1 { "" } else { "s" },
-            hours % 24,
-            minutes % 60
-        )
-    } else {
-        format!("{}:{:02}", hours, minutes % 60)
-    }
-}
-
-/// Render a fixed-point load-average value as the conventional `W.CC`.
-fn format_load(fixed: u32) -> String {
-    format!(
-        "{}.{:02}",
-        LoadAverage::whole(fixed),
-        LoadAverage::centis(fixed)
-    )
 }
 
 /// Append a base-ten `usize` without pulling in `format!`'s machinery for a

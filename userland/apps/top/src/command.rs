@@ -13,8 +13,10 @@ pub const DEFAULT_DELAY_TENTHS: u32 = 30;
 ///
 /// GNU `top` accepts a zero delay and spins as fast as it can; RustOS never
 /// busy-loops, so a requested delay below one tenth of a second is clamped
-/// to it — a deliberate, documented divergence in the tool's Help.
-pub const MIN_DELAY_TENTHS: u32 = 1;
+/// to it — a deliberate, documented divergence in the tool's Help. The
+/// grammar (and this clamp) is the shared full-screen-viewer delay grammar
+/// in `lib/curses`, so `top` and `sysmon` can never drift apart.
+pub use rustos_curses::MIN_DELAY_TENTHS;
 
 /// One thing the `top` tool can do.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,39 +81,17 @@ pub fn parse(args: &[&str]) -> Result<Command, TopError> {
     Ok(Command::Run { delay_tenths })
 }
 
-/// Parse a `secs[.tenths…]` delay into whole tenths of a second, keeping
-/// only the first fractional digit (GNU `top` keeps tenths) and clamping a
-/// zero up to [`MIN_DELAY_TENTHS`] so the viewer never busy-loops.
+/// Parse a `secs[.tenths…]` delay into whole tenths of a second through the
+/// shared full-screen-viewer grammar
+/// ([`rustos_curses::parse_delay_tenths`]), mapping its fail-closed `None`
+/// onto this tool's usage error.
 ///
 /// # Errors
 ///
 /// [`TopError::Usage`] when the value is empty, carries a non-digit, has
 /// more than one decimal point, or overflows the tenths counter.
 fn parse_delay_tenths(value: &str) -> Result<u32, TopError> {
-    let (whole, fraction) = match value.split_once('.') {
-        Some((whole, fraction)) => (whole, fraction),
-        None => (value, ""),
-    };
-    if whole.is_empty() && fraction.is_empty() {
-        return Err(TopError::Usage);
-    }
-    if !whole.bytes().all(|b| b.is_ascii_digit()) || !fraction.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(TopError::Usage);
-    }
-    let seconds: u32 = if whole.is_empty() {
-        0
-    } else {
-        whole.parse().map_err(|_| TopError::Usage)?
-    };
-    let tenth = fraction
-        .bytes()
-        .next()
-        .map_or(0, |digit| u32::from(digit - b'0'));
-    let tenths = seconds
-        .checked_mul(10)
-        .and_then(|t| t.checked_add(tenth))
-        .ok_or(TopError::Usage)?;
-    Ok(tenths.max(MIN_DELAY_TENTHS))
+    rustos_curses::parse_delay_tenths(value).ok_or(TopError::Usage)
 }
 
 #[cfg(test)]

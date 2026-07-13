@@ -59,6 +59,7 @@ extern crate alloc;
 
 pub mod buffer;
 pub mod color;
+pub mod delay;
 pub mod error;
 pub mod geom;
 pub mod input;
@@ -73,6 +74,7 @@ mod tests;
 
 pub use buffer::Buffer;
 pub use color::{downgrade, ColorPair, ColorPairs, DEFAULT_PAIR, MAX_COLOR_PAIRS};
+pub use delay::{parse_delay_tenths, MIN_DELAY_TENTHS};
 pub use error::{CursesError, Result};
 pub use geom::{Pos, Size};
 pub use input::{Event, Input};

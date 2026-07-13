@@ -1,0 +1,24 @@
+# Signed-AppInfo manifest source for the `sysmon` command app
+# (plans/STRESSTEST.md ST4). Discovered by the build's app-bundle composer;
+# the capability list is the bundle's request, intersected with the
+# launching user's grants. CAP_CONSOLE_WRITE drives the full-screen display
+# on fd 1; CAP_CONSOLE_READ the raw-mode keystrokes on fd 0 (it also
+# authorises the tool's stream_input_mode raw discipline). CAP_FS_ACCESS
+# because the short-help switches read the bundle's own Help/ tree through
+# the secured VFS, which still authorises every path per-inode under the
+# caller's attested identity. CAP_SYSINFO_KERNEL because every panel's
+# figures are the kernel-wide observability queries (KERNEL_MEMORY_STATS,
+# MEMORY_PRESSURE, RECLAIM_STATS, RAMZIP_STATS, CPU_LOAD) issued on every
+# refresh, and CAP_SYSINFO_GLOBAL because the process-summary panel issues
+# GLOBAL_PROCESS_LIST — optional features above the session baseline, armed
+# only when the launching account's ceiling carries them (an administrator)
+# and degraded to a stated refusal for everyone else while the rest of the
+# session continues. CAP_MEM_PIN because the monitor pins its own memory at
+# startup (mem_pin) so it never stalls on its own page fault-in under the
+# very pressure it observes; a refused pin is reported on the status line
+# and the session continues unpinned — the pin is incidental, never fatal.
+id = "os.rustos.sysmon"
+name = "sysmon"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_KERNEL", "CAP_MEM_PIN"]

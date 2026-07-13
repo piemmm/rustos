@@ -29,6 +29,9 @@
 //!   shared columnar rendering.
 //! * [`for_each_mount`] and [`render_mount`], the paged mount-table walk and
 //!   its `source on target type fstype (options)` row rendering.
+//! * [`kstats`] — the shared kernel-statistics fetches (memory pressure,
+//!   reclaim ledger, `ramzip` counters, per-CPU load) consumed by both the
+//!   resolver and the `sysmon` monitor.
 //! * [`walk_pages`](list) and the shared [`ListError`], the generic paging
 //!   loop both walks are built on.
 //! * [`resolve()`], the userspace `info:`/`stats:` resource-reference resolver:
@@ -50,6 +53,9 @@
 //! * [`hwtree`] — the shared paged `HARDWARE_TREE` fetch and the
 //!   stable-bus-order / topology-view walk the device-inventory listing
 //!   tools (`lspci`, `lsusb`) share.
+//! * [`human`] — the human-readable figure rendering the full-screen
+//!   viewers share.
+//! * [`kstats`] — the shared kernel-statistics fetches.
 //! * [`list`] — the generic paged-list walk and the shared [`ListError`].
 //! * [`process`] — the process-list paging walk and row rendering.
 //! * [`mount`] — the mount-table paging walk and row rendering.
@@ -78,7 +84,9 @@ extern crate alloc;
 #[cfg(all(freestanding, feature = "program"))]
 pub mod client;
 pub mod cputime;
+pub mod human;
 pub mod hwtree;
+pub mod kstats;
 pub mod list;
 pub mod mount;
 pub mod process;
@@ -91,7 +99,12 @@ pub mod users;
 #[cfg(all(freestanding, feature = "program"))]
 pub use client::{IpcTransport, RtOutput};
 pub use cputime::{for_each_cpu_time, CPU_TIME_PAGE};
+pub use human::{format_load, format_mib, format_size, format_tenths, format_uptime};
 pub use hwtree::{bus_order, class_label, depth_of, fetch_tree, keep_with_ancestors, HW_TREE_PAGE};
+pub use kstats::{
+    for_each_cpu_load, for_each_reclaim_class, memory_pressure, ramzip_stats, CPU_LOAD_PAGE,
+    RECLAIM_PAGE,
+};
 pub use list::{field_lossy, ListError};
 pub use mount::{for_each_mount, render_mount, render_options, MOUNT_PAGE};
 pub use process::{

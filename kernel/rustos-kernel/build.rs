@@ -171,6 +171,13 @@ const PROGRAMS: &[Program] = &[
         prefix: "SYSINFO",
     },
     Program {
+        pkg: "rustos-sysmon",
+        bin: "rustos-sysmon-run",
+        rel_dir: "../../userland/apps/sysmon",
+        fixture: "sysmon_rxe.rs",
+        prefix: "SYSMON",
+    },
+    Program {
         pkg: "rustos-top",
         bin: "rustos-top-run",
         rel_dir: "../../userland/apps/top",

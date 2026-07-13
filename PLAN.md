@@ -4711,7 +4711,7 @@ per-increment guarantees.
 
 ## STRESSTEST — stress testing + live kernel monitoring (`plans/STRESSTEST.md`)
 
-**Status: ST1–ST3 done; ST4–ST6 planned.** Makes RustOS's behaviour under
+**Status: ST1–ST4 done; ST5–ST6 planned.** Makes RustOS's behaviour under
 load observable and provokable with first-party tools. ST1 (done) exports the
 counters the kernel keeps — the `kernel/mem` pressure gauge, reclaim ledger,
 and `ramzip` accounting, plus per-CPU load — as four audited
@@ -4745,9 +4745,23 @@ unmaskable, a second pending termination request escalates to the default
 terminate (`^C ^C` kills), `Disable` refuses `WouldBlock` while an
 observation is undrained, the opt-in is never inherited and is cleared by
 the shared task reclaim, and the console-`^C`-to-intake path is proved end
-to end by the extended `signal_qemu_aarch64` vertical. ST4 is `sysmon`, the
-fullscreen curses kernel-memory monitor
-(pinned, event-driven, per-panel graceful degradation); ST5 is `stress`, the
+to end by the extended `signal_qemu_aarch64` vertical. ST4 (done) is
+`sysmon` (`userland/apps/sysmon`), the fullscreen curses kernel-memory
+monitor: a full self-contained store bundle (AppInfo requesting the
+`top` surface plus `CAP_MEM_PIN`; thirteen-locale `Help/`) whose model
+samples every panel with independent per-query degradation (a refusal is
+the panel's stated reason, a hiccuping service never kills the observer),
+pins itself at startup with a graceful title-line refusal, and draws six
+summary lines (memory, pressure band + history strip, CPU, census) above
+a `p`-cycled scrollable detail panel (reclaim ledger, `ramzip` counters,
+per-CPU load, top consumers) on an event-driven bounded-wait loop with
+`+`/`-` interval keys; the four kernel-statistics fetches were hoisted
+into the shared `rustos_procinfo::kstats` (resolver retargeted), the
+GNU `-d` delay grammar into `rustos_curses::delay`, and the viewer figure
+formatters into `rustos_procinfo::human` so `top`/`sysmon` share one
+definition; proved by exhaustive host model/render/loop tests and the
+`sysmon_qemu_aarch64` full-boot vertical (login → `sysmon` → pressure +
+reclaim figures on the transcript → `q` → intact prompt). ST5 is `stress`, the
 stress-ng-style load generator (pinned controller + swappable cpu/vm/io/hdd/
 cache workers, `--overcommit`, `--timeout`, `--quiet`, `--background`,
 `--monitor`, clean signal teardown); ST6 is the combined QEMU vertical,

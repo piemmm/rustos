@@ -1,6 +1,6 @@
 # STRESSTEST.md — System stress testing and live kernel monitoring
 
-Status: ST1–ST3 done; ST4–ST6 planned
+Status: ST1–ST4 done; ST5–ST6 planned
 Target: RustOS
 Primary code areas: `lib/abi`, `kernel/mem`, `kernel/core`, `userland/system/sysinfod`, `lib/procinfo`, `userland/apps/`
 Secondary code areas: `lib/rt`, `lib/curses`, `userland/shell/sysinfo`, `kernel/sched`, `docs/src/`
@@ -602,16 +602,65 @@ implementation fixed):
   `^C`s escalate to the default terminate reaped as 130 under a synthetic
   supervisor.
 
-### ST4 — `sysmon`
+### ST4 — `sysmon` — **done**
 
-Deliverables: the `userland/apps/sysmon` bundle (AppInfo, `Help/` with
-`en-US` plus the locale set the sibling apps carry, README, docs page);
-the §6 panels/keys; pin-on-start with graceful refusal; event-driven
-refresh loop.
-Tests: exhaustive I/O-free model tests (panel state, key handling,
-degradation states); render tests against fixture query data; a QEMU
-vertical that starts `sysmon` on the console, drives a refresh, asserts
-band/counter figures render, and quits back to an intact shell screen.
+What now holds (the deliverables of §6, with the reconciliations the
+implementation fixed):
+
+- The `userland/apps/sysmon` bundle ships complete (AppInfo requesting
+  `CAP_CONSOLE_WRITE`/`CAP_CONSOLE_READ`/`CAP_FS_ACCESS`/
+  `CAP_SYSINFO_KERNEL`/`CAP_SYSINFO_GLOBAL`/`CAP_MEM_PIN`, thirteen
+  `Help/` locales pinned by the locale test, README,
+  `docs/src/userland/sysmon.md`), registered on the x86_64/riscv64
+  embedded boot floor (`SYSMON_PATH`/`SYSMON_MANIFEST`/`SPAWN_PROGRAMS`
+  row) and discovered from the store on aarch64 like every sibling.
+- **Reconciliation — nothing but the terminal is fatal.** The plan's
+  per-panel degradation is total: `Model::refresh` is infallible — every
+  query (gated and ungated alike) degrades independently through the
+  typed `Gauge` (`Ready`/`Denied`/`Unavailable`), a denied global census
+  falls back to the caller's own with a short `(own)` census marker and
+  the full stated refusal leading the processes panel (the 80-column
+  tasks line cannot carry it), and a service that refuses *everything*
+  still leaves a running session of stated refusals. `SysmonError` is
+  `Usage`/`Terminal` only.
+- The §6 layout/keys hold: six summary lines (title with uptime/load/pin
+  state; MiB memory overview with the pinned aggregate; pressure band
+  name + depth gauge + free/reserve/entry counters; the band-history
+  strip — one glyph per refresh, bounded at 120 samples; aggregate CPU
+  busy share over the interval with summed switch/preemption counters;
+  task census) above a `p`-cycled scrollable detail panel (reclaim
+  ledger table, `ramzip` counter block, per-CPU table joining the
+  CPU_TIME split with the CPU_LOAD remainder, top consumers by interval
+  `%CPU` and by resident bytes — the full list stays `top`'s). `+`/`-`
+  step the interval one second within 0.1–60 s and re-arm the very next
+  bounded wait; `r` refreshes now; `?`/`h` overlay; `q` quits.
+- Pin-on-start with graceful refusal: `mem_pin` before the first
+  refresh; `0` → `[pinned]`, `-PermissionDenied` → "CAP_MEM_PIN not
+  held", `-OutOfRange` → "pinned-memory limit exceeded" — a standing
+  title-line state, never fatal, never silently blank.
+- **Reconciliation — the shared hoists §2.2 forced.** sysmon is the
+  second consumer of three things that previously lived inline, so each
+  moved to its one home in the same change: the four kernel-statistics
+  fetches into `rustos_procinfo::kstats` (`memory_pressure`,
+  `ramzip_stats`, `for_each_reclaim_class`, `for_each_cpu_load`; the
+  `info:`/`stats:` resolver retargeted onto them, its malformed-reply
+  error now uniformly `Malformed`), the GNU `-d secs.tenths` grammar
+  into `rustos_curses::delay` (`top` delegates), and the viewer figure
+  formatters (`format_tenths`/`format_size`/`format_mib`/
+  `format_uptime`/`format_load`) into `rustos_procinfo::human` (`top`
+  imports them; only `TIME+` stays `top`-private).
+- Tests land per §10's sysmon rows: exhaustive host model tests (keys,
+  panel cycling + scroll clamp, interval bounds, degradation states,
+  census fallback, band-history bound, per-CPU/per-process interval
+  deltas, pin-state record), render tests over an in-memory tty (every
+  panel's tokens, each refusal spelled out, the pin refusal, the help
+  overlay, the refuse-everything survival case), loop tests (quit,
+  auto-refresh on the elapsed bounded wait), and the
+  `sysmon_qemu_aarch64` full-boot vertical: login → `sysmon` spawned
+  from the store bundle → `Pressure:` figures on the transcript → `r`
+  refresh → `reclaimable` ledger header → `q` → the shell prompt back on
+  the restored screen, PASS keyed on sysmon's audited exit then the
+  shell's (the arm-then-exit discipline).
 
 ### ST5 — `stress`
 
