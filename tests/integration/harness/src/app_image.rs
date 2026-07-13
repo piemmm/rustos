@@ -583,6 +583,7 @@ mod tests {
                 "seq",
                 "sysinfo",
                 "sysinfod",
+                "sysmon",
                 "tee",
                 "terminal",
                 "top",
