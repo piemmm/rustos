@@ -183,24 +183,20 @@ impl Responder {
         peer_mac: MacAddress,
         out: &mut [u8],
     ) -> Result<Option<usize>, NetServiceError> {
-        let Some((header, datagram)) = Ipv4Header::parse(payload) else {
+        let Some((header, _options, datagram)) = Ipv4Header::parse(payload) else {
             return Ok(None);
         };
         if header.protocol != ipv4::PROTOCOL_ICMP || header.destination != self.ip {
             return Ok(None);
         }
-        let Some(request) = IcmpEcho::parse(datagram) else {
+        let Some(request) = IcmpEcho::parse(icmp::IcmpContext::V4, datagram) else {
             return Ok(None);
         };
-        if request.message_type != icmp::TYPE_ECHO_REQUEST {
+        if request.kind != icmp::EchoKind::Request {
             return Ok(None);
         }
         let echo = request.reply();
-        let reply_header = Ipv4Header {
-            source: self.ip,
-            destination: header.source,
-            protocol: ipv4::PROTOCOL_ICMP,
-        };
+        let reply_header = Ipv4Header::new(self.ip, header.source, ipv4::PROTOCOL_ICMP);
         let len = write_icmp_frame(out, peer_mac, self.mac, &reply_header, &echo)?;
         Ok(Some(len))
     }
@@ -298,16 +294,12 @@ impl Client {
         out: &mut [u8],
     ) -> Result<usize, NetServiceError> {
         let echo = IcmpEcho {
-            message_type: icmp::TYPE_ECHO_REQUEST,
+            kind: icmp::EchoKind::Request,
             identifier,
             sequence,
             payload,
         };
-        let header = Ipv4Header {
-            source: self.ip,
-            destination: dest,
-            protocol: ipv4::PROTOCOL_ICMP,
-        };
+        let header = Ipv4Header::new(self.ip, dest, ipv4::PROTOCOL_ICMP);
         write_icmp_frame(out, peer_mac, self.mac, &header, &echo)
     }
 
@@ -331,7 +323,7 @@ impl Client {
         if !eth.addressed_to(self.mac) || eth.ethertype != ethernet::ETHERTYPE_IPV4 {
             return false;
         }
-        let Some((header, datagram)) = Ipv4Header::parse(eth.payload) else {
+        let Some((header, _options, datagram)) = Ipv4Header::parse(eth.payload) else {
             return false;
         };
         if header.protocol != ipv4::PROTOCOL_ICMP
@@ -340,10 +332,10 @@ impl Client {
         {
             return false;
         }
-        let Some(echo) = IcmpEcho::parse(datagram) else {
+        let Some(echo) = IcmpEcho::parse(icmp::IcmpContext::V4, datagram) else {
             return false;
         };
-        echo.message_type == icmp::TYPE_ECHO_REPLY
+        echo.kind == icmp::EchoKind::Reply
             && echo.identifier == identifier
             && echo.sequence == sequence
     }
@@ -452,7 +444,7 @@ fn write_icmp_frame(
     let icmp_buf = out
         .get_mut(icmp_start..)
         .ok_or(NetServiceError::OutputTooSmall)?;
-    echo.write(icmp_buf)
+    echo.write(icmp::IcmpContext::V4, icmp_buf)
         .ok_or(NetServiceError::OutputTooSmall)?;
     let ip_buf = out
         .get_mut(eth_len..)
@@ -567,7 +559,7 @@ mod tests {
 
     fn icmp_echo_request_frame(payload: &[u8], out: &mut [u8]) -> usize {
         let echo = IcmpEcho {
-            message_type: icmp::TYPE_ECHO_REQUEST,
+            kind: icmp::EchoKind::Request,
             identifier: 0xBEEF,
             sequence: 7,
             payload,
@@ -575,15 +567,14 @@ mod tests {
         let eth = ethernet::write_header(out, LOCAL_MAC, PEER_MAC, ethernet::ETHERTYPE_IPV4)
             .expect("eth header fits");
         let icmp_len = echo.wire_len();
-        echo.write(&mut out[eth + ipv4::IPV4_HEADER_LEN..])
-            .expect("icmp fits");
-        Ipv4Header {
-            source: PEER_IP,
-            destination: LOCAL_IP,
-            protocol: ipv4::PROTOCOL_ICMP,
-        }
-        .write(&mut out[eth..], icmp_len)
-        .expect("ip header fits");
+        echo.write(
+            icmp::IcmpContext::V4,
+            &mut out[eth + ipv4::IPV4_HEADER_LEN..],
+        )
+        .expect("icmp fits");
+        Ipv4Header::new(PEER_IP, LOCAL_IP, ipv4::PROTOCOL_ICMP)
+            .write(&mut out[eth..], icmp_len)
+            .expect("ip header fits");
         eth + ipv4::IPV4_HEADER_LEN + icmp_len
     }
 
@@ -629,11 +620,11 @@ mod tests {
         let eth = EthernetFrame::parse(&out[..len]).expect("reply parses");
         assert_eq!(eth.destination, PEER_MAC);
         assert_eq!(eth.source, LOCAL_MAC);
-        let (ip, datagram) = Ipv4Header::parse(eth.payload).expect("ip parses");
+        let (ip, _options, datagram) = Ipv4Header::parse(eth.payload).expect("ip parses");
         assert_eq!(ip.source, LOCAL_IP);
         assert_eq!(ip.destination, PEER_IP);
-        let echo = IcmpEcho::parse(datagram).expect("icmp parses");
-        assert_eq!(echo.message_type, icmp::TYPE_ECHO_REPLY);
+        let echo = IcmpEcho::parse(icmp::IcmpContext::V4, datagram).expect("icmp parses");
+        assert_eq!(echo.kind, icmp::EchoKind::Reply);
         assert_eq!(echo.identifier, 0xBEEF);
         assert_eq!(echo.sequence, 7);
         assert_eq!(echo.payload, &payload);
@@ -741,16 +732,12 @@ mod tests {
     /// The ICMP echo reply the peer would send answering our ping.
     fn echo_reply_frame(identifier: u16, sequence: u16, payload: &[u8], out: &mut [u8]) -> usize {
         let echo = IcmpEcho {
-            message_type: icmp::TYPE_ECHO_REPLY,
+            kind: icmp::EchoKind::Reply,
             identifier,
             sequence,
             payload,
         };
-        let header = Ipv4Header {
-            source: PEER_IP,
-            destination: LOCAL_IP,
-            protocol: ipv4::PROTOCOL_ICMP,
-        };
+        let header = Ipv4Header::new(PEER_IP, LOCAL_IP, ipv4::PROTOCOL_ICMP);
         write_icmp_frame(out, LOCAL_MAC, PEER_MAC, &header, &echo).expect("echo reply fits")
     }
 
@@ -820,10 +807,10 @@ mod tests {
         // The transmitted frame is an ICMP echo request to the peer.
         let eth = EthernetFrame::parse(net.transmitted()).expect("request parses");
         assert_eq!(eth.destination, PEER_MAC);
-        let (ip, datagram) = Ipv4Header::parse(eth.payload).expect("ip parses");
+        let (ip, _options, datagram) = Ipv4Header::parse(eth.payload).expect("ip parses");
         assert_eq!(ip.destination, PEER_IP);
-        let echo = IcmpEcho::parse(datagram).expect("icmp parses");
-        assert_eq!(echo.message_type, icmp::TYPE_ECHO_REQUEST);
+        let echo = IcmpEcho::parse(icmp::IcmpContext::V4, datagram).expect("icmp parses");
+        assert_eq!(echo.kind, icmp::EchoKind::Request);
         assert_eq!(echo.identifier, 0xABCD);
         assert_eq!(echo.sequence, 9);
     }

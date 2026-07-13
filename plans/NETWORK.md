@@ -273,23 +273,48 @@ planned, `[~]` in progress, `[x]` done.
 - Docs: `docs/src/lib/net.md` (+ `docs/src/userland/net_icmp.md`
   refreshed).
 
-### N2 — IPv4 + IPv6 network layer: parse/emit, ICMP+ICMPv6, ND, reassembly, routing `[ ]`
-- IPv4 (options-tolerant parse, strict emit), IPv6 (extension-header
-  chain walk with §24.4 count/length bounds; unrecognised
-  headers/options handled per RFC 8200 dispositions), ICMP + ICMPv6
-  (echo, errors, rate-limited generation), ND (RS/RA/NS/NA/redirect
-  parse + the RFC 4861 state machine over the N1 neighbour contract,
-  hop-limit-255 enforced), ARP as the v4 neighbour provider.
-- Fragment reassembly (v4 + v6) with per-source and global budgets,
-  oldest-first eviction, overlap ⇒ whole-datagram drop; fragmentation
-  on emit (v4) and PMTUD plumbing (v6 never fragments in flight).
-- Routing: one generic longest-prefix-match table (v4/v6 instantiations
-  of one trie), on-link determination, default routers from RA, source
-  address selection (RFC 6724).
-- Tests: RFC vectors, adversarial fragment/extension-header corpora,
-  property tests (reassembly never exceeds budget; LPM matches a naive
-  oracle), fuzz `fuzz_net_ipv4`/`fuzz_net_ipv6`/`fuzz_net_icmp`/
-  `fuzz_net_nd`.
+### N2 — IPv4 + IPv6 network layer: parse/emit, ICMP+ICMPv6, ND, reassembly, routing `[x]`
+- `ipv4` evolved in place: options-tolerant parse (checksum-verified,
+  options surfaced opaquely, fragment fields typed with the offset in
+  bytes), strict option-free emit, and emit-side fragmentation
+  (`fragment`: DF honoured, 68-byte MTU floor, 8-byte-aligned parts).
+  `ipv6` carries the fixed-header codec and the bounded
+  extension-header `walk` (`MAX_EXT_HEADERS` = 8, a fixed validation
+  bound): HBH first-position-only, routing with segments-left ≠ 0
+  refused (host, not router), RFC 8200 §4.2 option dispositions as
+  typed `WalkRejection` values, and a fragment header ending the walk
+  for reassembly-then-rewalk.
+- `icmp` is one machinery for both families (`IcmpContext` holds the
+  type numbering + pseudo-header difference): `IcmpMessage`,
+  `IcmpEcho` (typed `EchoKind`), `IcmpError` (incl. the RFC 1191 v4
+  packet-too-big wire form), the RFC 4443 §2.4(e) `error_allowed`
+  gate, and the §2.4(f) token-bucket `ErrorRateLimiter`.
+- `nd` parses RS/RA/NS/NA/redirect with the RFC 4861 validations
+  (hop-limit 255, code 0, non-multicast targets, solicited-NA-to-
+  multicast refused, `MAX_ND_OPTIONS` = 16); emits host messages only
+  (RS/NS/NA); `apply_*` helpers drive the one N1 `NeighborTable`
+  (ARP remains the v4 provider). RA facts are typed data for
+  `route::DefaultRouterList` / address configuration.
+- `frag::Reassembler` is dual-stack: overlap (incl. exact duplicate) ⇒
+  whole-datagram drop (RFC 8900), per-source + global byte budgets
+  with oldest-first eviction (offending source first), datagram and
+  fragment-count caps, non-final-multiple-of-8 and final-length-
+  consistency shape rules, expiry reporting the first-fragment fact
+  for the RFC 4443 §3.2 Time Exceeded decision.
+- `route`: one generic LPM binary trie (`RoutingTable<A, M>` over the
+  `RouteAddr` bit view, O(bits) lookup, pruning + arena reuse under
+  churn), on-link = next-hop-free match, the bounded
+  `DefaultRouterList` (RFC 4861 §6.3.6 reachable-first + round-robin),
+  RFC 6724 `select_source` (rules 1/2/3/6/8; rule 5 is the caller's
+  interface pre-filter), and the RFC 8201 `PathMtuCache`
+  (reduction-only, 1280 floor, aging, LRU-bounded).
+- Tests landed: per-module suites (round-trips, rejection matrices,
+  dispositions, budgets, eviction order), property tests (reassembly
+  budgets hold after every push; random splits reassemble exactly; LPM
+  matches a naive oracle under insert/remove churn), and the
+  `fuzz_net_ipv4`/`fuzz_net_ipv6`/`fuzz_net_icmp`/`fuzz_net_nd`
+  harnesses registered in `cargo xtask fuzz`. Docs:
+  `docs/src/lib/net.md` + `lib/net/README.md` refreshed.
 
 ### N3 — the `netstack` service + evolved driver seam: frames flow end to end `[ ]`
 - `userland/net/netstack` process: interface/address/route state, the

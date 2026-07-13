@@ -7,26 +7,39 @@
 //! exact code the live `netstack` service runs is the code the unit
 //! tests, property tests, and fuzz harnesses exercise.
 //!
-//! # Contents (increment N1 of `plans/NETWORK.md`)
+//! # Contents (increments N1–N2 of `plans/NETWORK.md`)
 //!
 //! - [`addr`] — the dual-stack address vocabulary: IPv4 and IPv6 as
 //!   equals, IPv6 scope classification and zone handling for link-local
-//!   addresses, and the multicast IP → multicast MAC mappings.
+//!   addresses.
 //! - [`checksum`] — the one Internet-checksum definition (RFC 1071),
 //!   including the IPv4 and IPv6 pseudo-header variants the transport
 //!   layers fold over.
 //! - [`eth`] — Ethernet II framing.
 //! - [`arp`] — ARP for IPv4 over Ethernet (RFC 826), the IPv4 provider
 //!   of the neighbour-cache contract.
-//! - [`ipv4`] — the IPv4 header codec (RFC 791).
-//! - [`icmp`] — ICMP echo (RFC 792).
+//! - [`ipv4`] — the IPv4 codec (RFC 791): options-tolerant parse,
+//!   strict option-free emit, and fragmentation on emit.
+//! - [`ipv6`] — the IPv6 codec (RFC 8200): the fixed header and the
+//!   bounded extension-header chain walk with the RFC 8200
+//!   unrecognised-header/option dispositions.
+//! - [`icmp`] — ICMP and `ICMPv6` over one shared machinery (RFC 792,
+//!   RFC 4443): echo, error messages, and token-bucket rate-limited
+//!   error generation.
+//! - [`nd`] — Neighbour Discovery wire codecs (RFC 4861): RS/RA/NS/NA/
+//!   redirect with hop-limit-255 enforcement, driving [`neigh`].
+//! - [`frag`] — dual-stack fragment reassembly with per-source and
+//!   global budgets, oldest-first eviction, and overlap ⇒ drop.
+//! - [`route`] — the generic longest-prefix-match table (one trie,
+//!   v4/v6 instantiations), the RFC 4861 default-router list, RFC 6724
+//!   source-address selection, and the RFC 8201 path-MTU cache.
 //! - [`neigh`] — the provider-agnostic neighbour cache: one bounded
-//!   RFC 4861 §7.3.2 state machine that ARP drives today and Neighbour
-//!   Discovery drives when IPv6 lands (one table, two providers).
+//!   RFC 4861 §7.3.2 state machine that ARP and Neighbour Discovery
+//!   both drive (one table, two providers).
 //!
-//! Later increments extend this crate in place with `ipv6`, `icmpv6`/`nd`,
-//! `igmp`/`mld`, `udp`, `tcp`, `route`, and `frag` (`plans/NETWORK.md` §2.1);
-//! none of that surface is speculated here.
+//! Later increments extend this crate in place with `igmp`/`mld`, `udp`,
+//! and `tcp` (`plans/NETWORK.md` §2.1); none of that surface is
+//! speculated here.
 //!
 //! # Security
 //!
@@ -47,9 +60,13 @@ pub mod addr;
 pub mod arp;
 pub mod checksum;
 pub mod eth;
+pub mod frag;
 pub mod icmp;
 pub mod ipv4;
+pub mod ipv6;
+pub mod nd;
 pub mod neigh;
+pub mod route;
 
 pub use addr::{IpAddr, Ipv4Addr, Ipv6Addr};
 pub use checksum::internet_checksum;

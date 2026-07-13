@@ -69,6 +69,26 @@ pub const TARGETS: &[Target] = &[
         description: "lib/net address scope/zone rules + Internet-checksum properties",
     },
     Target {
+        package: "rustos-net",
+        test: "fuzz_net_ipv4",
+        description: "lib/net IPv4 codec, emit fragmentation, fragment reassembly budgets",
+    },
+    Target {
+        package: "rustos-net",
+        test: "fuzz_net_ipv6",
+        description: "lib/net IPv6 codec + extension-header chain walk",
+    },
+    Target {
+        package: "rustos-net",
+        test: "fuzz_net_icmp",
+        description: "lib/net ICMP/ICMPv6 echo + error codecs, error rate limiter",
+    },
+    Target {
+        package: "rustos-net",
+        test: "fuzz_net_nd",
+        description: "lib/net Neighbour Discovery codecs + neighbour-table glue",
+    },
+    Target {
         package: "rustos-net-icmp",
         test: "fuzz_parse",
         description: "userland/net composed ARP/ICMP responder + client paths",

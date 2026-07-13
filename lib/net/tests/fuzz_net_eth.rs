@@ -27,7 +27,7 @@
 use rustos_abi::driver::net::MacAddress;
 use rustos_net::arp::{self, ArpPacket};
 use rustos_net::eth::{self, EthernetFrame};
-use rustos_net::icmp::IcmpEcho;
+use rustos_net::icmp::{IcmpContext, IcmpEcho};
 use rustos_net::ipv4::{self, Ipv4Header};
 use rustos_net::Ipv4Addr;
 
@@ -73,24 +73,32 @@ fn exercise_arp(bytes: &[u8]) {
 }
 
 fn exercise_ipv4(bytes: &[u8]) {
-    if let Some((header, payload)) = Ipv4Header::parse(bytes) {
+    if let Some((header, options, payload)) = Ipv4Header::parse(bytes) {
+        if !options.is_empty() {
+            // The emit side is strictly option-free; an options-bearing
+            // parse is exercised for totality only.
+            return;
+        }
         let mut out = vec![0u8; ipv4::IPV4_HEADER_LEN + payload.len()];
         let header_len = header
             .write(&mut out, payload.len())
-            .expect("a parsed IPv4 header must re-encode");
+            .expect("a parsed option-free IPv4 header must re-encode");
         out[header_len..].copy_from_slice(payload);
-        let (redecoded, redecoded_payload) =
+        let (redecoded, redecoded_options, redecoded_payload) =
             Ipv4Header::parse(&out).expect("round-trip of an accepted header must parse");
         assert_eq!(header, redecoded);
+        assert!(redecoded_options.is_empty());
         assert_eq!(payload, redecoded_payload);
     }
 }
 
 fn exercise_icmp(bytes: &[u8]) {
-    if let Some(echo) = IcmpEcho::parse(bytes) {
+    if let Some(echo) = IcmpEcho::parse(IcmpContext::V4, bytes) {
         let mut out = vec![0u8; echo.wire_len()];
-        echo.write(&mut out).expect("a parsed echo must re-encode");
-        let redecoded = IcmpEcho::parse(&out).expect("round-trip of an accepted echo must parse");
+        echo.write(IcmpContext::V4, &mut out)
+            .expect("a parsed echo must re-encode");
+        let redecoded = IcmpEcho::parse(IcmpContext::V4, &out)
+            .expect("round-trip of an accepted echo must parse");
         assert_eq!(echo, redecoded);
     }
 }
