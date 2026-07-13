@@ -189,6 +189,51 @@ pub fn arm_with_cpus(base: u64, size: u64, cpus: &[(u64, Option<u32>)]) -> Vec<u
     b.build()
 }
 
+/// An aarch64 tree whose `/cpus/cpu@*` children declare the Pi-4
+/// stock-firmware spin-table shape: per-core `reg` plus, for each entry
+/// with a `Some` release address, `enable-method = "spin-table"` and a
+/// two-cell `cpu-release-addr`. A `None` release entry emits neither
+/// property (the boot CPU's shape). Used to exercise
+/// [`crate::CpuNode::spin_table_release`] and the aarch64 spin-table
+/// bring-up discovery.
+#[must_use]
+pub fn arm_with_spin_table_cpus(base: u64, size: u64, cpus: &[(u64, Option<u64>)]) -> Vec<u8> {
+    let mut b = DtbBuilder::new();
+    b.begin_node("");
+    b.prop_u32("#address-cells", 2);
+    b.prop_u32("#size-cells", 2);
+
+    b.begin_node("cpus");
+    b.prop_u32("#address-cells", 1);
+    b.prop_u32("#size-cells", 0);
+    for (mpidr, release) in cpus {
+        let name = alloc::format!("cpu@{mpidr:x}");
+        b.begin_node(&name);
+        b.prop_str("device_type", "cpu");
+        b.prop_u32(
+            "reg",
+            u32::try_from(*mpidr).expect("fixture MPIDR fits one cell"),
+        );
+        if let Some(addr) = release {
+            b.prop("enable-method", b"spin-table\0");
+            b.prop("cpu-release-addr", &addr.to_be_bytes());
+        }
+        b.end_node();
+    }
+    b.end_node();
+
+    b.begin_node("memory@0");
+    b.prop("device_type", b"memory\0");
+    let mut reg = Vec::new();
+    reg.extend_from_slice(&base.to_be_bytes());
+    reg.extend_from_slice(&size.to_be_bytes());
+    b.prop("reg", &reg);
+    b.end_node();
+
+    b.end_node();
+    b.build()
+}
+
 /// A Raspberry-Pi-shaped aarch64 tree carrying the two console UARTs the
 /// Pi exposes — a PrimeCell PL011 (`arm,pl011`) and a BCM2835 AUX
 /// mini-UART (`brcm,bcm2835-aux-uart`) — a GIC-400 interrupt controller

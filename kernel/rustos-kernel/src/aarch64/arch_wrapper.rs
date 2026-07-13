@@ -297,10 +297,11 @@ impl KernelArch for Aarch64BinArch {
     }
 
     fn secondary_bringup(&self) -> Option<&dyn SecondaryBringup> {
-        // The arch handle is the PSCI `CPU_ON` bring-up surface
-        // (`SecondaryBringup`); `kernel_main` drives it for each
+        // The arch handle is the bring-up surface (`SecondaryBringup`):
+        // PSCI `CPU_ON` or the Devicetree spin-table release, whichever
+        // the firmware tree declared. `kernel_main` drives it for each
         // secondary once the boot phases are green. A handle with no
-        // discovered PSCI conduit fails each start closed inside
+        // discovered start mechanism fails each start closed inside
         // `start_secondary` (`SmpError::NotReady`), which `kernel_main`
         // audits — never a silent fallback.
         Some(&self.arch)

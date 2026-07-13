@@ -67,8 +67,11 @@ The Pi firmware (`start4.elf`, with `fixup4.dat`) loads the kernel image
 enters it in **AArch64 EL2** with the aarch64 boot hand-off convention
 (`x0` = physical address of the firmware-supplied DTB; `x1`/`x2`/`x3` zero).
 On current firmware all four cores are released to the kernel entry unless an
-`armstub8.bin` spin-table stub is supplied; the boot stub must therefore park
-secondaries (`MPIDR_EL1` affinity ≠ 0) until SMP bring-up wants them (P1/P5).
+`armstub8.bin` spin-table stub is supplied; the boot stub therefore parks
+secondaries (`MPIDR_EL1` affinity ≠ 0) polling the kernel's own spin-table
+release word (`SECONDARY_KERNEL_RELEASE`) until SMP bring-up releases them
+deliberately (P1/P5); cores a firmware stub keeps parked instead are released
+through their DTB `cpu-release-addr` words — the same trampoline serves both.
 
 `config.txt` knobs the bring-up relies on:
 
@@ -156,13 +159,17 @@ Since **P3** it also points the GICv2 driver at the discovered GICD/GICC
 bases (`gic::configure_from_fdt`) and reads the `/memory` window, logging
 `gic_discovered` / `ram_discovered` (see
 [Board-discovered interrupt controller](#board-discovered-interrupt-controller)).
-Since **P5** it discovers the PSCI conduit (`fdt::psci_method`) and
-installs it on the handle (`with_psci_method`), logging
-`psci_conduit_discovered`, so SMP bring-up issues `CPU_ON` over the
-conduit the board declares (`hvc` on `virt`, `smc` on the Pi) rather than
-an assumed one (see
+Since **P5** it discovers the board's secondary-start mechanism and
+installs it on the handle (`with_secondary_start`), logging
+`smp_start_method` (`psci` / `spin_table` / `none`): a `/psci` node
+selects PSCI `CPU_ON` over the declared conduit (`fdt::psci_method` —
+`hvc` on `virt`, `smc` on the Pi with `armstub8.bin`), and a PSCI-less
+tree whose cpu nodes declare `enable-method = "spin-table"` (the Pi 4's
+stock firmware) selects the spin-table release over the declared
+per-CPU `cpu-release-addr` words, so bring-up rides whatever the board
+declares rather than an assumed mechanism (see
 [SMP secondary-core bring-up](#smp-secondary-core-bring-up-psci--gicv2-ipi)).
-The production boot **uses** that conduit end to end: it collects every
+The production boot **uses** that mechanism end to end: it collects every
 `/cpus/cpu@*` affinity, validates the list into the dense CPU map
 (`cpu_topology::order_cpus` — boot core at dense id 0, fail-closed to a
 single-CPU map on an empty/duplicated/foreign list), sizes every per-CPU
@@ -170,15 +177,17 @@ backing exactly from it (the arch handle's leaked slices, the preemption
 slices, the `smp.s` secondary-stack region — cleaned to PoC so a
 cache-off starter observes them), and logs `cpu_count` / `smp_prepared`
 on the boot line. After `BootCompleted`, `kernel_core::kernel_main`
-PSCI-starts each secondary (audited `SecondaryCpuStarted` /
-`SecondaryCpuStartFailed`); each core's entry adopts the boot identity
-map (`paging::adopt_boot_translation` over the published park root),
-installs its own EL1 vectors, GICv2 CPU interface, and tickless
-preemption/IPI arming, and joins the shared kernel dispatch loop through
-`rustos_kernel_core::run_secondary`, attesting `SecondaryCpuOnline`. On
-a Pi 4B with a PSCI-providing armstub this brings all four Cortex-A72
-cores into service; a tree with no `/psci` node fails each start closed
-and the system continues single-CPU — degraded, loud, and correct.
+starts each secondary over the discovered mechanism (audited
+`SecondaryCpuStarted` / `SecondaryCpuStartFailed`); each core's entry
+adopts the boot identity map (`paging::adopt_boot_translation` over the
+published park root), installs its own EL1 vectors, GICv2 CPU
+interface, and tickless preemption/IPI arming, and joins the shared
+kernel dispatch loop through `rustos_kernel_core::run_secondary`,
+attesting `SecondaryCpuOnline`. On a Pi 4B this brings all four
+Cortex-A72 cores into service over PSCI (with a PSCI-providing armstub)
+or the stock firmware's spin-table; a tree declaring neither fails each
+start closed and the system continues single-CPU — degraded, loud, and
+correct.
 Since **P6c-1** it builds the canonical `BootMemoryMap` from the discovered
 `/memory` window and records its usable/reserved split (`mem_map_built` /
 `mem_map_status` / `usable_bytes_hex` / `reserved_bytes_hex`); see
@@ -2287,42 +2296,73 @@ callback path on two emulated cores.
 Secondary bring-up is reached through the Arch HAL `SecondaryBringup`
 slice (`rustos_arch_api::smp`, `plans/WIRING.md` Stage W14):
 `Aarch64Arch::start_secondary(cpu)` resolves the dense `CpuId` to its
-`MPIDR_EL1` affinity through the handle's map, looks up the PSCI conduit
-installed via `Aarch64Arch::with_psci_method` (a missing conduit or an
-unmapped id fails closed with `SmpError::NotReady` / `InvalidCpu`), and
-delegates to `smp::start_secondary` above. The host
-`passes_secondary_bringup_conformance` test runs `smp::conformance::run_all`
-over a real handle; the real PSCI `CPU_ON` is proven by the two-core QEMU
+`MPIDR_EL1` affinity through the handle's map, looks up the start
+mechanism installed via `Aarch64Arch::with_secondary_start` (a missing
+mechanism or an unmapped id fails closed with `SmpError::NotReady` /
+`InvalidCpu`), and dispatches on it: `SecondaryStart::Psci(conduit)`
+delegates to `smp::start_secondary` above, and
+`SecondaryStart::SpinTable { release_addrs }` delegates to
+`smp::start_secondary_spintable` with the dense id's release word (a
+CPU whose tree slot carries no word is refused as `InvalidCpu`). The
+host `passes_secondary_bringup_conformance` /
+`spin_table_start_fails_closed_on_unstartable_and_releaseless_cpus`
+tests run `smp::conformance::run_all` over real handles of both
+shapes; the real PSCI `CPU_ON` is proven by the two-core QEMU
 verticals, which start their secondary core through this HAL trait —
 `cross_cpu_tlb_shootdown_qemu_aarch64` and, since `plans/WIRING.md` Stage
 W15, `ipi_smp_qemu_aarch64` — rather than calling the port-private
 `smp::start_secondary` directly.
 
-Since `plans/PI.md` **P5** the conduit `with_psci_method` installs is a
-*discovered* board fact, not a constant. The production `boot_aarch64`
-path reads `/psci` `method` from the `x0` DTB (`fdt::psci_method`) and
-installs it on the handle, logging `psci_conduit_discovered`; a tree with
-no PSCI node leaves the conduit unset so bring-up fails closed
-(`SmpError::NotReady`) rather than assuming one. `fdt::psci_method`
-matches the `/psci` node through the shared `Fdt::nodes` early-return
-walk (the same byte-safe traversal `gic::configure_from_fdt` and
-`fdt::timer_clock_frequency` use, §2.2) — not the whole-tree
-`Fdt::property` scan, which faults under the verticals' MMU-off boot once
-the compiler widens the byte reads. The `ipi_smp_qemu_aarch64` vertical
-proves the discovered conduit drives bring-up: it reads the conduit from
-the embedded `virt` tree (asserting it is the board's `hvc`) and starts
-the secondary over *that* value, fail-closed if the tree declares none.
-The Pi's `smc` conduit (via `armstub8.bin`) flows through the identical
-path and is an on-metal acceptance item (no `-M raspi4b` in QEMU).
+Since `plans/PI.md` **P5** the mechanism `with_secondary_start` installs
+is a *discovered* board fact, not a constant. The production
+`boot_aarch64` path reads `/psci` `method` from the `x0` DTB
+(`fdt::psci_method`) when the node exists, else collects each
+`/cpus/cpu@*` node's `enable-method`/`cpu-release-addr`
+(`rustos_fdt::CpuNode::spin_table_release`, aligned to the dense ids by
+`cpu_topology::align_release_addrs`), and installs the result on the
+handle, logging `smp_start_method`; a tree that declares neither leaves
+the mechanism unset so bring-up fails closed (`SmpError::NotReady`)
+rather than assuming one. `fdt::psci_method` matches the `/psci` node
+through the shared `Fdt::nodes` early-return walk (the same byte-safe
+traversal `gic::configure_from_fdt` and `fdt::timer_clock_frequency`
+use, §2.2) — not the whole-tree `Fdt::property` scan, which faults under
+the verticals' MMU-off boot once the compiler widens the byte reads. The
+`ipi_smp_qemu_aarch64` vertical proves the discovered conduit drives
+bring-up: it reads the conduit from the embedded `virt` tree (asserting
+it is the board's `hvc`) and starts the secondary over *that* value,
+fail-closed if the tree declares none. The Pi's `smc` conduit (via
+`armstub8.bin`) flows through the identical path and is an on-metal
+acceptance item (no `-M raspi4b` in QEMU).
 
-Non-PSCI spin-table boot (e.g. a bare Raspberry Pi 3, whose firmware
-parks secondaries on a release address rather than offering PSCI) is a
-tracked follow-up: `start_secondary` would gain a spin-table branch
-selected from the device tree's `enable-method`. The QEMU `virt` board
-and UEFI platforms use PSCI, so the PSCI path is the one exercised today;
-the port adds the spin-table path when a spin-table target lands so it is
-covered by a real vertical rather than shipped untested (`AGENTS.md`
-§2.1 / §2.5).
+Non-PSCI **Devicetree spin-table** boot — the Raspberry Pi 4's stock
+firmware, whose `/cpus` nodes declare `enable-method = "spin-table"`
+and no `/psci` node — is the second production start path
+(`smp::start_secondary_spintable`). A release writes the physical
+address of the argument-free `smp.s` trampoline
+(`_start_secondary_spintable_aarch64`) to **both** release channels —
+the firmware's declared `cpu-release-addr` word (for a core parked in
+the firmware stub) and the kernel's own `SECONDARY_KERNEL_RELEASE` word
+(for a core the firmware released straight into `boot.s`'s `_start`,
+whose park loop polls it) — sweeps both to the point of coherency, and
+signals `sev`. The released core may arrive at EL2 (the Pi firmware
+hand-off): the trampoline drops through the same
+`_el2_establish_and_drop` routine the boot core uses (every UNKNOWN EL2
+control register written whole, per core), establishes the known
+MMU-off `SCTLR_EL1`, recovers its dense `CpuId` by matching its own
+`MPIDR_EL1` affinity against the table `prepare_secondary_bringup`
+published (`smp::register_secondary_affinities`, swept to PoC), and
+joins the common PSCI trampoline path with the id in `x0`; an affinity
+not in the table parks fail-closed. A release is refused
+(`StartCpuError::NoEntryInstalled` / `NoAffinityTable` /
+`CpuIdOutOfRange`) until the stacks, entry, and affinity table are all
+published, so a woken core can never observe a half-published hand-off.
+Spin-table release has no firmware status: a core that never polls
+simply stays offline (audited by the arch-neutral start loop) and the
+system continues on the online cores. There is no `-M raspi4b` machine
+in the pinned QEMU, so the end-to-end spin-table release is an on-metal
+acceptance item like the rest of the Pi bring-up (P2–P5); the
+discovery, alignment, fail-closed refusals, and publication logic are
+host-tested (`lib/fdt`, `cpu_topology`, `kernel_arch`, `smp_tests`).
 
 ## Timer programming (`Timer`)
 

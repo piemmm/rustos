@@ -77,7 +77,7 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU32, Ordering};
 
-    use rustos_arch_aarch64::kernel_arch::read_cntfrq;
+    use rustos_arch_aarch64::kernel_arch::{read_cntfrq, SecondaryStart};
     use rustos_arch_aarch64::{
         exceptions, fdt, gic, handle_panic_via_serial, preempt, qemu_exit, smp, Aarch64Arch,
         Aarch64ArchStorage, SERIAL_SINK,
@@ -242,7 +242,7 @@ mod kernel {
             counter_hz,
             &[BOOT_CPU as u64, SECONDARY_MPIDR],
         )
-        .with_psci_method(psci_method);
+        .with_secondary_start(SecondaryStart::Psci(psci_method));
 
         // P3: prove the GICv2 bases are *discovered*, not assumed. Poison
         // the runtime base, then read the GICD/GICC bases from the

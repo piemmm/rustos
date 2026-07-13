@@ -490,47 +490,56 @@ same gap as P2/P3). `cargo xtask cfg-check` stays clean.
 
 ### P5 — SMP bring-up on the Pi (PSCI vs spin-table) `[x]`
 
-- The Pi 4 firmware exposes PSCI when `armstub8.bin` is present (default
-  on current firmware); the W6 `psci::CPU_ON` path then works unchanged.
-  Confirm the conduit (`smc` vs `hvc`) is the one `fdt::psci_method`
-  discovers on the Pi tree (Pi uses `smc`). If a target firmware lacks
-  PSCI, the honest options are documented (require the PSCI armstub, or
-  build the carried-forward spin-table bring-up as a *separate, tested*
-  port-side path — never untested asm, §2.1).
+- The board's start mechanism is discovered, never assumed: PSCI over
+  the `/psci`-declared conduit when the node exists, else the
+  Devicetree spin-table release the Pi 4's stock firmware declares
+  (`enable-method = "spin-table"` + per-cpu `cpu-release-addr`), else
+  fail closed to a single-CPU boot.
 
-**Done when:** a `-M raspi4b --cpus 4` vertical starts the secondary
-cores via the discovered conduit and delivers a directed SGI, mirroring
-`ipi_smp_qemu_aarch64`; the conduit choice is discovered, not assumed.
-
-**Landed.** The PSCI conduit is now a *discovered* board fact end to end.
-`fdt::psci_method` was moved off the whole-tree `Fdt::property` scan onto
-the shared `Fdt::nodes` early-return walk (matching the `/psci` node by an
-`arm,psci` `compatible` prefix and reading `method` from that node only),
-the same byte-safe traversal `gic::configure_from_fdt` /
-`fdt::timer_clock_frequency` use (§2.2) — so conduit discovery is safe on
-the MMU-off bring-up path where a full-tree scan faults (the P4
-watch-out). `boot_aarch64` now reads the conduit from the `x0` DTB,
-installs it via `Aarch64Arch::with_psci_method`, and logs
-`psci_conduit_discovered`; a tree with no `/psci` node leaves the conduit
-unset, so the `SecondaryBringup` HAL fails closed (`SmpError::NotReady`)
-rather than assuming one (§5.4.5). **Runtime proof on `-M virt`:**
-`ipi_smp_qemu_aarch64` now *discovers* the conduit from the embedded
-`virt` tree (replacing the former hard-coded `VIRT_PSCI_METHOD`), asserts
-it is the board's `hvc`, fails closed otherwise, and starts the secondary
-core + delivers a directed SGI over *that* discovered conduit. Host tests
-cover the conduit read from both the `virt` (`hvc`) and `raspi` (`smc`)
-fixtures and the fail-closed no-`/psci` path. The Pi's `smc` conduit (via
-`armstub8.bin`) flows through the identical path and is an on-metal
-acceptance item (no `-M raspi4b` in QEMU — the same gap as P2/P3/P4).
-`cargo xtask cfg-check` stays clean. The **production multi-core bring-up
-now rides this conduit end to end**: `boot_aarch64` sizes every per-CPU
-backing from the validated `/cpus` dense map, `kernel_core::kernel_main`
-PSCI-starts each secondary after `BootCompleted` (audited
+**Landed — both mechanisms.** The PSCI conduit is a *discovered* board
+fact end to end. `fdt::psci_method` rides the shared `Fdt::nodes`
+early-return walk (matching the `/psci` node by an `arm,psci`
+`compatible` prefix and reading `method` from that node only), the same
+byte-safe traversal `gic::configure_from_fdt` /
+`fdt::timer_clock_frequency` use (§2.2) — safe on the MMU-off bring-up
+path where a full-tree scan faults. `boot_aarch64` reads the mechanism
+from the `x0` DTB — the `/psci` conduit when declared, else each
+`/cpus/cpu@*` node's spin-table release word
+(`rustos_fdt::CpuNode::spin_table_release`, dense-aligned by
+`cpu_topology::align_release_addrs`) — installs it via
+`Aarch64Arch::with_secondary_start`, and logs `smp_start_method`
+(`psci`/`spin_table`/`none`); a tree declaring neither leaves the
+mechanism unset, so the `SecondaryBringup` HAL fails closed
+(`SmpError::NotReady`) rather than assuming one. **Runtime proof on
+`-M virt`:** `ipi_smp_qemu_aarch64` *discovers* the conduit from the
+embedded `virt` tree, asserts it is the board's `hvc`, fails closed
+otherwise, and starts the secondary core + delivers a directed SGI over
+*that* discovered conduit. Host tests cover the conduit read from both
+the `virt` (`hvc`) and `raspi` (`smc`) fixtures, the fail-closed
+no-`/psci` path, and the spin-table discovery (positive, wrong-method,
+zero/malformed-address). The **spin-table release path is the metal
+Pi 4 production path** (its stock firmware declares no `/psci`, which
+left every secondary `smp_secondary_entry_not_installed`-dead before
+this landed): `smp::start_secondary_spintable` writes the argument-free
+`_start_secondary_spintable_aarch64` trampoline address to both the
+firmware `cpu-release-addr` word and the kernel's own
+`SECONDARY_KERNEL_RELEASE` word (the `_start` park loop now polls it —
+formerly an unreleasable `wfe` loop), sweeps both to PoC, and `sev`s;
+the trampoline drops from EL2 via the shared `_el2_establish_and_drop`
+(factored out of `_start`, §2.2), recovers its dense id from the
+published affinity table (`smp::register_secondary_affinities`, swept
+to PoC by `prepare_secondary_bringup`), and joins the common PSCI
+trampoline path; an undescribed affinity parks fail-closed. The
+**production multi-core bring-up rides the discovered mechanism end to
+end**: `boot_aarch64` sizes every per-CPU backing from the validated
+`/cpus` dense map, `kernel_core::kernel_main` starts each secondary
+after `BootCompleted` (audited
 `SecondaryCpuStarted`/`StartFailed`/`Online`), and each core adopts the
 boot translation and joins the shared kernel dispatch loop — proven by
 the `-smp 4` `kernel-arch-boot-aarch64` vertical (see
-`docs/src/platform/aarch64.md`). A no-`/psci` tree still fails each
-start closed and boots single-CPU.
+`docs/src/platform/aarch64.md`). No `-M raspi4b` in the pinned QEMU, so
+the end-to-end spin-table release is an on-metal acceptance item (the
+same gap as P2/P3/P4); `cargo xtask cfg-check` stays clean.
 
 ### P6 — Spawn `init` into EL0 on the Pi `[x]`
 

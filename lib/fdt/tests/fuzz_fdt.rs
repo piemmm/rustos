@@ -104,10 +104,11 @@ fn exercise_never_panics(bytes: &[u8]) {
     // `each_cpu` returns `Err` on a malformed tree; either way it must not
     // panic. Accumulate to keep the closure side-effecting.
     let mut cpu_acc = 0u64;
-    let _ = fdt.each_cpu(|mpidr, capacity| {
+    let _ = fdt.each_cpu(|cpu| {
         cpu_acc = cpu_acc
-            .wrapping_add(mpidr)
-            .wrapping_add(capacity.unwrap_or(0));
+            .wrapping_add(cpu.reg)
+            .wrapping_add(cpu.capacity.unwrap_or(0))
+            .wrapping_add(cpu.spin_table_release.unwrap_or(0));
     });
     let _ = cpu_acc;
 

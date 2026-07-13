@@ -286,23 +286,17 @@ impl<'a> Fdt<'a> {
     }
 
     /// Enumerate every `/cpus/cpu@*` node in tree order, invoking
-    /// `f(reg, capacity)` once per CPU node.
+    /// `f(cpu)` once per CPU node with that node's decoded [`CpuNode`].
     ///
-    /// * `reg` is the integer value of the node's `reg` property — the
-    ///   CPU's `MPIDR_EL1` affinity on aarch64 / hart id on riscv64 —
-    ///   decoded from a one-cell (`u32`) or two-cell (`u64`) value. A CPU
-    ///   node with no readable `reg` is skipped (it cannot be matched to a
-    ///   logical CPU).
-    /// * `capacity` is the `capacity-dmips-mhz` value (the per-core DMIPS
-    ///   rating used to classify `big.LITTLE` cores), or `None` when the
-    ///   node omits it — a homogeneous machine.
+    /// A CPU node with no readable `reg` is skipped (it cannot be
+    /// matched to a logical CPU).
     ///
     /// # Errors
     ///
     /// Returns [`FdtError::Malformed`] if the structure block is
     /// malformed (a truncated token, an unterminated name, or unbalanced
     /// node nesting); the closure is not invoked for a malformed tree.
-    pub fn each_cpu<F: FnMut(u64, Option<u64>)>(&self, mut f: F) -> Result<(), FdtError> {
+    pub fn each_cpu<F: FnMut(CpuNode)>(&self, mut f: F) -> Result<(), FdtError> {
         let struct_end = self.struct_off + self.struct_size;
         let mut pos = self.struct_off;
 
@@ -315,6 +309,8 @@ impl<'a> Fdt<'a> {
         // Accumulators for the cpu node currently open (they never nest).
         let mut reg: Option<u64> = None;
         let mut capacity: Option<u64> = None;
+        let mut spin_table = false;
+        let mut release_addr: Option<u64> = None;
 
         while pos < struct_end {
             let token = be_u32(self.blob, pos).ok_or(FdtError::Malformed)?;
@@ -335,6 +331,8 @@ impl<'a> Fdt<'a> {
                     if is_cpu[depth] {
                         reg = None;
                         capacity = None;
+                        spin_table = false;
+                        release_addr = None;
                     }
                     depth += 1;
                 }
@@ -342,7 +340,21 @@ impl<'a> Fdt<'a> {
                     depth = depth.checked_sub(1).ok_or(FdtError::Malformed)?;
                     if is_cpu[depth] {
                         if let Some(mpidr) = reg {
-                            f(mpidr, capacity);
+                            f(CpuNode {
+                                reg: mpidr,
+                                capacity,
+                                // The release address is meaningful only
+                                // under the spin-table enable method; a
+                                // zero address is the firmware's "not
+                                // provided" and is refused rather than
+                                // handed out as a writable target (fail
+                                // closed).
+                                spin_table_release: if spin_table {
+                                    release_addr.filter(|&addr| addr != 0)
+                                } else {
+                                    None
+                                },
+                            });
                         }
                     }
                 }
@@ -353,6 +365,10 @@ impl<'a> Fdt<'a> {
                             reg = read_int_cells(value);
                         } else if prop_name == b"capacity-dmips-mhz" {
                             capacity = read_int_cells(value);
+                        } else if prop_name == b"enable-method" {
+                            spin_table = str_prop_is(value, b"spin-table");
+                        } else if prop_name == b"cpu-release-addr" {
+                            release_addr = read_int_cells(value);
                         }
                     }
                 }
@@ -943,6 +959,37 @@ fn read_int_cells(value: &[u8]) -> Option<u64> {
     }
 }
 
+/// `true` iff the string property `value` equals `expected` — with or
+/// without the NUL terminator the Devicetree spec appends. Any other
+/// shape (a different string, a string list, an empty value) is `false`
+/// (fail closed, never a prefix match).
+fn str_prop_is(value: &[u8], expected: &[u8]) -> bool {
+    match value.split_last() {
+        Some((0, head)) => head == expected,
+        _ => value == expected,
+    }
+}
+
+/// One `/cpus/cpu@*` node decoded by [`Fdt::each_cpu`].
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct CpuNode {
+    /// The node's `reg` value — the CPU's `MPIDR_EL1` affinity on
+    /// aarch64 / hart id on riscv64 — decoded from a one-cell (`u32`)
+    /// or two-cell (`u64`) value.
+    pub reg: u64,
+    /// The `capacity-dmips-mhz` value (the per-core DMIPS rating used
+    /// to classify `big.LITTLE` cores), or `None` when the node omits
+    /// it — a homogeneous machine.
+    pub capacity: Option<u64>,
+    /// The spin-table release address (Devicetree `cpu-release-addr`),
+    /// present only when the node's `enable-method` is `spin-table`
+    /// and the address decodes non-zero. `None` for a PSCI-enabled or
+    /// boot CPU node. This is the physical word firmware parks the CPU
+    /// polling; writing an entry address there (and signalling an
+    /// event) releases the CPU into that entry.
+    pub spin_table_release: Option<u64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1179,7 +1226,7 @@ mod tests {
         );
         let fdt = Fdt::new(&blob).expect("valid fdt");
         let mut seen: Vec<(u64, Option<u64>)> = Vec::new();
-        fdt.each_cpu(|mpidr, cap| seen.push((mpidr, cap)))
+        fdt.each_cpu(|cpu| seen.push((cpu.reg, cpu.capacity)))
             .expect("walk succeeds");
         assert_eq!(
             seen,
@@ -1193,11 +1240,105 @@ mod tests {
     }
 
     #[test]
+    fn each_cpu_reads_spin_table_release_addresses() {
+        // The Pi 4 stock-firmware shape: the boot CPU has no release
+        // address; each secondary declares `enable-method = "spin-table"`
+        // and a two-cell `cpu-release-addr`.
+        let blob = crate::fixture::arm_with_spin_table_cpus(
+            0x0,
+            0x4000_0000,
+            &[
+                (0x0, None),
+                (0x1, Some(0xe0)),
+                (0x2, Some(0xe8)),
+                (0x3, Some(0xf0)),
+            ],
+        );
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let mut seen: Vec<(u64, Option<u64>)> = Vec::new();
+        fdt.each_cpu(|cpu| seen.push((cpu.reg, cpu.spin_table_release)))
+            .expect("walk succeeds");
+        assert_eq!(
+            seen,
+            [
+                (0x0, None),
+                (0x1, Some(0xe0)),
+                (0x2, Some(0xe8)),
+                (0x3, Some(0xf0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn spin_table_release_requires_the_spin_table_enable_method() {
+        // A `cpu-release-addr` without `enable-method = "spin-table"`
+        // (or under a different method) is not a release target.
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.begin_node("cpus");
+        b.begin_node("cpu@1");
+        b.prop_u32("reg", 1);
+        b.prop("enable-method", b"psci\0");
+        b.prop("cpu-release-addr", &0xe0u64.to_be_bytes());
+        b.end_node();
+        b.begin_node("cpu@2");
+        b.prop_u32("reg", 2);
+        b.prop("cpu-release-addr", &0xe8u64.to_be_bytes());
+        b.end_node();
+        b.end_node();
+        b.end_node();
+        let blob = b.build();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let mut seen: Vec<Option<u64>> = Vec::new();
+        fdt.each_cpu(|cpu| seen.push(cpu.spin_table_release))
+            .expect("walk succeeds");
+        assert_eq!(seen, [None, None]);
+    }
+
+    #[test]
+    fn spin_table_release_rejects_a_zero_or_malformed_address() {
+        // A zero release address is firmware's "not provided"; a
+        // wrong-sized property does not decode. Both fail closed.
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.begin_node("cpus");
+        b.begin_node("cpu@1");
+        b.prop_u32("reg", 1);
+        b.prop("enable-method", b"spin-table\0");
+        b.prop("cpu-release-addr", &0u64.to_be_bytes());
+        b.end_node();
+        b.begin_node("cpu@2");
+        b.prop_u32("reg", 2);
+        b.prop("enable-method", b"spin-table\0");
+        b.prop("cpu-release-addr", &[0xe0u8, 0, 0]);
+        b.end_node();
+        b.end_node();
+        b.end_node();
+        let blob = b.build();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let mut seen: Vec<Option<u64>> = Vec::new();
+        fdt.each_cpu(|cpu| seen.push(cpu.spin_table_release))
+            .expect("walk succeeds");
+        assert_eq!(seen, [None, None]);
+    }
+
+    #[test]
+    fn str_prop_is_matches_with_and_without_the_nul() {
+        assert!(str_prop_is(b"spin-table\0", b"spin-table"));
+        assert!(str_prop_is(b"spin-table", b"spin-table"));
+        assert!(!str_prop_is(b"psci\0", b"spin-table"));
+        assert!(!str_prop_is(b"spin-table-x\0", b"spin-table"));
+        assert!(!str_prop_is(b"", b"spin-table"));
+        // A string list is not a single matching string.
+        assert!(!str_prop_is(b"spin-table\0psci\0", b"spin-table"));
+    }
+
+    #[test]
     fn each_cpu_yields_nothing_when_there_are_no_cpu_nodes() {
         let blob = virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 14);
         let fdt = Fdt::new(&blob).expect("valid fdt");
         let mut count = 0usize;
-        fdt.each_cpu(|_, _| count += 1).expect("walk succeeds");
+        fdt.each_cpu(|_| count += 1).expect("walk succeeds");
         assert_eq!(count, 0);
     }
 

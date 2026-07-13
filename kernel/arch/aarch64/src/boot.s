@@ -26,10 +26,14 @@
 // firmware (with no `armstub` spin-table) instead releases all four
 // cores straight to the kernel entry. To behave correctly on both, every
 // CPU whose `MPIDR_EL1` affinity is non-zero parks in a low-power `wfe`
-// loop here, before touching the single boot stack or `.bss`, and waits
-// for the SMP bring-up (`plans/PI.md` P5) to start it deliberately. This
-// fails closed (`AGENTS.md` §2.1 — never race the secondaries onto a
-// shared stack).
+// loop here, before touching the single boot stack or `.bss`, polling
+// the kernel spin-table release word (`smp::SECONDARY_KERNEL_RELEASE`):
+// it stays parked while the word is zero and branches to the address
+// written there when the SMP bring-up (`plans/PI.md` P5) releases it
+// deliberately (`smp::start_secondary_spintable`). This fails closed
+// (`AGENTS.md` §2.1 — never race the secondaries onto a shared stack):
+// nothing is released until the boot CPU has published the secondary
+// stacks, entry, and affinity table.
 //
 // SAFETY-INVARIANTs (audited per AGENTS.md §10):
 //   1. The body below `_start` runs exactly once, on the boot CPU
@@ -68,10 +72,18 @@ _start:
 
     // Park every non-boot CPU. The boot CPU is the one whose MPIDR_EL1
     // affinity (Aff0..Aff3) is zero; any other core waits in a `wfe`
-    // loop until the SMP bring-up starts it explicitly (plans/PI.md P5).
-    // This runs before the shared boot stack or `.bss` is touched, so a
-    // released-at-reset Pi secondary cannot race the boot CPU. Scratch
-    // registers x4..x7 are used so x19 (the DTB) is left untouched.
+    // loop until the SMP bring-up releases it explicitly (plans/PI.md
+    // P5) by writing the spin-table trampoline's address into
+    // `SECONDARY_KERNEL_RELEASE` (`smp::start_secondary_spintable`) —
+    // the kernel's own release word, polled exactly like a firmware
+    // spin-table mailbox. The word lives in `.bss`, which the boot CPU
+    // zeroes below; a parked core reading a mid-clear value sees only
+    // zero (keep parking) or, much later, the published entry — never a
+    // torn in-between (the store is a single aligned doubleword). This
+    // runs before the shared boot stack or `.bss` is touched by *this*
+    // core, so a released-at-reset Pi secondary cannot race the boot
+    // CPU. Scratch registers x4..x7 are used so x19 (the DTB) is left
+    // untouched.
     mrs     x4, mpidr_el1
     mov     x5, #0xffff             // Aff0 [7:0] | Aff1 [15:8]
     movk    x5, #0xff, lsl #16      // | Aff2 [23:16]  => x5 = 0x00FF_FFFF
@@ -81,7 +93,11 @@ _start:
     cbz     x6, .Lboot_cpu
 .Lpark_secondary:
     wfe
-    b       .Lpark_secondary
+    adrp    x4, SECONDARY_KERNEL_RELEASE
+    add     x4, x4, :lo12:SECONDARY_KERNEL_RELEASE
+    ldr     x4, [x4]
+    cbz     x4, .Lpark_secondary
+    br      x4
 
 .Lboot_cpu:
     // Dispatch on the current exception level (bits [3:2] of CurrentEL).
@@ -89,51 +105,8 @@ _start:
     lsr     x1, x1, #2
     cmp     x1, #2
     b.ne    .Lin_el1
-
-    // --- Entered at EL2: establish fully-known EL2 state, drop to EL1 ---
-    // Every EL2 control register below is architecturally UNKNOWN at
-    // first entry on real silicon (the Pi firmware stub sets only
-    // SCTLR_EL2 and CPUECTLR_EL1.SMPEN); QEMU resets them to benign
-    // zeroes, masking any residue. Each is therefore *written whole*
-    // with its known hand-off value (`rustos_arch_aarch64::el2`,
-    // unit-test-pinned) — an `orr` into the live register would carry
-    // UNKNOWN bits (HCR_EL2.TVM traps EL1's first MAIR/TCR/TTBR/SCTLR
-    // write into vector-less EL2: the silent Pi 4 MMU-switch hang).
-
-    // HCR_EL2 = el2::HCR_EL2_HANDOFF: EL1 is AArch64 (RW), stage-2
-    // translation off, no traps, no TGE.
-    mov     x0, #(1 << 31)
-    msr     hcr_el2, x0
-
-    // CNTHCTL_EL2 = el2::CNTHCTL_EL2_HANDOFF: EL1/EL0 read the physical
-    // counter and program the physical timer without trapping to EL2
-    // (EL1PCTEN | EL1PCEN); zero virtual-counter offset.
-    mov     x0, #3
-    msr     cnthctl_el2, x0
-    msr     cntvoff_el2, xzr
-
-    // CPTR_EL2 = el2::CPTR_EL2_HANDOFF: the RES1 bits only — FP/SIMD
-    // (TFP) and CPACR_EL1 (TCPAC) accesses from EL1 do not trap.
-    mov     x0, #0x33ff
-    msr     cptr_el2, x0
-
-    // MDCR_EL2 = el2::MDCR_EL2_HANDOFF: no debug/PMU traps to EL2.
-    msr     mdcr_el2, xzr
-
-    // EL1 reads of MIDR_EL1/MPIDR_EL1 return VPIDR_EL2/VMPIDR_EL2:
-    // mirror the silicon's own identity registers so EL1 never sees an
-    // UNKNOWN core id.
-    mrs     x0, midr_el1
-    msr     vpidr_el2, x0
-    mrs     x0, mpidr_el1
-    msr     vmpidr_el2, x0
-
-    // eret into EL1h (M[3:0]=0b0101) with DAIF masked (bits [9:6]).
-    mov     x0, #0x3c5
-    msr     spsr_el2, x0
-    adr     x0, .Lin_el1
-    msr     elr_el2, x0
-    eret
+    adr     x20, .Lin_el1
+    b       _el2_establish_and_drop
 
 .Lin_el1:
     // SCTLR_EL1 is architecturally UNKNOWN here on real silicon — both
@@ -174,6 +147,61 @@ _start:
 3:
     wfi
     b       3b
+
+// --- Entered at EL2: establish fully-known EL2 state, drop to EL1 ---
+//
+// Shared by the boot core's `_start` and the spin-table secondary
+// trampoline (`smp.s` `_start_secondary_spintable_aarch64`) — both may
+// be entered at EL2 on the Pi firmware hand-off, and the EL2 register
+// establishment is banked per core, so every arriving core runs it.
+//
+// Contract: x20 = EL1 continuation address; clobbers x0 only; `eret`s
+// into EL1h at x20 with DAIF masked. Callee-saved state (x19 = the boot
+// DTB pointer) is untouched.
+//
+// Every EL2 control register below is architecturally UNKNOWN at first
+// entry on real silicon (the Pi firmware stub sets only SCTLR_EL2 and
+// CPUECTLR_EL1.SMPEN); QEMU resets them to benign zeroes, masking any
+// residue. Each is therefore *written whole* with its known hand-off
+// value (`rustos_arch_aarch64::el2`, unit-test-pinned) — an `orr` into
+// the live register would carry UNKNOWN bits (HCR_EL2.TVM traps EL1's
+// first MAIR/TCR/TTBR/SCTLR write into vector-less EL2: the silent Pi 4
+// MMU-switch hang).
+.global _el2_establish_and_drop
+_el2_establish_and_drop:
+    // HCR_EL2 = el2::HCR_EL2_HANDOFF: EL1 is AArch64 (RW), stage-2
+    // translation off, no traps, no TGE.
+    mov     x0, #(1 << 31)
+    msr     hcr_el2, x0
+
+    // CNTHCTL_EL2 = el2::CNTHCTL_EL2_HANDOFF: EL1/EL0 read the physical
+    // counter and program the physical timer without trapping to EL2
+    // (EL1PCTEN | EL1PCEN); zero virtual-counter offset.
+    mov     x0, #3
+    msr     cnthctl_el2, x0
+    msr     cntvoff_el2, xzr
+
+    // CPTR_EL2 = el2::CPTR_EL2_HANDOFF: the RES1 bits only — FP/SIMD
+    // (TFP) and CPACR_EL1 (TCPAC) accesses from EL1 do not trap.
+    mov     x0, #0x33ff
+    msr     cptr_el2, x0
+
+    // MDCR_EL2 = el2::MDCR_EL2_HANDOFF: no debug/PMU traps to EL2.
+    msr     mdcr_el2, xzr
+
+    // EL1 reads of MIDR_EL1/MPIDR_EL1 return VPIDR_EL2/VMPIDR_EL2:
+    // mirror the silicon's own identity registers so EL1 never sees an
+    // UNKNOWN core id.
+    mrs     x0, midr_el1
+    msr     vpidr_el2, x0
+    mrs     x0, mpidr_el1
+    msr     vmpidr_el2, x0
+
+    // eret into EL1h (M[3:0]=0b0101) with DAIF masked (bits [9:6]).
+    mov     x0, #0x3c5
+    msr     spsr_el2, x0
+    msr     elr_el2, x20
+    eret
 
 // Boot stack. Reserved in `.bss` (zeroed by the loop above); 64 KiB is
 // generous headroom for the single-CPU boot pipeline.
