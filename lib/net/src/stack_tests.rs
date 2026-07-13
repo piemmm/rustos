@@ -554,6 +554,150 @@ fn next_deadline_spans_all_components() {
 }
 
 #[test]
+fn ipv4_udp_datagram_round_trips() {
+    let mut a = stack(MAC_A, IID_A);
+    let mut b = stack(MAC_B, IID_B);
+    a.set_ipv4_config(V4_A, 24, None).expect("configure A");
+    b.set_ipv4_config(V4_B, 24, None).expect("configure B");
+    let mut events_b = Vec::new();
+
+    // The datagram parks on ARP resolution; it flows once the exchange
+    // settles, exactly like the echo path.
+    let out = a
+        .send_datagram(IpAddr::V4(V4_B), 5000, 7, b"udp-payload", t(2))
+        .expect("send");
+    let mut frames: VecDeque<Vec<u8>> = out.frames.into();
+    for _ in 0..16 {
+        let Some(frame) = frames.pop_front() else {
+            break;
+        };
+        let out_b = b.on_frame(&frame, t(2));
+        events_b.extend(out_b.events);
+        for reply in out_b.frames {
+            let out_a = a.on_frame(&reply, t(2));
+            frames.extend(out_a.frames);
+        }
+    }
+    assert!(events_b.contains(&StackEvent::UdpDatagram {
+        source: IpAddr::V4(V4_A),
+        destination: IpAddr::V4(V4_B),
+        source_port: 5000,
+        destination_port: 7,
+        payload: b"udp-payload".to_vec(),
+    }));
+}
+
+#[test]
+fn ipv6_udp_datagram_round_trips() {
+    let mut a = stack(MAC_A, IID_A);
+    let mut b = stack(MAC_B, IID_B);
+    bring_up(&mut a, &mut b);
+    let mut events_b = Vec::new();
+
+    let out = a
+        .send_datagram(IpAddr::V6(link_local(IID_B)), 6000, 9, b"udp6", t(3))
+        .expect("send");
+    let mut frames: VecDeque<Vec<u8>> = out.frames.into();
+    for _ in 0..16 {
+        let Some(frame) = frames.pop_front() else {
+            break;
+        };
+        let out_b = b.on_frame(&frame, t(3));
+        events_b.extend(out_b.events);
+        for reply in out_b.frames {
+            let out_a = a.on_frame(&reply, t(3));
+            frames.extend(out_a.frames);
+        }
+    }
+    assert!(events_b.contains(&StackEvent::UdpDatagram {
+        source: IpAddr::V6(link_local(IID_A)),
+        destination: IpAddr::V6(link_local(IID_B)),
+        source_port: 6000,
+        destination_port: 9,
+        payload: b"udp6".to_vec(),
+    }));
+}
+
+#[test]
+fn send_datagram_refusals_are_typed() {
+    let mut a = stack(MAC_A, IID_A);
+    // No v4 configuration yet: no usable source address.
+    assert_eq!(
+        a.send_datagram(IpAddr::V4(V4_B), 1, 2, b"x", t(0)),
+        Err(SendError::NoSourceAddress)
+    );
+    a.set_ipv4_config(V4_A, 24, None).expect("configure");
+    // Multicast and broadcast destinations are refused this increment
+    // (group-membership transmit is a later increment); fail closed.
+    assert_eq!(
+        a.send_datagram(IpAddr::V4(Ipv4Addr::BROADCAST), 1, 2, b"x", t(0)),
+        Err(SendError::NotUnicast)
+    );
+    assert_eq!(
+        a.send_datagram(IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1)), 1, 2, b"x", t(0)),
+        Err(SendError::NotUnicast)
+    );
+    assert_eq!(
+        a.send_datagram(IpAddr::V6(ALL_NODES), 1, 2, b"x", t(0)),
+        Err(SendError::NotUnicast)
+    );
+    // Off-subnet unicast with no gateway.
+    assert_eq!(
+        a.send_datagram(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 1, 2, b"x", t(0)),
+        Err(SendError::NoRoute)
+    );
+    // Link down refuses everything.
+    a.set_link(LinkState::Down);
+    assert_eq!(
+        a.send_datagram(IpAddr::V4(V4_B), 1, 2, b"x", t(0)),
+        Err(SendError::LinkDown)
+    );
+}
+
+#[test]
+fn oversize_v6_udp_is_refused_too_large() {
+    let mut a = stack(MAC_A, IID_A);
+    let mut b = stack(MAC_B, IID_B);
+    bring_up(&mut a, &mut b);
+    let payload = vec![0u8; 1600];
+    assert_eq!(
+        a.send_datagram(IpAddr::V6(link_local(IID_B)), 1, 2, &payload, t(2)),
+        Err(SendError::TooLarge)
+    );
+}
+
+#[test]
+fn corrupt_udp_checksum_is_dropped() {
+    let mut a = stack(MAC_A, IID_A);
+    a.set_ipv4_config(V4_A, 24, None).expect("configure");
+    // Hand-build a UDP-over-IPv4 datagram to A, then corrupt its payload
+    // so the checksum no longer verifies: it must be dropped, not surfaced.
+    let mut udp_msg = vec![0u8; udp::UDP_HEADER_LEN + 4];
+    udp::write(
+        udp::Pseudo::V4 {
+            source: V4_B,
+            destination: V4_A,
+        },
+        1111,
+        2222,
+        &[1, 2, 3, 4],
+        &mut udp_msg,
+    )
+    .expect("write");
+    udp_msg[udp::UDP_HEADER_LEN] ^= 0xFF;
+    let header = Ipv4Header::new(V4_B, V4_A, PROTOCOL_UDP);
+    let mut packet = vec![0u8; IPV4_HEADER_LEN + udp_msg.len()];
+    header.write(&mut packet, udp_msg.len()).expect("fits");
+    packet[IPV4_HEADER_LEN..].copy_from_slice(&udp_msg);
+    let mut frame = vec![0u8; ETHERNET_HEADER_LEN + packet.len()];
+    write_header(&mut frame, MAC_B, MAC_A, ETHERTYPE_IPV4).expect("fits");
+    frame[ETHERNET_HEADER_LEN..].copy_from_slice(&packet);
+    let out = a.on_frame(&frame, t(0));
+    assert!(out.events.is_empty());
+    assert!(a.counters().rx_dropped >= 1);
+}
+
+#[test]
 fn frames_for_other_hosts_are_dropped() {
     let mut a = stack(MAC_A, IID_A);
     a.set_ipv4_config(V4_A, 24, None).expect("configure");

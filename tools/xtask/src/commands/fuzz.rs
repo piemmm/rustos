@@ -94,6 +94,11 @@ pub const TARGETS: &[Target] = &[
         description: "lib/net dual-stack host engine frame entry point",
     },
     Target {
+        package: "rustos-net",
+        test: "fuzz_net_udp",
+        description: "lib/net dual-stack UDP codec (pseudo-header checksum, length bounds)",
+    },
+    Target {
         package: "rustos-kernel-ipc",
         test: "fuzz_port",
         description: "IPC port send dispatch (capability + size + capacity)",
