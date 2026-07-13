@@ -519,7 +519,7 @@ impl ErrorRateLimiter {
     /// Take one error's worth of budget at time `now`; `false` means
     /// the error must be suppressed.
     pub fn allow(&mut self, now: Duration64) -> bool {
-        let now = duration_nanos(now);
+        let now = crate::timeutil::nanos(now);
         let elapsed = now.saturating_sub(self.last);
         self.last = now;
         let refill = u64::try_from(elapsed)
@@ -533,13 +533,6 @@ impl ErrorRateLimiter {
             false
         }
     }
-}
-
-/// Nanoseconds of a non-negative monotonic duration (negative inputs
-/// saturate to zero rather than wrapping).
-fn duration_nanos(d: Duration64) -> u128 {
-    let secs = u128::try_from(d.secs()).unwrap_or(0);
-    secs * u128::from(NANOS_PER_SEC) + u128::from(d.subsec_nanos())
 }
 
 #[cfg(test)]

@@ -210,3 +210,26 @@ fn fragment_fails_closed() {
     // Total length overflow.
     assert!(fragment(header(), 65_536, 1500).is_none());
 }
+
+#[test]
+fn router_alert_header_carries_the_option() {
+    // A 24-byte header (IHL = 6) carrying the RFC 2113 Router Alert
+    // option, as IGMP membership messages require.
+    let payload = [0xDEu8, 0xAD, 0xBE, 0xEF];
+    let mut out = [0u8; IPV4_HEADER_LEN + 4 + 4];
+    let written = header()
+        .write_with_router_alert(&mut out, payload.len())
+        .expect("router-alert header fits");
+    assert_eq!(written, IPV4_HEADER_LEN + 4);
+    out[written..].copy_from_slice(&payload);
+    // IHL field says six 32-bit words.
+    assert_eq!(out[0] & 0x0F, 6);
+    // The option bytes are the Router Alert option (type 148, len 4).
+    let (parsed, options, body) = Ipv4Header::parse(&out).expect("parses");
+    assert_eq!(parsed.source, SRC);
+    assert_eq!(parsed.destination, DST);
+    assert_eq!(options, &[0x94, 0x04, 0x00, 0x00]);
+    assert_eq!(body, &payload);
+    // The header checksum still verifies over the whole 24-byte header.
+    assert_eq!(internet_checksum(&out[..written]), 0);
+}

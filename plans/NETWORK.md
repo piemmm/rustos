@@ -406,19 +406,41 @@ docs, and the full gate) because the whole was too large for one change:
   socket delivery / port-unreachable, not the engine) and originates it
   with `Stack::send_datagram` (unicast this increment; the ICMP send
   helpers were generalised to carry the protocol, no duplication).
+- **Multicast membership engine + host membership landed:**
+  - `lib/net::igmp` (IGMPv2, RFC 2236) and `lib/net::mld` (MLDv2,
+    RFC 3810) are the wire codecs — total/bounded/fail-closed, fuzzed
+    (`fuzz_net_igmp`, `fuzz_net_mld`); `mld` decodes queries and encodes
+    v2 reports only (no report decoder — MLDv2 has no suppression).
+  - `lib/net::mcast` is the family-generic host state machine
+    `Membership<P>` over the `Igmp`/`Mld` providers (the `neigh`
+    one-core/two-providers shape): reference-counted join/leave,
+    robustness retransmission, query responses jittered from a
+    MAC-seeded non-crypto generator, IGMP-only report suppression,
+    all-hosts control groups never reported, bounded + fail-closed at
+    capacity.
+  - Router Alert on emit: `Ipv4Header::write_with_router_alert`
+    (RFC 2113 option, IHL 6) and `ipv6::hop_by_hop_router_alert`
+    (RFC 2711 Hop-by-Hop), TTL/hop-limit 1, defined once.
+  - `Stack` wiring: `join_multicast`/`leave_multicast`, receive-path
+    filtering by membership (v4 + v6), IGMP (proto 2) and MLD
+    (`ICMPv6` 130/143) query dispatch, report emission to the group /
+    `224.0.0.2` / `ff02::16`, folded `next_deadline`; solicited-node
+    multicast for ND is formalised here (auto-joined on
+    `AddressPreferred`, left on invalidation) and the all-systems group
+    is auto-joined on v4 configuration.
 - **Remaining:** the socket ABI (`lib/abi/src/net.rs`) with
   `socket`/`bind`/`connect`/`send`/`recv`/`close`, `CAP_NET`
   introduced + enforced, ephemeral ports CSPRNG-randomised, per-socket
   and per-principal buffer accounting (§24.3), `WaitSourceKind::Socket`
-  readiness.
-- **Remaining — multicast:** IGMPv2 + MLDv2 host-side membership,
-  socket join/leave, reception filtering, multicast UDP transmit;
-  solicited-node multicast for ND (already needed by N2) formalised
-  here.
-- Tests: two-process QEMU vertical (UDP echo v4+v6, multicast join +
-  receive), fuzz `fuzz_net_udp` (landed) / `fuzz_net_sockabi`,
-  limit-exhaustion tests failing closed.
-- Docs: `docs/src/abi/net-sockets.md`.
+  readiness; multicast **socket** join/leave and multicast datagram
+  **transmit** built on the landed `mcast` engine.
+- Remaining tests: two-process QEMU vertical (UDP echo v4+v6, multicast
+  join + receive), `fuzz_net_sockabi`, limit-exhaustion tests failing
+  closed. (`fuzz_net_udp`/`fuzz_net_igmp`/`fuzz_net_mld` landed; the
+  membership engine + host-membership + Router-Alert paths are covered
+  by `lib/net` unit/e2e tests.)
+- Docs: `docs/src/abi/net-sockets.md` (remaining); `docs/src/lib/net.md`
+  refreshed for `udp`/`igmp`/`mld`/`mcast`.
 
 ### N5 — TCP core: the RFC 9293 state machine, retransmission, flow control `[ ]`
 - Connection establishment/teardown (full state machine, simultaneous

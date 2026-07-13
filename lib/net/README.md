@@ -9,9 +9,10 @@ caller-owned byte slices and explicit monotonic time values, so the exact
 code the live `netstack` service runs is the code the unit tests, property
 tests, and fuzz harnesses (`fuzz_net_eth`, `fuzz_net_addr`,
 `fuzz_net_ipv4`, `fuzz_net_ipv6`, `fuzz_net_icmp`, `fuzz_net_nd`,
-`fuzz_net_stack`) exercise.
+`fuzz_net_stack`, `fuzz_net_udp`, `fuzz_net_igmp`, `fuzz_net_mld`)
+exercise.
 
-## Contents (NETWORK.md increments N1–N3a)
+## Contents
 
 - `addr` — the dual-stack address vocabulary. IPv4 and IPv6 are peers,
   expressed as the `core::net` types (re-exported, never a drifting
@@ -71,11 +72,27 @@ tests, and fuzz harnesses (`fuzz_net_eth`, `fuzz_net_addr`,
   returns frames plus typed events — ARP/ND answering and resolution
   with a bounded pending queue, echo in/out, budgeted reassembly,
   rate-limited ICMP error generation, RA processing (SLAAC, default
-  routers, on-link routes, MTU, timing adoption — all bounded), and
-  redirect validation against the destination's current first hop.
+  routers, on-link routes, MTU, timing adoption — all bounded),
+  redirect validation against the destination's current first hop,
+  UDP demux to typed events, and IGMPv2/MLDv2 multicast membership
+  (auto-joining each address's solicited-node group and the all-systems
+  group, filtering the receive path by membership, emitting reports
+  with a Router Alert; `join_multicast` / `leave_multicast`).
+- `udp` — the dual-stack UDP codec (RFC 768): one parse/emit core over
+  the family-appropriate pseudo-header checksum, IPv4-optional /
+  IPv6-mandatory checksum discipline.
+- `igmp`, `mld` — the IPv4 (IGMPv2, RFC 2236) and IPv6 (MLDv2,
+  RFC 3810) multicast group-membership message codecs, total and
+  fail-closed; `mld` decodes queries and encodes reports only (a host
+  never acts on another's report — MLDv2 has no suppression).
+- `mcast` — the family-generic host membership state machine
+  (`Membership<P>` over the `Igmp` / `Mld` providers, the `neigh`
+  "one core, two providers" shape): reference-counted join/leave,
+  robustness retransmission, jittered query responses, bounded and
+  fail-closed at capacity.
 
-Later increments evolve this crate in place with `igmp`/`mld`, `udp`,
-and `tcp` (`plans/NETWORK.md` §2.1).
+Later increments evolve this crate in place with the socket ABI's
+multicast transmit and `tcp` (`plans/NETWORK.md` §2.1).
 
 ## Security
 

@@ -36,9 +36,10 @@
 use alloc::vec::Vec;
 
 use rustos_abi::driver::net::MacAddress;
-use rustos_abi::time::{Duration64, NANOS_PER_SEC};
+use rustos_abi::time::Duration64;
 
 use crate::addr::IpAddr;
+use crate::timeutil::{nanos, NEVER};
 
 /// Reachability state of one cache entry, per RFC 4861 §7.3.2.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -117,17 +118,6 @@ impl Default for NeighborConfig {
         }
     }
 }
-
-/// Nanoseconds of a non-negative monotonic duration.
-fn nanos(d: Duration64) -> u128 {
-    // Monotonic time never goes negative; clamp defensively so a
-    // malformed input saturates instead of wrapping.
-    let secs = u128::try_from(d.secs()).unwrap_or(0);
-    secs * u128::from(NANOS_PER_SEC) + u128::from(d.subsec_nanos())
-}
-
-/// Deadline value meaning "no timed transition pending".
-const NEVER: u128 = u128::MAX;
 
 /// Reachability of a resolved entry — [`NeighborState`] minus
 /// `Incomplete`, so "resolved but addressless" is unrepresentable.
