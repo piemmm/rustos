@@ -5169,7 +5169,11 @@ binding design and staging.
 - **Boot facts (`boot_facts_get`, syscall 89) + the machine-summary
   banner.** The kernel mints one immutable `rustos_abi::BootFacts` record at
   boot — the arch port's stated identity (`KernelArch::arch_id`, `None` on
-  the host test arch so the facts stay uninstalled), the validated CPU
+  the host test arch so the facts stay uninstalled), the boot CPU's
+  discovered model name (`KernelArch::cpu_name` → `rustos_abi::CpuName`:
+  the x86_64 CPUID brand string, the aarch64 `MIDR_EL1` decode, the riscv64
+  device-tree cpu `compatible` mapping; `CpuName::UNKNOWN` when none is
+  derivable), the validated CPU
   count, and the boot path's pre-carve installed-RAM total
   (`BootInfo::with_installed_memory`; aarch64 sums the raw FDT `/memory`
   windows, riscv64 takes the FDT window, x86_64 sums the firmware map's
@@ -5178,8 +5182,10 @@ binding design and staging.
   machine's public shape, never live state; live figures stay behind the
   capability-gated System Information API). PID 1 renders its startup banner
   from it: `RustOS <version>: <mem>` (whole MiB rounded to nearest; whole
-  GiB above 100 GiB), a blank line, then
-  `Architecture: <arch>, <n> core(s)`; a kernel with no installed facts
+  GiB above 100 GiB), a blank line, then `<CPU name>, <n> core(s)` — e.g.
+  `ARM Cortex-A72, 4 cores` — falling back to
+  `Unknown <arch> processor, <n> core(s)` when no model was discovered; a
+  kernel with no installed facts
   degrades the banner to the version line, fail closed, with the reason on
   stderr. Wrappers: `rustos_rt::boot_facts()`, `ros_sys_boot_facts_get`.
 - **The boot-time configuration store (`lib/sysconfig` + the `configure`

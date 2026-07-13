@@ -99,6 +99,9 @@ pub mod context;
 /// architecture-neutral first-frame seeding + task switch over the
 /// bare-metal primitive in [`context`].
 pub mod context_hal;
+/// Boot-CPU model-name discovery: the `MIDR_EL1` implementer/part decode
+/// (`ARM Cortex-A72`, …) the boot facts report.
+pub mod cpuname;
 /// Known EL2→EL1 hand-off register values (`HCR_EL2`, `CNTHCTL_EL2`,
 /// `CPTR_EL2`, `MDCR_EL2`) the `boot.s` trampoline writes *whole* before
 /// dropping to EL1 — the EL2 reset state is architecturally UNKNOWN on

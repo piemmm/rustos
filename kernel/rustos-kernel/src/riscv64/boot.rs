@@ -167,13 +167,19 @@ fn kernel_end_addr() -> u64 {
 #[derive(Debug)]
 pub struct RiscvBinArch {
     arch: RiscvArch,
+    /// The boot CPU's model name, discovered once at boot from the
+    /// device tree's cpu `compatible` (S-mode cannot read the M-mode
+    /// identity CSRs, so the tree is the only source); `None` when the
+    /// tree names no part the port knows.
+    cpu_name: Option<rustos_abi::CpuName>,
 }
 
 impl RiscvBinArch {
-    /// Wrap `arch` so it can be handed to `kernel_core::kernel_main`.
+    /// Wrap `arch` (and the boot-discovered CPU name) so it can be
+    /// handed to `kernel_core::kernel_main`.
     #[must_use]
-    pub const fn new(arch: RiscvArch) -> Self {
-        Self { arch }
+    pub const fn new(arch: RiscvArch, cpu_name: Option<rustos_abi::CpuName>) -> Self {
+        Self { arch, cpu_name }
     }
 }
 
@@ -225,6 +231,13 @@ impl KernelArch for RiscvBinArch {
 
     fn arch_id(&self) -> Option<rustos_abi::Arch> {
         Some(rustos_abi::Arch::Riscv64)
+    }
+
+    fn cpu_name(&self) -> Option<rustos_abi::CpuName> {
+        // Captured from the device tree at construction; an unlisted or
+        // generic (`riscv`) compatible stays an honest `None` (the boot
+        // facts record "unknown"), never a guessed name.
+        self.cpu_name
     }
 
     fn ticks_to_ns(&self, ticks: u64) -> u64 {
@@ -849,11 +862,14 @@ pub fn try_boot(
     // Single-hart boot slice: one per-CPU slot, owned by an
     // allocator-free `static` backing.
     static STORAGE: RiscvArchStorage<1> = RiscvArchStorage::new();
-    let arch = Arc::new(RiscvBinArch::new(RiscvArch::new(
-        &STORAGE,
-        BOOT_CPU,
-        timebase_hz,
-    )));
+    let cpu_name = fdt
+        .boot_cpu_compatible()
+        .and_then(rustos_arch_riscv64::cpuname::name_for_compatible)
+        .and_then(rustos_abi::CpuName::new);
+    let arch = Arc::new(RiscvBinArch::new(
+        RiscvArch::new(&STORAGE, BOOT_CPU, timebase_hz),
+        cpu_name,
+    ));
     let boot_info = BootInfo::new(
         BOOT_CPU,
         1,

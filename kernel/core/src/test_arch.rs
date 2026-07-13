@@ -261,6 +261,13 @@ impl KernelArch for TestArch {
         None
     }
 
+    fn cpu_name(&self) -> Option<rustos_abi::CpuName> {
+        // The host test arch runs on whatever machine hosts the tests: it
+        // discovers no CPU model, stating an honest `None` rather than
+        // fabricating a name.
+        None
+    }
+
     fn pump_console_tx(&self) {
         // The host mock has no buffered device; it only records that the
         // dispatch loop reached the seam so a test can assert the

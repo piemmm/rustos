@@ -1371,9 +1371,10 @@ pub extern "C" fn sys_boot_id_get(out: *mut c_void, out_cap: usize) -> u64 {
 }
 
 /// `boot_facts_get`: read the kernel's boot-static machine summary
-/// (`SyscallNumber::BOOT_FACTS_GET`). The 16-byte `rustos_abi::BootFacts`
-/// wire image — CPU architecture, processor-core count, and installed
-/// physical memory, minted once at boot from kernel-attested state — is
+/// (`SyscallNumber::BOOT_FACTS_GET`). The 64-byte `rustos_abi::BootFacts`
+/// wire image — CPU architecture, the boot CPU's discovered model name,
+/// processor-core count, and installed physical memory, minted once at
+/// boot from kernel-attested state — is
 /// written to the `out_cap`-byte buffer at `out` and its byte count returned
 /// (or a `ROS_E_*` code reinterpreted into the result). Unprivileged, like
 /// `ros_sys_boot_id_get` — the facts are the machine's public shape, never

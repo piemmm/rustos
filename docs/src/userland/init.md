@@ -119,7 +119,9 @@ idiomatic syscall wrappers; `rustos_rt::entry!` names the program's
 `main`. `main` renders the startup banner from the kernel-attested
 `boot_facts_get` machine summary — `RustOS <version>: <installed memory>`
 (whole MiB rounded to nearest, whole GiB above 100 GiB), a blank line, then
-`Architecture: <arch>, <n> core(s)`; a kernel that installed no facts
+`<CPU name>, <n> core(s)` (e.g. `ARM Cortex-A72, 4 cores`), falling back to
+`Unknown <arch> processor, <n> core(s)` when the kernel discovered no CPU
+model; a kernel that installed no facts
 degrades the banner to the version line with the reason on fd 2, never a
 fabricated machine shape — and writes it to its inherited standard
 output (fd 1) through `rustos_rt::stdout` — the `abi-v1` `stream_write`

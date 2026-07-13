@@ -121,6 +121,13 @@ impl KernelArch for Aarch64BinArch {
         Some(rustos_abi::Arch::Aarch64)
     }
 
+    fn cpu_name(&self) -> Option<rustos_abi::CpuName> {
+        // The `MIDR_EL1` implementer/part decode; a part outside the
+        // port's table stays an honest `None` (the boot facts record
+        // "unknown"), never a guessed name.
+        rustos_arch_aarch64::cpuname::boot_cpu_name().and_then(rustos_abi::CpuName::new)
+    }
+
     fn ticks_to_ns(&self, ticks: u64) -> u64 {
         // `ticks_now` is raw `CNTPCT_EL0`, so the identity default would
         // misreport CPU time; convert against the same discovered timer

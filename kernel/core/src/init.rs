@@ -1491,6 +1491,12 @@ fn run_phases<A: KernelArch>(
     let hook = match state.arch.arch_id() {
         Some(arch_id) if installed_memory_bytes != 0 => hook.with_boot_facts(BootFacts {
             arch: arch_id,
+            // A port that discovered no CPU model installs the honest
+            // `UNKNOWN`; readers render their own fallback for it.
+            cpu_name: state
+                .arch
+                .cpu_name()
+                .unwrap_or(rustos_abi::CpuName::UNKNOWN),
             cpu_count,
             memory_bytes: installed_memory_bytes,
         }),

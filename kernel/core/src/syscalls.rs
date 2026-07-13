@@ -23721,6 +23721,7 @@ mod tests {
         // large-enough one copies the record out; it decodes back exactly.
         let facts = BootFacts {
             arch: rustos_abi::Arch::Aarch64,
+            cpu_name: rustos_abi::CpuName::new("ARM Cortex-A72").expect("valid name"),
             cpu_count: 4,
             memory_bytes: 8 * 1024 * 1024 * 1024,
         };

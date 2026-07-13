@@ -504,6 +504,37 @@ impl<'a> Fdt<'a> {
         )
     }
 
+    /// The first `compatible` string of the first `/cpus/cpu@*` node, in
+    /// document order.
+    ///
+    /// This is the device tree's identity of the boot-relevant CPU model
+    /// (e.g. `sifive,u74-mc`, `arm,cortex-a72`), which the architecture
+    /// ports map to a human-readable processor name for the boot facts.
+    /// Returns `None` — never a guess — when the tree has no cpu node,
+    /// the node carries no `compatible`, the property is empty, or its
+    /// first string is not UTF-8; a malformed structure block equally
+    /// yields `None` (fail closed).
+    #[must_use]
+    pub fn boot_cpu_compatible(&self) -> Option<&'a str> {
+        let mut in_cpus = false;
+        for node in self.nodes() {
+            let node = node.ok()?;
+            match node.depth() {
+                1 => in_cpus = name_stem(node.name()) == b"cpus",
+                2 if in_cpus && name_stem(node.name()) == b"cpu" => {
+                    let compatible = node.property("compatible")?;
+                    let first = compatible.iter_strings().next()?;
+                    if first.is_empty() {
+                        return None;
+                    }
+                    return core::str::from_utf8(first).ok();
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// Iterate every node of the tree in document order.
     ///
     /// Each item is a [`Node`] handle exposing the node's properties
@@ -1168,6 +1199,48 @@ mod tests {
         let mut count = 0usize;
         fdt.each_cpu(|_, _| count += 1).expect("walk succeeds");
         assert_eq!(count, 0);
+    }
+
+    /// A minimal tree with one `/cpus/cpu@0` node carrying `compatible`,
+    /// plus a `cpu-map` sibling that must not be mistaken for a cpu node.
+    fn tree_with_cpu_compatible(compatible: Option<&[u8]>) -> Vec<u8> {
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.begin_node("cpus");
+        b.begin_node("cpu-map");
+        b.end_node();
+        b.begin_node("cpu@0");
+        if let Some(value) = compatible {
+            b.prop("compatible", value);
+        }
+        b.prop_u32("reg", 0);
+        b.end_node();
+        b.end_node();
+        b.end_node();
+        b.build()
+    }
+
+    #[test]
+    fn boot_cpu_compatible_reads_the_first_string() {
+        let blob = tree_with_cpu_compatible(Some(b"sifive,u74-mc\0riscv\0"));
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(fdt.boot_cpu_compatible(), Some("sifive,u74-mc"));
+    }
+
+    #[test]
+    fn boot_cpu_compatible_is_none_without_a_source() {
+        // No cpu node at all.
+        let blob = virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 14);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(fdt.boot_cpu_compatible(), None);
+        // A cpu node with no `compatible` property.
+        let blob = tree_with_cpu_compatible(None);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(fdt.boot_cpu_compatible(), None);
+        // A cpu node with an empty `compatible` value.
+        let blob = tree_with_cpu_compatible(Some(b"\0"));
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(fdt.boot_cpu_compatible(), None);
     }
 
     #[test]

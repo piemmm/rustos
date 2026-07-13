@@ -609,17 +609,21 @@ first-party Rust wrapper is `rustos_rt::boot_id`; the C stub is
 `ros_sys_boot_id_get`.
 
 `boot_facts_get` (no. 89) copies the kernel's boot-static machine summary —
-the 16-byte `rustos_abi::BootFacts` wire record: the CPU architecture
-(`rustos_abi::Arch`, a closed Tier-1 set), the number of processor cores
+the 64-byte `rustos_abi::BootFacts` wire record: the CPU architecture
+(`rustos_abi::Arch`, a closed Tier-1 set), the boot CPU's discovered model
+name (`rustos_abi::CpuName`, a bounded NUL-padded string; the all-zero
+`UNKNOWN` when the port derived none), the number of processor cores
 brought under the scheduler, and the installed physical memory the boot
 path discovered — out to the caller's `(out, len)` buffer and returns its
 byte count. The facts are minted once at boot from kernel-attested state
-(the arch port's stated identity, the validated `BootInfo::cpu_count`, and
+(the arch port's stated identity, its CPU-model discovery — the x86_64
+CPUID brand string, the aarch64 `MIDR_EL1` decode, the riscv64 device-tree
+cpu `compatible` — the validated `BootInfo::cpu_count`, and
 the boot path's pre-carve installed-RAM total) and never change; like
 `boot_id_get` the call is **ungated** and unaudited because the record is
 the machine's public shape, never live state or a secret — usage figures
 and per-process detail stay behind the capability-gated System Information
-API. A buffer shorter than `BOOT_FACTS_WIRE_LEN` (16) fails closed with
+API. A buffer shorter than `BOOT_FACTS_WIRE_LEN` (64) fails closed with
 `BufferTooSmall`, and a kernel whose boot path installed no facts (the host
 test arch states no Tier-1 identity, and a boot path may not learn its
 installed total) fails closed with `NotImplemented` rather than fabricate a

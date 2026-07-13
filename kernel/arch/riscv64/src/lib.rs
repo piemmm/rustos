@@ -110,6 +110,9 @@ pub mod context;
 /// architecture-neutral first-frame seeding + task switch over the
 /// bare-metal primitive in [`context`].
 pub mod context_hal;
+/// Boot-CPU model-name discovery: the device-tree cpu `compatible` →
+/// marketing-name mapping (`SiFive U74-MC`, …) the boot facts report.
+pub mod cpuname;
 /// riscv64 implementation of the Arch HAL platform-entropy surface
 /// ([`rustos_arch_api::PlatformEntropy`]): the `Zkr` `seed` CSR source,
 /// honestly `Pending` on the M-mode delegation (see the module docs).

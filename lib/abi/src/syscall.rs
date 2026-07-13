@@ -1654,7 +1654,8 @@ impl SyscallNumber {
     pub const PORT_BIND: Self = Self(88);
 
     /// Read the kernel's boot-static machine summary
-    /// ([`crate::BootFacts`]): the CPU architecture, the number of
+    /// ([`crate::BootFacts`]): the CPU architecture, the boot CPU's
+    /// discovered model name ([`crate::CpuName`]), the number of
     /// processor cores brought under the scheduler, and the installed
     /// physical memory the boot path discovered.
     ///

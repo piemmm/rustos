@@ -136,6 +136,19 @@ pub trait KernelArch: SchedulerArch {
     /// (fail closed — a `None` leaves the boot facts uninstalled).
     fn arch_id(&self) -> Option<rustos_abi::Arch>;
 
+    /// The discovered model name of the boot CPU, or `None` when the
+    /// port cannot derive one.
+    ///
+    /// Consumed once at boot, alongside [`Self::arch_id`], to mint the
+    /// [`rustos_abi::BootFacts`] record: a `None` is installed as
+    /// [`rustos_abi::CpuName::UNKNOWN`] and readers render their own
+    /// fallback. There is **no default impl**: every port must state
+    /// what it discovered (the x86_64 CPUID brand string, the aarch64
+    /// `MIDR_EL1` decode, the riscv64 device-tree cpu `compatible`) or
+    /// an explicit `None`, so a port cannot silently ship a fabricated
+    /// or missing name.
+    fn cpu_name(&self) -> Option<rustos_abi::CpuName>;
+
     /// Convert a span measured in [`SchedulerArch::ticks_now`] units into
     /// nanoseconds.
     ///

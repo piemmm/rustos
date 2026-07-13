@@ -86,6 +86,9 @@ pub mod context;
 /// underlying `context` primitive itself carries no such gate.
 #[cfg(feature = "sched-arch")]
 pub mod context_hal;
+/// Boot-CPU model-name discovery: the CPUID processor brand string
+/// (leaves `0x8000_0002..=0x8000_0004`) the boot facts report.
+pub mod cpuname;
 /// x86_64 implementation of the Arch HAL platform-entropy surface
 /// ([`rustos_arch_api::PlatformEntropy`]): the `RDSEED`/`RDRAND` on-die
 /// random source the kernel seeds its CSPRNG reserve from.

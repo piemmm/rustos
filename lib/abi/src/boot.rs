@@ -19,8 +19,9 @@
 //!
 //! [`BootFacts`] is the second per-boot value this module carries: the
 //! kernel-attested, boot-static machine summary — the CPU architecture, the
-//! number of processor cores brought under the scheduler, and the installed
-//! physical memory the boot path discovered. Like the boot id it is not a
+//! boot CPU's discovered model name ([`CpuName`]), the number of processor
+//! cores brought under the scheduler, and the installed physical memory the
+//! boot path discovered. Like the boot id it is not a
 //! secret (any task can measure its own timing across cores; the figures are
 //! the machine's public shape, not its state), so it is exposed read-only to
 //! any task through the ungated `boot_facts_get` syscall. Unlike the live
@@ -117,7 +118,104 @@ impl BootId {
 }
 
 /// Length, in bytes, of the [`BootFacts`] wire encoding.
-pub const BOOT_FACTS_WIRE_LEN: usize = 16;
+pub const BOOT_FACTS_WIRE_LEN: usize = 16 + CPU_NAME_LEN;
+
+/// Length, in bytes, of the [`CpuName`] wire field.
+///
+/// Exactly the 48 bytes of the x86 CPUID processor-brand string (leaves
+/// `0x8000_0002..=0x8000_0004`, Intel SDM Vol. 2A), the longest CPU-name
+/// source any Tier-1 target reports, so no discovered name is ever
+/// truncated to fit the wire.
+pub const CPU_NAME_LEN: usize = 48;
+
+/// The human-readable model name of the boot CPU, as discovered by the
+/// architecture port (`ARM Cortex-A72`, an x86 CPUID brand string,
+/// `SiFive U74-MC`, …).
+///
+/// A bounded, NUL-padded UTF-8 string of at most [`CPU_NAME_LEN`] bytes.
+/// The canonical form is enforced at construction and decode: no control
+/// characters, no leading or trailing whitespace, and every byte after the
+/// first NUL is NUL. The all-zero [`CpuName::UNKNOWN`] value means the port
+/// could not derive a name — an honest "unknown", never a fabricated one —
+/// and readers render their own fallback for it.
+#[repr(transparent)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash)]
+pub struct CpuName([u8; CPU_NAME_LEN]);
+
+impl CpuName {
+    /// The reserved all-zero value: the port could not derive a CPU name.
+    pub const UNKNOWN: Self = Self([0u8; CPU_NAME_LEN]);
+
+    /// Construct a [`CpuName`] from a discovered name string.
+    ///
+    /// Returns `None` — so the caller falls back to
+    /// [`UNKNOWN`](Self::UNKNOWN) rather than shipping a malformed name —
+    /// when `name` is empty, longer than [`CPU_NAME_LEN`] bytes, contains a
+    /// control character (including NUL), or carries leading or trailing
+    /// whitespace (the discoverer trims; the wire form is canonical).
+    #[must_use]
+    pub fn new(name: &str) -> Option<Self> {
+        let bytes = name.as_bytes();
+        if bytes.is_empty()
+            || bytes.len() > CPU_NAME_LEN
+            || name.trim() != name
+            || name.chars().any(char::is_control)
+        {
+            return None;
+        }
+        let mut buf = [0u8; CPU_NAME_LEN];
+        buf[..bytes.len()].copy_from_slice(bytes);
+        Some(Self(buf))
+    }
+
+    /// The name as a string, or `None` for [`UNKNOWN`](Self::UNKNOWN).
+    ///
+    /// Always `Some` for a value built by [`new`](Self::new) or
+    /// decoded by [`from_wire`](Self::from_wire); the UTF-8 re-check exists
+    /// only so a corrupted in-memory value degrades to "unknown" instead of
+    /// panicking.
+    #[must_use]
+    pub fn as_str(&self) -> Option<&str> {
+        let len = self.0.iter().position(|&b| b == 0).unwrap_or(CPU_NAME_LEN);
+        if len == 0 {
+            return None;
+        }
+        core::str::from_utf8(&self.0[..len]).ok()
+    }
+
+    /// The raw NUL-padded wire bytes.
+    #[must_use]
+    pub const fn to_wire(self) -> [u8; CPU_NAME_LEN] {
+        self.0
+    }
+
+    /// Decode and validate the wire field.
+    ///
+    /// Fails closed with [`Errno::BadMagic`](crate::Errno::BadMagic) on any
+    /// non-canonical image: a non-NUL byte after the first NUL, invalid
+    /// UTF-8, a control character, or leading/trailing whitespace. The
+    /// all-zero image decodes to [`UNKNOWN`](Self::UNKNOWN).
+    pub fn from_wire(bytes: &[u8; CPU_NAME_LEN]) -> crate::Result<Self> {
+        let len = bytes.iter().position(|&b| b == 0).unwrap_or(CPU_NAME_LEN);
+        if bytes[len..].iter().any(|&b| b != 0) {
+            return Err(crate::Errno::BadMagic);
+        }
+        if len == 0 {
+            return Ok(Self::UNKNOWN);
+        }
+        let name = core::str::from_utf8(&bytes[..len]).map_err(|_| crate::Errno::BadMagic)?;
+        Self::new(name).ok_or(crate::Errno::BadMagic)
+    }
+}
+
+impl core::fmt::Debug for CpuName {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.as_str() {
+            Some(name) => write!(f, "CpuName({name:?})"),
+            None => f.write_str("CpuName(<unknown>)"),
+        }
+    }
+}
 
 /// The CPU architecture a RustOS kernel was built for.
 ///
@@ -181,6 +279,9 @@ impl Arch {
 pub struct BootFacts {
     /// The CPU architecture the running kernel was built for.
     pub arch: Arch,
+    /// The boot CPU's discovered model name, or [`CpuName::UNKNOWN`] when
+    /// the port could not derive one (readers render their own fallback).
+    pub cpu_name: CpuName,
     /// Processor cores brought under the scheduler at boot. Never zero:
     /// at least the boot CPU runs.
     pub cpu_count: u32,
@@ -195,7 +296,8 @@ impl BootFacts {
     pub const WIRE_LEN: usize = BOOT_FACTS_WIRE_LEN;
 
     /// The wire encoding: `arch:u16`, `reserved:u16` (zero),
-    /// `cpu_count:u32`, `memory_bytes:u64`, all little-endian.
+    /// `cpu_count:u32`, `memory_bytes:u64` (all little-endian), then the
+    /// [`CPU_NAME_LEN`]-byte NUL-padded [`CpuName`].
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; BOOT_FACTS_WIRE_LEN] {
         let mut out = [0u8; BOOT_FACTS_WIRE_LEN];
@@ -203,6 +305,7 @@ impl BootFacts {
         // Bytes 2..4 are the reserved word, kept zero.
         out[4..8].copy_from_slice(&self.cpu_count.to_le_bytes());
         out[8..16].copy_from_slice(&self.memory_bytes.to_le_bytes());
+        out[16..].copy_from_slice(&self.cpu_name.to_wire());
         out
     }
 
@@ -212,8 +315,8 @@ impl BootFacts {
     ///
     /// Fails closed: [`Errno::LengthOutOfRange`](crate::Errno) for a slice
     /// that is not exactly [`WIRE_LEN`](Self::WIRE_LEN) long,
-    /// [`Errno::BadMagic`](crate::Errno) for an unknown arch discriminant
-    /// or a non-zero reserved word, and
+    /// [`Errno::BadMagic`](crate::Errno) for an unknown arch discriminant,
+    /// a non-zero reserved word, or a non-canonical CPU-name field, and
     /// [`Errno::OutOfRange`](crate::Errno) for a zero CPU count or zero
     /// memory size (no machine that boots has either).
     pub fn from_bytes(bytes: &[u8]) -> crate::Result<Self> {
@@ -229,8 +332,12 @@ impl BootFacts {
         if cpu_count == 0 || memory_bytes == 0 {
             return Err(crate::Errno::OutOfRange);
         }
+        let mut name = [0u8; CPU_NAME_LEN];
+        name.copy_from_slice(&bytes[16..]);
+        let cpu_name = CpuName::from_wire(&name)?;
         Ok(Self {
             arch,
+            cpu_name,
             cpu_count,
             memory_bytes,
         })
@@ -239,7 +346,10 @@ impl BootFacts {
 
 #[cfg(test)]
 mod tests {
-    use super::{Arch, BootFacts, BootId, BOOT_FACTS_WIRE_LEN, BOOT_ID_HEX_LEN, BOOT_ID_LEN};
+    use super::{
+        Arch, BootFacts, BootId, CpuName, BOOT_FACTS_WIRE_LEN, BOOT_ID_HEX_LEN, BOOT_ID_LEN,
+        CPU_NAME_LEN,
+    };
     use crate::Errno;
 
     #[test]
@@ -314,17 +424,68 @@ mod tests {
     fn boot_facts_round_trip() {
         let facts = BootFacts {
             arch: Arch::Aarch64,
+            cpu_name: CpuName::new("ARM Cortex-A72").expect("valid name"),
             cpu_count: 4,
             memory_bytes: 8 * 1024 * 1024 * 1024,
         };
         assert_eq!(BootFacts::WIRE_LEN, BOOT_FACTS_WIRE_LEN);
         assert_eq!(BootFacts::from_bytes(&facts.to_le_bytes()), Ok(facts));
+        // An unknown CPU name round-trips too (the all-zero field).
+        let unknown = BootFacts {
+            cpu_name: CpuName::UNKNOWN,
+            ..facts
+        };
+        assert_eq!(BootFacts::from_bytes(&unknown.to_le_bytes()), Ok(unknown));
+    }
+
+    #[test]
+    fn cpu_name_construction_is_canonical() {
+        let name = CpuName::new("ARM Cortex-A72").expect("valid name");
+        assert_eq!(name.as_str(), Some("ARM Cortex-A72"));
+        // The longest permitted name (exactly CPU_NAME_LEN bytes) fits.
+        let max = "x".repeat(CPU_NAME_LEN);
+        assert_eq!(
+            CpuName::new(&max).expect("fits").as_str(),
+            Some(max.as_str())
+        );
+        // Rejections: empty, too long, control characters, outer whitespace.
+        assert_eq!(CpuName::new(""), None);
+        assert_eq!(CpuName::new(&"x".repeat(CPU_NAME_LEN + 1)), None);
+        assert_eq!(CpuName::new("bad\u{0}name"), None);
+        assert_eq!(CpuName::new("bad\nname"), None);
+        assert_eq!(CpuName::new(" padded"), None);
+        assert_eq!(CpuName::new("padded "), None);
+        // The unknown sentinel has no string.
+        assert_eq!(CpuName::UNKNOWN.as_str(), None);
+    }
+
+    #[test]
+    fn cpu_name_wire_decode_fails_closed() {
+        // A non-NUL byte after the first NUL is a non-canonical image.
+        let mut bad = [0u8; CPU_NAME_LEN];
+        bad[0] = b'A';
+        bad[2] = b'B';
+        assert_eq!(CpuName::from_wire(&bad), Err(Errno::BadMagic));
+        // Invalid UTF-8 is refused.
+        let mut bad = [0u8; CPU_NAME_LEN];
+        bad[0] = 0xff;
+        assert_eq!(CpuName::from_wire(&bad), Err(Errno::BadMagic));
+        // Trailing whitespace is non-canonical.
+        let mut bad = [0u8; CPU_NAME_LEN];
+        bad[..2].copy_from_slice(b"A ");
+        assert_eq!(CpuName::from_wire(&bad), Err(Errno::BadMagic));
+        // The all-zero image is the honest unknown, not an error.
+        assert_eq!(
+            CpuName::from_wire(&[0u8; CPU_NAME_LEN]),
+            Ok(CpuName::UNKNOWN)
+        );
     }
 
     #[test]
     fn boot_facts_decode_fails_closed() {
         let good = BootFacts {
             arch: Arch::X86_64,
+            cpu_name: CpuName::new("Intel(R) Xeon(R)").expect("valid name"),
             cpu_count: 36,
             memory_bytes: 1 << 33,
         }
@@ -350,5 +511,9 @@ mod tests {
         let mut bad = good;
         bad[8..16].copy_from_slice(&0u64.to_le_bytes());
         assert_eq!(BootFacts::from_bytes(&bad), Err(Errno::OutOfRange));
+        // Non-canonical CPU-name field (a byte set after its first NUL).
+        let mut bad = good;
+        bad[BOOT_FACTS_WIRE_LEN - 1] = b'!';
+        assert_eq!(BootFacts::from_bytes(&bad), Err(Errno::BadMagic));
     }
 }

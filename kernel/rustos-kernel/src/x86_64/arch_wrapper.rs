@@ -348,6 +348,14 @@ impl KernelArch for BinArch {
         Some(rustos_abi::Arch::X86_64)
     }
 
+    fn cpu_name(&self) -> Option<rustos_abi::CpuName> {
+        // The CPUID processor brand string; a part without the
+        // brand-string leaves stays an honest `None` (the boot facts
+        // record "unknown"), never a guessed name.
+        let mut buf = [0u8; rustos_arch_x86_64::cpuname::BRAND_LEN];
+        rustos_arch_x86_64::cpuname::boot_cpu_name(&mut buf).and_then(rustos_abi::CpuName::new)
+    }
+
     fn park_translation(&self) -> Option<fn()> {
         // Re-installs the trampoline `CR3` root (published by the boot
         // path's `publish_boot_park_root`) so no user root stays active

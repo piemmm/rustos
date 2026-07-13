@@ -100,12 +100,14 @@ const BANNER_PREFIX: &str = concat!("RustOS ", env!("CARGO_PKG_VERSION"));
 /// Byte capacity of the [`render_banner`] output buffer.
 ///
 /// The banner is bounded by construction: the fixed prefix and layout text,
-/// a `u64` memory figure (at most 20 digits), the longest arch name
-/// (`aarch64`/`riscv64`, 7 bytes), and a `u32` core count (at most
-/// 10 digits) fit comfortably; 96 bytes leaves honest headroom without a
-/// heap. A `Write` overflow is impossible for well-formed inputs and fails
-/// closed (truncation refused) rather than corrupting the text.
-pub const BANNER_MAX: usize = 96;
+/// a `u64` memory figure (at most 20 digits), a CPU name of at most
+/// [`rustos_abi::CPU_NAME_LEN`] (48) bytes — or the fallback's
+/// `Unknown `/` processor` text around the longest arch name — and a `u32`
+/// core count (at most 10 digits) fit comfortably; 160 bytes leaves honest
+/// headroom without a heap. A `Write` overflow is impossible for
+/// well-formed inputs and fails closed (truncation refused) rather than
+/// corrupting the text.
+pub const BANNER_MAX: usize = 160;
 
 /// One binary mebibyte, the banner's default memory unit.
 const MIB: u64 = 1024 * 1024;
@@ -147,15 +149,17 @@ impl core::fmt::Write for BufWriter<'_> {
 /// ```text
 /// RustOS 0.0.0: 8192MiB
 ///
-/// Architecture: aarch64, 4 cores
+/// ARM Cortex-A72, 4 cores
 /// ```
 ///
 /// The installed memory renders in whole MiB (rounded to nearest) unless it
 /// exceeds 100 GiB, where whole GiB keep the figure readable; a single core
-/// reads `1 core`. Without facts (a kernel that installed none) the banner
-/// degrades to the version line alone — the honest output, never a
-/// fabricated machine shape. A formatting overflow (impossible for
-/// well-formed inputs) equally degrades to the version line, fail closed.
+/// reads `1 core`. A kernel that discovered no CPU model reports the honest
+/// fallback `Unknown <arch> processor, <n> cores`. Without facts (a kernel
+/// that installed none) the banner degrades to the version line alone —
+/// the honest output, never a fabricated machine shape. A formatting
+/// overflow (impossible for well-formed inputs) equally degrades to the
+/// version line, fail closed.
 pub fn render_banner(facts: Option<rustos_abi::BootFacts>, buf: &mut [u8; BANNER_MAX]) -> &str {
     use core::fmt::Write as _;
 
@@ -192,11 +196,14 @@ fn write_facts_banner(w: &mut BufWriter<'_>, facts: &rustos_abi::BootFacts) -> c
     }
     let cores = facts.cpu_count;
     let noun = if cores == 1 { "core" } else { "cores" };
-    write!(
-        w,
-        "\n\nArchitecture: {}, {cores} {noun}\n",
-        facts.arch.name()
-    )
+    match facts.cpu_name.as_str() {
+        Some(name) => write!(w, "\n\n{name}, {cores} {noun}\n"),
+        None => write!(
+            w,
+            "\n\nUnknown {} processor, {cores} {noun}\n",
+            facts.arch.name()
+        ),
+    }
 }
 
 /// Why a startup config text was refused.
@@ -630,7 +637,7 @@ session /Apps/Shell.app/Run login   # the login service
     }
 
     use super::{render_banner, BANNER_MAX};
-    use rustos_abi::{Arch, BootFacts};
+    use rustos_abi::{Arch, BootFacts, CpuName};
 
     /// Render with the given facts into a fresh buffer.
     fn banner(facts: Option<BootFacts>) -> String {
@@ -638,19 +645,40 @@ session /Apps/Shell.app/Run login   # the login service
         String::from(render_banner(facts, &mut buf))
     }
 
+    /// A [`CpuName`] from a string the tests know is well formed.
+    fn cpu_name(name: &str) -> CpuName {
+        CpuName::new(name).expect("valid name")
+    }
+
     #[test]
-    fn banner_renders_memory_arch_and_cores() {
+    fn banner_renders_memory_cpu_name_and_cores() {
         let facts = BootFacts {
             arch: Arch::X86_64,
+            cpu_name: cpu_name("Intel(R) Xeon(R) CPU E5-2690 v4 @ 2.60GHz"),
             cpu_count: 36,
             memory_bytes: 8192 * 1024 * 1024,
         };
         assert_eq!(
             banner(Some(facts)),
             format!(
-                "RustOS {}: 8192MiB\n\nArchitecture: x86_64, 36 cores\n",
+                "RustOS {}: 8192MiB\n\nIntel(R) Xeon(R) CPU E5-2690 v4 @ 2.60GHz, 36 cores\n",
                 env!("CARGO_PKG_VERSION"),
             ),
+        );
+    }
+
+    #[test]
+    fn banner_falls_back_to_unknown_processor_without_a_cpu_name() {
+        let facts = BootFacts {
+            arch: Arch::Riscv64,
+            cpu_name: CpuName::UNKNOWN,
+            cpu_count: 2,
+            memory_bytes: 512 * 1024 * 1024,
+        };
+        let text = banner(Some(facts));
+        assert!(
+            text.ends_with("Unknown riscv64 processor, 2 cores\n"),
+            "{text}"
         );
     }
 
@@ -659,6 +687,7 @@ session /Apps/Shell.app/Run login   # the login service
         // Exactly 100 GiB still renders in MiB ("over 100G" is strict).
         let facts = BootFacts {
             arch: Arch::Aarch64,
+            cpu_name: cpu_name("ARM Cortex-A72"),
             cpu_count: 4,
             memory_bytes: 100 * 1024 * 1024 * 1024,
         };
@@ -669,12 +698,13 @@ session /Apps/Shell.app/Run login   # the login service
     fn banner_switches_to_gib_above_the_threshold() {
         let facts = BootFacts {
             arch: Arch::Riscv64,
+            cpu_name: cpu_name("SiFive U74-MC"),
             cpu_count: 128,
             memory_bytes: 256 * 1024 * 1024 * 1024,
         };
         let text = banner(Some(facts));
         assert!(text.contains(": 256GiB\n"), "{text}");
-        assert!(text.ends_with("Architecture: riscv64, 128 cores\n"));
+        assert!(text.ends_with("SiFive U74-MC, 128 cores\n"), "{text}");
     }
 
     #[test]
@@ -683,6 +713,7 @@ session /Apps/Shell.app/Run login   # the login service
         // user recognises as installed, not a truncated 8191.
         let facts = BootFacts {
             arch: Arch::Aarch64,
+            cpu_name: cpu_name("ARM Cortex-A72"),
             cpu_count: 4,
             memory_bytes: 8192 * 1024 * 1024 - 100 * 1024,
         };
@@ -693,11 +724,12 @@ session /Apps/Shell.app/Run login   # the login service
     fn banner_uses_the_singular_for_one_core() {
         let facts = BootFacts {
             arch: Arch::Aarch64,
+            cpu_name: cpu_name("ARM Cortex-A53"),
             cpu_count: 1,
             memory_bytes: 128 * 1024 * 1024,
         };
         let text = banner(Some(facts));
-        assert!(text.ends_with("Architecture: aarch64, 1 core\n"), "{text}");
+        assert!(text.ends_with("ARM Cortex-A53, 1 core\n"), "{text}");
     }
 
     #[test]
@@ -710,15 +742,24 @@ session /Apps/Shell.app/Run login   # the login service
 
     #[test]
     fn banner_always_fits_its_buffer() {
-        // The worst representable inputs still fit BANNER_MAX, so the
-        // fail-closed truncation refusal can never fire for real facts.
+        // The worst representable inputs — a maximum-length CPU name,
+        // saturated counts — still fit BANNER_MAX, so the fail-closed
+        // truncation refusal can never fire for real facts.
         let facts = BootFacts {
             arch: Arch::Riscv64,
+            cpu_name: cpu_name(&"x".repeat(rustos_abi::CPU_NAME_LEN)),
             cpu_count: u32::MAX,
             memory_bytes: u64::MAX,
         };
         let text = banner(Some(facts));
         assert!(text.starts_with("RustOS "));
-        assert!(text.ends_with(" cores\n"));
+        assert!(text.ends_with(" cores\n"), "{text}");
+        // The unknown-name fallback's worst case fits too.
+        let facts = BootFacts {
+            cpu_name: CpuName::UNKNOWN,
+            ..facts
+        };
+        let text = banner(Some(facts));
+        assert!(text.ends_with(" cores\n"), "{text}");
     }
 }

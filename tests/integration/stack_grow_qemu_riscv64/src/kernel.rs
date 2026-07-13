@@ -375,11 +375,10 @@ fn leak_subsystems(counter_hz: u64) -> Subsystems {
     };
     let frames: &'static FrameAllocator = Box::leak(Box::new(frames));
 
-    let sched_arch = Arc::new(RiscvBinArch::new(RiscvArch::new(
-        &SCHED_STORAGE,
-        BOOT_CPU,
-        counter_hz,
-    )));
+    let sched_arch = Arc::new(RiscvBinArch::new(
+        RiscvArch::new(&SCHED_STORAGE, BOOT_CPU, counter_hz),
+        None,
+    ));
     let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(1), sched_arch) else {
         qemu_exit::exit_failure(FAIL_SCHED_NEW);
     };
@@ -387,11 +386,10 @@ fn leak_subsystems(counter_hz: u64) -> Subsystems {
     Subsystems {
         frames,
         sched: Box::leak(Box::new(sched)),
-        arch: Box::leak(Box::new(RiscvBinArch::new(RiscvArch::new(
-            &HOOK_ARCH_STORAGE,
-            BOOT_CPU,
-            counter_hz,
-        )))),
+        arch: Box::leak(Box::new(RiscvBinArch::new(
+            RiscvArch::new(&HOOK_ARCH_STORAGE, BOOT_CPU, counter_hz),
+            None,
+        ))),
         caps: Box::leak(Box::new(RwLock::new(CapTable::new()))),
         ipc: Box::leak(Box::new(RwLock::new(PortRegistry::new()))),
         aspaces: Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new()))),

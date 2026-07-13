@@ -2673,10 +2673,11 @@ pub fn boot_id() -> Result<BootId, i64> {
 /// (`SyscallNumber::BOOT_FACTS_GET`).
 ///
 /// Returns the machine facts the kernel minted once at boot from
-/// kernel-attested state: the CPU architecture, the number of processor
-/// cores brought under the scheduler, and the installed physical memory the
-/// boot path discovered. Unprivileged, like [`boot_id`] — the facts are the
-/// machine's public shape, never live state or a secret.
+/// kernel-attested state: the CPU architecture, the boot CPU's discovered
+/// model name, the number of processor cores brought under the scheduler,
+/// and the installed physical memory the boot path discovered.
+/// Unprivileged, like [`boot_id`] — the facts are the machine's public
+/// shape, never live state or a secret.
 ///
 /// # Errors
 ///
