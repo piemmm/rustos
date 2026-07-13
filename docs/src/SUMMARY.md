@@ -55,6 +55,7 @@
   - [`rustos-hid`](./lib/hid.md)
   - [`rustos-keymap`](./lib/keymap.md)
   - [`rustos-log`](./lib/log.md)
+  - [`rustos-net`](./lib/net.md)
   - [`rustos-path`](./lib/path.md)
   - [`rustos-resref`](./lib/resref.md)
   - [`rustos-rng`](./lib/rng.md)

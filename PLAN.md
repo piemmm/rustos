@@ -4670,7 +4670,19 @@ format-conformance defect the evidence window exposed). See
 
 ## NETWORK — full IPv4 + IPv6 networking (`plans/NETWORK.md`)
 
-**Status: planned (N1–N9).** The complete dual-stack user-space network
+**Status: N1 done; N2–N9 planned.** N1 (done) landed the `lib/net`
+protocol-engine foundation: the dual-stack address vocabulary
+(`core::net` types + RFC 4007 `Ipv6Scope`/`ScopedIpv6Addr` zone rules),
+the one RFC 1071 checksum (incremental accumulator + v4/v6
+pseudo-header seeds), the Ethernet/ARP/IPv4/ICMP codecs migrated in from
+`userland/net/icmp` (which now re-exports them and keeps only the
+composed responder/client until N3 deletes it; IPv4 parse now verifies
+the header checksum), and the bounded, provider-agnostic RFC 4861
+neighbour cache (`NeighborTable`: pure `now`-driven state machine,
+action-channel `advance`, one-shot `next_deadline`, LRU-of-resolved
+eviction failing closed) — fuzzed via `fuzz_net_eth`/`fuzz_net_addr`
+and documented in `docs/src/lib/net.md`. The remaining increments
+deliver the complete dual-stack user-space network
 stack above the link-layer driver seam: one pure, host-testable,
 fuzzed protocol engine (`lib/net` — Ethernet, ARP/ND over one neighbour
 contract, IPv4 + IPv6 as peers, ICMP/ICMPv6, IGMP/MLD multicast

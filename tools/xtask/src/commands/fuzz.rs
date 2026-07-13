@@ -59,9 +59,19 @@ pub const TARGETS: &[Target] = &[
         description: "syscall dispatcher argument validation",
     },
     Target {
+        package: "rustos-net",
+        test: "fuzz_net_eth",
+        description: "lib/net Ethernet/ARP/IPv4/ICMP wire codecs",
+    },
+    Target {
+        package: "rustos-net",
+        test: "fuzz_net_addr",
+        description: "lib/net address scope/zone rules + Internet-checksum properties",
+    },
+    Target {
         package: "rustos-net-icmp",
         test: "fuzz_parse",
-        description: "userland/net ARP/IPv4/ICMP/Ethernet parsers",
+        description: "userland/net composed ARP/ICMP responder + client paths",
     },
     Target {
         package: "rustos-kernel-ipc",

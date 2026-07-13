@@ -12,9 +12,12 @@
 //! # Scope
 //!
 //! In scope: ARP request + reply (RFC 826), IPv4 (RFC 791, option-free
-//! headers only), and ICMP echo (RFC 792). Explicitly **out of scope**
-//! and deferred to Stage 6: TCP, UDP, IPv6, IP routing, fragmentation,
-//! and any form of neighbour cache or retransmission.
+//! headers only), and ICMP echo (RFC 792), all parsed and emitted by
+//! the shared protocol engine (`lib/net`), which this crate re-exports.
+//! Explicitly **out of scope**: TCP, UDP, IPv6, IP routing,
+//! fragmentation, and any form of neighbour cache or retransmission —
+//! the `netstack` service (`plans/NETWORK.md`) delivers those and
+//! replaces this responder outright in its N3 increment.
 //!
 //! # Design
 //!
@@ -41,10 +44,8 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-pub mod arp;
-pub mod ethernet;
-pub mod icmp;
-pub mod ipv4;
+pub use rustos_net::addr::Ipv4Addr;
+pub use rustos_net::{arp, eth as ethernet, icmp, ipv4};
 
 use rustos_abi::driver::net::{MacAddress, Net};
 use rustos_abi::DriverError;
@@ -53,25 +54,6 @@ use crate::arp::ArpPacket;
 use crate::ethernet::EthernetFrame;
 use crate::icmp::IcmpEcho;
 use crate::ipv4::Ipv4Header;
-
-/// A 32-bit IPv4 address in network byte order.
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
-pub struct Ipv4Address(pub [u8; 4]);
-
-impl Ipv4Address {
-    /// Construct an address from its four octets.
-    #[must_use]
-    pub const fn new(octets: [u8; 4]) -> Self {
-        Self(octets)
-    }
-
-    /// Borrow the underlying octets.
-    #[must_use]
-    pub const fn as_octets(&self) -> &[u8; 4] {
-        &self.0
-    }
-}
 
 /// Error returned while servicing a frame.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -92,13 +74,13 @@ impl From<DriverError> for NetServiceError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Responder {
     mac: MacAddress,
-    ip: Ipv4Address,
+    ip: Ipv4Addr,
 }
 
 impl Responder {
     /// Bind the responder to an interface's addresses.
     #[must_use]
-    pub const fn new(mac: MacAddress, ip: Ipv4Address) -> Self {
+    pub const fn new(mac: MacAddress, ip: Ipv4Addr) -> Self {
         Self { mac, ip }
     }
 
@@ -110,7 +92,7 @@ impl Responder {
 
     /// The IPv4 address this responder answers for.
     #[must_use]
-    pub const fn ipv4_address(&self) -> Ipv4Address {
+    pub const fn ipv4_address(&self) -> Ipv4Addr {
         self.ip
     }
 
@@ -236,18 +218,19 @@ impl Responder {
 /// a mock in unit tests.
 ///
 /// Like [`Responder`] the type is stateless: it neither caches
-/// resolved addresses nor retransmits. Callers that need a neighbour
-/// cache or retries layer them on top (deferred to Stage 6).
+/// resolved addresses nor retransmits. The `netstack` service layers
+/// the shared neighbour cache (`rustos_net::neigh`) and retries on
+/// top (`plans/NETWORK.md`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Client {
     mac: MacAddress,
-    ip: Ipv4Address,
+    ip: Ipv4Addr,
 }
 
 impl Client {
     /// Bind the client to an interface's addresses.
     #[must_use]
-    pub const fn new(mac: MacAddress, ip: Ipv4Address) -> Self {
+    pub const fn new(mac: MacAddress, ip: Ipv4Addr) -> Self {
         Self { mac, ip }
     }
 
@@ -259,7 +242,7 @@ impl Client {
 
     /// The IPv4 address this client sources datagrams from.
     #[must_use]
-    pub const fn ipv4_address(&self) -> Ipv4Address {
+    pub const fn ipv4_address(&self) -> Ipv4Addr {
         self.ip
     }
 
@@ -269,7 +252,7 @@ impl Client {
     /// when `out` cannot hold it.
     pub fn write_arp_request(
         &self,
-        target: Ipv4Address,
+        target: Ipv4Addr,
         out: &mut [u8],
     ) -> Result<usize, NetServiceError> {
         let request = ArpPacket {
@@ -288,7 +271,7 @@ impl Client {
     /// Returns `None` when the frame is not an ARP reply addressed to
     /// this client for `target`.
     #[must_use]
-    pub fn parse_arp_reply(&self, frame: &[u8], target: Ipv4Address) -> Option<MacAddress> {
+    pub fn parse_arp_reply(&self, frame: &[u8], target: Ipv4Addr) -> Option<MacAddress> {
         let eth = EthernetFrame::parse(frame)?;
         if !eth.addressed_to(self.mac) || eth.ethertype != ethernet::ETHERTYPE_ARP {
             return None;
@@ -308,7 +291,7 @@ impl Client {
     pub fn write_echo_request(
         &self,
         peer_mac: MacAddress,
-        dest: Ipv4Address,
+        dest: Ipv4Addr,
         identifier: u16,
         sequence: u16,
         payload: &[u8],
@@ -338,7 +321,7 @@ impl Client {
     pub fn is_echo_reply(
         &self,
         frame: &[u8],
-        dest: Ipv4Address,
+        dest: Ipv4Addr,
         identifier: u16,
         sequence: u16,
     ) -> bool {
@@ -376,7 +359,7 @@ impl Client {
     pub fn resolve<N: Net>(
         &self,
         net: &mut N,
-        target: Ipv4Address,
+        target: Ipv4Addr,
         rx: &mut [u8],
         tx: &mut [u8],
         max_polls: usize,
@@ -406,7 +389,7 @@ impl Client {
         &self,
         net: &mut N,
         peer_mac: MacAddress,
-        dest: Ipv4Address,
+        dest: Ipv4Addr,
         identifier: u16,
         sequence: u16,
         payload: &[u8],
@@ -480,28 +463,6 @@ fn write_icmp_frame(
     Ok(eth_len + ipv4::IPV4_HEADER_LEN + icmp_len)
 }
 
-/// Compute the 16-bit one's-complement Internet checksum (RFC 1071)
-/// over `data`.
-///
-/// Shared by [`ipv4`] and [`icmp`] so the fold is written once. A
-/// trailing odd byte is treated as the high byte of a final 16-bit
-/// word, matching the algorithm every checksummed header on the wire
-/// uses.
-pub(crate) fn internet_checksum(data: &[u8]) -> u16 {
-    let mut sum: u32 = 0;
-    let mut words = data.chunks_exact(2);
-    for word in &mut words {
-        sum += u32::from(u16::from_be_bytes([word[0], word[1]]));
-    }
-    if let [last] = words.remainder() {
-        sum += u32::from(*last) << 8;
-    }
-    while (sum >> 16) != 0 {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    !((sum & 0xFFFF) as u16)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,9 +470,9 @@ mod tests {
     use crate::icmp::IcmpEcho;
 
     const LOCAL_MAC: MacAddress = MacAddress([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
-    const LOCAL_IP: Ipv4Address = Ipv4Address([10, 0, 2, 15]);
+    const LOCAL_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 15);
     const PEER_MAC: MacAddress = MacAddress([0x02, 0xCA, 0xFE, 0xBA, 0xBE, 0x01]);
-    const PEER_IP: Ipv4Address = Ipv4Address([10, 0, 2, 2]);
+    const PEER_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
 
     fn responder() -> Responder {
         Responder::new(LOCAL_MAC, LOCAL_IP)
@@ -753,18 +714,10 @@ mod tests {
     }
 
     #[test]
-    fn checksum_of_known_vector() {
-        // RFC 1071 worked example.
-        let data = [0x00, 0x01, 0xf2, 0x03, 0xf4, 0xf5, 0xf6, 0xf7];
-        assert_eq!(internet_checksum(&data), 0x220d);
-    }
-
-    #[test]
     fn addresses_round_trip() {
         let r = responder();
         assert_eq!(r.mac_address(), LOCAL_MAC);
         assert_eq!(r.ipv4_address(), LOCAL_IP);
-        assert_eq!(Ipv4Address::new([1, 2, 3, 4]).as_octets(), &[1, 2, 3, 4]);
     }
 
     // --- Client (initiator) ------------------------------------------
@@ -844,7 +797,7 @@ mod tests {
         // Resolving a different target: the cached reply binds PEER_IP,
         // not 10.0.2.99, so no match.
         assert_eq!(
-            client().resolve(&mut net, Ipv4Address([10, 0, 2, 99]), &mut rx, &mut tx, 4),
+            client().resolve(&mut net, Ipv4Addr::new(10, 0, 2, 99), &mut rx, &mut tx, 4),
             Ok(None)
         );
     }

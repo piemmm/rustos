@@ -704,6 +704,15 @@ rustos/
 │   │                    #   console (tty) byte encoder a keyboard driver's
 │   │                    #   console_input producer uses, over lib/vt (§2.2).
 │   ├── log/             # Structured logging.
+│   ├── net/             # Network protocol engine (plans/NETWORK.md): the
+│   │                    #   pure, no_std, host-testable definition of the
+│   │                    #   wire protocols the user-space stack speaks —
+│   │                    #   dual-stack address vocabulary (v6 scope/zone),
+│   │                    #   the one RFC 1071 checksum (+ v4/v6 pseudo-
+│   │                    #   headers), Ethernet/ARP/IPv4/ICMP codecs, and
+│   │                    #   the bounded provider-agnostic RFC 4861
+│   │                    #   neighbour cache ARP and ND both drive (§2.2).
+│   │                    #   No I/O: the netstack service is the glue.
 │   ├── partition/       # Shared, scheme-neutral partition-table layer: MBR
 │   │                    #   encode + fail-closed MBR/GPT parse and a
 │   │                    #   bounds-checked PartitionBlock window, the one

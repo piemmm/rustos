@@ -247,22 +247,31 @@ Each increment is one deliverable change: code + tests + docs + the §7
 gate, and each leaves the tree fully working. Status marks: `[ ]`
 planned, `[~]` in progress, `[x]` done.
 
-### N1 — `lib/net` foundation: addresses, checksum, Ethernet, ARP/ND-ready neighbour contract `[ ]`
-- Crate skeleton (`rustos-net`, `no_std`, `#![forbid(unsafe_code)]`,
-  §6 README with stability tier), the dual-stack address vocabulary
-  (`IpAddr`/`Ipv4Addr`/`Ipv6Addr`, scope/zone handling for v6
-  link-local), the one checksum definition (RFC 1071 + v6
-  pseudo-header), Ethernet framing, and the neighbour-cache contract
-  (`NeighborTable`: bounded, state-machine per RFC 4861 §7.3.2 shape,
-  provider-agnostic so ARP and ND both drive it).
-- The existing `userland/net/icmp` parsers migrate in (evolved, not
-  copied); `userland/net/icmp` keeps compiling against `lib/net`
-  re-exports until N3 deletes it.
-- Tests: exhaustive parse/emit round-trips, truncation/mutation
-  matrices, checksum vectors (RFC examples + property tests), fuzz
-  harnesses `fuzz_net_eth`/`fuzz_net_addr` registered in `cargo xtask
-  fuzz`.
-- Docs: `docs/src/lib/net.md` (architecture + seam contract).
+### N1 — `lib/net` foundation: addresses, checksum, Ethernet, ARP/ND-ready neighbour contract `[x]`
+- `rustos-net` exists (`no_std`, `#![forbid(unsafe_code)]`, §6 README,
+  tier experimental): the dual-stack address vocabulary re-exports the
+  `core::net` types and adds RFC 4007 `Ipv6Scope` (fail-closed on
+  reserved multicast scopes) + `ScopedIpv6Addr` (zone required exactly
+  when scope is non-global); `checksum` is the one RFC 1071 definition
+  (one-shot fold + byte-stream incremental `Checksum` accumulator with
+  `ipv4_pseudo`/`ipv6_pseudo` seeds); `eth` carries Ethernet II framing
+  (`ETHERTYPE_ARP/IPV4/IPV6`); `neigh::NeighborTable` is the bounded,
+  provider-agnostic RFC 4861 §7.3.2 state machine (pure `now`-driven
+  methods, side effects as returned actions from `advance`, one-shot
+  timer via `next_deadline`, LRU-of-resolved eviction that fails closed
+  when all entries are mid-resolution, unsolicited confirmations never
+  create entries).
+- The `userland/net/icmp` parsers migrated in (evolved: `Ipv4Addr`
+  vocabulary; IPv4 parse now verifies the header checksum per RFC 1122
+  §3.2.1.2). `userland/net/icmp` re-exports the codecs and keeps only
+  the composed responder/client until N3 deletes it.
+- Tests landed: parse/emit round-trips and rejection matrices, checksum
+  vectors + independent-oracle/split properties, the 14-test neighbour
+  state-machine suite, and the `fuzz_net_eth`/`fuzz_net_addr` harnesses
+  registered in `cargo xtask fuzz` (the icmp `fuzz_parse` harness now
+  covers only the composed paths).
+- Docs: `docs/src/lib/net.md` (+ `docs/src/userland/net_icmp.md`
+  refreshed).
 
 ### N2 — IPv4 + IPv6 network layer: parse/emit, ICMP+ICMPv6, ND, reassembly, routing `[ ]`
 - IPv4 (options-tolerant parse, strict emit), IPv6 (extension-header

@@ -1,10 +1,12 @@
 //! ICMP echo request/reply handling (RFC 792).
 //!
 //! Only the echo service (types 8 and 0) is implemented; every other
-//! ICMP type is rejected by [`IcmpEcho::parse`] so the responder
-//! answers pings and nothing else.
+//! ICMP type is rejected by [`IcmpEcho::parse`]. The error messages,
+//! rate-limited error generation, and the `ICMPv6` sibling land with the
+//! network-layer increment (`plans/NETWORK.md` N2), evolving this
+//! module family in place.
 
-use crate::internet_checksum;
+use crate::checksum::internet_checksum;
 
 /// Length of the fixed ICMP echo header preceding the payload.
 pub const ICMP_HEADER_LEN: usize = 8;

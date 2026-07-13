@@ -1,43 +1,33 @@
-//! Deterministic fuzz harness for the `userland/net/icmp` wire parsers.
+//! Deterministic fuzz harness for the composed responder/client paths.
 //!
-//! Every parser in this crate decodes a byte slice that arrived from a
-//! possibly hostile peer over the link layer, so each one is driven by a fuzz harness. This is the `userland/net`
-//! protocol-parser harness the burn-down (PLAN.md item 5) calls for;
-//! it sits alongside the `lib/abi` decoder harness and the syscall
-//! dispatcher harness in the `cargo xtask fuzz` target set.
+//! The wire parsers themselves live in `lib/net` and are fuzzed there
+//! (`fuzz_net_eth`); this harness drives the *composed* service entry
+//! points this crate owns — [`Responder::handle_frame`],
+//! [`Client::parse_arp_reply`], and [`Client::is_echo_reply`] — over
+//! hostile bytes, asserting they never panic, that any reply fits the
+//! caller's buffer and is itself a well-formed Ethernet frame, and that
+//! the classifiers never claim a malformed frame.
 //!
-//! RustOS does not pull in an external fuzz runner: a
-//! deterministic, per-run-seeded LCG generates pseudo-random inputs and asserts
-//! the two invariants every parser must uphold no matter what bits a peer
-//! crafts:
-//!
-//! 1. Decoding never panics for any input.
-//! 2. An accepted decode round-trips through its matching encoder — the
-//!    bytes a parser accepts are exactly the bytes its writer produces.
-//!
-//! [`Responder::handle_frame`], [`Client::parse_arp_reply`], and
-//! [`Client::is_echo_reply`] are the composed entry points a live service
-//! exposes; the harness drives them too and additionally checks that any
-//! reply [`Responder::handle_frame`] emits fits the caller's buffer and is
-//! itself a well-formed Ethernet frame.
+//! RustOS does not pull in an external fuzz runner: a deterministic,
+//! per-run-seeded LCG generates pseudo-random inputs, and a structured
+//! bit-flip sweep walks the boundary between accepted and rejected at
+//! every layer of the composed parser.
 //!
 //! ## Wall-clock budget
 //!
-//! A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh,
-//! logged seed so the suite stays fast. When `cargo xtask fuzz --soak` exports
-//! `RUSTOS_FUZZ_BUDGET_SECS`, the PRNG-driven harness keeps drawing fresh
-//! inputs from the *same continuing* stream until the deadline elapses — the
-//! "run each harness for its wall-clock budget" contract. The seed is
-//! logged at the start, so a fresh-seed crash stays reproducible via
-//! `RUSTOS_FUZZ_SEED`. The structured bit-flip harness is an exhaustive
-//! boundary sweep, not a random one, so it runs once regardless of the budget.
+//! A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a
+//! fresh, logged seed so the suite stays fast. When `cargo xtask fuzz
+//! --soak` exports `RUSTOS_FUZZ_BUDGET_SECS`, the PRNG-driven harness
+//! keeps drawing fresh inputs from the *same continuing* stream until
+//! the deadline elapses. The seed is logged at the start, so a
+//! fresh-seed crash stays reproducible via `RUSTOS_FUZZ_SEED`. The
+//! structured bit-flip harness is an exhaustive boundary sweep, not a
+//! random one, so it runs once regardless of the budget.
 
 use rustos_abi::driver::net::MacAddress;
 use rustos_net_icmp::arp::ArpPacket;
 use rustos_net_icmp::ethernet::EthernetFrame;
-use rustos_net_icmp::icmp::IcmpEcho;
-use rustos_net_icmp::ipv4::Ipv4Header;
-use rustos_net_icmp::{Client, Ipv4Address, Responder};
+use rustos_net_icmp::{Client, Ipv4Addr, Responder};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
@@ -46,78 +36,11 @@ const SMOKE_ITERATIONS: u64 = 100_000;
 const LOCAL_MAC: MacAddress = MacAddress([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
 
 /// IPv4 address the responder/client answer for.
-const LOCAL_IP: Ipv4Address = Ipv4Address([10, 0, 2, 15]);
-
-/// Drive every parser in the crate on `bytes`.
-///
-/// The contract is "must not panic for any input"; an accepted decode is
-/// additionally required to round-trip through its matching encoder.
-fn exercise(bytes: &[u8]) {
-    exercise_ethernet(bytes);
-    exercise_arp(bytes);
-    exercise_ipv4(bytes);
-    exercise_icmp(bytes);
-    exercise_composed(bytes);
-}
-
-fn exercise_ethernet(bytes: &[u8]) {
-    if let Some(frame) = EthernetFrame::parse(bytes) {
-        // Re-lay the header and payload, then re-parse: the fields and
-        // borrowed payload must survive the round trip exactly.
-        let mut out =
-            vec![0u8; rustos_net_icmp::ethernet::ETHERNET_HEADER_LEN + frame.payload.len()];
-        let header_len = rustos_net_icmp::ethernet::write_header(
-            &mut out,
-            frame.destination,
-            frame.source,
-            frame.ethertype,
-        )
-        .expect("a parsed header must re-encode");
-        out[header_len..].copy_from_slice(frame.payload);
-        let redecoded =
-            EthernetFrame::parse(&out).expect("round-trip of an accepted frame must parse");
-        assert_eq!(frame, redecoded);
-    }
-}
-
-fn exercise_arp(bytes: &[u8]) {
-    if let Some(packet) = ArpPacket::parse(bytes) {
-        let mut out = [0u8; rustos_net_icmp::arp::ARP_PACKET_LEN];
-        packet
-            .write(&mut out)
-            .expect("a parsed ARP packet must re-encode");
-        let redecoded =
-            ArpPacket::parse(&out).expect("round-trip of an accepted packet must parse");
-        assert_eq!(packet, redecoded);
-    }
-}
-
-fn exercise_ipv4(bytes: &[u8]) {
-    if let Some((header, payload)) = Ipv4Header::parse(bytes) {
-        let mut out = vec![0u8; rustos_net_icmp::ipv4::IPV4_HEADER_LEN + payload.len()];
-        let header_len = header
-            .write(&mut out, payload.len())
-            .expect("a parsed IPv4 header must re-encode");
-        out[header_len..].copy_from_slice(payload);
-        let (redecoded, redecoded_payload) =
-            Ipv4Header::parse(&out).expect("round-trip of an accepted header must parse");
-        assert_eq!(header, redecoded);
-        assert_eq!(payload, redecoded_payload);
-    }
-}
-
-fn exercise_icmp(bytes: &[u8]) {
-    if let Some(echo) = IcmpEcho::parse(bytes) {
-        let mut out = vec![0u8; echo.wire_len()];
-        echo.write(&mut out).expect("a parsed echo must re-encode");
-        let redecoded = IcmpEcho::parse(&out).expect("round-trip of an accepted echo must parse");
-        assert_eq!(echo, redecoded);
-    }
-}
+const LOCAL_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 15);
 
 /// Drive the composed service entry points and assert a produced reply
 /// fits the caller's buffer and is itself a well-formed frame.
-fn exercise_composed(bytes: &[u8]) {
+fn exercise(bytes: &[u8]) {
     let responder = Responder::new(LOCAL_MAC, LOCAL_IP);
     let mut out = [0u8; 256];
     if let Ok(Some(len)) = responder.handle_frame(bytes, &mut out) {
@@ -131,7 +54,7 @@ fn exercise_composed(bytes: &[u8]) {
     // The client's classifiers are pure predicates over hostile bytes;
     // they must never panic and never claim a malformed frame.
     let client = Client::new(LOCAL_MAC, LOCAL_IP);
-    let target = Ipv4Address([10, 0, 2, 2]);
+    let target = Ipv4Addr::new(10, 0, 2, 2);
     let _ = client.parse_arp_reply(bytes, target);
     let _ = client.is_echo_reply(bytes, target, 0x1234, 0x0001);
 }
@@ -195,7 +118,7 @@ fn valid_arp_frame() -> Vec<u8> {
     let request = ArpPacket {
         operation: rustos_net_icmp::arp::OP_REQUEST,
         sender_hardware: MacAddress([0x02, 0xCA, 0xFE, 0xBA, 0xBE, 0x01]),
-        sender_protocol: Ipv4Address([10, 0, 2, 2]),
+        sender_protocol: Ipv4Addr::new(10, 0, 2, 2),
         target_hardware: MacAddress([0; 6]),
         target_protocol: LOCAL_IP,
     };

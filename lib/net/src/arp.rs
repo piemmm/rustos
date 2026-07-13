@@ -3,11 +3,16 @@
 //! Only the IPv4-over-Ethernet binding is handled: 6-byte hardware
 //! addresses, 4-byte protocol addresses, request and reply opcodes.
 //! Other hardware or protocol types are rejected by [`ArpPacket::parse`]
-//! so the responder never answers a binding it does not understand.
+//! so the engine never acts on a binding it does not understand.
+//!
+//! ARP is the IPv4 provider of the neighbour-cache contract
+//! ([`crate::neigh`]): a reply confirms an entry, a request's sender
+//! binding is link-layer evidence, and the cache itself is shared with
+//! the IPv6 Neighbour Discovery provider.
 
 use rustos_abi::driver::net::{MacAddress, MAC_ADDRESS_LEN};
 
-use crate::Ipv4Address;
+use crate::addr::Ipv4Addr;
 
 /// Wire length of an IPv4-over-Ethernet ARP packet.
 pub const ARP_PACKET_LEN: usize = 28;
@@ -38,11 +43,11 @@ pub struct ArpPacket {
     /// Sender hardware address.
     pub sender_hardware: MacAddress,
     /// Sender protocol (IPv4) address.
-    pub sender_protocol: Ipv4Address,
+    pub sender_protocol: Ipv4Addr,
     /// Target hardware address.
     pub target_hardware: MacAddress,
     /// Target protocol (IPv4) address.
-    pub target_protocol: Ipv4Address,
+    pub target_protocol: Ipv4Addr,
 }
 
 impl ArpPacket {
@@ -103,9 +108,9 @@ impl ArpPacket {
         body[5] = PROTOCOL_LEN;
         body[6..8].copy_from_slice(&self.operation.to_be_bytes());
         body[8..14].copy_from_slice(self.sender_hardware.as_octets());
-        body[14..18].copy_from_slice(self.sender_protocol.as_octets());
+        body[14..18].copy_from_slice(&self.sender_protocol.octets());
         body[18..24].copy_from_slice(self.target_hardware.as_octets());
-        body[24..28].copy_from_slice(self.target_protocol.as_octets());
+        body[24..28].copy_from_slice(&self.target_protocol.octets());
         Some(ARP_PACKET_LEN)
     }
 }
@@ -116,10 +121,10 @@ fn mac(bytes: &[u8]) -> MacAddress {
     MacAddress(octets)
 }
 
-fn ipv4(bytes: &[u8]) -> Ipv4Address {
+fn ipv4(bytes: &[u8]) -> Ipv4Addr {
     let mut octets = [0u8; 4];
     octets.copy_from_slice(bytes);
-    Ipv4Address(octets)
+    Ipv4Addr::from(octets)
 }
 
 #[cfg(test)]
@@ -128,8 +133,8 @@ mod tests {
 
     const REQUESTER_MAC: MacAddress = MacAddress([0x02, 0xCA, 0xFE, 0xBA, 0xBE, 0x01]);
     const LOCAL_MAC: MacAddress = MacAddress([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
-    const REQUESTER_IP: Ipv4Address = Ipv4Address([10, 0, 2, 2]);
-    const LOCAL_IP: Ipv4Address = Ipv4Address([10, 0, 2, 15]);
+    const REQUESTER_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
+    const LOCAL_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 15);
 
     fn request_bytes() -> [u8; ARP_PACKET_LEN] {
         let mut out = [0u8; ARP_PACKET_LEN];

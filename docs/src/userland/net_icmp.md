@@ -10,8 +10,9 @@ Item 5): the test bin uses `Client` to resolve and ping the QEMU
 user-network gateway over the live virtio-net device.
 
 The crate is `no_std`, allocation-free, and `#![forbid(unsafe_code)]`.
-It depends only on `rustos_abi::driver::net::Net`, so identical logic
-runs against a real virtio-net device and against a mock in tests.
+It composes the shared protocol engine (`lib/net`, re-exported) over
+`rustos_abi::driver::net::Net`, so identical logic runs against a real
+virtio-net device and against a mock in tests.
 
 ## Protocol surface
 
@@ -23,17 +24,17 @@ runs against a real virtio-net device and against a mock in tests.
 | ICMP     | echo request → echo reply                 | 792  |
 
 Anything else — TCP, UDP, IPv6, routing, fragmentation, neighbour
-caching, retransmission — is explicitly out of scope and deferred to
-Stage 6.
+caching, retransmission — is explicitly out of scope: the `netstack`
+service (`plans/NETWORK.md`) delivers those and replaces this
+responder outright in its N3 increment.
 
 ## Components
 
-- `ethernet`, `arp`, `ipv4`, `icmp` — each parses and serialises one
-  protocol layer with bounds-checked, panic-free accessors. Each
-  rejects truncated or malformed inputs by returning `None`.
-- `internet_checksum` — the one's-complement Internet checksum
-  (RFC 1071), written once and shared by the IPv4 and ICMP layers so
-  the fold is never duplicated (`AGENTS.md` §2.2).
+- The wire codecs (`eth`, `arp`, `ipv4`, `icmp`) and the Internet
+  checksum live in the shared protocol engine ([`lib/net`](../lib/net.md))
+  and are re-exported here (`ethernet` is `rustos_net::eth`); this crate
+  contains no parser of its own, so the definitions cannot drift
+  (`AGENTS.md` §2.2).
 - `write_arp_frame` / `write_icmp_frame` — Ethernet+ARP and
   Ethernet+IPv4+ICMP framing, written once and shared by `Responder`
   (replies) and `Client` (requests) so the framing is never duplicated
@@ -41,8 +42,8 @@ Stage 6.
 - `Responder` — binds an interface's MAC and IPv4 address. It is
   stateless beyond those two values.
 - `Client` — binds the same two values and initiates exchanges. It is
-  likewise stateless: no neighbour cache, no retransmission (deferred
-  to Stage 6).
+  likewise stateless: no neighbour cache, no retransmission (the
+  `netstack` service layers `rustos_net::neigh` and retries on top).
 
 ### `Responder` API
 
@@ -89,12 +90,13 @@ be coaxed into reflecting arbitrary traffic.
 
 ## Tests
 
-`cargo test -p rustos-net-icmp` runs 41 host-side tests: per-layer
-parse/serialise round-trips and rejection paths, checksum validity
-(including the RFC 1071 worked example), end-to-end responder
+`cargo test -p rustos-net-icmp` runs the end-to-end responder
 behaviour over a mock `Net` (ARP and ICMP answers, ignoring frames for
 other MACs/IPs, output-too-small handling, the poll/run loop, and
-driver-error propagation), and `Client` behaviour over the same mock
+driver-error propagation), `Client` behaviour over the same mock
 (ARP resolve emitting a well-formed request, ICMP ping confirming the
 reply, mismatched-sequence and wrong-target rejection, output-too-small
-handling, and driver-error propagation).
+handling, and driver-error propagation), and the composed-path fuzz
+harness (`fuzz_parse`, registered with `cargo xtask fuzz`). The
+per-layer parse/serialise and checksum tests live with the codecs in
+`lib/net` (`fuzz_net_eth`, `fuzz_net_addr`).

@@ -1,10 +1,10 @@
 //! Ethernet II framing.
 //!
-//! The responder only needs to read the destination, source, and
-//! `EtherType` of an inbound frame and to lay down the same three
-//! fields on an outbound one. Anything below that (VLAN tags, jumbo
-//! frames, 802.3 length framing) is out of scope for the ARP / ICMP
-//! responder and is left for a fuller stack in Stage 6.
+//! One fixed 14-byte header: destination, source, `EtherType`. That is
+//! the whole contract between the stack and an Ethernet link — VLAN
+//! tags and 802.3 length framing are not spoken by the stack and a
+//! frame carrying them is simply an unrecognised `EtherType`, dropped
+//! by the dispatcher (fail closed) rather than mis-parsed.
 
 use rustos_abi::driver::net::{MacAddress, MAC_ADDRESS_LEN};
 
@@ -16,6 +16,9 @@ pub const ETHERTYPE_ARP: u16 = 0x0806;
 
 /// `EtherType` identifying an IPv4 payload (RFC 894).
 pub const ETHERTYPE_IPV4: u16 = 0x0800;
+
+/// `EtherType` identifying an IPv6 payload (RFC 2464).
+pub const ETHERTYPE_IPV6: u16 = 0x86DD;
 
 /// The all-ones link-layer broadcast address.
 pub const BROADCAST: MacAddress = MacAddress([0xFF; MAC_ADDRESS_LEN]);

@@ -66,6 +66,7 @@ members = [
     "lib/input",
     "lib/keymap",
     "lib/log",
+    "lib/net",
     "lib/partition",
     "lib/path",
     "lib/pci",

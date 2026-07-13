@@ -1614,11 +1614,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-net"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-fuzzseed",
+]
+
+[[package]]
 name = "rustos-net-icmp"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-fuzzseed",
+ "rustos-net",
 ]
 
 [[package]]

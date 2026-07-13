@@ -1,11 +1,15 @@
-//! Minimal IPv4 datagram handling (RFC 791).
+//! IPv4 datagram handling (RFC 791) — option-free headers.
 //!
-//! The responder only parses and emits option-free 20-byte headers,
-//! which is all that ICMP echo over the QEMU user network requires.
-//! Headers carrying options (`IHL > 5`), fragments, or a non-matching
-//! total-length field are rejected by [`Ipv4Header::parse`].
+//! This codec parses and emits option-free 20-byte headers. Headers
+//! carrying options (`IHL > 5`), a non-matching total-length field, or
+//! an invalid header checksum (RFC 1122 §3.2.1.2 — a corrupted header
+//! is discarded, never acted on) are rejected by [`Ipv4Header::parse`].
+//! The options-tolerant parse, fragmentation, and reassembly land with
+//! the network-layer increment (`plans/NETWORK.md` N2), evolving this
+//! module in place.
 
-use crate::{internet_checksum, Ipv4Address};
+use crate::addr::Ipv4Addr;
+use crate::checksum::internet_checksum;
 
 /// Length of an option-free IPv4 header.
 pub const IPV4_HEADER_LEN: usize = 20;
@@ -26,9 +30,9 @@ const FLAG_DONT_FRAGMENT: u16 = 0x4000;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Ipv4Header {
     /// Source address.
-    pub source: Ipv4Address,
+    pub source: Ipv4Addr,
     /// Destination address.
-    pub destination: Ipv4Address,
+    pub destination: Ipv4Addr,
     /// Upper-layer protocol number.
     pub protocol: u8,
 }
@@ -38,11 +42,15 @@ impl Ipv4Header {
     /// payload that the `total length` field delimits.
     ///
     /// Returns `None` for non-IPv4 headers, headers carrying options,
-    /// or a `total length` that does not fit within `bytes`.
+    /// a `total length` that does not fit within `bytes`, or a header
+    /// whose checksum does not verify.
     #[must_use]
     pub fn parse(bytes: &[u8]) -> Option<(Self, &[u8])> {
         let header = bytes.get(..IPV4_HEADER_LEN)?;
         if header[0] != VERSION_IHL {
+            return None;
+        }
+        if internet_checksum(header) != 0 {
             return None;
         }
         let total_length = u16::from_be_bytes([header[2], header[3]]) as usize;
@@ -74,26 +82,26 @@ impl Ipv4Header {
         header[8] = DEFAULT_TTL;
         header[9] = self.protocol;
         header[10..12].copy_from_slice(&0u16.to_be_bytes());
-        header[12..16].copy_from_slice(self.source.as_octets());
-        header[16..20].copy_from_slice(self.destination.as_octets());
+        header[12..16].copy_from_slice(&self.source.octets());
+        header[16..20].copy_from_slice(&self.destination.octets());
         let checksum = internet_checksum(header);
         header[10..12].copy_from_slice(&checksum.to_be_bytes());
         Some(IPV4_HEADER_LEN)
     }
 }
 
-fn address(bytes: &[u8]) -> Ipv4Address {
+fn address(bytes: &[u8]) -> Ipv4Addr {
     let mut octets = [0u8; 4];
     octets.copy_from_slice(bytes);
-    Ipv4Address(octets)
+    Ipv4Addr::from(octets)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const SRC: Ipv4Address = Ipv4Address([10, 0, 2, 2]);
-    const DST: Ipv4Address = Ipv4Address([10, 0, 2, 15]);
+    const SRC: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
+    const DST: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 15);
 
     #[test]
     fn write_then_parse_round_trips() {
@@ -154,11 +162,32 @@ mod tests {
         .write(&mut out, 0)
         .expect("fits");
         out[2..4].copy_from_slice(&100u16.to_be_bytes());
+        // Re-seal the checksum so the length bound is what rejects.
+        out[10..12].copy_from_slice(&0u16.to_be_bytes());
+        let checksum = internet_checksum(&out);
+        out[10..12].copy_from_slice(&checksum.to_be_bytes());
         assert!(Ipv4Header::parse(&out).is_none());
     }
 
     #[test]
     fn parse_rejects_truncated() {
         assert!(Ipv4Header::parse(&[0u8; IPV4_HEADER_LEN - 1]).is_none());
+    }
+
+    #[test]
+    fn parse_rejects_corrupted_header_checksum() {
+        let mut out = [0u8; IPV4_HEADER_LEN];
+        Ipv4Header {
+            source: SRC,
+            destination: DST,
+            protocol: PROTOCOL_ICMP,
+        }
+        .write(&mut out, 0)
+        .expect("fits");
+        assert!(Ipv4Header::parse(&out).is_some());
+        // Corrupt one address bit without touching the checksum field:
+        // the header no longer verifies and must be discarded.
+        out[12] ^= 0x01;
+        assert!(Ipv4Header::parse(&out).is_none());
     }
 }

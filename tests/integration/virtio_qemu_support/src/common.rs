@@ -40,7 +40,7 @@ use rustos_drvhost::{
 };
 use rustos_kernel_mem::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
 use rustos_kernel_mem::{PhysAddr, PAGE_SIZE};
-use rustos_net_icmp::{Client, Ipv4Address};
+use rustos_net_icmp::{Client, Ipv4Addr};
 use rustos_virtio::{Transport, VirtioHost, VirtioHostFactory};
 use rustos_virtio_input::VirtioInput;
 
@@ -511,9 +511,9 @@ pub fn users_db_load<Tr: Transport>(
 
 /// Fixed guest address under QEMU user-mode (SLIRP) networking — the
 /// same `10.0.2.0/24` topology on every arch's `-netdev user`.
-const GUEST_IP: Ipv4Address = Ipv4Address::new([10, 0, 2, 15]);
+const GUEST_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 15);
 /// SLIRP gateway address that answers ARP and ICMP echo.
-const GATEWAY_IP: Ipv4Address = Ipv4Address::new([10, 0, 2, 2]);
+const GATEWAY_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
 /// ICMP echo identifier the request carries and the reply must echo.
 const ECHO_ID: u16 = 0x1234;
 /// ICMP echo sequence number.
