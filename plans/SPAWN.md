@@ -758,7 +758,15 @@ Split into two increments, exactly as SP6 was (surface+seam, then producer):
   records the signal's POSIX-familiar termination status (the shared
   `Signal::termination_status` in `lib/abi`, so kernel and program agree —
   since SP9: `Interrupt` → 130, `Kill` → 137, `Terminate` → 143) so the
-  parent's `wait` reaps it.
+  parent's `wait` reaps it. A termination never lands *inside* a syscall:
+  a victim between syscall entry and return may hold kernel state only its
+  own unwind can release (a mount's `SleepLock`, an in-flight block-I/O
+  descriptor), so the `procsignal` kill gate records the kill pending,
+  wakes the victim (every in-kernel park loop unwinds with
+  `Errno::Interrupted` when a kill is pending, so no wait is unkillable),
+  and the syscall dispatch boundary lands it — recording the same
+  `128 + n` status and running the one shared reclaim — once the handler
+  has unwound. A victim in user mode is terminated immediately.
   Installed in `init.rs::run_phases` over the concrete wait producer +
   `state.scheduler` and threaded through a hook-level `with_process_signal`
   forwarder. Six host tests cover it over a real `Scheduler<TestArch>`
@@ -1022,9 +1030,10 @@ Staged like SP3/SP5/SP6/SP7 (one fully-gated increment per landing):
   admitted the *caller* from — the `spawn_path` attested on its
   capability record at admission, never `argv[0]`, which is data the
   spawner chose — then runs the ordinary resolution and load gate over
-  it. The token is honoured only with `SPAWN_FLAG_SANDBOX` and only when
-  the caller carries a spawnable path; every other use fails closed
-  `NotFound`) + `SPAWN_ATTACH_LEN`, the
+  it. The token serves any spawn of the caller's own binary, sandboxed
+  or plain (`plans/STRESSTEST.md` ST5's worker re-entry is the plain
+  consumer), and only when the caller carries a spawnable path; a
+  caller without one fails closed `NotFound`) + `SPAWN_ATTACH_LEN`, the
   `SPAWN` row's slots 2/3 → `attach`/`attach_len`, and the
   `stream_read`/`stream_write` rows' dispatcher gate dropped (checked
   in-handler for console backings). `lib/abi-sys`: `ros_sys_spawn` carries

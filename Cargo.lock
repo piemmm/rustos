@@ -1806,6 +1806,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-stress"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-help",
+ "rustos-procinfo",
+ "rustos-rt",
+]
+
+[[package]]
 name = "rustos-svg"
 version = "0.0.0"
 dependencies = [
@@ -3372,6 +3382,17 @@ dependencies = [
  "rustos-kernel",
  "rustos-kernel-core",
  "rustos-kernel-sched-eevdf",
+ "rustos-log",
+]
+
+[[package]]
+name = "rustos-test-stress-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-aarch64",
+ "rustos-itest-harness",
+ "rustos-kalloc",
+ "rustos-kernel",
  "rustos-log",
 ]
 

@@ -1,6 +1,6 @@
 # STRESSTEST.md — System stress testing and live kernel monitoring
 
-Status: ST1–ST4 done; ST5–ST6 planned
+Status: ST1–ST5 done; ST6 planned
 Target: RustOS
 Primary code areas: `lib/abi`, `kernel/mem`, `kernel/core`, `userland/system/sysinfod`, `lib/procinfo`, `userland/apps/`
 Secondary code areas: `lib/rt`, `lib/curses`, `userland/shell/sysinfo`, `kernel/sched`, `docs/src/`
@@ -662,19 +662,85 @@ implementation fixed):
   the restored screen, PASS keyed on sysmon's audited exit then the
   shell's (the arm-then-exit discipline).
 
-### ST5 — `stress`
+### ST5 — `stress` — **done**
 
-Deliverables: the `userland/apps/stress` bundle; controller/worker model
-(§7.1), the five subsystems (§7.2), the option set (§7.3) with
-fail-closed parsing; scratch-tree hygiene on every exit path; the
-summary report; stdinfo `summary` record on fd 3 (§20.1).
-Tests: option-parser unit tests (valid/invalid/contradictory); worker
-unit tests against seams (bounded work units, refusal handling); teardown
-tests (Interrupt → workers terminated and reaped, scratch removed, exit
-130; timeout → same with exit 0; Kill of a worker → controller notices
-and reports); QEMU verticals: a short `--all` run under `--timeout`
-moves `MEMORY_PRESSURE`/`RAMZIP_STATS` counters and returns the prompt
-clean; `^C` mid-run tears down.
+What now holds (the deliverables of §7, with the reconciliations the
+implementation fixed):
+
+- The `userland/apps/stress` bundle ships complete (AppInfo requesting
+  `CAP_CONSOLE_WRITE`/`CAP_FS_ACCESS`/`CAP_PROC_SPAWN`/`CAP_MEM_PIN` —
+  no `CAP_CONSOLE_READ`: `^C` arrives through the signal intake, never
+  fd 0 — thirteen `Help/` locales, README,
+  `docs/src/userland/stress.md`), registered on the x86_64/riscv64
+  embedded boot floor (`STRESS_PATH`/`STRESS_MANIFEST`/`SPAWN_PROGRAMS`
+  row) and discovered from the store on aarch64 like every sibling.
+- **Reconciliation — the `@self` token widened in place.** Workers
+  re-enter the same binary via the reserved `SPAWN_SELF` token, which now
+  serves **any** spawn of the caller's own binary (previously
+  sandbox-only; still attested-path — never `argv[0]` — still the full
+  resolution and load gate, still fail-closed for a caller with no
+  spawnable path). The worker argv codec lives in `worker.rs`
+  (`["stress","--worker",kind,bytes,index,scratch]`, decoded fail-closed).
+- **Reconciliation — the secured VFS stamps creations.**
+  `MetaPolicy::stamp_creation` rewrites a freshly created node's
+  ownership to the creating caller's `(uid, gid)` under the `PerInode`
+  policy (mode/ACL/gate untouched, `Uniform` no-op): RustFS's raw create
+  stamped the system user, which locked creators out of their own
+  private-mode files — the scratch tree under `$HOME/Library/stress`
+  depends on the fix.
+- **Reconciliation — orphans strand no zombies, without lying about
+  liveness.** The one shared task reclaim gained
+  `ProcessWait::parent_exited`: a dead parent's unreaped zombie rows are
+  dropped and its running children become orphans (`parent: None`) whose
+  rows survive so `is_live` stays honest for the console-foreground
+  gate; an orphan's own exit removes its row instead of minting an
+  unreapable zombie. `--background` builds on this: the front process
+  re-spawns `@self` (options minus `--background`, `--quiet` implied,
+  `HOME` threaded), prints the controller PID, and exits — the detached
+  run continues as a safe orphan.
+- The five §7.2 subsystems are bounded, restartable units (`load.rs`)
+  over the injected `Scratch` seam; a typed refusal (ENOSPC, a limit, a
+  refused allocation) exits `REFUSED_EXIT` (3) and is counted as an
+  expected outcome, any other worker failure fails the run exit 1 (GNU
+  convention; signals end 130/143). Teardown-phase `Terminate`/`Kill`
+  statuses (143/137) count clean — the requested outcome — while the
+  same statuses mid-run mean an externally killed worker, reported as a
+  failure.
+- Sizing (`sizing.rs`) is policy over discovery: vm workers share half
+  the `boot_facts` RAM, hdd workers half the scratch volume's free space
+  (unprivileged `MOUNT_LIST`, longest-covering-mount match);
+  `--overcommit P` rescales to `P`%; explicit bytes win; documented
+  fallbacks (32 MiB vm / 16 MiB hdd per worker) when discovery is
+  unavailable; u128 intermediates, 64 KiB floor.
+- The controller (`ctrl.rs`) is a host-provable state machine
+  (`Running → Draining → Killing`) driven off one wait-set
+  (`WAITSET_CHILD_ANY` + the `Signal` intake member + the timeout/grace
+  deadline as the bounded wait): a completed run's teardown targets
+  workers only (`--monitor` reports when the user quits sysmon), signal
+  ends tear the monitor down too, the 2 s grace escalates to `Kill`, and
+  scratch cleanup (`run_scratch_paths` — exactly the run's own
+  deterministic names, never other files in a `--temp-path` directory)
+  runs on every exit path. The summary lines are GNU-shaped
+  (`report.rs`) and the fd-3 `summary` record is best-effort advisory.
+- Tests land per §10's stress rows: exhaustive host tests (parser
+  valid/invalid/contradictory, worker-codec round-trip + fail-closed
+  shapes, sizing scale/overcommit/fallback/no-wrap, each unit's load and
+  refusal/corruption handling over an in-memory scratch, every teardown
+  path — Interrupt 130, timeout 0, grace `Kill`, external kill reported,
+  all-refused end, monitor policy, no phase regression), kernel host
+  tests for the widened `@self` (plain spawn serves, no-path refusal),
+  `stamp_creation` (creator-owned file + directory), and
+  `parent_exited` (zombie drop, honest orphan liveness, no stranded
+  zombie, sibling isolation, stop discard), and the
+  `stress_qemu_aarch64` full-boot vertical: login →
+  `stress --cpu 1 --vm 1 --vm-bytes 16M --io 1 --timeout 2s` from the
+  store bundle → `dispatching hogs` → `successful run completed` →
+  post-load `sysinfo pressure` (`reserve bytes:`) and `sysinfo reclaim`
+  (`clean-file-data`) renders → clean prompt, PASS keyed on the
+  controller's audited exit then the shell's (arm-then-exit). The
+  numeric counter-movement rows are the ST1 kernel/host tests;
+  `RAMZIP_STATS` movement stays behind the §0 restartable-user-fault
+  prerequisite.
 
 ### ST6 — Integration, benchmarks, docs sweep
 

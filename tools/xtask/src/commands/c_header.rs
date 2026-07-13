@@ -127,6 +127,7 @@ const ERRNO_NAMES: &[(&str, Errno)] = &[
     ("DEVICE_FAULT", Errno::DeviceFault),
     ("NO_DATA", Errno::NoData),
     ("NOT_SUPPORTED", Errno::NotSupported),
+    ("INTERRUPTED", Errno::Interrupted),
 ];
 
 /// One generated C header: its file name (relative to the include directory)
@@ -3967,11 +3968,11 @@ mod tests {
             let expected = i32::try_from(idx + 1).expect("small index");
             assert_eq!(errno.as_i32(), expected, "errno values must be dense 1..=N");
         }
-        // NotSupported is the last appended abi-v1 variant
-        // (discriminant 32).
+        // Interrupted is the last appended abi-v1 variant
+        // (discriminant 33).
         assert_eq!(
             ERRNO_NAMES.last().map(|(_, e)| e.as_i32()),
-            Some(Errno::NotSupported.as_i32()),
+            Some(Errno::Interrupted.as_i32()),
             "errno table must end at the last frozen variant"
         );
     }

@@ -582,6 +582,7 @@ mod tests {
                 "rmdir",
                 "seatmgr",
                 "seq",
+                "stress",
                 "sysinfo",
                 "sysinfod",
                 "sysmon",

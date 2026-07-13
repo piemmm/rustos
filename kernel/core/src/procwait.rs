@@ -172,6 +172,17 @@ pub trait ProcessWait: Sync {
         ChildPeek::NoChild
     }
 
+    /// Sever the exited `parent`'s link to every child row it owned.
+    ///
+    /// Called from the one shared task reclaim for every death path. A
+    /// dead parent can never issue another `wait` (task ids are never
+    /// reused), so its unreaped zombies are dropped outright and its
+    /// running children become orphans whose rows are removed when they
+    /// themselves exit — no row is ever stranded, and no still-running
+    /// orphan is misreported dead. The default is a no-op, like the other
+    /// bookkeeping hooks.
+    fn parent_exited(&self, _parent: TaskId) {}
+
     /// Whether `task` is a **live** tracked process (spawned, not yet
     /// exited).
     ///
@@ -225,8 +236,11 @@ fn narrow_task_id(id: u64) -> u32 {
 /// One child's entry in the [`ProcessTable`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 struct ChildEntry {
-    /// Scheduler task id of the parent that spawned this child.
-    parent: u64,
+    /// Scheduler task id of the parent that spawned this child, or `None`
+    /// once that parent has exited (the child is an orphan): no `wait`,
+    /// signal, or peek can ever select it again, but the row keeps the
+    /// liveness bookkeeping honest until the orphan itself exits.
+    parent: Option<u64>,
     /// The child's exit code once it has exited (`Some`), or `None` while it
     /// is still running. A `Some` entry is a reapable zombie.
     exit: Option<i32>,
@@ -303,7 +317,7 @@ impl ProcessTable {
         self.children.insert(
             child.0,
             ChildEntry {
-                parent: parent.0,
+                parent: Some(parent.0),
                 exit: None,
                 stop_pending: None,
             },
@@ -315,6 +329,12 @@ impl ProcessTable {
     /// ignored.
     pub fn record_exit(&mut self, task: TaskId, code: i32) {
         if let Some(entry) = self.children.get_mut(&task.0) {
+            // An orphan's exit has no parent left to reap it: drop the row
+            // instead of minting a zombie no `wait` can ever collect.
+            if entry.parent.is_none() {
+                self.children.remove(&task.0);
+                return;
+            }
             entry.exit = Some(code);
             // A terminated child can no longer be "stopped": the exit report
             // supersedes any unobserved stop.
@@ -428,7 +448,7 @@ impl ProcessTable {
         let mut reapable: Option<(u64, i32)> = None;
         let mut stopped: Option<(u64, Signal)> = None;
         for (&child_id, entry) in &self.children {
-            if entry.parent != parent.0 {
+            if entry.parent != Some(parent.0) {
                 continue;
             }
             if let Some(want) = target {
@@ -464,10 +484,34 @@ impl ProcessTable {
     pub fn live_child(&self, parent: TaskId, pid: i32) -> Option<TaskId> {
         let want = u64::try_from(pid).ok()?;
         let entry = self.children.get(&want)?;
-        if entry.parent == parent.0 && entry.exit.is_none() {
+        if entry.parent == Some(parent.0) && entry.exit.is_none() {
             Some(TaskId(want))
         } else {
             None
+        }
+    }
+
+    /// Sever the exited `parent`'s link to every child row it owned.
+    ///
+    /// A dead parent can never reap, so its **zombie** rows are dropped
+    /// outright (no `wait` will ever collect them) and its **running**
+    /// children become orphans: their `parent` link is cleared so no
+    /// selector can match them again, but the row itself survives so
+    /// [`Self::is_live`] keeps answering honestly for a task that is
+    /// still running (the console-foreground gate depends on that). An
+    /// orphan's own exit then removes its row ([`Self::record_exit`])
+    /// instead of minting an unreapable zombie, so the table stays
+    /// bounded by the live process tree, never by history.
+    pub fn parent_exited(&mut self, parent: TaskId) {
+        self.children
+            .retain(|_, entry| entry.parent != Some(parent.0) || entry.exit.is_none());
+        for entry in self.children.values_mut() {
+            if entry.parent == Some(parent.0) {
+                entry.parent = None;
+                // An unobserved stop dies with the parent that could have
+                // observed it.
+                entry.stop_pending = None;
+            }
         }
     }
 
@@ -558,6 +602,10 @@ where
         self.table.lock().register(parent, child);
     }
 
+    fn parent_exited(&self, parent: TaskId) {
+        self.table.lock().parent_exited(parent);
+    }
+
     fn record_exit(&self, task: TaskId, code: i32) {
         self.table.lock().record_exit(task, code);
         // Wake every parent parked in `wait`: the exiting task may be the
@@ -638,6 +686,13 @@ where
                     crate::waitq::PROCWAIT_WAITQ.deregister(parent.0);
                     if !parked {
                         return Err(Errno::NotImplemented);
+                    }
+                    // A doomed waiter never re-parks: a termination deferred
+                    // against this task unwinds the wait so the kill lands at
+                    // the syscall boundary (the errno never reaches user
+                    // space).
+                    if crate::procsignal::kill_pending(parent.0) {
+                        return Err(Errno::Interrupted);
                     }
                 }
                 // `try_report` yields only the three arms above; keep the
@@ -765,6 +820,72 @@ mod tests {
             })
         );
         assert_eq!(table.peek(TaskId(1), 2), ChildPeek::NoChild);
+    }
+
+    /// A dead parent's unreaped zombie is dropped outright: no `wait` can
+    /// ever collect it, so keeping it would strand the row forever.
+    #[test]
+    fn parent_exited_drops_unreaped_zombies() {
+        let mut table = ProcessTable::new();
+        table.register(TaskId(1), TaskId(2));
+        table.record_exit(TaskId(2), 7);
+        table.parent_exited(TaskId(1));
+        assert_eq!(table.peek(TaskId(1), WAIT_PID_ANY), ChildPeek::NoChild);
+        assert!(!table.is_live(TaskId(2)));
+    }
+
+    /// A dead parent's running child becomes an orphan: no selector can
+    /// match it again, but it still reports live — the console-foreground
+    /// gate must never mistake a running orphan for a dead owner — and its
+    /// own exit removes the row instead of minting an unreapable zombie.
+    #[test]
+    fn parent_exited_orphans_a_running_child_without_stranding_a_zombie() {
+        let mut table = ProcessTable::new();
+        table.register(TaskId(1), TaskId(2));
+        table.parent_exited(TaskId(1));
+        // Unmatchable by any parent selector...
+        assert_eq!(table.peek(TaskId(1), 2), ChildPeek::NoChild);
+        assert_eq!(table.live_child(TaskId(1), 2), None);
+        assert_eq!(table.reap(TaskId(1), WAIT_PID_ANY, false), Reap::NoChild);
+        // ...but still honestly live while it runs.
+        assert!(table.is_live(TaskId(2)));
+        // The orphan's own exit removes the row: dead, and never a zombie.
+        table.record_exit(TaskId(2), 0);
+        assert!(!table.is_live(TaskId(2)));
+        assert_eq!(table.peek(TaskId(1), 2), ChildPeek::NoChild);
+    }
+
+    /// Severing one parent's links leaves every other parent's children
+    /// untouched — running and reapable alike.
+    #[test]
+    fn parent_exited_leaves_other_parents_children_untouched() {
+        let mut table = ProcessTable::new();
+        table.register(TaskId(1), TaskId(2));
+        table.register(TaskId(9), TaskId(3));
+        table.register(TaskId(9), TaskId(4));
+        table.record_exit(TaskId(3), 5);
+        table.parent_exited(TaskId(1));
+        assert_eq!(table.peek(TaskId(9), 3), ChildPeek::Reapable);
+        assert_eq!(table.peek(TaskId(9), 4), ChildPeek::Running);
+        assert_eq!(
+            table.reap(TaskId(9), 3, false),
+            Reap::Ready(WaitedChild {
+                pid: 3,
+                status: WaitStatus::Exited(5)
+            })
+        );
+    }
+
+    /// An unobserved stop dies with the parent that could have observed
+    /// it: a stop-aware reap by anyone reports nothing for an orphan.
+    #[test]
+    fn parent_exited_discards_an_orphans_pending_stop() {
+        let mut table = ProcessTable::new();
+        table.register(TaskId(1), TaskId(2));
+        table.record_stop(TaskId(2), Signal::Stop);
+        table.parent_exited(TaskId(1));
+        assert_eq!(table.reap(TaskId(1), WAIT_PID_ANY, true), Reap::NoChild);
+        assert!(table.is_live(TaskId(2)));
     }
 
     #[test]

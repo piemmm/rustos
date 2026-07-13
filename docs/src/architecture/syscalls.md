@@ -882,6 +882,28 @@ first-party Rust wrapper is
 `ROS_SIGNAL_CONTINUE` / `ROS_SIGNAL_TERMINATE` / `ROS_SIGNAL_KILL` /
 `ROS_SIGNAL_INTERRUPT` / `ROS_SIGNAL_STOP`.
 
+A termination never lands **inside** a syscall. A child currently between
+syscall entry and return may hold kernel state only its own unwind can
+release — a mount's per-volume `SleepLock`, an in-flight block-I/O
+descriptor the device is still writing, heap owned by handler stack
+frames — so destroying it mid-handler would leak that state (the
+motivating defect: a killed writer left its volume's lock held forever,
+deadlocking every later filesystem call on that mount). The signal
+producer therefore consults the **kill gate**
+(`kernel/core::procsignal`): a victim inside a syscall has the signal
+recorded *pending*, is woken out of any park (every in-kernel park loop
+re-tests after a wake and unwinds with `Errno::Interrupted` when a kill
+is pending, so an indefinite wait — a console read, `waitset_wait`, a
+blocking `wait`, a pipe park, `irq_wait` — never leaves a task
+unkillable), and dies at the **syscall dispatch boundary** once the
+handler has unwound: the boundary records the `128 + n` status, runs the
+one shared resource reclaim, and suspends the task with an `Exit` action.
+The completed syscall's result (including that `Errno::Interrupted`)
+never reaches user space. A victim in user mode is terminated immediately,
+exactly as before; the deferral is invisible to the signalling parent —
+`signal` answers `0` and `wait` reaps the child when the exit is
+recorded, typically a few block-I/O milliseconds later at worst.
+
 `signal_intake` (no. 94) operates on the calling process's own **signal
 intake** — the fail-closed signal-observation opt-in (`plans/STRESSTEST.md`
 ST3). RustOS deliberately ships **no** user-installed signal handlers: a

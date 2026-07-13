@@ -1025,6 +1025,59 @@ fn secured_set_mode_of_missing_path_is_not_found() {
     );
 }
 
+/// A created node is stamped with its **creator's** identity, not the
+/// driver's raw default: the driver mints the record with its own
+/// baked-in owner (`RustFS` stamps the system user), and before the create
+/// returns the secured path rewrites the ownership to the creating
+/// caller, so a user can immediately use a private-mode file it just
+/// made. Before the stamp landed this read failed `PermissionDenied` —
+/// the creator was locked out of its own file.
+#[test]
+fn secured_create_stamps_the_creator_as_owner() {
+    let vfs = backed_vfs_rw(0o755);
+    let caps = CapabilitySet::empty();
+    let user = cred(7, 3, &caps);
+    // The driver's raw create default: admin-owned, private mode — the
+    // shape that locked a non-admin creator out.
+    let mut fs = RwMockFs::new().with_create_owner(ADMIN_UID, ADMIN_GID, 0o600);
+    fs.set_root_security(NodeSecurity::new(0o777, ADMIN_UID, ADMIN_GID));
+    let path = p("/Storage/usb0/mine.txt");
+
+    vfs.create_via_secured(&user, &path, &mut fs)
+        .expect("create");
+
+    // The stored record names the creator, mode untouched.
+    let node = fs.lookup(fs.root(), b"mine.txt").expect("created child");
+    let sec = fs.security(node).expect("security record");
+    assert_eq!((sec.uid, sec.gid), (7, 3));
+    assert_eq!(sec.mode, 0o600);
+    // The behavioural proof: the creator reads its own private file.
+    let mut buf = [0u8; 4];
+    assert_eq!(
+        vfs.read_via_secured(&user, &path, &mut fs, 0, &mut buf),
+        Ok(0)
+    );
+}
+
+/// A created directory is stamped like a file, so a user can immediately
+/// populate a private-mode directory it just made — the scratch-tree
+/// shape a per-user cache directory (`Library/<app>/`) relies on.
+#[test]
+fn secured_mkdir_stamps_the_creator_as_owner() {
+    let vfs = backed_vfs_rw(0o755);
+    let caps = CapabilitySet::empty();
+    let user = cred(7, 3, &caps);
+    let mut fs = RwMockFs::new().with_create_owner(ADMIN_UID, ADMIN_GID, 0o700);
+    fs.set_root_security(NodeSecurity::new(0o777, ADMIN_UID, ADMIN_GID));
+
+    vfs.mkdir_via_secured(&user, &p("/Storage/usb0/scratch"), &mut fs)
+        .expect("mkdir");
+    // Creating inside needs search + write on the new directory: only
+    // its stamped owner passes a 0o700 mode.
+    vfs.create_via_secured(&user, &p("/Storage/usb0/scratch/unit.bin"), &mut fs)
+        .expect("create inside own private directory");
+}
+
 /// A driver whose directory cursor never advances, exercising the delegated
 /// listing's no-progress guard: a corrupt directory must fail the listing
 /// closed, never spin the kernel forever.

@@ -3616,6 +3616,67 @@ const TESTS: &[QemuTest] = &[
             ("root@rustos ~% ", "exit\n"),
         ],
     },
+    // `plans/STRESSTEST.md` ST5: the `stress` load-generator acceptance
+    // vertical. `rustos-test-stress-qemu-aarch64` boots the *production*
+    // aarch64 pipeline with the planted encrypted-root disk, unlocks the
+    // root, authenticates `root`/`root` at the console login, and runs a
+    // short `stress --cpu 1 --vm 1 --vm-bytes 16M --io 1 --timeout 2s`
+    // from its store bundle (the load gate verifies the whole on-disk
+    // bundle; the granted `CAP_MEM_PIN` lets the controller pin itself and
+    // `CAP_PROC_SPAWN` lets it re-enter its own attested binary as three
+    // workers through the kernel's `@self` token). The `dispatching hogs`
+    // token witnesses the dispatch line; `successful run completed`
+    // witnesses the timeout teardown — every worker `Terminate`d, reaped,
+    // and the scratch files removed — with the prompt returning as the
+    // reap witness. The post-load `sysinfo pressure` render's
+    // `reserve bytes:` token and `sysinfo reclaim`'s `clean-file-data`
+    // class row witness the gated `MEMORY_PRESSURE`/`RECLAIM_STATS`
+    // figures after the load (the ST5 movement assertions on
+    // `RAMZIP_STATS` stay behind the plan's §0 restartable-user-fault
+    // prerequisite; the numeric counter-movement rows are host/kernel
+    // tests). Each line is typed only after its marker appeared. The
+    // guest audit sink arms on the stress *controller*'s audited `exit`
+    // (`sc=exit`, `comm=stress` — its workers are `Terminate`d and never
+    // invoke `exit`) and reports PASS on the audited exit of the *shell*
+    // (`comm=elsh`), typed only after both renders appeared — the
+    // arm-then-exit discipline, immune to the two intervening `sysinfo`
+    // exits. A 120-second budget covers boot + bounded PBKDF2 + the
+    // 2 s load + teardown on QEMU TCG; single CPU like the other
+    // full-boot verticals.
+    QemuTest {
+        package: "rustos-test-stress-qemu-aarch64",
+        binary: "rustos-test-stress-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(120),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::EncryptedRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[
+            ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
+            ("Username:", SESSION_USERNAME_LINE),
+            ("Password", SESSION_PASSWORD_LINE),
+            (
+                "root@rustos ~% ",
+                "stress --cpu 1 --vm 1 --vm-bytes 16M --io 1 --timeout 2s\n",
+            ),
+            // The controller dispatched its workers through `@self`.
+            ("dispatching hogs", ""),
+            // The timeout tore the run down: workers terminated, reaped,
+            // scratch removed, and the summary printed. The prompt marker
+            // in the next step is the clean-exit witness.
+            ("successful run completed", "sysinfo pressure\n"),
+            // The post-load pressure figures rendered.
+            ("reserve bytes:", "sysinfo reclaim\n"),
+            // The reclaim ledger rendered its class rows.
+            ("clean-file-data", "exit\n"),
+        ],
+    },
     // `plans/PI.md` design B / B2 + `plans/DISPLAY.md` D7d (first stage): the
     // pre-unlock driver-loading-by-discovery autoload vertical, booted as a
     // *display* world. `rustos-test-autoload-input-qemu-aarch64` boots the

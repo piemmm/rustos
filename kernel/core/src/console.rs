@@ -1333,6 +1333,12 @@ where
             if !parked {
                 return Err(Errno::NotImplemented);
             }
+            // A doomed waiter never re-parks: a termination deferred against
+            // this task unwinds the read so the kill lands at the syscall
+            // boundary (the errno never reaches user space).
+            if crate::procsignal::kill_pending(task) {
+                return Err(Errno::Interrupted);
+            }
             // A timed wake for the animation: advance the marker's dots one
             // frame, then loop back to re-poll and re-park. Input arriving
             // concurrently is handled by the re-poll, never lost.
