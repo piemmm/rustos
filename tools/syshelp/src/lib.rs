@@ -11,7 +11,9 @@
 //!
 //! The source of truth for the payload is the bundle's own on-disk `Help/`
 //! and `Resources/` directories. This crate's build script walks the
-//! command-app source roots (`userland/apps`, `userland/shell`), finds every
+//! command-app source roots (`userland/apps`, `userland/gui`,
+//! `userland/shell`; each bundle named by its crate's `AppInfo.toml`,
+//! never the crate directory), finds every
 //! help document and resource file, and embeds each as a row in
 //! [`HELP_FILES`] / [`RESOURCE_FILES`], so the image builder plants the
 //! payload by iterating discovered data — **never** a hand-maintained

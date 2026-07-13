@@ -25,11 +25,12 @@ forma canónica e exige acesso de escrita a `/System/Settings` — uma
 conta comum pode ler as opções mas não alterá-las.
 
 - `os.loginType` — `text` ou `graphical`: o tipo de sessão que o
-  serviço de início de sessão propõe por omissão no arranque. `text`
-  (a omissão) mantém a pergunta de escolha de sessão com texto por
-  omissão; `graphical` inicia diretamente a sessão de ambiente de
-  trabalho após a autenticação quando existe um instalado, recuando
-  para texto quando não existe.
+  serviço de início de sessão inicia para um utilizador autenticado.
+  `text` (a omissão) inicia a shell da conta — o ambiente de trabalho
+  pode ainda ser iniciado a pedido com o comando `desktop`; `graphical`
+  inicia diretamente a sessão de ambiente de trabalho após a
+  autenticação quando existe um instalado, recuando para texto quando
+  não existe.
 
 ## OPTIONS
 

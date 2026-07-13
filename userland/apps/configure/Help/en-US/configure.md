@@ -26,10 +26,11 @@ requires write access to `/System/Settings` — an ordinary account can
 read the settings but not change them.
 
 - `os.loginType` — `text` or `graphical`: which session type the login
-  service offers as the boot default. `text` (the default) keeps the
-  session-choice prompt with a text default; `graphical` starts the
-  desktop session directly after authentication when a desktop is
-  installed, degrading to text when none is.
+  service starts for an authenticated user. `text` (the default) starts
+  the account's shell — the desktop can still be started on demand with
+  the `desktop` command; `graphical` starts the desktop session
+  directly after authentication when a desktop is installed, degrading
+  to text when none is.
 
 ## OPTIONS
 

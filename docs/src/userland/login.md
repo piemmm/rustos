@@ -1,12 +1,16 @@
 # Text login (`userland/session/login`)
 
 `rustos-login` authenticates a user against `kernel/sec` and launches a
-session on their behalf. It **always starts in text mode** and offers a
-graphical session only when the desktop-session bundle is installed
+session on their behalf. Which session runs is **system policy, never a
+per-login prompt**: the authenticated account's text shell by default,
+or the graphical desktop when the administrator configured
+`os.loginType graphical` **and** the desktop bundle is installed
 **and** a display service is live (both re-probed each round, see the
-`Run` binary below); when they are not, the graphical option is simply
-hidden — never crashed, never errored (`AGENTS.md` §10). The installed
-binary lives at `/System/Services/login.app/Run`.
+`Run` binary below). When they are not, the configured graphical
+default degrades to text — never crashed, never errored (`AGENTS.md`
+§10) — and a shell user starts the desktop on demand with the `desktop`
+command. The installed binary lives at
+`/System/Services/login.app/Run`.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and depends only on
 the audited `lib/*` crates `rustos-abi`, `rustos-caps`, `rustos-log`,
@@ -34,14 +38,15 @@ the stored hash.
 2. **Authenticate** the `Credentials` through the `Authenticator`. A
    rejected attempt is audited and consumes one try; the bounded budget
    means a stuck or hostile console can never spin forever.
-3. On success, **choose the session** — text by default, graphical offered
-   only when `graphical_available` (`AGENTS.md` §10) — and hand the
-   authenticated identity to the `SessionLauncher`. When the administrator
-   configured `os.loginType graphical` (the `configure` command's
-   system-configuration store, read through the shared `lib/sysconfig`
-   engine each round), an available graphical session starts directly
-   without the choice prompt; on a system with no desktop it degrades to
-   text — never an error.
+3. On success, **decide the session** — pure policy, no prompt — and
+   hand the authenticated identity to the `SessionLauncher`. When the
+   administrator configured `os.loginType graphical` (the `configure`
+   command's system-configuration store, read through the shared
+   `lib/sysconfig` engine each round) and a graphical session is
+   available (`graphical_available`, `AGENTS.md` §10), the desktop
+   starts directly; every other combination starts the account's text
+   shell — a graphical default on a system with no desktop degrades to
+   text, never an error.
 
 If the attempt budget is exhausted, login launches nothing and returns
 `LoginError::TooManyAttempts`. A terminal that cannot be read aborts with
@@ -82,8 +87,8 @@ no ambient authority).
 The operations that touch the outside world are injected, mirroring
 [`init`](init.md)'s `Spawner`/`Reaper` split:
 
-- `LoginView` — presents the login screen and reads the username, the
-  (never-rendered) password, and the session choice; the machine drives
+- `LoginView` — presents the login screen and reads the username and the
+  (never-rendered) password; the machine drives
   it through semantic calls (`round_begin`, `note_failure`,
   `session_handoff`), never raw terminal writes.
 - `Authenticator::authenticate(&Credentials) -> Result<AuthenticatedUser, Errno>`
@@ -190,9 +195,10 @@ supervises (`plans/PI.md` P11). It wires the real seams:
     an invented account).
 - **`SessionLauncher`** over the `spawn`/`wait` syscalls: the chosen
   session's program — the record's shell of choice for a text session,
-  the OS desktop-session bundle
+  the OS `desktop` command app
   (`rustos_login::DESKTOP_SESSION_PATH`,
-  `/System/Services/desktop.app/Run`) for a graphical one
+  `/System/Apps/desktop.app/Run` — the same bundle the shell's
+  `desktop` command word resolves to) for a graphical one
   (`session_program`, one mapping defined beside `SessionKind`) — is
   spawned **as the authenticated user** and supervised;
   its exit code closes the session. Login holds `CAP_SPAWN_AS_USER` and
@@ -208,7 +214,7 @@ supervises (`plans/PI.md` P11). It wires the real seams:
   because the session baseline carries the graphical class; the
   spawn-as-user switch sets the child's *identity*, not its capabilities.
 - **The graphical-availability probe** (`plans/DISPLAY.md` D7d), run
-  before every round and failing closed to "hidden": a read-only
+  before every round and failing closed to the text shell: a read-only
   `fs_open` of the desktop bundle's `Run` path through the secured VFS
   (login's one filesystem code path, the reason its manifest carries
   `CAP_FS_ACCESS`; credentials still flow only through the gated
@@ -266,13 +272,12 @@ on fd 2 until a userland audit transport exists.
 
 `cargo test -p rustos-login` drives the state machine against an in-memory
 `LoginView`/`Authenticator`/`SessionLauncher` and a recording log sink,
-covering a successful text login, the graphical option hidden when
-unavailable, an offered graphical session selected and defaulted to text,
-the configured graphical boot default starting the desktop without a
-prompt (and degrading to text when headless),
+covering a successful text login, the text default launching the shell
+even when a graphical session is available, the configured graphical
+default starting the desktop (and degrading to text when headless),
 wrong-password retry then success, the fail-closed lockout and zero-budget
 paths, a dead console, and a refused session launch — plus the
-session-choice parser, the `EventId` range and uniqueness invariants, the
+`EventId` range and uniqueness invariants, the
 numeric audit-field formatter, and the `UsersAuthenticator` (full identity
 mapping on success; one uniform refusal for a wrong password, an unknown
 user, a locked account, and empty credentials). The `supervise` loop is

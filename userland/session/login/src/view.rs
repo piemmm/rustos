@@ -152,11 +152,6 @@ const TITLE: &str = " RustOS Login ";
 /// costs one wake-up per interval and nothing else.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Most characters a session-choice answer may carry — a validation bound
-/// well past the longest valid answer (`graphical`), refusing junk whole
-/// before it can run into the field's drawn width.
-const SESSION_CHOICE_MAX: usize = 16;
-
 /// The status bars' style: white text on a blue background. Stated
 /// directly, never through reverse video — a terminal renders reverse by
 /// swapping the pen's colours, which would show the bars blue-on-white.
@@ -568,15 +563,6 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> LoginView for CursesView<T, S, M> 
         }
         // Hidden, so only the buffer's own validation bound applies.
         self.read_field("Password: ", false, usize::MAX, buf)
-    }
-
-    fn read_session_choice(&self, buf: &mut [u8]) -> Result<usize, Errno> {
-        self.read_field(
-            "Session [text]/[g]raphical: ",
-            true,
-            SESSION_CHOICE_MAX,
-            buf,
-        )
     }
 
     fn note_failure(&self) {

@@ -128,6 +128,7 @@
 extern crate alloc;
 
 pub mod assets;
+pub mod cli;
 pub mod config;
 pub mod device;
 pub mod input;
@@ -144,6 +145,7 @@ pub mod windows;
 mod tests;
 
 pub use assets::{load_cursor_theme, load_icon_set, GraphicsAssetReader, GRAPHICS_DIR};
+pub use cli::{parse, CliError, Command, USAGE};
 pub use config::{
     APPEARANCE_LABEL, FILES_LABEL, FILES_LAUNCHER, FILES_RUN_PATH, TERMINAL_LABEL,
     TERMINAL_LAUNCHER, TERMINAL_RUN_PATH, VIEWER_LABEL, VIEWER_LAUNCHER, VIEWER_RUN_PATH,

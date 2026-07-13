@@ -2,10 +2,14 @@
 
 Stage 6 deliverable (`AGENTS.md` §3 `userland/session/`, §10). It
 authenticates a user against `kernel/sec` and launches a session on their
-behalf. Login **always starts in text mode** and offers a graphical
-session only when a display driver and the window manager are present;
-otherwise the graphical option is hidden — never crashed, never errored
-(`AGENTS.md` §10). The installed binary lives at `/System/Services/login.app/Run`.
+behalf. Which session runs is **system policy, never a per-login
+prompt**: the authenticated account's text shell by default, or the
+graphical desktop when the administrator configured
+`os.loginType graphical` (`lib/sysconfig`) *and* a graphical session is
+available. When it is not, the configured graphical default degrades to
+text — never crashed, never errored (`AGENTS.md` §10) — and a shell user
+starts the desktop on demand with the `desktop` command. The installed
+binary lives at `/System/Services/login.app/Run`.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). It
@@ -76,11 +80,11 @@ Login owns the reserved `EventId` range `10000..11000` (`AGENTS.md` §2.5,
 
 `cargo test -p rustos-login` drives the state machine against in-memory
 `Prompt`/`Authenticator`/`SessionLauncher` fixtures and a recording log
-sink, covering a successful text login, the graphical option hidden when
-unavailable, an offered graphical session selected and defaulted to text,
-wrong-password retry then success, the lockout and zero-budget paths, a
-dead console, and a refused session launch — plus the session-choice
-parser, the `EventId` invariants, the numeric audit-field formatter, and
+sink, covering a successful text login, the configured graphical default
+starting the desktop (and degrading to text when no graphical session is
+available), wrong-password retry then success, the lockout and
+zero-budget paths, a dead console, and a refused session launch — plus
+the `EventId` invariants, the numeric audit-field formatter, and
 the elevation broker's decision table (grant + audit, foreign console
 refused before parsing, malformed refused without authentication,
 indistinguishable refusals, spawn refusal reported verbatim).

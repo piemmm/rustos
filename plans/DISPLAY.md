@@ -504,8 +504,9 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
 - **D7c — the desktop session binary. `[x]` — done.**
   `userland/gui/session` ships the `Run` program (`src/run.rs`, the
   login-crate lib+bin shape: `freestanding` build.rs cfg, the shared PIE
-  `Run.ld`, an `AppInfo.toml` requesting exactly `CAP_DISPLAY` +
-  `CAP_INPUT_READ` + `CAP_SHM`, host stub elsewhere):
+  `Run.ld`, host stub elsewhere) as the `desktop` **command app** — its
+  `AppInfo.toml` (kind `command`, the AW3/AW5/CU6-grown request pinned in
+  the kernel registry tests) plants it in the system app store:
   `display_acquire(SEAT_PRIMARY)` → `DisplayClient` bring-up over
   `ipc_call` (query → checked frame arithmetic → `shm_create` double
   buffer → `shm_grant` to the display endpoint's serving task →
@@ -535,16 +536,24 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
   are the reserved 1 GiB spans with lazily grown, fail-closed
   bookkeeping; and fixture build scripts register the inner build's
   dep-info (`tests/integration/harness` `dep_info`).
-  **D7d-2 (the graphical login) guarantees:**
-  - `userland/session/login` probes per round — a read-only `fs_open` of
-    `DESKTOP_SESSION_PATH` (`rustos_login::session`, the one spelling of
-    `/System/Services/desktop.app/Run`) plus one `Query` `ipc_call` to
-    the reserved `DISPLAY_ENDPOINT` (any well-formed reply proves a
-    privileged-bound service; `NotFound` proves none) — and offers the
-    graphical choice only when both hold; a graphical choice spawns the
-    D7c session as the authenticated user (`session_program`). Login's
-    manifest gained `CAP_FS_ACCESS` for exactly that probe (AppInfo +
-    kernel pin in lockstep).
+  **D7d-2 (the desktop launch) guarantees:**
+  - The desktop is the `desktop` **command app** in the system app store
+    (`userland/gui/session`, bundle `desktop.app`): the shell resolves
+    the bare command word `desktop` to it, and a graphical login spawns
+    the same bundle — one bundle, one spelling.
+  - Session selection is system policy, never a per-login prompt: login
+    starts the account's shell unless `os.loginType graphical` is
+    configured (`lib/sysconfig`) *and* the per-round probe holds — a
+    read-only `fs_open` of `DESKTOP_SESSION_PATH`
+    (`rustos_login::session`, the one spelling of
+    `/System/Apps/desktop.app/Run`) plus one `Query` `ipc_call` to the
+    reserved `DISPLAY_ENDPOINT` (any well-formed reply proves a
+    privileged-bound service; `NotFound` proves none); a configured
+    graphical default that cannot start degrades to text, never an
+    error. A graphical login spawns the D7c session as the
+    authenticated user (`session_program`). Login's manifest gained
+    `CAP_FS_ACCESS` for exactly that probe (AppInfo + kernel pin in
+    lockstep).
   - The CU6 ceiling slice: `SESSION_BASELINE` carries the
     graphical-session class (`CAP_DISPLAY`/`CAP_INPUT_READ`/`CAP_SHM`),
     so `desktop.app`'s manifest survives the `manifest ∩ ceiling`
@@ -556,9 +565,10 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
     range `15000..16000` in the driver crate's lib target, message
     shared with every consumer; manifest += `CAP_LOG_EMIT` at both plant
     sites) after the first successful client present — off the hot path.
-  - The vertical types `root`/`root` + `g` (a second marker-gated
-    typed-keys step keyed on the `UsersDbLoaded` serial witness; the
-    dialogue is compile-time-pinned to the fixture credentials), and the
+  - The vertical types `root`/`root` + the `desktop` command at the
+    shell the text login drops to (a second marker-gated typed-keys step
+    keyed on the `UsersDbLoaded` serial witness; the dialogue is
+    compile-time-pinned to the fixture credentials), and the
     runner keys **both** a QEMU-monitor screendump and the mouse
     injection on the `FIRST_PRESENT` marker, ordered present → fully
     parsed dump → pointer → `kind=pointer` witness → PASS, then asserts

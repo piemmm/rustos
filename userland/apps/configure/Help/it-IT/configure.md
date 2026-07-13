@@ -25,11 +25,11 @@ forma canonica e richiede l'accesso in scrittura a `/System/Settings`:
 un account ordinario può leggere le impostazioni ma non cambiarle.
 
 - `os.loginType` — `text` o `graphical`: quale tipo di sessione il
-  servizio di accesso propone come predefinito all'avvio. `text` (il
-  predefinito) mantiene la domanda di scelta sessione con testo
-  predefinito; `graphical` avvia direttamente la sessione desktop dopo
-  l'autenticazione quando un desktop è installato, ripiegando sul testo
-  quando non lo è.
+  servizio di accesso avvia per un utente autenticato. `text` (il
+  predefinito) avvia la shell dell'account — il desktop può comunque
+  essere avviato su richiesta con il comando `desktop`; `graphical`
+  avvia direttamente la sessione desktop dopo l'autenticazione quando
+  un desktop è installato, ripiegando sul testo quando non lo è.
 
 ## OPTIONS
 

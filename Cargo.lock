@@ -712,6 +712,7 @@ dependencies = [
  "rustos-caps",
  "rustos-cursor",
  "rustos-display",
+ "rustos-help",
  "rustos-icon",
  "rustos-rt",
  "rustos-taskbar",

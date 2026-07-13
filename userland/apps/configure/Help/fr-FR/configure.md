@@ -26,11 +26,12 @@ canonique et exige le droit d'écriture sur `/System/Settings` — un
 compte ordinaire peut lire les paramètres mais pas les changer.
 
 - `os.loginType` — `text` ou `graphical` : le type de session que le
-  service de connexion propose par défaut au démarrage. `text` (la
-  valeur par défaut) conserve l'invite de choix de session avec le mode
-  texte par défaut ; `graphical` lance directement la session de bureau
-  après l'authentification quand un bureau est installé, et se replie
-  sur le texte sinon.
+  service de connexion lance pour un utilisateur authentifié. `text`
+  (la valeur par défaut) lance le shell du compte — le bureau peut
+  toujours être lancé à la demande avec la commande `desktop` ;
+  `graphical` lance directement la session de bureau après
+  l'authentification quand un bureau est installé, et se replie sur le
+  texte sinon.
 
 ## OPTIONS
 

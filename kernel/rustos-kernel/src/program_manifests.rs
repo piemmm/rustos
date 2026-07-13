@@ -568,6 +568,7 @@ mod tests {
         for manifest in [
             CAT_MANIFEST,
             CLEAR_MANIFEST,
+            DESKTOP_SESSION_REQUEST,
             LS_MANIFEST,
             MAN_MANIFEST,
             PS_MANIFEST,
@@ -628,10 +629,13 @@ mod tests {
                 CapabilityId::SYSINFO_HW,
             ])
         );
-        // Every other session tool requests nothing above the baseline.
+        // Every other session tool — including the desktop session, whose
+        // whole graphical class is baseline (CU6) — requests nothing above
+        // the baseline.
         for manifest in [
             CAT_MANIFEST,
             CLEAR_MANIFEST,
+            DESKTOP_SESSION_REQUEST,
             LS_MANIFEST,
             MAN_MANIFEST,
             RESET_MANIFEST,
@@ -699,16 +703,19 @@ mod tests {
     const PURE_TOOL_REQUEST: &[CapabilityId] =
         &[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS];
 
-    // The desktop graphical-session service (plans/DISPLAY.md D7c,
-    // plans/APPWIN.md AW3/AW5): the boot seat's revocable lease
-    // (CAP_DISPLAY), the owner-gated seat input drains
-    // (CAP_INPUT_READ), the zero-copy frame regions it creates for
-    // the display service and maps from each served app window
-    // (CAP_SHM), the start menu's app launchers (CAP_PROC_SPAWN),
-    // and the trusted file picker (CAP_FS_ACCESS — the session lists
-    // directories and opens the user's chosen file under its own
-    // identity, then delegates that one file one-shot over fd_grant;
-    // plans/CAPABILITY_USE.md CU6). Binding the seat-scoped window
+    // The `desktop` command app — the graphical desktop session
+    // (plans/DISPLAY.md D7c, plans/APPWIN.md AW3/AW5), started by a
+    // graphical login or by the shell's `desktop` command word: the
+    // boot seat's revocable lease (CAP_DISPLAY), the owner-gated seat
+    // input drains (CAP_INPUT_READ), the zero-copy frame regions it
+    // creates for the display service and maps from each served app
+    // window (CAP_SHM), the start menu's app launchers
+    // (CAP_PROC_SPAWN), the trusted file picker (CAP_FS_ACCESS — the
+    // session lists directories and opens the user's chosen file under
+    // its own identity, then delegates that one file one-shot over
+    // fd_grant; plans/CAPABILITY_USE.md CU6), and the command surface
+    // (CAP_CONSOLE_WRITE — the short help on stdout and the fail-loud
+    // teardown reasons on stderr). Binding the seat-scoped window
     // rendezvous needs no capability: the kernel authorises it by the
     // session's live seat lease. It ships purely as a discovered
     // on-disk bundle — the boot floor never grows — so no
@@ -720,6 +727,7 @@ mod tests {
         CapabilityId::SHM,
         CapabilityId::PROC_SPAWN,
         CapabilityId::FS_ACCESS,
+        CapabilityId::CONSOLE_WRITE,
     ];
 
     // The device-inventory listing tools `lspci` and `lsusb`
@@ -799,7 +807,7 @@ mod tests {
             ("clear", AppKind::Command, CLEAR_MANIFEST),
             ("configure", AppKind::Command, PURE_TOOL_REQUEST),
             ("cp", AppKind::Command, FILE_TOOL_REQUEST),
-            ("desktop", AppKind::Service, DESKTOP_SESSION_REQUEST),
+            ("desktop", AppKind::Command, DESKTOP_SESSION_REQUEST),
             ("devmgr", AppKind::Service, DEVMGR_MANIFEST),
             ("df", AppKind::Command, PURE_TOOL_REQUEST),
             ("dirname", AppKind::Command, PURE_TOOL_REQUEST),

@@ -2,7 +2,13 @@
 
 The RustOS desktop **session glue** (`AGENTS.md` §10, `PLAN.md` Stage 7): the
 component that owns the shared theme registry and the taskbar model and ties
-the desktop's parts together.
+the desktop's parts together. The crate also ships the `Run` binary of the
+`desktop` **command app** (`desktop.app` in the system app store): a shell
+user starts the desktop by typing `desktop`, and a login configured with
+`os.loginType graphical` spawns the same bundle directly after
+authentication — one bundle, one spelling. The command's grammar is closed
+(`src/cli.rs`): bare `desktop` starts the session, the reserved `-h`/`-?`
+switches serve its own `Help/` documents, anything else is a usage error.
 
 The taskbar deliberately owns no theme registry and no spawn capability:
 activating a start-menu entry only *reports* an abstract `MenuAction` (a
@@ -281,8 +287,8 @@ block (`AGENTS.md` §2.10).
 ## Still to come (Stage 7)
 
 The D7d end-to-end QEMU vertical (the autoload world grows the display node,
-the framebuffer service bundle, and this spawned session; login flips
-`graphical_available` when both bundles are present), relaying the active
+the framebuffer service bundle, and this session, started by typing
+`desktop` at the shell the text login drops to), relaying the active
 theme to the window manager and apps over live IPC, resolving launcher /
 session-control actions once the process and window-manager capabilities are
 wired (deferred Stage 6 work), and the VFS-backed `GraphicsAssetReader` that

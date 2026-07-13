@@ -2533,9 +2533,12 @@ added to the file-map verticals.
   reaper, capability granting from manifests.
 - `userland/shell/elsh`: POSIX-ish shell with job control and a small builtin set.
 - `userland/session/login`: text login that authenticates against `kernel/sec`
-  and spawns a shell or a graphical session. Always starts in text mode;
-  offers graphical mode only when a display driver and `userland/gui/wm`
-  are available. The console presentation is the full-screen curses view
+  and spawns a shell or a graphical session. Which session runs is system
+  policy, never a per-login prompt: the account's shell by default, the
+  desktop when `os.loginType graphical` is configured *and* a graphical
+  session is available (degrading to text otherwise); a shell user starts
+  the desktop on demand with the `desktop` command app.
+  The console presentation is the full-screen curses view
   (`rustos_login::view::CursesView` over `lib/curses`): top bar with
   hostname/OS-version/clock, centred bordered login box, red running
   failed-attempt count, bottom bar with memory/tasks/users/load figures
@@ -2589,8 +2592,8 @@ added to the file-map verticals.
   hash discipline; served by `userland/system/sysinfod`.
 - `userland/system/init` (PID 1, dependency-ordered service manager + reaper +
   manifest capability granting), `userland/shell/elsh` (POSIX-ish, job
-  control), `userland/session/login` (text-first, graphical only when a
-  display driver + wm exist).
+  control), `userland/session/login` (shell by default; the desktop when
+  `os.loginType graphical` is configured and a graphical session exists).
 - Core CLI utilities each as their own `userland/apps/` crate (`ls`/`cp`/`mv`/
   `rm`/`cat`/`ps`/`mount`/`chmod`/`chown`/`useradd`/`groupadd`/`setcap`/
   `getcap`/`sysinfo`); `ps`/`mount`/`sysinfo` are sysinfo-API clients (no
@@ -2982,20 +2985,24 @@ transfer, landed in increments:
   autoloads onto its grants, the whole unlock dialogue is typed at the
   seat keyboard (the video console is the only console), and the run
   proves both per-kind `INPUT_DELIVERED` witnesses, the unlock, and the
-  `DISPLAY_ENDPOINT` bind (`plans/DISPLAY.md` D7d). **D7d-2 (the
-  graphical login) is done — D7 is complete:** login probes per round
-  (a read-only `fs_open` of the desktop bundle's `Run` path — its
-  manifest gained `CAP_FS_ACCESS` for exactly this — plus one `Query`
-  `ipc_call` to the reserved `DISPLAY_ENDPOINT`), offers the graphical
-  choice only when both hold, and spawns the D7c session as the
-  authenticated user; `SESSION_BASELINE` carries the graphical class
+  `DISPLAY_ENDPOINT` bind (`plans/DISPLAY.md` D7d). **D7d-2 (the desktop
+  launch) is done — D7 is complete:** the desktop is the `desktop`
+  command app in the system app store (`desktop.app`, the
+  `userland/gui/session` `Run` binary) — typed as a bare command word at
+  the shell, and spawned directly by login when `os.loginType graphical`
+  is configured (`lib/sysconfig`) *and* the per-round probe holds (a
+  read-only `fs_open` of the bundle's `Run` path — login's manifest
+  carries `CAP_FS_ACCESS` for exactly this — plus one `Query` `ipc_call`
+  to the reserved `DISPLAY_ENDPOINT`); there is no per-login session
+  selector, and a configured graphical default degrades to text when the
+  probe fails. `SESSION_BASELINE` carries the graphical class
   (`CAP_DISPLAY`/`CAP_INPUT_READ`/`CAP_SHM`, the CU6 ceiling slice) while
   the shell's manifest was decoupled to its own exercised set
   (`SHELL_MANIFEST`); the display service emits a one-shot
   `FIRST_PRESENT` record (id 15001, `CAP_LOG_EMIT`) after the first
   client frame reaches scan-out; and the autoload vertical types
-  `root`/`root` + `g` at the seat keyboard, keys a QEMU screendump plus
-  the mouse injection on that witness (present → verified dump →
+  `root`/`root` + `desktop` at the seat keyboard, keys a QEMU screendump
+  plus the mouse injection on that witness (present → verified dump →
   pointer → PASS), and the runner asserts the dump is dominated by the
   theme's desktop colour — the host-side proof the composited frame
   reached the surface.

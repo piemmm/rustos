@@ -3,8 +3,10 @@
 //! This is the one place a credential is collected, checked, audited, and
 //! turned into a running session. The loop **fails closed**: it launches a session only when a user authenticates *and* their
 //! session starts, and it bounds the number of attempts so a stuck console
-//! can never spin forever. It always starts in text mode and offers the
-//! graphical session only when one is available.
+//! can never spin forever. Which session runs is system policy, never a
+//! per-login prompt: the text shell by default, the graphical desktop when
+//! the administrator configured `os.loginType graphical` *and* a graphical
+//! session is available.
 
 use rustos_abi::Errno;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
@@ -25,18 +27,20 @@ pub struct LoginConfig<'a> {
     /// Maximum number of authentication attempts before login fails closed.
     /// Must be non-zero; a zero budget would refuse every login.
     pub max_attempts: u32,
-    /// Whether a graphical session can be offered. Set only when a display
-    /// driver loaded **and** the window manager is present; otherwise the
-    /// graphical option is hidden, never errored.
+    /// Whether a graphical session can be launched. Set only when the
+    /// desktop bundle is installed **and** a display service is live;
+    /// otherwise a configured graphical default degrades to text, never an
+    /// error.
     pub graphical_available: bool,
-    /// The administrator-configured boot-default session type
-    /// (`os.loginType` in the system-configuration store, read by the
-    /// binary after the root unlock). [`SessionKind::Text`] keeps the
-    /// session-choice prompt with a text default; [`SessionKind::Graphical`]
-    /// starts the desktop directly after authentication — but only when
+    /// The administrator-configured session type (`os.loginType` in the
+    /// system-configuration store, read by the binary after the root
+    /// unlock). [`SessionKind::Text`] — the default — starts the
+    /// authenticated account's shell; [`SessionKind::Graphical`] starts
+    /// the desktop directly after authentication — but only when
     /// [`graphical_available`](Self::graphical_available) holds, so a
     /// graphical default on a headless system degrades to text, never an
-    /// error.
+    /// error. There is no per-login prompt: a shell user starts the
+    /// desktop on demand with the `desktop` command.
     pub session_default: SessionKind,
     /// Seam that presents the login screen and reads the user's input.
     pub view: &'a dyn LoginView,
@@ -144,7 +148,7 @@ impl<'a> Login<'a> {
         username: &str,
         user: &AuthenticatedUser,
     ) -> Result<SessionOutcome, LoginError> {
-        let kind = self.choose_session()?;
+        let kind = self.choose_session();
         self.audit_session_started(username, user, kind);
         // The screen is the session's now: restore the normal terminal
         // before the shell starts writing to it.
@@ -161,25 +165,19 @@ impl<'a> Login<'a> {
         }
     }
 
-    /// Decide which session to launch.
+    /// Decide which session to launch: pure policy, no prompt.
     ///
-    /// Text is the default and the only option when no graphical session is
-    /// available. With a graphical session available, a configured
-    /// graphical boot default (`os.loginType graphical`) starts the desktop
-    /// directly; otherwise the user is offered the choice with a text
-    /// default.
-    fn choose_session(&self) -> Result<SessionKind, LoginError> {
-        if !self.cfg.graphical_available {
-            return Ok(SessionKind::Text);
+    /// The graphical desktop runs only when the administrator configured
+    /// it (`os.loginType graphical`) **and** a graphical session is
+    /// available this round; every other combination runs the text shell
+    /// (fail closed — a configured desktop that cannot start degrades to
+    /// text, never an error).
+    fn choose_session(&self) -> SessionKind {
+        if self.cfg.graphical_available && self.cfg.session_default == SessionKind::Graphical {
+            SessionKind::Graphical
+        } else {
+            SessionKind::Text
         }
-        if self.cfg.session_default == SessionKind::Graphical {
-            return Ok(SessionKind::Graphical);
-        }
-        let mut answer_buf = [0u8; INPUT_LINE_MAX];
-        let answer = self.read("session choice", &mut answer_buf, |v, buf| {
-            v.read_session_choice(buf)
-        })?;
-        Ok(SessionKind::from_choice(answer))
     }
 
     fn emit(&self, level: Level, id: EventId, fields: &[Field<'_>]) {
@@ -348,16 +346,13 @@ mod tests {
     /// calls the machine makes (rounds begun, failures noted, hand-offs).
     ///
     /// Scripted entries are raw bytes, not `&str`, so tests can replay
-    /// invalid UTF-8 and over-long lines through the same fixture. The
-    /// username and session-choice reads share the `lines` queue, exactly
-    /// as they share the echoed-input channel on a real console.
+    /// invalid UTF-8 and over-long lines through the same fixture.
     struct MockView {
         lines: RefCell<VecDeque<Result<Vec<u8>, Errno>>>,
         secrets: RefCell<VecDeque<Result<Vec<u8>, Errno>>>,
         rounds: Cell<u32>,
         failures: Cell<u32>,
         handoffs: Cell<u32>,
-        choice_reads: Cell<u32>,
     }
     impl MockView {
         fn new(lines: &[&str], secrets: &[&str]) -> Self {
@@ -376,7 +371,6 @@ mod tests {
                 rounds: Cell::new(0),
                 failures: Cell::new(0),
                 handoffs: Cell::new(0),
-                choice_reads: Cell::new(0),
             }
         }
         fn fill(
@@ -403,10 +397,6 @@ mod tests {
         }
         fn read_password(&self, buf: &mut [u8]) -> Result<usize, Errno> {
             Self::fill(&self.secrets, buf)
-        }
-        fn read_session_choice(&self, buf: &mut [u8]) -> Result<usize, Errno> {
-            self.choice_reads.set(self.choice_reads.get() + 1);
-            Self::fill(&self.lines, buf)
         }
         fn note_failure(&self) {
             self.failures.set(self.failures.get() + 1);
@@ -545,60 +535,15 @@ mod tests {
     }
 
     #[test]
-    fn graphical_option_hidden_when_unavailable() {
-        // Only one input line (the username); no session-choice line is read.
+    fn text_default_launches_the_shell_even_when_graphical_is_available() {
+        // A live graphical session never overrides the configured text
+        // default: only `os.loginType graphical` selects the desktop.
         let view = MockView::new(&["ada"], &["byron"]);
         let auth = auth();
         let launcher = MockLauncher::ok(SessionKind::Text);
         let sink = RecordingSink::new();
         let login = Login::new(LoginConfig {
             max_attempts: 3,
-            graphical_available: false,
-            session_default: SessionKind::Text,
-            view: &view,
-            authenticator: &auth,
-            launcher: &launcher,
-            sink: &sink,
-        });
-
-        let outcome = login.run().unwrap();
-        assert_eq!(outcome.kind, SessionKind::Text);
-        // The choice prompt was never presented.
-        assert_eq!(view.choice_reads.get(), 0);
-    }
-
-    #[test]
-    fn graphical_session_chosen_when_offered() {
-        // Username, then the session choice "g".
-        let view = MockView::new(&["ada", "g"], &["byron"]);
-        let auth = auth();
-        let launcher = MockLauncher::ok(SessionKind::Graphical);
-        let sink = RecordingSink::new();
-        let login = Login::new(LoginConfig {
-            max_attempts: 3,
-            graphical_available: true,
-            session_default: SessionKind::Text,
-            view: &view,
-            authenticator: &auth,
-            launcher: &launcher,
-            sink: &sink,
-        });
-
-        let outcome = login.run().unwrap();
-        assert_eq!(outcome.kind, SessionKind::Graphical);
-        assert_eq!(launcher.launched.borrow()[0].1, SessionKind::Graphical);
-        // The choice prompt was presented exactly once.
-        assert_eq!(view.choice_reads.get(), 1);
-    }
-
-    #[test]
-    fn offered_but_text_chosen_defaults_to_text() {
-        let view = MockView::new(&["ada", ""], &["byron"]);
-        let auth = auth();
-        let launcher = MockLauncher::ok(SessionKind::Text);
-        let sink = RecordingSink::new();
-        let login = Login::new(LoginConfig {
-            max_attempts: 3,
             graphical_available: true,
             session_default: SessionKind::Text,
             view: &view,
@@ -609,13 +554,13 @@ mod tests {
 
         let outcome = login.run().unwrap();
         assert_eq!(outcome.kind, SessionKind::Text);
+        assert_eq!(launcher.launched.borrow()[0].1, SessionKind::Text);
     }
 
     #[test]
-    fn configured_graphical_default_skips_the_choice_prompt() {
+    fn configured_graphical_default_starts_the_desktop() {
         // The administrator configured `os.loginType graphical`: the
-        // desktop starts directly after authentication, and the
-        // session-choice prompt is never presented.
+        // desktop starts directly after authentication.
         let view = MockView::new(&["ada"], &["byron"]);
         let auth = auth();
         let launcher = MockLauncher::ok(SessionKind::Graphical);
@@ -633,14 +578,12 @@ mod tests {
         let outcome = login.run().unwrap();
         assert_eq!(outcome.kind, SessionKind::Graphical);
         assert_eq!(launcher.launched.borrow()[0].1, SessionKind::Graphical);
-        assert_eq!(view.choice_reads.get(), 0, "no choice prompt was read");
     }
 
     #[test]
     fn configured_graphical_default_degrades_to_text_when_headless() {
-        // A graphical boot default on a system with no desktop session
-        // degrades to text — never an error, never a prompt for an option
-        // that does not exist.
+        // A graphical default on a system with no desktop session degrades
+        // to text — never an error (fail closed, the login still works).
         let view = MockView::new(&["ada"], &["byron"]);
         let auth = auth();
         let launcher = MockLauncher::ok(SessionKind::Text);
@@ -657,7 +600,7 @@ mod tests {
 
         let outcome = login.run().unwrap();
         assert_eq!(outcome.kind, SessionKind::Text);
-        assert_eq!(view.choice_reads.get(), 0);
+        assert_eq!(launcher.launched.borrow()[0].1, SessionKind::Text);
     }
 
     #[test]

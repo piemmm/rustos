@@ -64,12 +64,13 @@ pub const CONFIG_PATH: &str = "/System/Settings/Configuration/system.conf";
 /// a defect, not a workload.
 pub const MAX_CONFIG_LEN: usize = 4096;
 
-/// Which session type the login service offers as the boot default
-/// (`os.loginType`).
+/// Which session type the login service starts for an authenticated user
+/// (`os.loginType`). System policy, never a per-login prompt.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum LoginType {
-    /// The text login: the session-choice prompt with a text default —
-    /// today's behaviour, and the value an absent store implies.
+    /// The text login: the authenticated account's shell — the default,
+    /// and the value an absent store implies. A shell user starts the
+    /// desktop on demand with the `desktop` command.
     #[default]
     Text,
     /// The graphical login: an authenticated user's session starts the

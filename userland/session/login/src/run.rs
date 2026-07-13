@@ -558,13 +558,13 @@ mod program {
         }
     }
 
-    /// Whether a graphical session can be offered on this round: the
-    /// desktop-session bundle is installed **and** a display service is
-    /// live. Both facts are re-checked per round — a service that came up
-    /// (or a bundle installed) after boot is offered on the next prompt,
-    /// and one that vanished is hidden again — and both fail closed: any
-    /// refusal hides the option, never errors the login (the graphical
-    /// option is hidden, never crashed).
+    /// Whether a graphical session can be launched on this round: the
+    /// desktop bundle is installed **and** a display service is live.
+    /// Both facts are re-checked per round — a service that came up (or a
+    /// bundle installed) after boot arms a configured graphical default at
+    /// the next prompt, and one that vanished degrades it to text again —
+    /// and both fail closed: any refusal selects the text shell, never an
+    /// errored login.
     ///
     /// * **Bundle presence** — a read-only `fs_open` of the desktop
     ///   bundle's `Run` path through the secured VFS (per-inode
@@ -614,9 +614,10 @@ mod program {
         };
         let login = Login::new(LoginConfig {
             max_attempts: MAX_ATTEMPTS,
-            // Re-probed each round: offered only while the desktop bundle
-            // is installed and a display service is live; hidden — never
-            // errored — otherwise.
+            // Re-probed each round: a configured graphical default takes
+            // effect only while the desktop bundle is installed and a
+            // display service is live; it degrades to text — never an
+            // error — otherwise.
             graphical_available: graphical_session_available(),
             // Re-read each round: a `configure os.loginType` change takes
             // effect at the next prompt, exactly like the availability

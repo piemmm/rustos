@@ -1,10 +1,13 @@
 //! RustOS text login (Stage 6).
 //!
 //! `rustos-login` authenticates a user against `kernel/sec` and launches a
-//! session on their behalf. It **always starts in text mode** and offers a
-//! graphical session only when a display driver and the window manager are
-//! present; when they are not, the graphical option is simply hidden — never
-//! crashed, never errored. Installed to
+//! session on their behalf. Which session runs is **system policy, never a
+//! per-login prompt**: the authenticated account's text shell by default,
+//! or the graphical desktop when the administrator configured
+//! `os.loginType graphical` (`lib/sysconfig`) *and* a graphical session is
+//! available. When it is not, the configured graphical default degrades to
+//! text — never crashed, never errored — and a shell user starts the
+//! desktop on demand with the `desktop` command. Installed to
 //! `/System/Services/login.app/Run`.
 //!
 //! # What this crate is
@@ -19,9 +22,9 @@
 //!    and capability ceiling. A rejected attempt
 //!    consumes one of a bounded number of tries; the budget makes login
 //!    **fail closed** rather than prompt forever.
-//! 3. On success, offer the session choice (text by default, graphical only
-//!    when available) and hand the authenticated identity to the
-//!    [`SessionLauncher`].
+//! 3. On success, decide the session kind from the configured
+//!    `os.loginType` and this round's graphical availability, and hand the
+//!    authenticated identity to the [`SessionLauncher`].
 //!
 //! Every security-relevant decision — a failed authentication, a lockout, a
 //! session start and end, a refused launch, a dead console — is audited

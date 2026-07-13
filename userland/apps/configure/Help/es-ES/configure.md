@@ -24,12 +24,12 @@ válidas y no cambia nada. Cambiar un ajuste reescribe el almacén en su
 forma canónica y requiere acceso de escritura a `/System/Settings`: una
 cuenta ordinaria puede leer los ajustes pero no cambiarlos.
 
-- `os.loginType` — `text` o `graphical`: qué tipo de sesión ofrece por
-  defecto el servicio de inicio de sesión. `text` (el valor por
-  defecto) conserva la pregunta de sesión con texto por defecto;
-  `graphical` inicia directamente la sesión de escritorio tras la
-  autenticación cuando hay un escritorio instalado, y recurre al texto
-  cuando no lo hay.
+- `os.loginType` — `text` o `graphical`: qué tipo de sesión inicia el
+  servicio de inicio de sesión para un usuario autenticado. `text` (el
+  valor por defecto) inicia el shell de la cuenta — el escritorio puede
+  iniciarse bajo demanda con el comando `desktop`; `graphical` inicia
+  directamente la sesión de escritorio tras la autenticación cuando hay
+  un escritorio instalado, y recurre al texto cuando no lo hay.
 
 ## OPTIONS
 

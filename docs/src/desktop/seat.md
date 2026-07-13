@@ -353,9 +353,10 @@ Both `Run` binaries hosting those halves are live (stages D7b–D7c):
 
 Stage D7d (`plans/DISPLAY.md`) proves the whole chain end to end in the
 autoload QEMU vertical: the boot display node, the autoloaded framebuffer
-service, login's per-round `graphical_available` probes (the desktop
-bundle on disk plus a live display service at the reserved endpoint), the
-`root`/`root` + `g` dialogue typed at the seat keyboard, the spawned
+service, the `root`/`root` login typed at the seat keyboard followed by
+the `desktop` command at the text shell it drops to (the desktop is the
+system app store's `desktop.app`, the same bundle a configured
+`os.loginType graphical` login spawns directly), the spawned
 session's first present — witnessed by the service's one-shot
 `FIRST_PRESENT` record — and a host-side QEMU screendump asserted to be
 dominated by the theme's desktop colour, so the composited frame

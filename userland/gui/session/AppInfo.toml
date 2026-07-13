@@ -1,26 +1,30 @@
-# Signed-AppInfo manifest source for the `desktop` graphical-session
-# service (a service is an app, AGENTS.md §16.2; plans/DISPLAY.md D7c).
-# Discovered by the build's app-bundle composer and planted under
-# /System/Services/. The capability list is the bundle's request:
-# CAP_DISPLAY to acquire the boot seat's exclusive, revocable lease,
-# CAP_INPUT_READ to drain the owned seat's pointer/keyboard channels
-# (the kernel additionally owner-gates every drain against the live
-# lease), CAP_SHM to create and grant the zero-copy frame region the
+# Signed-AppInfo manifest source for the `desktop` command app — the
+# graphical desktop session (plans/DISPLAY.md D7c, plans/APPS.md).
+# Discovered by the build's app-bundle composer and planted in the system
+# app store under /System/Apps/, so the shell resolves the bare command
+# word `desktop` to this bundle and a graphical login spawns the same
+# path — one bundle, one spelling. The capability list is the bundle's
+# request: CAP_DISPLAY to acquire the boot seat's exclusive, revocable
+# lease, CAP_INPUT_READ to drain the owned seat's pointer/keyboard
+# channels (the kernel additionally owner-gates every drain against the
+# live lease), CAP_SHM to create and grant the zero-copy frame region the
 # display service maps (and to map each served app window's granted
 # frames), CAP_PROC_SPAWN for the start menu's app launchers
-# (plans/APPWIN.md AW3), and CAP_FS_ACCESS for the trusted file picker
+# (plans/APPWIN.md AW3), CAP_FS_ACCESS for the trusted file picker
 # (plans/APPWIN.md AW5, plans/CAPABILITY_USE.md CU6): the session lists
 # directories and opens the user's chosen file under its own identity
 # (every read still permission-checked per inode), then delegates that
 # one file one-shot to the requesting app over fd_grant — the
-# user-mediated capability model, and also the read seam for the
-# on-disk SVG desktop assets. No console pair: the session's surface is
-# the seat, not a text console; no CAP_IPC_BIND_PRIVILEGED: the display
+# user-mediated capability model, and also the read seam for the on-disk
+# SVG desktop assets — and CAP_CONSOLE_WRITE for the command surface: the
+# short help (-h/-?) on standard output and the fail-loud teardown
+# reasons on standard error. No CAP_CONSOLE_READ: the session's input is
+# the seat, never a text console; no CAP_IPC_BIND_PRIVILEGED: the display
 # endpoint is called, never bound, and binding the seat-scoped window
 # rendezvous is authorised by the session's kernel-attested live seat
 # lease, not a capability.
 id = "os.rustos.desktop"
 name = "desktop"
 version = "0.1.0"
-kind = "service"
-capabilities = ["CAP_DISPLAY", "CAP_INPUT_READ", "CAP_SHM", "CAP_PROC_SPAWN", "CAP_FS_ACCESS"]
+kind = "command"
+capabilities = ["CAP_DISPLAY", "CAP_INPUT_READ", "CAP_SHM", "CAP_PROC_SPAWN", "CAP_FS_ACCESS", "CAP_CONSOLE_WRITE"]

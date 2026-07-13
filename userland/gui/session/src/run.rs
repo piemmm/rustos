@@ -1,6 +1,11 @@
-//! The `Run` entry-point binary of the desktop session service, installed
-//! as a signed `/System/Services/` bundle and launched as the graphical
-//! session (`plans/DISPLAY.md` D7c).
+//! The `Run` entry-point binary of the `desktop` command app, installed
+//! as a signed bundle in the system app store (`/System/Apps/`) and
+//! started two ways through the one bundle: a graphical login
+//! (`os.loginType graphical`) spawns it as the authenticated user's
+//! session, and a shell user starts it on demand by typing `desktop`
+//! (`plans/DISPLAY.md` D7c, `plans/APPS.md`). The reserved `-h`/`-?`
+//! switches serve the command's own short help; the grammar is otherwise
+//! closed (see [`rustos_desktop_session::cli`]).
 //!
 //! This is the client half of the zero-copy, lease-gated present path: the
 //! session acquires the boot seat's exclusive, revocable lease, brings the
@@ -74,12 +79,15 @@ mod program {
     use rustos_browse::{DirectorySource, VfsDirectorySource};
     use rustos_caps::CapabilitySet;
     use rustos_desktop_session::{
-        ConcludedPick, DesktopShell, DeviceInputSource, KeyboardInputSource, PickConclusion,
-        SeatEventReader, SeatInputChannel, SessionPicker, SessionWindows, ShellWindowHost,
-        APPEARANCE_LABEL, FILES_LABEL, FILES_LAUNCHER, FILES_RUN_PATH, TERMINAL_LABEL,
-        TERMINAL_LAUNCHER, TERMINAL_RUN_PATH, VIEWER_LABEL, VIEWER_LAUNCHER, VIEWER_RUN_PATH,
+        parse, CliError, Command, ConcludedPick, DesktopShell, DeviceInputSource,
+        KeyboardInputSource, PickConclusion, SeatEventReader, SeatInputChannel, SessionPicker,
+        SessionWindows, ShellWindowHost, APPEARANCE_LABEL, FILES_LABEL, FILES_LAUNCHER,
+        FILES_RUN_PATH, TERMINAL_LABEL, TERMINAL_LAUNCHER, TERMINAL_RUN_PATH, USAGE, VIEWER_LABEL,
+        VIEWER_LAUNCHER, VIEWER_RUN_PATH,
     };
     use rustos_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
+    use rustos_help::{own_short_help, BundleHelp};
+    use rustos_rt::io::{write_stderr_line, Stdout, Write};
     use rustos_taskbar::{MenuAction, TaskbarConfig, TaskbarResponse};
     use rustos_window::{CallerIdentity, EventSink, WindowServer, WINDOW_REPLY_MAX};
     use rustos_wm::{Compositor, InputResponse, Rect};
@@ -891,13 +899,46 @@ mod program {
         }
     }
 
+    /// Render the command's own short help (`NAME` + `SYNOPSIS` + compact
+    /// `OPTIONS`) from its own bundle's `Help/` tree through the one shared
+    /// engine; when no document can be served (a build without the
+    /// bundle's documents) the usage banner stands in — the tool's own
+    /// text, not fabricated help content — so `-h` never fails.
+    fn short_help() -> i32 {
+        let locale = rustos_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let bytes = own_short_help(&BundleHelp::new("desktop"), locale, "desktop")
+            .unwrap_or_else(|| alloc::format!("{USAGE}\n").into_bytes());
+        match Stdout.write_all(&bytes) {
+            Ok(()) => 0,
+            Err(_) => 1,
+        }
+    }
+
     /// Program entry point. `rustos-rt`'s `_start` calls it once the
     /// runtime is set up and routes its return value through the `exit`
     /// syscall.
     ///
-    /// On success this never returns: the session loop runs until the seat
-    /// is lost or a fault ends it.
+    /// Exit codes: `0` for a served short help, `2` on a usage error, and
+    /// otherwise the session's own codes — on success this never returns
+    /// until the session ends: the loop runs until the seat is lost or a
+    /// fault ends it.
     fn main() -> i32 {
+        // The command surface first: a malformed (non-UTF-8) argument
+        // vector is a usage error, reported rather than guessed at, and
+        // the reserved short-help switches never touch the seat.
+        let Some(arguments) = rustos_rt::args() else {
+            write_stderr_line(USAGE);
+            return 2;
+        };
+        match parse(&arguments) {
+            Ok(Command::Run) => {}
+            Ok(Command::Help) => return short_help(),
+            Err(CliError::Usage) => {
+                write_stderr_line(USAGE);
+                return 2;
+            }
+        }
+
         // Acquire the boot seat's exclusive, revocable lease. The kernel
         // binds this task as the owner; a seat already held refuses with a
         // typed error rather than displacing its owner.

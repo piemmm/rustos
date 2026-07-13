@@ -297,7 +297,7 @@ const AUTOLOAD_TERMINAL_TYPE_OCCURRENCES: u32 =
 const AUTOLOAD_TERMINAL_COMMAND: &str = rustos_test_autoload_input_qemu_aarch64::TERMINAL_COMMAND;
 
 /// Serial marker after which the autoload vertical types the login +
-/// graphical-choice dialogue: the serial rendering of the kernel's
+/// desktop-command dialogue: the serial rendering of the kernel's
 /// `UsersDbLoaded` audit witness (`EventId` 4040), emitted the moment the
 /// typed passphrase unlocked the encrypted root and the users database
 /// installed. `login` prompts on the video console only after that, so
@@ -307,12 +307,18 @@ const AUTOLOAD_TERMINAL_COMMAND: &str = rustos_test_autoload_input_qemu_aarch64:
 /// time out loudly, never pass on the wrong exchange.)
 const AUTOLOAD_LOGIN_MARKER: &str = "users database loaded";
 
-/// The login + graphical-choice dialogue the autoload vertical types at
+/// The login + desktop-command dialogue the autoload vertical types at
 /// the seat keyboard: the fixture account's username and password
-/// (`root`/`root`), then `g` at the session-choice prompt — selecting
-/// the graphical desktop session. Pinned against the fixture credentials
-/// below so the dialogue and the planted account cannot drift.
-const AUTOLOAD_LOGIN_DIALOGUE: &str = "root\nroot\ng\n";
+/// (`root`/`root`), then the `desktop` command word at the text shell's
+/// prompt — login has no session selector (`os.loginType` defaults to
+/// text), so the authenticated session is the shell and the desktop is
+/// started exactly as a user starts it, by typing `desktop` (the system
+/// app store's `desktop.app`, the bundle a graphical login also spawns).
+/// Pinned against the fixture credentials below so the dialogue and the
+/// planted account cannot drift; a renamed bundle makes the vertical
+/// time out loudly at the `FIRST_PRESENT` gate, never pass on the wrong
+/// exchange.
+const AUTOLOAD_LOGIN_DIALOGUE: &str = "root\nroot\ndesktop\n";
 
 /// Serial marker after which the autoload vertical takes its screendump
 /// **and** injects the mouse motion: the display service's one-shot
@@ -388,7 +394,8 @@ const _: () = {
         "WRONG_UNLOCK_PASSPHRASE_PREFIX must be non-empty and not the fixture passphrase"
     );
     // The autoload login dialogue is `<username>\n<password>\n` from the
-    // shared fixture account, then the explicit graphical choice `g\n`.
+    // shared fixture account, then the `desktop` command typed at the
+    // shell prompt the text login drops to.
     assert!(
         starts_with_bytes(
             AUTOLOAD_LOGIN_DIALOGUE.as_bytes(),
@@ -412,9 +419,9 @@ const _: () = {
                 .as_bytes()
                 .split_at(SESSION_USERNAME_LINE.len() + SESSION_PASSWORD_LINE.len())
                 .1,
-            b"g\n"
+            b"desktop\n"
         ),
-        "AUTOLOAD_LOGIN_DIALOGUE must end with the explicit graphical choice"
+        "AUTOLOAD_LOGIN_DIALOGUE must end with the `desktop` shell command"
     );
     assert!(
         is_line_of(
@@ -3643,12 +3650,13 @@ const TESTS: &[QemuTest] = &[
     // granted surface and bound its rendezvous under
     // `CAP_IPC_BIND_PRIVILEGED`).
     //
-    // D7d-2 grows the run into the full graphical login: after the unlock,
-    // the second typed step (keyed on the `UsersDbLoaded` serial witness)
+    // D7d-2 grows the run into the desktop launch: after the unlock, the
+    // second typed step (keyed on the `UsersDbLoaded` serial witness)
     // types the fixture account's `root`/`root` at login's video-console
-    // prompt and answers the session choice with `g` — login offers the
-    // choice only because its per-round probes found both the desktop
-    // bundle and the live display service.
+    // prompt — `os.loginType` defaults to text, so login drops to the
+    // account's shell — and then the `desktop` command word, which the
+    // shell resolves in the system app store and spawns: the desktop is
+    // started exactly the way a user starts it from the command line.
     //
     // AW3 (`plans/APPWIN.md`) grows the presented desktop into the full
     // click-through: the display service's one-shot `FIRST_PRESENT`

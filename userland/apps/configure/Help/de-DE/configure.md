@@ -26,11 +26,12 @@ schreibt den Speicher in kanonischer Form neu und erfordert
 Schreibzugriff auf `/System/Settings` — ein gewöhnliches Konto kann die
 Einstellungen lesen, aber nicht ändern.
 
-- `os.loginType` — `text` oder `graphical`: welcher Sitzungstyp der
-  Anmeldedienst als Startvorgabe anbietet. `text` (die Vorgabe) behält
-  die Sitzungsabfrage mit Text-Vorgabe; `graphical` startet nach der
-  Authentifizierung direkt die Desktop-Sitzung, sofern ein Desktop
-  installiert ist, und fällt andernfalls auf Text zurück.
+- `os.loginType` — `text` oder `graphical`: welchen Sitzungstyp der
+  Anmeldedienst für einen authentifizierten Benutzer startet. `text`
+  (die Vorgabe) startet die Shell des Kontos — der Desktop lässt sich
+  weiterhin bei Bedarf mit dem Befehl `desktop` starten; `graphical`
+  startet nach der Authentifizierung direkt die Desktop-Sitzung, sofern
+  ein Desktop installiert ist, und fällt andernfalls auf Text zurück.
 
 ## OPTIONS
 

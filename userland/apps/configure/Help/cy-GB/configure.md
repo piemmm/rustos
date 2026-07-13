@@ -25,11 +25,12 @@ gofyn am fynediad ysgrifennu i `/System/Settings` — gall cyfrif
 cyffredin ddarllen y gosodiadau ond nid eu newid.
 
 - `os.loginType` — `text` neu `graphical`: pa fath o sesiwn y mae'r
-  gwasanaeth mewngofnodi yn ei gynnig fel rhagosodiad cychwyn. Mae
-  `text` (y rhagosodiad) yn cadw'r cwestiwn dewis sesiwn gyda thestun
-  yn rhagosodedig; mae `graphical` yn cychwyn y sesiwn bwrdd gwaith yn
-  uniongyrchol ar ôl dilysu pan fo bwrdd gwaith wedi'i osod, gan
-  ddisgyn yn ôl i destun pan nad oes un.
+  gwasanaeth mewngofnodi yn ei chychwyn i ddefnyddiwr wedi'i ddilysu.
+  Mae `text` (y rhagosodiad) yn cychwyn cragen y cyfrif — gellir dal i
+  gychwyn y bwrdd gwaith ar alw gyda'r gorchymyn `desktop`; mae
+  `graphical` yn cychwyn y sesiwn bwrdd gwaith yn uniongyrchol ar ôl
+  dilysu pan fo bwrdd gwaith wedi'i osod, gan ddisgyn yn ôl i destun
+  pan nad oes un.
 
 ## OPTIONS
 

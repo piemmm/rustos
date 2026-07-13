@@ -121,13 +121,15 @@ pub fn session_environment(user: &AuthenticatedUser) -> Vec<String> {
     ]
 }
 
-/// Absolute path of the desktop-session service's `Run` binary — the
+/// Absolute path of the `desktop` command app's `Run` binary — the
 /// program a [`SessionKind::Graphical`] session launches
-/// (`plans/DISPLAY.md` D7c/D7d). A service is an app (`.app` bundle under
-/// `/System/Services/`), and this is the one OS-wide spelling of its
-/// entry point: the launcher spawns it and login's availability probe
-/// checks the same path, so the two can never name different bundles.
-pub const DESKTOP_SESSION_PATH: &str = "/System/Services/desktop.app/Run";
+/// (`plans/DISPLAY.md` D7c/D7d). The desktop is a system command app
+/// (`.app` bundle in the system app store, `/System/Apps/`), so the same
+/// bundle a graphical login starts is what a shell user runs by typing
+/// `desktop`. This is the one OS-wide spelling of its entry point: the
+/// launcher spawns it and login's availability probe checks the same
+/// path, so the two can never name different bundles.
+pub const DESKTOP_SESSION_PATH: &str = "/System/Apps/desktop.app/Run";
 
 /// The program a session of `kind` runs for `user`: the authenticated
 /// account's own shell of choice for a text session, the OS desktop
@@ -147,9 +149,14 @@ pub fn session_program(user: &AuthenticatedUser, kind: SessionKind) -> &str {
 
 /// Which kind of session to launch after a successful authentication.
 ///
-/// Login always offers **text** first; the graphical option
-/// is presented only when a display driver and the window manager are present
-/// (see [`LoginConfig::graphical_available`](crate::LoginConfig)).
+/// There is no per-login prompt: the kind is system policy, decided by
+/// the administrator-configured `os.loginType` setting (the
+/// [`LoginConfig::session_default`](crate::LoginConfig) the binary reads
+/// through `lib/sysconfig`), and a graphical default takes effect only
+/// when a graphical session is actually available (see
+/// [`LoginConfig::graphical_available`](crate::LoginConfig)) — otherwise
+/// the text shell runs. A shell user starts the desktop on demand with
+/// the `desktop` command instead.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SessionKind {
     /// A text shell session.
@@ -159,25 +166,6 @@ pub enum SessionKind {
 }
 
 impl SessionKind {
-    /// Interpret the user's free-text session choice.
-    ///
-    /// The default is always [`SessionKind::Text`]: an empty
-    /// line, an unrecognised answer, or any explicit text choice selects it.
-    /// Only an explicit graphical answer (`g`, `graphical`, or `2`, in any
-    /// case, surrounding whitespace ignored) selects [`SessionKind::Graphical`].
-    #[must_use]
-    pub fn from_choice(answer: &str) -> Self {
-        let trimmed = answer.trim();
-        let graphical = trimmed.eq_ignore_ascii_case("g")
-            || trimmed.eq_ignore_ascii_case("graphical")
-            || trimmed == "2";
-        if graphical {
-            Self::Graphical
-        } else {
-            Self::Text
-        }
-    }
-
     /// Stable lowercase label used in audit records.
     #[must_use]
     pub fn label(self) -> &'static str {
@@ -240,14 +228,6 @@ pub trait LoginView {
     /// the terminal cannot be read, [`Errno::LengthOutOfRange`] for an
     /// over-long line.
     fn read_password(&self, buf: &mut [u8]) -> Result<usize, Errno>;
-
-    /// Read the session choice (text or graphical) into `buf`, returning
-    /// the number of bytes filled.
-    ///
-    /// # Errors
-    ///
-    /// As [`LoginView::read_username`].
-    fn read_session_choice(&self, buf: &mut [u8]) -> Result<usize, Errno>;
 
     /// Record one rejected authentication attempt and show the running
     /// failed-attempt count. The count accumulates across rounds until a
@@ -363,31 +343,9 @@ mod tests {
             super::session_program(&user, SessionKind::Graphical),
             super::DESKTOP_SESSION_PATH
         );
-        // The desktop path is the sealed service-store bundle spelling.
-        assert_eq!(
-            super::DESKTOP_SESSION_PATH,
-            "/System/Services/desktop.app/Run"
-        );
-    }
-
-    #[test]
-    fn session_choice_defaults_to_text() {
-        assert_eq!(SessionKind::from_choice(""), SessionKind::Text);
-        assert_eq!(SessionKind::from_choice("  "), SessionKind::Text);
-        assert_eq!(SessionKind::from_choice("t"), SessionKind::Text);
-        assert_eq!(SessionKind::from_choice("text"), SessionKind::Text);
-        assert_eq!(SessionKind::from_choice("yes please"), SessionKind::Text);
-    }
-
-    #[test]
-    fn session_choice_recognises_graphical() {
-        assert_eq!(SessionKind::from_choice("g"), SessionKind::Graphical);
-        assert_eq!(SessionKind::from_choice("G"), SessionKind::Graphical);
-        assert_eq!(
-            SessionKind::from_choice("  Graphical  "),
-            SessionKind::Graphical
-        );
-        assert_eq!(SessionKind::from_choice("2"), SessionKind::Graphical);
+        // The desktop path is the system-app-store bundle spelling: the
+        // same bundle the shell's `desktop` command word resolves to.
+        assert_eq!(super::DESKTOP_SESSION_PATH, "/System/Apps/desktop.app/Run");
     }
 
     #[test]
