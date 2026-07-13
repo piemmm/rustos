@@ -79,3 +79,97 @@ _start_secondary_aarch64:
 1:
     wfi
     b       1b
+
+// Spin-table release entry (`smp::start_secondary_spintable`).
+//
+// A core released through a Devicetree spin-table — the Pi 4's stock
+// firmware, whose parked cores poll a release word and `br` to the
+// address written there — arrives here instead of the PSCI trampoline
+// above. The release carries **no** context register (unlike PSCI's
+// x0 = context_id) and, on the Pi firmware hand-off, may arrive at EL2,
+// so this stub:
+//
+//   1. drops to EL1 through the shared `_el2_establish_and_drop`
+//      routine in `boot.s` (writing every UNKNOWN EL2 control register
+//      whole, exactly as the boot core's own drop does) when entered at
+//      EL2, and proceeds directly when already at EL1;
+//   2. establishes the known MMU-off `SCTLR_EL1` before the first EL1
+//      data access;
+//   3. recovers its dense CpuId by matching its own `MPIDR_EL1`
+//      affinity (`Aff0`–`Aff2`, `smp::MPIDR_AFFINITY_MASK`) against the
+//      table `smp::register_secondary_affinities` published in
+//      `SECONDARY_AFFINITY_BASE`/`SECONDARY_AFFINITY_COUNT`;
+//   4. joins `_start_secondary_aarch64` above with the dense id in x0,
+//      sharing the one stack-selection + Rust hand-off path.
+//
+// SAFETY-INVARIANTs (audited per AGENTS.md §1):
+//   1. Entered with the MMU off, at EL1 or EL2, only after
+//      `start_secondary_spintable` validated that the secondary entry,
+//      the stack pool, and the affinity table were all published (and
+//      swept to the point of coherency) before the release word was
+//      written — so every symbol read below observes published values.
+//   2. A core whose affinity is not in the published table parks in a
+//      `wfe` loop (fail closed): an undescribed core must never select
+//      a stack slice or enter Rust.
+//   3. The release word may wake every parked core at once (the kernel
+//      release word is shared); each core matches its own affinity, so
+//      no two cores resolve the same dense id (the dense map is
+//      duplicate-free by construction) and no stack slice is shared.
+.global _start_secondary_spintable_aarch64
+_start_secondary_spintable_aarch64:
+    // Mask all interrupts until the common path installs vectors.
+    msr     DAIFSet, #0xf
+
+    // Drop to EL1 first if the firmware handed this core over at EL2
+    // (bits [3:2] of CurrentEL); the boot core's own EL2 path is shared.
+    mrs     x1, CurrentEL
+    lsr     x1, x1, #2
+    cmp     x1, #2
+    b.ne    .Lspintable_el1
+    adr     x20, .Lspintable_el1
+    b       _el2_establish_and_drop
+
+.Lspintable_el1:
+    // Known MMU-off SCTLR_EL1 (`paging::SCTLR_MMU_OFF`, unit-test-pinned)
+    // before the first EL1 data access, exactly as `boot.s` `.Lin_el1`
+    // and the PSCI trampoline above do.
+    mov     x0, #0x0800
+    movk    x0, #0x30D0, lsl #16
+    msr     sctlr_el1, x0
+    isb
+
+    // This core's affinity (Aff0–Aff2, `smp::MPIDR_AFFINITY_MASK`).
+    mrs     x2, mpidr_el1
+    mov     x3, #0xffff
+    movk    x3, #0xff, lsl #16
+    and     x2, x2, x3
+
+    // Published dense-id → affinity table (base 0 = unpublished: park).
+    adrp    x3, SECONDARY_AFFINITY_BASE
+    add     x3, x3, :lo12:SECONDARY_AFFINITY_BASE
+    ldr     x3, [x3]
+    cbz     x3, .Lspintable_park
+    adrp    x4, SECONDARY_AFFINITY_COUNT
+    add     x4, x4, :lo12:SECONDARY_AFFINITY_COUNT
+    ldr     x4, [x4]
+
+    // Linear match: dense id x5 in 0..count with table[x5] == affinity.
+    mov     x5, #0
+.Lspintable_scan:
+    cmp     x5, x4
+    b.hs    .Lspintable_park            // not described: park, fail closed
+    ldr     x6, [x3, x5, lsl #3]
+    cmp     x6, x2
+    b.eq    .Lspintable_found
+    add     x5, x5, #1
+    b       .Lspintable_scan
+
+.Lspintable_found:
+    // Join the common trampoline with the dense id in x0 (it re-masks
+    // DAIF and re-writes SCTLR_EL1 — both idempotent).
+    mov     x0, x5
+    b       _start_secondary_aarch64
+
+.Lspintable_park:
+    wfe
+    b       .Lspintable_park

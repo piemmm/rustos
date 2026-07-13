@@ -86,5 +86,49 @@ fn start_cpu_error_cause_strings_are_stable() {
         StartCpuError::NoEntryInstalled.as_str(),
         "no_secondary_entry_installed"
     );
+    assert_eq!(
+        StartCpuError::NoAffinityTable.as_str(),
+        "no_secondary_affinity_table"
+    );
     assert_eq!(StartCpuError::Psci(-4).as_str(), "psci_cpu_on_failed");
+}
+
+#[test]
+fn affinity_table_publication_is_set_once_and_observable() {
+    // Dense id → affinity, the spin-table trampoline's identity source.
+    static AFFINITIES: [u64; 4] = [0, 1, 2, 3];
+    static SECOND: [u64; 2] = [0, 1];
+
+    reset_secondary_affinities_for_tests();
+    // Fail closed before publication: a spin-table release must be
+    // refused while no table is visible to the released core.
+    assert!(!secondary_affinities_registered());
+
+    assert_eq!(register_secondary_affinities(&AFFINITIES), Ok(4));
+    assert!(secondary_affinities_registered());
+    assert_eq!(
+        SECONDARY_AFFINITY_BASE.load(Ordering::Acquire),
+        AFFINITIES.as_ptr() as u64
+    );
+    assert_eq!(SECONDARY_AFFINITY_COUNT.load(Ordering::Acquire), 4);
+
+    // A second table is refused rather than silently re-pointing the
+    // live trampoline's identity source.
+    assert_eq!(
+        register_secondary_affinities(&SECOND),
+        Err(SecondaryAffinityError::AlreadyRegistered)
+    );
+    assert_eq!(
+        SECONDARY_AFFINITY_BASE.load(Ordering::Acquire),
+        AFFINITIES.as_ptr() as u64
+    );
+
+    reset_secondary_affinities_for_tests();
+}
+
+#[test]
+fn kernel_release_word_starts_parked() {
+    // The `_start` park loop polls this word MMU-off: it must be zero
+    // (keep parking) until a spin-table release publishes an entry.
+    assert_eq!(SECONDARY_KERNEL_RELEASE.load(Ordering::Acquire), 0);
 }

@@ -28,14 +28,34 @@
 //! set-once callback (parking until installed) keeps secondary bring-up
 //! opt-in without a Cargo feature gate (no hacks).
 //!
-//! # Bring-up method
+//! # Bring-up methods
 //!
-//! The `virt` board (and every platform RustOS' aarch64 QEMU tests run
-//! on) brings secondary cores up through PSCI `CPU_ON`, with the conduit
-//! (`hvc`/`smc`) discovered from the device tree ([`crate::fdt`]).
-//! Non-PSCI spin-table boot (e.g. a bare Raspberry Pi 3) is a tracked
-//! follow-up documented in the port `README.md`; `start_secondary`
-//! fails closed for an absent PSCI method rather than faking it.
+//! The board's device tree declares how a parked secondary is started,
+//! and the port implements both declared mechanisms:
+//!
+//! * **PSCI `CPU_ON`** (`start_secondary`) — the QEMU `virt` board and
+//!   every PSCI-firmware platform — with the conduit (`hvc`/`smc`)
+//!   discovered from the `/psci` node ([`crate::fdt`]). The firmware
+//!   enters the started core at the `smp.s` PSCI trampoline with the
+//!   dense id in `x0`.
+//! * **Devicetree spin-table** (`start_secondary_spintable`) — the
+//!   Raspberry Pi 4's stock firmware, whose `cpu@*` nodes declare
+//!   `enable-method = "spin-table"` and a per-core `cpu-release-addr`.
+//!   Releasing a core writes the spin-table trampoline's physical
+//!   address to **both** release channels — the firmware's declared
+//!   release word (for a core parked in the firmware stub) and the
+//!   kernel's own `SECONDARY_KERNEL_RELEASE` word (for a core the
+//!   firmware released straight into `boot.s`'s `_start`, which parks
+//!   it polling that word) — sweeps both to the point of coherency, and
+//!   signals `sev`. A spin-table release carries no context register,
+//!   so the released core recovers its dense id by matching its own
+//!   `MPIDR_EL1` affinity against the table published by
+//!   `register_secondary_affinities`; entry may be at EL2 (the Pi
+//!   firmware hand-off), which the trampoline drops exactly as `_start`
+//!   does (the shared `_el2_establish_and_drop` routine).
+//!
+//! A tree that declares neither mechanism leaves the handle without a
+//! start method and every start fails closed rather than guessing.
 //!
 //! # Host testability
 //!
@@ -250,6 +270,100 @@ fn reset_secondary_stacks_for_tests() {
 /// lock. `0` until [`set_secondary_entry`] installs it.
 static SECONDARY_ENTRY_FN: AtomicUsize = AtomicUsize::new(0);
 
+/// Base address of the published dense-id → `MPIDR_EL1`-affinity table
+/// (`0` until [`register_secondary_affinities`] publishes it). Read by
+/// symbol, MMU-off, by the `smp.s` spin-table trampoline: a released
+/// core carries no context register, so it linearly matches its own
+/// affinity against this table to recover its dense [`CpuId`] (entry
+/// `i` is dense id `i`'s affinity).
+#[no_mangle]
+#[used]
+static SECONDARY_AFFINITY_BASE: AtomicU64 = AtomicU64::new(0);
+
+/// Number of entries in the published affinity table (`0` until
+/// published). Read by symbol, MMU-off, by the `smp.s` spin-table
+/// trampoline; an affinity not found within this bound parks the core
+/// (fail closed).
+#[no_mangle]
+#[used]
+static SECONDARY_AFFINITY_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// The kernel's own spin-table release word, polled MMU-off by the
+/// `wfe` park loop in `boot.s`'s `_start` (the park every non-boot core
+/// enters when firmware releases all cores straight to the kernel).
+/// `0` parks; a non-zero value is the physical entry address the parked
+/// core branches to. Written only by `start_secondary_spintable`.
+#[no_mangle]
+#[used]
+static SECONDARY_KERNEL_RELEASE: AtomicU64 = AtomicU64::new(0);
+
+/// Set-once guard for [`register_secondary_affinities`].
+static SECONDARY_AFFINITIES_REGISTERED: AtomicBool = AtomicBool::new(false);
+
+/// Failure mode of [`register_secondary_affinities`].
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum SecondaryAffinityError {
+    /// A table was already published; the slot is set-once per boot (no
+    /// silent re-pointing of the live trampoline's identity source).
+    AlreadyRegistered,
+}
+
+/// Publish the dense-id → affinity table the spin-table trampoline
+/// recovers a released core's dense [`CpuId`] from (entry `i` is dense
+/// id `i`'s `MPIDR_EL1` affinity, `Aff0`–`Aff2` masked), returning the
+/// covered CPU count.
+///
+/// Must be called on the boot core, exactly once, before any
+/// spin-table release; the slice must stay mapped at its physical
+/// address for the kernel's lifetime (the `&'static` pins that). The
+/// released core reads the table with the MMU (and cache) off, so the
+/// publish sweeps the pointer, the count, and the table itself to the
+/// point of coherency.
+///
+/// # Errors
+///
+/// [`SecondaryAffinityError::AlreadyRegistered`] on the second publish.
+pub fn register_secondary_affinities(
+    affinities: &'static [u64],
+) -> Result<usize, SecondaryAffinityError> {
+    if SECONDARY_AFFINITIES_REGISTERED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(SecondaryAffinityError::AlreadyRegistered);
+    }
+    let base = affinities.as_ptr() as u64;
+    // Publish the count only after the base so an MMU-off reader that
+    // observes a non-zero base sees a bounded, coherent table; the PoC
+    // sweeps below order both ahead of any release.
+    SECONDARY_AFFINITY_BASE.store(base, Ordering::Release);
+    SECONDARY_AFFINITY_COUNT.store(affinities.len() as u64, Ordering::Release);
+    crate::paging::clean_invalidate_range_to_poc(base, core::mem::size_of_val(affinities) as u64);
+    crate::paging::clean_invalidate_range_to_poc(
+        core::ptr::addr_of!(SECONDARY_AFFINITY_BASE) as u64,
+        core::mem::size_of::<AtomicU64>() as u64,
+    );
+    crate::paging::clean_invalidate_range_to_poc(
+        core::ptr::addr_of!(SECONDARY_AFFINITY_COUNT) as u64,
+        core::mem::size_of::<AtomicU64>() as u64,
+    );
+    Ok(affinities.len())
+}
+
+/// `true` iff a dense-id → affinity table has been published for the
+/// spin-table trampoline. Test/diagnostic observer.
+#[must_use]
+pub fn secondary_affinities_registered() -> bool {
+    SECONDARY_AFFINITY_BASE.load(Ordering::Acquire) != 0
+}
+
+#[cfg(test)]
+fn reset_secondary_affinities_for_tests() {
+    SECONDARY_AFFINITIES_REGISTERED.store(false, Ordering::Release);
+    SECONDARY_AFFINITY_BASE.store(0, Ordering::Release);
+    SECONDARY_AFFINITY_COUNT.store(0, Ordering::Release);
+}
+
 /// Failure modes of [`set_secondary_entry`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum SetEntryError {
@@ -267,6 +381,11 @@ pub enum StartCpuError {
     /// starting a core that would immediately park is refused so the
     /// failure is loud at the call site, not silent on the new core.
     NoEntryInstalled,
+    /// No dense-id → affinity table was published via
+    /// [`register_secondary_affinities`]; a spin-table-released core
+    /// could not recover its dense id, so the release is refused at the
+    /// call site rather than parking the core in the trampoline.
+    NoAffinityTable,
     /// The PSCI `CPU_ON` call returned an error (the core was already on,
     /// the MPIDR is invalid, the entry address was rejected, etc.); the
     /// payload is the raw PSCI status (`crate::psci::error`).
@@ -280,6 +399,7 @@ impl StartCpuError {
         match self {
             Self::CpuIdOutOfRange => "cpu_id_out_of_range",
             Self::NoEntryInstalled => "no_secondary_entry_installed",
+            Self::NoAffinityTable => "no_secondary_affinity_table",
             Self::Psci(_) => "psci_cpu_on_failed",
         }
     }
@@ -413,6 +533,84 @@ pub unsafe fn start_secondary(
     }
 }
 
+/// Release the parked secondary core `cpu` through the Devicetree
+/// spin-table protocol: write the spin-table trampoline's physical
+/// address to the firmware-declared release word `release_addr` *and*
+/// to the kernel's own `SECONDARY_KERNEL_RELEASE` park word, sweep both
+/// to the point of coherency, and signal `sev`.
+///
+/// Two channels because the parked core's location depends on the
+/// firmware: a core still spinning in the firmware stub polls
+/// `release_addr`, while a core the firmware released straight into the
+/// kernel image polls the kernel word in `boot.s`'s `_start` park loop.
+/// Whichever loop the core is in, it branches to the same trampoline,
+/// which recovers its dense id from the published affinity table.
+///
+/// The kernel word is shared by every parked core, so the first release
+/// wakes them all; each core that finds its affinity in the published
+/// table joins the kernel (its stack slice is its own), and a core not
+/// described there parks again (fail closed). Repeat releases store the
+/// same address and are harmless.
+///
+/// Validates the id against the stack pool and confirms the entry and
+/// the affinity table are installed **before** any write, so a released
+/// core can never wake into a half-published hand-off.
+///
+/// # Errors
+///
+/// See [`StartCpuError`]. The launcher fails closed rather than
+/// assuming the core came up (a spin-table release has no firmware
+/// status to inspect; a core that never polls simply stays offline and
+/// the system continues on the cores that are online).
+///
+/// # Safety
+///
+/// Must be called from the boot core after `boot.s` has zeroed `.bss`
+/// (so the secondary stack pool is clear) and after the secondary entry
+/// and affinity table are installed. `release_addr` must be the
+/// firmware-declared `cpu-release-addr` word for `cpu` — an
+/// identity-mapped, writable physical word the kernel image does not
+/// occupy — and `cpu` must be the dense id the rest of the kernel uses
+/// for the core parked on it.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub unsafe fn start_secondary_spintable(
+    cpu: CpuId,
+    release_addr: u64,
+) -> Result<(), StartCpuError> {
+    if !is_valid_cpu(cpu) {
+        return Err(StartCpuError::CpuIdOutOfRange);
+    }
+    if secondary_entry_addr() == 0 {
+        return Err(StartCpuError::NoEntryInstalled);
+    }
+    if !secondary_affinities_registered() {
+        return Err(StartCpuError::NoAffinityTable);
+    }
+    let entry = spintable_trampoline_addr() as u64;
+    // SAFETY: the caller's contract guarantees `release_addr` is the
+    // firmware's declared release word — identity-mapped RAM outside
+    // the kernel image — so the volatile store writes only the word the
+    // parked core polls.
+    unsafe {
+        core::ptr::write_volatile(release_addr as *mut u64, entry);
+    }
+    SECONDARY_KERNEL_RELEASE.store(entry, Ordering::Release);
+    // The parked cores poll with their MMU (and cache) off: push both
+    // release words to the point of coherency, then wake the `wfe`
+    // loops. The sweep's own `dsb sy` orders the stores ahead of `sev`.
+    crate::paging::clean_invalidate_range_to_poc(release_addr, core::mem::size_of::<u64>() as u64);
+    crate::paging::clean_invalidate_range_to_poc(
+        core::ptr::addr_of!(SECONDARY_KERNEL_RELEASE) as u64,
+        core::mem::size_of::<AtomicU64>() as u64,
+    );
+    // SAFETY: `sev` is a hint instruction with no operands or side
+    // effects beyond waking `wfe` waiters.
+    unsafe {
+        core::arch::asm!("sev", options(nomem, nostack, preserves_flags));
+    }
+    Ok(())
+}
+
 /// Address of the `_start_secondary_aarch64` trampoline published by
 /// `smp.s`.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
@@ -421,6 +619,17 @@ fn secondary_trampoline_addr() -> usize {
         fn _start_secondary_aarch64();
     }
     _start_secondary_aarch64 as *const () as usize
+}
+
+/// Address of the `_start_secondary_spintable_aarch64` trampoline
+/// published by `smp.s` — the argument-free entry a spin-table release
+/// branches a parked core to.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+fn spintable_trampoline_addr() -> usize {
+    extern "C" {
+        fn _start_secondary_spintable_aarch64();
+    }
+    _start_secondary_spintable_aarch64 as *const () as usize
 }
 
 /// Rust side of the secondary trampoline.

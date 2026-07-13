@@ -150,13 +150,35 @@ pub struct Aarch64Arch {
     /// discovered by the arch port).
     core_classes: &'static [AtomicU8],
 
-    /// PSCI conduit (`hvc`/`smc`) the [`SecondaryBringup`] path calls
-    /// firmware through, discovered from the `/psci` device-tree node
-    /// (`crate::fdt::psci_method`) and installed via
-    /// [`Self::with_psci_method`]. `None` on a single-core / headless
-    /// handle that never starts a secondary; starting one then fails
-    /// closed with [`SmpError::NotReady`].
-    psci_method: Option<PsciMethod>,
+    /// How the [`SecondaryBringup`] path starts a parked secondary,
+    /// discovered from the device tree and installed via
+    /// [`Self::with_secondary_start`]. `None` on a single-core /
+    /// headless handle that never starts a secondary; starting one then
+    /// fails closed with [`SmpError::NotReady`].
+    secondary_start: Option<SecondaryStart>,
+}
+
+/// The board-declared mechanism that releases a parked secondary CPU,
+/// discovered from the firmware device tree — never assumed.
+///
+/// * A tree with a `/psci` node starts secondaries through the PSCI
+///   `CPU_ON` firmware call over the declared conduit.
+/// * A tree whose `cpu@*` nodes declare `enable-method = "spin-table"`
+///   (the Raspberry Pi 4's stock firmware) releases each parked core by
+///   writing the entry address to that core's `cpu-release-addr` word
+///   and signalling an event.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum SecondaryStart {
+    /// PSCI `CPU_ON` over the `/psci`-declared conduit.
+    Psci(PsciMethod),
+    /// Devicetree spin-table release.
+    SpinTable {
+        /// Per-dense-CPU release-word physical addresses, indexed by
+        /// [`CpuId`] (slot 0, the boot CPU, carries `0`). A `0` entry
+        /// means the tree declared no release word for that CPU; a
+        /// start request for it is refused (fail closed).
+        release_addrs: &'static [u64],
+    },
 }
 
 impl Aarch64Arch {
@@ -221,7 +243,7 @@ impl Aarch64Arch {
             host_ipi_count: &storage.host_ipi_count,
             host_stray_ipi: AtomicU64::new(0),
             core_classes: &storage.core_classes,
-            psci_method: None,
+            secondary_start: None,
         }
     }
 
@@ -272,7 +294,7 @@ impl Aarch64Arch {
             host_ipi_count,
             host_stray_ipi: AtomicU64::new(0),
             core_classes,
-            psci_method: None,
+            secondary_start: None,
         })
     }
 
@@ -297,24 +319,26 @@ impl Aarch64Arch {
         }
     }
 
-    /// Install the PSCI conduit the [`SecondaryBringup`] path calls
-    /// firmware through, returning the updated handle (a builder so the
-    /// existing constructors keep their signatures).
+    /// Install the secondary-start mechanism the [`SecondaryBringup`]
+    /// path releases parked cores through, returning the updated handle
+    /// (a builder so the existing constructors keep their signatures).
     ///
-    /// The downstream boot consumer reads the conduit from the device
-    /// tree (`crate::fdt::psci_method`) once on the boot core and installs
+    /// The downstream boot consumer discovers the mechanism from the
+    /// device tree once on the boot core — the `/psci` conduit
+    /// (`crate::fdt::psci_method`) or the per-CPU spin-table release
+    /// words (`rustos_fdt::CpuNode::spin_table_release`) — and installs
     /// it here before bringing secondaries up.
     #[must_use]
-    pub fn with_psci_method(mut self, method: PsciMethod) -> Self {
-        self.psci_method = Some(method);
+    pub fn with_secondary_start(mut self, start: SecondaryStart) -> Self {
+        self.secondary_start = Some(start);
         self
     }
 
-    /// The PSCI conduit installed via [`Self::with_psci_method`], or
-    /// `None` on a handle that never starts a secondary.
+    /// The start mechanism installed via [`Self::with_secondary_start`],
+    /// or `None` on a handle that never starts a secondary.
     #[must_use]
-    pub const fn psci_method(&self) -> Option<PsciMethod> {
-        self.psci_method
+    pub const fn secondary_start(&self) -> Option<SecondaryStart> {
+        self.secondary_start
     }
 
     /// Record the [`CoreClass`] discovered for dense `cpu`.
@@ -359,17 +383,17 @@ impl Aarch64Arch {
         // maps to an in-range dense id. A malformed tree yields no peak
         // (the homogeneous default).
         let mut peak: Option<u64> = None;
-        let _ = fdt.each_cpu(|mpidr, capacity| {
-            if let (Some(cap), Some(_)) = (capacity, self.cpu_for_mpidr(mpidr)) {
+        let _ = fdt.each_cpu(|cpu| {
+            if let (Some(cap), Some(_)) = (cpu.capacity, self.cpu_for_mpidr(cpu.reg)) {
                 peak = Some(peak.map_or(cap, |p| p.max(cap)));
             }
         });
         // Pass 2: a core rated strictly below the peak is an efficiency
         // core; a peak-rated or unrated core stays the performance
         // default already stored above.
-        let _ = fdt.each_cpu(|mpidr, capacity| {
-            if let Some(cpu) = self.cpu_for_mpidr(mpidr) {
-                if crate::hetcore::class_for_capacity(capacity, peak).is_efficiency() {
+        let _ = fdt.each_cpu(|node| {
+            if let Some(cpu) = self.cpu_for_mpidr(node.reg) {
+                if crate::hetcore::class_for_capacity(node.capacity, peak).is_efficiency() {
                     self.record_core_class(cpu, CoreClass::Efficiency);
                 }
             }
@@ -577,31 +601,55 @@ impl CrossCpuTlbShootdown for Aarch64Arch {
 
 impl SecondaryBringup for Aarch64Arch {
     unsafe fn start_secondary(&self, cpu: CpuId) -> Result<(), SmpError> {
-        // Fail closed before any PSCI call: the boot core is already
-        // running, and an unmapped dense id has no `MPIDR` to power on.
+        // Fail closed before any platform action: the boot core is
+        // already running, and an unmapped dense id has no `MPIDR` to
+        // power on or release word to write.
         if cpu == self.boot_cpu {
             return Err(SmpError::InvalidCpu);
         }
         let Some(mpidr) = self.mpidr_of(cpu) else {
             return Err(SmpError::InvalidCpu);
         };
-        // Bring-up needs the firmware conduit; a handle without one
-        // (single-core / headless) cannot start a secondary.
-        let Some(method) = self.psci_method else {
+        // Bring-up needs the board-declared start mechanism; a handle
+        // without one (single-core / headless, or a tree that declared
+        // neither PSCI nor a spin-table) cannot start a secondary.
+        let Some(start) = self.secondary_start else {
             return Err(SmpError::NotReady);
         };
 
         #[cfg(all(target_arch = "aarch64", target_os = "none"))]
         {
-            // SAFETY: the caller of this HAL method guarantees `.bss` is
-            // zeroed (clear secondary-stack pool), the secondary entry is
-            // installed, and `mpidr` names a real, parked core distinct
-            // from the caller — exactly `crate::smp::start_secondary`'s
-            // contract. `cpu` was range-checked via `mpidr_of`.
-            match unsafe { crate::smp::start_secondary(method, cpu, mpidr) } {
+            let started = match start {
+                // SAFETY: the caller of this HAL method guarantees `.bss`
+                // is zeroed (clear secondary-stack pool), the secondary
+                // entry is installed, and `mpidr` names a real, parked
+                // core distinct from the caller — exactly the contract of
+                // `crate::smp::start_secondary` /
+                // `crate::smp::start_secondary_spintable`. `cpu` was
+                // range-checked via `mpidr_of`.
+                SecondaryStart::Psci(method) => unsafe {
+                    crate::smp::start_secondary(method, cpu, mpidr)
+                },
+                SecondaryStart::SpinTable { release_addrs } => {
+                    let release = release_addrs
+                        .get(cpu as usize)
+                        .copied()
+                        .filter(|&addr| addr != 0);
+                    let Some(release) = release else {
+                        // The tree declared no release word for this CPU:
+                        // it is not a startable secondary (fail closed).
+                        return Err(SmpError::InvalidCpu);
+                    };
+                    // SAFETY: as above; `release` is the firmware's own
+                    // declared release word for this CPU's spin loop.
+                    unsafe { crate::smp::start_secondary_spintable(cpu, release) }
+                }
+            };
+            match started {
                 Ok(()) => Ok(()),
                 Err(crate::smp::StartCpuError::CpuIdOutOfRange) => Err(SmpError::InvalidCpu),
-                Err(crate::smp::StartCpuError::NoEntryInstalled) => Err(SmpError::NotReady),
+                Err(crate::smp::StartCpuError::NoEntryInstalled)
+                | Err(crate::smp::StartCpuError::NoAffinityTable) => Err(SmpError::NotReady),
                 Err(crate::smp::StartCpuError::Psci(status)) => {
                     Err(SmpError::StartRejected(i64::from(status)))
                 }
@@ -609,12 +657,24 @@ impl SecondaryBringup for Aarch64Arch {
         }
         #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
         {
-            // Host: there is no PSCI firmware to call. Mirror the
-            // bare-metal precondition so the observable contract holds —
-            // refuse when no secondary entry is installed, otherwise
-            // report the (range-checked) request as accepted. The real
-            // `CPU_ON` is proven by the QEMU verticals.
-            let _ = (method, mpidr);
+            // Host: there is no PSCI firmware to call and no parked core
+            // polling a release word. Mirror the bare-metal preconditions
+            // so the observable contract holds — refuse when no secondary
+            // entry is installed, or when a spin-table start names a CPU
+            // with no release word, otherwise report the (range-checked)
+            // request as accepted. The real release is proven by the QEMU
+            // verticals and the on-metal bring-up.
+            let _ = mpidr;
+            if let SecondaryStart::SpinTable { release_addrs } = start {
+                if release_addrs
+                    .get(cpu as usize)
+                    .copied()
+                    .filter(|&addr| addr != 0)
+                    .is_none()
+                {
+                    return Err(SmpError::InvalidCpu);
+                }
+            }
             if crate::smp::secondary_entry_addr() == 0 {
                 return Err(SmpError::NotReady);
             }
@@ -1048,14 +1108,15 @@ mod tests {
     #[test]
     fn passes_secondary_bringup_conformance() {
         static S: Aarch64ArchStorage<2> = Aarch64ArchStorage::new();
-        let arch = Aarch64Arch::with_cpus(&S, 0, 1_000, &[0, 1]).with_psci_method(PsciMethod::Hvc);
+        let arch = Aarch64Arch::with_cpus(&S, 0, 1_000, &[0, 1])
+            .with_secondary_start(SecondaryStart::Psci(PsciMethod::Hvc));
         rustos_arch_api::smp::conformance::run_all(&arch, CpuId::MAX);
         let erased: &dyn SecondaryBringup = &arch;
         rustos_arch_api::smp::conformance::run_all(erased, CpuId::MAX);
     }
 
     /// The boot core and any unmapped dense id are refused before any
-    /// PSCI call, and a handle with no PSCI conduit cannot start a
+    /// PSCI call, and a handle with no start mechanism cannot start a
     /// secondary — the fail-closed contract. (The
     /// set-once secondary-entry slot is a process-global shared with
     /// `crate::smp`'s own tests, so the accepted path is exercised there,
@@ -1067,8 +1128,8 @@ mod tests {
         static WITH: Aarch64ArchStorage<2> = Aarch64ArchStorage::new();
         static WITHOUT: Aarch64ArchStorage<2> = Aarch64ArchStorage::new();
         unsafe {
-            let with_conduit =
-                Aarch64Arch::with_cpus(&WITH, 0, 1_000, &[0, 1]).with_psci_method(PsciMethod::Hvc);
+            let with_conduit = Aarch64Arch::with_cpus(&WITH, 0, 1_000, &[0, 1])
+                .with_secondary_start(SecondaryStart::Psci(PsciMethod::Hvc));
             // Boot core: already running.
             assert_eq!(with_conduit.start_secondary(0), Err(SmpError::InvalidCpu));
             // Unmapped dense id.
@@ -1077,11 +1138,47 @@ mod tests {
                 with_conduit.start_secondary(CpuId::MAX),
                 Err(SmpError::InvalidCpu)
             );
-            // A mapped secondary on a handle with no PSCI conduit is
+            // A mapped secondary on a handle with no start mechanism is
             // refused as not-ready, before any firmware call.
             let no_conduit = Aarch64Arch::with_cpus(&WITHOUT, 0, 1_000, &[0, 1]);
             assert_eq!(no_conduit.start_secondary(1), Err(SmpError::NotReady));
         }
+    }
+
+    /// A spin-table handle is refused before any release-word write for
+    /// the boot core, an unmapped id, and a CPU the tree declared no
+    /// release word for — the fail-closed contract of the Pi-4
+    /// stock-firmware start path.
+    #[test]
+    fn spin_table_start_fails_closed_on_unstartable_and_releaseless_cpus() {
+        // SAFETY: every call below is refused before any release-word
+        // write, so the test takes no platform action.
+        static S: Aarch64ArchStorage<4> = Aarch64ArchStorage::new();
+        // Dense ids 0..=3; the tree declared release words only for
+        // CPUs 1 and 2 (CPU 3's slot is 0 — "not provided").
+        static RELEASE: [u64; 4] = [0, 0xe0, 0xe8, 0];
+        static S2: Aarch64ArchStorage<2> = Aarch64ArchStorage::new();
+        static RELEASE2: [u64; 2] = [0, 0xe0];
+        unsafe {
+            let arch = Aarch64Arch::with_cpus(&S, 0, 1_000, &[0, 1, 2, 3]).with_secondary_start(
+                SecondaryStart::SpinTable {
+                    release_addrs: &RELEASE,
+                },
+            );
+            // Boot core: already running.
+            assert_eq!(arch.start_secondary(0), Err(SmpError::InvalidCpu));
+            // Unmapped dense id.
+            assert_eq!(arch.start_secondary(4), Err(SmpError::InvalidCpu));
+            // A mapped CPU whose tree slot carries no release word.
+            assert_eq!(arch.start_secondary(3), Err(SmpError::InvalidCpu));
+        }
+        // The conformance vertical holds over the spin-table handle too.
+        let arch = Aarch64Arch::with_cpus(&S2, 0, 1_000, &[0, 1]).with_secondary_start(
+            SecondaryStart::SpinTable {
+                release_addrs: &RELEASE2,
+            },
+        );
+        rustos_arch_api::smp::conformance::run_all(&arch, CpuId::MAX);
     }
 
     /// / W0: the port passes the shared Arch HAL conformance

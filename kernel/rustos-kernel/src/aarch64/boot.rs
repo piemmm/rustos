@@ -52,7 +52,7 @@ use alloc::vec::Vec;
 
 use core::sync::atomic::{AtomicU64, AtomicU8};
 use rustos_abi::HwNode;
-use rustos_arch_aarch64::kernel_arch::{read_cntfrq, timer_frequency_hz};
+use rustos_arch_aarch64::kernel_arch::{read_cntfrq, timer_frequency_hz, SecondaryStart};
 use rustos_arch_aarch64::paging::{
     configure_device_gigapages, configure_ram_gigapages, guard_arena_pool_capacity,
     identity_device_mask, identity_ram_mask, ram_gigapages, AddressSpace, PageTablePool,
@@ -579,16 +579,36 @@ pub fn boot(
             arch.classify_from_fdt(&fdt);
         }
     }
-    // Install the PSCI conduit discovered from the firmware tree (`hvc`
-    // at EL2-hosted, `smc` at EL3-hosted — the Pi 4's `armstub8.bin`
-    // exposes `smc`), so the SMP bring-up that follows (`plans/PI.md` P5)
-    // issues `CPU_ON` through the conduit the board *declares*, never an
-    // assumed one (no `cfg(board)` fork). A tree that
-    // declares no PSCI node leaves the conduit unset, and bring-up fails
+    // Install the secondary-start mechanism the firmware tree declares
+    // (`plans/PI.md` P5), never an assumed one (no `cfg(board)` fork):
+    // a `/psci` node selects PSCI `CPU_ON` over its conduit (`hvc` at
+    // EL2-hosted, `smc` at EL3-hosted — the Pi 4 with `armstub8.bin`),
+    // and a PSCI-less tree whose cpu nodes declare
+    // `enable-method = "spin-table"` (the Pi 4's stock firmware)
+    // selects the spin-table release over the declared per-CPU
+    // `cpu-release-addr` words, aligned to the dense ids. A tree that
+    // declares neither leaves the mechanism unset, and bring-up fails
     // closed at the start site rather than guessing.
-    let arch = match discovered.psci_method {
-        Some(method) => arch.with_psci_method(method),
-        None => arch,
+    let (arch, smp_start_method) = match discovered.psci_method {
+        Some(method) => (
+            arch.with_secondary_start(SecondaryStart::Psci(method)),
+            "psci",
+        ),
+        None => {
+            let release_addrs = crate::cpu_topology::align_release_addrs(
+                &cpu_mpidrs,
+                &discovered.cpu_spin_releases,
+            );
+            if release_addrs.iter().any(|&addr| addr != 0) {
+                let release_addrs: &'static [u64] = Box::leak(release_addrs.into_boxed_slice());
+                (
+                    arch.with_secondary_start(SecondaryStart::SpinTable { release_addrs }),
+                    "spin_table",
+                )
+            } else {
+                (arch, "none")
+            }
+        }
     };
 
     // Sanity-check that the constructed handle reports the boot CPU, and
@@ -597,11 +617,13 @@ pub fn boot(
     let boot_cpu_ok = arch.current_cpu() == BOOT_CPU;
     let timer_present = counter_hz != 0;
 
-    // Stage the secondary bring-up (stacks + entry) before the hand-off:
-    // `kernel_main` issues the PSCI `CPU_ON`s once every init phase is
-    // green, and each start is refused fail-closed (and audited) unless
-    // this preparation succeeded. Single-CPU boots prepare nothing.
-    let smp_prepared = mmu_on && prepare_secondary_bringup(arch.cpu_count());
+    // Stage the secondary bring-up (stacks + entry + the dense-id →
+    // affinity table the spin-table trampoline recovers identity from)
+    // before the hand-off: `kernel_main` issues the starts (PSCI
+    // `CPU_ON` or spin-table release) once every init phase is green,
+    // and each start is refused fail-closed (and audited) unless this
+    // preparation succeeded. Single-CPU boots prepare nothing.
+    let smp_prepared = mmu_on && prepare_secondary_bringup(&cpu_mpidrs);
 
     // P6c-1: translate the firmware-discovered `/memory` windows into the
     // canonical physical-memory map `kernel_core::kernel_main` consumes.
@@ -754,8 +776,8 @@ pub fn boot(
                     value: rustos_log::FieldValue::Str(timer_hz_hex),
                 },
                 Field {
-                    key: "psci_conduit_discovered",
-                    value: rustos_log::FieldValue::Str(yes_no(discovered.psci_method.is_some())),
+                    key: "smp_start_method",
+                    value: rustos_log::FieldValue::Str(smp_start_method),
                 },
                 Field {
                     key: "cpu_count",
@@ -890,21 +912,32 @@ fn leak_zeroed_secondary_stacks(count: usize) -> &'static [smp::SecondaryStack] 
 }
 
 /// Stage the multi-core bring-up: size and publish the secondary stack
-/// region and install the production secondary entry, so the PSCI
-/// `CPU_ON`s `kernel_main` issues later find both in place.
+/// region, publish the dense-id → affinity table (the identity source a
+/// spin-table-released core recovers its dense id from), and install
+/// the production secondary entry, so the starts `kernel_main` issues
+/// later — PSCI `CPU_ON` or spin-table release — find everything in
+/// place.
 ///
-/// Returns `true` when the machine is ready to start secondaries (or is
-/// single-CPU, where there is nothing to prepare). Both installs are
-/// set-once per boot and this is their only production call site, so a
-/// refusal is a programmer error; it is reported (`false` → the boot
-/// line's `smp_prepared` field) and every later `CPU_ON` fails closed
-/// and audited rather than starting a core with no stack.
-fn prepare_secondary_bringup(cpu_count: u32) -> bool {
+/// `cpu_mpidrs` is the validated dense map from
+/// [`crate::cpu_topology::order_cpus`] (entry `i` is dense id `i`'s
+/// affinity). Returns `true` when the machine is ready to start
+/// secondaries (or is single-CPU, where there is nothing to prepare).
+/// Every install is set-once per boot and this is their only production
+/// call site, so a refusal is a programmer error; it is reported
+/// (`false` → the boot line's `smp_prepared` field) and every later
+/// start fails closed and audited rather than releasing a core into a
+/// half-published hand-off.
+fn prepare_secondary_bringup(cpu_mpidrs: &[u64]) -> bool {
+    let cpu_count = cpu_mpidrs.len();
     if cpu_count <= 1 {
         return true;
     }
-    let stacks = leak_zeroed_secondary_stacks(cpu_count as usize);
+    let stacks = leak_zeroed_secondary_stacks(cpu_count);
     if smp::register_secondary_stacks(stacks).is_err() {
+        return false;
+    }
+    let affinities: &'static [u64] = Box::leak(cpu_mpidrs.to_vec().into_boxed_slice());
+    if smp::register_secondary_affinities(affinities).is_err() {
         return false;
     }
     smp::set_secondary_entry(production_secondary_entry).is_ok()
@@ -1378,8 +1411,8 @@ struct Discovered {
     timer_hz_from_tree: bool,
     /// The PSCI conduit (`hvc`/`smc`) the `/psci` node declares, used to
     /// issue `CPU_ON` for SMP bring-up (`plans/PI.md` P5). `None` when the
-    /// tree declares no PSCI node, so bring-up fails closed rather than
-    /// assuming a conduit.
+    /// tree declares no PSCI node; bring-up then rides the spin-table
+    /// release when the cpu nodes declare one, else fails closed.
     psci_method: Option<fdt::PsciMethod>,
     /// Every `/cpus/cpu@*` `reg` affinity (`MPIDR_EL1` `Aff0`–`Aff2`)
     /// the firmware tree declares, in tree order — the CPU inventory
@@ -1388,6 +1421,13 @@ struct Discovered {
     /// declares none or the walk fails (the boot then falls back closed
     /// to a single-CPU map).
     cpu_mpidrs: Vec<u64>,
+    /// `(affinity, cpu-release-addr)` for every cpu node that declares
+    /// the `spin-table` enable method (the Pi 4's stock firmware), in
+    /// tree order — aligned to the dense map by
+    /// [`crate::cpu_topology::align_release_addrs`] and used for
+    /// bring-up only when the tree declares no PSCI node. Empty when
+    /// none are declared or the walk fails (fail closed).
+    cpu_spin_releases: Vec<(u64, u64)>,
 }
 
 /// Discover the board's post-MMU facts from the device tree at `dtb`:
@@ -1407,6 +1447,7 @@ fn configure_from_dtb(dtb: u64) -> Discovered {
         timer_hz_from_tree: false,
         psci_method: None,
         cpu_mpidrs: Vec::new(),
+        cpu_spin_releases: Vec::new(),
     };
     if dtb == 0 {
         return out;
@@ -1450,19 +1491,27 @@ fn configure_from_dtb(dtb: u64) -> Discovered {
     out.psci_method = fdt::psci_method(&fdt);
     // Collect every `/cpus/cpu@*` affinity so the bring-up starts the
     // cores the board *declares* (the Pi 4's four Cortex-A72s), never an
-    // assumed count. A malformed walk discards the partial list — the
-    // boot then sizes for the one running core rather than trusting a
-    // truncated inventory (fail closed).
+    // assumed count — along with each node's spin-table release word,
+    // the PSCI-less start channel. A malformed walk discards the
+    // partial lists — the boot then sizes for the one running core
+    // rather than trusting a truncated inventory (fail closed).
     let mut cpus = Vec::new();
+    let mut spin_releases = Vec::new();
     if fdt
-        .each_cpu(|mpidr, _capacity| {
-            cpus.push(mpidr & smp::MPIDR_AFFINITY_MASK);
+        .each_cpu(|cpu| {
+            let affinity = cpu.reg & smp::MPIDR_AFFINITY_MASK;
+            cpus.push(affinity);
+            if let Some(addr) = cpu.spin_table_release {
+                spin_releases.push((affinity, addr));
+            }
         })
         .is_err()
     {
         cpus.clear();
+        spin_releases.clear();
     }
     out.cpu_mpidrs = cpus;
+    out.cpu_spin_releases = spin_releases;
     // Record the console UART's receive-interrupt line so the root-unlock
     // console handoff can switch `login`'s input from polled to
     // interrupt-driven (`crate::aarch64::gic_irq::enable_uart_console_irq`).

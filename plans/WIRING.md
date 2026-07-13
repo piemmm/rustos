@@ -517,11 +517,17 @@ The single largest aarch64 gap, closed by mirroring the riscv64 port-side
   boot core starts core 1 via PSCI and delivers it a directed SGI; PASS
   once core 1's IRQ path runs the IPI callback with core 1's id.
 - **Honest carve-outs (tracked):**
-  - *Non-PSCI spin-table boot* (bare Raspberry Pi 3) is **not** built:
-    the QEMU `virt` board and UEFI platforms use PSCI, so a spin-table
-    branch would be untested asm. It lands with a spin-table target so a
-    real vertical covers it (§2.1 / §2.5), documented in
-    `docs/src/platform/aarch64.md`.
+  - *Non-PSCI spin-table boot* is now **built** (the metal Pi 4's stock
+    firmware declares `enable-method = "spin-table"` and no `/psci`
+    node, so PSCI-only bring-up left its secondaries dead):
+    `smp::start_secondary_spintable` releases a parked core through both
+    the firmware `cpu-release-addr` word and the kernel's own
+    `SECONDARY_KERNEL_RELEASE` park word, and the argument-free
+    trampoline recovers the dense id from the published affinity table
+    (EL2-capable via the shared `_el2_establish_and_drop`). No
+    `-M raspi4b` in the pinned QEMU, so the end-to-end release is an
+    on-metal acceptance item; discovery/alignment/fail-closed logic is
+    host-tested. See `docs/src/platform/aarch64.md`.
   - *The QEMU vertical names the `virt` conduit (`hvc`) directly* rather
     than parsing the tree at runtime: QEMU's ELF `-kernel` boot hands no
     DTB pointer (`x0 = 0`, unlike the Linux Image protocol), and the
@@ -934,9 +940,12 @@ interface creep).
     `scheduler_stress_qemu` and `cross_cpu_tlb_shootdown_qemu_x86_64`
     into the arch crate (§2.2 — the two verticals had duplicated it);
     both now call `X86_64Arch::start_secondary`.
-  - **aarch64** delegates to the W6 `smp::start_secondary` (PSCI
-    `CPU_ON`); the conduit is installed on the handle via
-    `Aarch64Arch::with_psci_method` (a missing conduit → `NotReady`).
+  - **aarch64** dispatches on the `SecondaryStart` mechanism installed
+    via `Aarch64Arch::with_secondary_start` (a missing mechanism →
+    `NotReady`): PSCI `CPU_ON` over the discovered conduit (the W6
+    `smp::start_secondary`), or the Devicetree spin-table release
+    (`smp::start_secondary_spintable`) on a PSCI-less tree (the Pi 4's
+    stock firmware).
   - **riscv64** delegates to the SBI HSM `hart_start` `smp::start_secondary`.
   - **wasm32** delegates to `smp::start_worker` (Web Worker spawn); it
     has no settable entry, so it never reports `NotReady`.
@@ -964,8 +973,9 @@ the bring-up surface the tests exercise matches the one the kernel uses.
   handle is built up front and `arch.start_secondary(secondary_hartid)`
   replaces the bare `smp::start_secondary(hartid)`.
 - **aarch64** (`ipi_smp_qemu_aarch64`): the `Aarch64Arch::with_cpus`
-  handle now also carries `.with_psci_method(VIRT_PSCI_METHOD)` so
-  `arch.start_secondary(SECONDARY_CPU)` can issue PSCI `CPU_ON`.
+  handle now also carries `.with_secondary_start(SecondaryStart::Psci(…))`
+  over the tree-discovered conduit so `arch.start_secondary(SECONDARY_CPU)`
+  can issue PSCI `CPU_ON`.
 - **wasm32** (`kernel_arch_boot_wasm32`): `arch.start_secondary(WORKER_CPU)`
   on the existing `WasmArch::with_workers` handle replaces
   `smp::start_worker`.
