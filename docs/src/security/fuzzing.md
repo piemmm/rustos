@@ -23,7 +23,10 @@ run under `cargo xtask fuzz` so consecutive soaks explore new inputs
 instead of replaying the same stream. A flaky fuzz target is a bug
 (`AGENTS.md` §7).
 
-Five harnesses exist today:
+The authoritative list of harnesses is the `TARGETS` registry in
+`tools/xtask/src/commands/fuzz.rs` — the single definition the budgeted
+runs wire in (`AGENTS.md` §2.2) — and `cargo xtask fuzz --list` prints it
+with a one-line description each. The families are:
 
 * `lib/abi/tests/fuzz_decode.rs` — the `lib/abi` wire decoders
   (`IpcMessageHeader::from_bytes`, `ManifestHeader::from_bytes`). It
@@ -32,12 +35,20 @@ Five harnesses exist today:
 * `kernel/syscall/tests/fuzz_args.rs` — the syscall dispatcher's
   per-argument validation. It cross-checks the dispatcher against an
   independent acceptance mirror over random `(syscall, RawArgs)` pairs.
-* `userland/net/icmp/tests/fuzz_parse.rs` — the `userland/net` protocol
-  parsers (Ethernet, ARP, IPv4, ICMP echo) plus the composed
-  `Responder::handle_frame` and `Client` classifiers. It asserts no
-  input panics, that any accepted decode round-trips through its
-  encoder, and that any reply the responder emits fits the caller's
-  buffer and is itself a well-formed frame.
+* The `lib/net` protocol parsers, one harness per layer, driving the
+  *same* engine the live `netstack` service runs — `fuzz_net_eth`
+  (Ethernet/ARP), `fuzz_net_addr` (address scope/zone rules and the
+  Internet-checksum properties), `fuzz_net_ipv4` (the IPv4 codec, emit
+  fragmentation, and the fragment-reassembly budgets), `fuzz_net_ipv6`
+  (the IPv6 codec and extension-header chain walk), `fuzz_net_icmp`
+  (ICMP/ICMPv6 echo and error codecs plus the error rate limiter),
+  `fuzz_net_nd` (Neighbour Discovery codecs and the neighbour-table
+  glue), and `fuzz_net_stack` (the dual-stack host engine's frame entry
+  point). Each asserts that no input panics, that any accepted decode
+  round-trips through its encoder, and that any frame the engine emits
+  in response is itself well-formed and fits its buffer. These carry the
+  parser coverage of the former interim `userland/net/icmp` responder,
+  which was folded into `lib/net` and deleted (`AGENTS.md` §2.13/§2.14).
 * `kernel/ipc/tests/fuzz_port.rs` — the capability-checked IPC port
   endpoint. It drives random `(sender capabilities, payload)` pairs at
   `Port::send` and asserts the fail-closed decision against an
@@ -53,10 +64,15 @@ Five harnesses exist today:
   that an untampered round-trip is faithful, that any tampering or
   relocation makes `load` fail closed, and that the output buffer is
   zeroed on every failure.
+* The remaining untrusted-input decoders each carry their own harness as
+  they land (`AGENTS.md` §19.5/§19.6): `fuzz_ramzip` and the RustFS/ADFS
+  mount decoders (`fuzz_mount`, `fuzz_adfs_mount`), `fuzz_compress` (the
+  first-party LZ decoder), `fuzz_svg`, `fuzz_virtqueue` (the hostile
+  device-written used ring), `fuzz_vt`, `fuzz_fdt`, and the partition
+  table reader — see the registry for the current, complete set.
 
-This completes the §19.6 burn-down's coverage of the IPC endpoints and
-the `userland/net` protocol parsers. Future untrusted-input parsers
-(font, image, archive, media — §19.5) each gain a harness as they land.
+Future untrusted-input parsers (font, image, archive, media — §19.5)
+each gain a harness as they land and enter the same registry.
 
 ## Two run modes
 
