@@ -360,6 +360,47 @@ impl<A: SchedulerArch> Scheduler<A> {
         Ok(id)
     }
 
+    /// Admit a new task at `priority` but leave it [`TaskState::Parked`]
+    /// and unqueued — see [`SchedulerPolicy::spawn_parked`].
+    ///
+    /// The task is registered with a minted id, homed exactly where
+    /// [`spawn`](Self::spawn) would place it, and left parked with **no**
+    /// run-queue entry and **no** wake IPI. It becomes runnable only
+    /// through a later [`unpark`](Self::unpark), which computes its
+    /// placement, enqueues it, and sends the IPI — so no CPU can dispatch
+    /// the task before the caller finishes installing its per-task state
+    /// under the returned id.
+    ///
+    /// # Errors
+    /// * [`SchedError::NoSuchCpu`] if `home_cpu` is out of range.
+    pub fn spawn_parked<F>(
+        &self,
+        home_cpu: CpuId,
+        priority: Priority,
+        body: F,
+    ) -> SchedResult<TaskId>
+    where
+        F: FnMut(&mut TaskContext) -> TaskAction + Send + 'static,
+    {
+        self.cpu_state(home_cpu)?;
+        let placed = self.preferred_home(priority, home_cpu);
+        self.cpu_state(placed)?;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = if id == 0 {
+            self.next_id.fetch_add(1, Ordering::Relaxed)
+        } else {
+            id
+        };
+        let boxed: Box<TaskBody> = Box::new(body);
+        let inner = Arc::new(TaskInner::new(id, placed, priority, boxed));
+        // Born parked: no queue entry is pushed and no IPI is raised, so
+        // no CPU can pick the task up. The later `unpark` performs the
+        // placement, enqueue, and IPI.
+        inner.store_state(TaskState::Parked);
+        self.tasks.write().insert(id, inner);
+        Ok(id)
+    }
+
     /// Park a task. Cancellation-safe: the call is a no-op if the task
     /// has already exited.
     ///
@@ -1030,6 +1071,13 @@ impl<A: SchedulerArch> SchedulerPolicy<A> for Scheduler<A> {
         F: FnMut(&mut TaskContext) -> TaskAction + Send + 'static,
     {
         Scheduler::spawn(self, home_cpu, priority, body)
+    }
+
+    fn spawn_parked<F>(&self, home_cpu: CpuId, priority: Priority, body: F) -> SchedResult<TaskId>
+    where
+        F: FnMut(&mut TaskContext) -> TaskAction + Send + 'static,
+    {
+        Scheduler::spawn_parked(self, home_cpu, priority, body)
     }
 
     fn park(&self, id: TaskId) -> SchedResult<()> {

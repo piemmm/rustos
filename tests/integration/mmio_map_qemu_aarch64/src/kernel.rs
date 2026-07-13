@@ -620,6 +620,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         pre_resume,
         live,
         work,
+        false,
     )
     .is_err()
     {

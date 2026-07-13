@@ -261,6 +261,27 @@ immediately, schedules a deferred reschedule, or — on
 on the IPI; correctness only requires that the target CPU eventually
 calls [`step`].
 
+## Deferred admission: `spawn_parked`
+
+`spawn` makes a task runnable the instant it returns — it is enqueued and
+its home CPU is IPI'd, so on an SMP machine another core can dispatch the
+task (and take its first syscall) before the caller's next instruction.
+That is wrong for a process whose per-task kernel state — its capability
+record, address space, standard streams, resource limits, and device
+grants — is installed *after* the scheduler mints its id: a Ready
+admission races those installs, and the racing core's first syscall finds
+no capability record.
+
+`spawn_parked` is the birth form that closes this race. It registers the
+task and returns its id but leaves it `Parked`, off every run queue, with
+**no** wake IPI; no CPU can dispatch it. The process-admit path installs
+all per-task state under the returned id and only then calls `unpark`,
+which performs the placement, enqueue, and IPI exactly as `spawn` would.
+Both the `spawn` syscall path and PID 1's admission use it, so a freshly
+spawned process is never dispatchable before it is fully constructed. The
+`SchedulerPolicy` conformance suite pins the guarantee
+(`spawn_parked_stays_parked_until_unpark`).
+
 ## Timer-driven preemption entry point
 
 The inverse direction — *arch driving the scheduler* on every timer
@@ -604,6 +625,23 @@ MLFQ demotion bookkeeping (`yields_at_band` /
 `yields_before_demotion`). The two notions are deliberately
 distinct so the syscall handler is not on the hook for demotion
 policy, which would be interface creep into the syscall layer.
+
+### Parking a waiter on its *live* CPU
+
+A syscall that blocks (`irq_wait`, `hw_tree_wait`, `ipc_call`,
+`call_recv`, `waitset_wait`, the users-DB / app-store waits) parks its
+task off the run queue and re-polls each time it is woken. Between two
+polls the task is `Parked`, so it can be woken and re-dispatched
+(work-stolen) onto a **different** CPU than it parked on. The suspend
+mechanism — `reschedule_current(cpu, Park)` — is keyed to a specific
+CPU's resume handle, so it must be told the CPU the task occupies *right
+now*, not a CPU id captured once before the loop: a stale id misses the
+resume handle, the suspend silently fails, and the fallback
+`yield_current` clears the task's live current-task slot while it keeps
+running — the task then returns to user space with no recorded current
+task and its next syscall faults the core closed. Every wait loop
+therefore parks through one shared helper that reads the live CPU on each
+call, so a mid-wait migration is always handled.
 
 ## Invariants
 

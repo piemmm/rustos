@@ -39,6 +39,7 @@ use crate::task::{Priority, TaskAction, TaskState};
 /// Panics (failing the test) if any required property does not hold.
 pub fn run_all<S: SchedulerPolicy<TestArch>>() {
     spawn_runs_and_exits::<S>();
+    spawn_parked_stays_parked_until_unpark::<S>();
     block_wake_roundtrip::<S>();
     unpark_before_park_is_not_lost::<S>();
     lifecycle_error_codes::<S>();
@@ -85,6 +86,50 @@ fn spawn_runs_and_exits<S: SchedulerPolicy<TestArch>>() {
     assert_eq!(sched.state_of(id), TaskState::Exited, "task exited");
     assert!(arch.ipi_count(0) >= 1, "spawn notifies the home CPU");
     assert_eq!(sched.step(0), Ok(StepOutcome::Idle), "no work remains");
+}
+
+/// A task admitted through `spawn_parked` is born [`TaskState::Parked`]
+/// and is **not** dispatchable on any CPU until an explicit `unpark`: a
+/// `step` before the unpark finds no runnable work, and no wake IPI is
+/// raised by the parked admission itself. This is the property the
+/// process-admit path relies on to install a task's capability record and
+/// address space under the returned id before any core can run the task
+/// and take its first syscall.
+fn spawn_parked_stays_parked_until_unpark<S: SchedulerPolicy<TestArch>>() {
+    let (arch, sched) = make::<S>(2, 64);
+    arch.set_current_cpu(0);
+    let counter = Arc::new(AtomicU64::new(0));
+    let c2 = counter.clone();
+    let id = sched
+        .spawn_parked(0, Priority::Normal, move |_ctx| {
+            c2.fetch_add(1, Ordering::Relaxed);
+            TaskAction::Exit
+        })
+        .expect("spawn_parked");
+    assert_eq!(
+        sched.state_of(id),
+        TaskState::Parked,
+        "born parked, not ready"
+    );
+    // No wake IPI from the parked admission, and no CPU can dispatch it.
+    assert_eq!(arch.ipi_count(0), 0, "parked admission raises no IPI");
+    assert_eq!(sched.step(0), Ok(StepOutcome::Idle), "not runnable yet");
+    assert_eq!(counter.load(Ordering::Relaxed), 0, "body never ran");
+    assert_eq!(sched.state_of(id), TaskState::Parked, "still parked");
+
+    // Unpark makes it runnable exactly once, exactly like a spawned task.
+    sched.unpark(id).expect("unpark the parked task");
+    let mut ran = false;
+    for cpu in 0..2 {
+        arch.set_current_cpu(cpu);
+        if sched.step(cpu) == Ok(StepOutcome::Ran(id)) {
+            ran = true;
+            break;
+        }
+    }
+    assert!(ran, "task dispatched after unpark");
+    assert_eq!(counter.load(Ordering::Relaxed), 1, "body ran once");
+    assert_eq!(sched.state_of(id), TaskState::Exited, "task exited");
 }
 
 /// The per-CPU load observations are truthful: `queue_depth` reflects
