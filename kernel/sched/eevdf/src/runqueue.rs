@@ -114,6 +114,13 @@ impl RunQueue {
         g.total_weight = g.total_weight.saturating_sub(weight);
     }
 
+    /// Total weight currently competing on this CPU (`0` when it is
+    /// idle). The placement path reads it to put new and woken work on
+    /// the least-loaded eligible CPU.
+    pub(crate) fn competing_weight(&self) -> u64 {
+        self.inner.lock().total_weight
+    }
+
     /// Number of ready entries currently queued on this CPU.
     ///
     /// The task a CPU is *running* is held in the scheduler's current-task

@@ -212,13 +212,20 @@ follows its priority band:
   **performance** core;
 * `Low` (background / idle) → an **efficiency** core.
 
-`spawn`, `unpark`, and the dispatch re-enqueue path route a task to a CPU
-of its preferred class (round-robin within the class). If the task's
-current home is already of the right class it stays put — which is why
-the path is a no-op on a homogeneous machine, where the efficiency pool
-is empty and all work is `Performance`-class. EEVDF carries the task's
-competing weight with it across a class migration (the same
-no-lag-across-CPUs rebase that work-stealing uses).
+`spawn` and `unpark` place a task on the **least-loaded** CPU of its
+preferred class (by competing weight, preferring the caller's hint on an
+equal-load tie). An idle CPU competes with weight `0`, so new and woken
+work fills sleeping cores — whose placement IPI pulls them out of their
+idle park — instead of piling onto the spawning CPU; and because each
+admission adds the placed task's weight, a burst of spawns spreads
+across equally-idle CPUs. The dispatch re-enqueue path is deliberately
+stickier: a yielding task stays on its current CPU unless its *class* is
+wrong (re-placing on every yield would migrate a task whenever another
+CPU dipped below its home's load, thrashing caches for no fairness
+gain); only a class mismatch — e.g. a `Low` task work-stealing parked on
+a performance core — migrates it, to the least-loaded CPU of the right
+class. EEVDF carries the task's competing weight with it across a class
+migration (the same no-lag-across-CPUs rebase that work-stealing uses).
 
 ### Promotion and demotion
 

@@ -272,6 +272,31 @@ pub enum AuditEvent {
     /// could not seed the reserve. The kernel never substitutes a predictable
     /// id; it fails closed.
     BootIdUnavailable,
+    /// A secondary CPU was asked to start (the arch port accepted the
+    /// bring-up request for it).
+    ///
+    /// Emitted by `kernel_main`'s SMP bring-up once per secondary after
+    /// the arch port's `SecondaryBringup::start_secondary` returns `Ok`.
+    /// Acceptance is not liveness: the started core attests its own
+    /// arrival with [`Self::SecondaryCpuOnline`]. The record carries the
+    /// dense `cpu` id.
+    SecondaryCpuStarted,
+    /// A secondary CPU could **not** be started; the system continues on
+    /// the cores that are online (the scheduler's work stealing drains
+    /// the missing core's queue), degraded but correct.
+    ///
+    /// Emitted by `kernel_main`'s SMP bring-up with the dense `cpu` id
+    /// and a `cause` field naming the arch port's refusal. A refused
+    /// core is never retried blindly (no retry-until-it-works); the
+    /// failure is loud and attributable here.
+    SecondaryCpuStartFailed,
+    /// A started secondary CPU reached the kernel dispatch loop and is
+    /// scheduling tasks — the liveness witness for the bring-up.
+    ///
+    /// Emitted once by the secondary CPU itself from
+    /// [`crate::smp::run_secondary`], after its per-CPU hardware init and
+    /// before its first dispatch, with its dense `cpu` id.
+    SecondaryCpuOnline,
 }
 
 impl AuditEvent {
@@ -309,6 +334,9 @@ impl AuditEvent {
             Self::EntropyReserveUnseeded => 4061,
             Self::BootIdMinted => 4062,
             Self::BootIdUnavailable => 4063,
+            Self::SecondaryCpuStarted => 4070,
+            Self::SecondaryCpuStartFailed => 4071,
+            Self::SecondaryCpuOnline => 4072,
         })
     }
 
@@ -348,6 +376,9 @@ impl AuditEvent {
             Self::EntropyReserveUnseeded => "entropy reserve unseeded",
             Self::BootIdMinted => "per-boot id minted",
             Self::BootIdUnavailable => "per-boot id unavailable",
+            Self::SecondaryCpuStarted => "secondary cpu start requested",
+            Self::SecondaryCpuStartFailed => "secondary cpu start failed",
+            Self::SecondaryCpuOnline => "secondary cpu online",
         }
     }
 }
@@ -401,6 +432,9 @@ mod tests {
             AuditEvent::EntropyReserveUnseeded,
             AuditEvent::BootIdMinted,
             AuditEvent::BootIdUnavailable,
+            AuditEvent::SecondaryCpuStarted,
+            AuditEvent::SecondaryCpuStartFailed,
+            AuditEvent::SecondaryCpuOnline,
         ] {
             let id = ev.id().0;
             assert!(
@@ -442,6 +476,9 @@ mod tests {
             AuditEvent::EntropyReserveUnseeded.id().0,
             AuditEvent::BootIdMinted.id().0,
             AuditEvent::BootIdUnavailable.id().0,
+            AuditEvent::SecondaryCpuStarted.id().0,
+            AuditEvent::SecondaryCpuStartFailed.id().0,
+            AuditEvent::SecondaryCpuOnline.id().0,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {

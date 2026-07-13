@@ -225,6 +225,66 @@ impl Aarch64Arch {
         }
     }
 
+    /// Construct a multi-core handle over caller-leaked per-CPU slices,
+    /// one slot per dense CPU id — the runtime-sized twin of
+    /// [`Self::with_cpus`] for an allocator-having boot path that sizes
+    /// its backing to the *discovered* core count instead of a
+    /// compile-time `N`.
+    ///
+    /// Every slot is initialised here: `mpidrs[cpu]` populates the
+    /// affinity map, the IPI counters are zeroed, and every core class
+    /// defaults to [`CoreClass::Performance`] until
+    /// [`Self::classify_from_fdt`] rewrites it. Returns `None` (fail
+    /// closed) when the slice lengths disagree with each other or with
+    /// `mpidrs`, when no CPU is described, or when `boot_cpu` lies
+    /// outside the map.
+    #[must_use]
+    pub fn with_cpu_slices(
+        cpu_to_mpidr: &'static [AtomicU64],
+        host_ipi_count: &'static [AtomicU64],
+        core_classes: &'static [AtomicU8],
+        boot_cpu: CpuId,
+        timer_hz: u64,
+        mpidrs: &[u64],
+    ) -> Option<Self> {
+        let count = mpidrs.len();
+        if count == 0
+            || cpu_to_mpidr.len() != count
+            || host_ipi_count.len() != count
+            || core_classes.len() != count
+            || (boot_cpu as usize) >= count
+        {
+            return None;
+        }
+        for (slot, &mpidr) in cpu_to_mpidr.iter().zip(mpidrs) {
+            slot.store(mpidr, Ordering::Relaxed);
+        }
+        for counter in host_ipi_count {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for class in core_classes {
+            class.store(CoreClass::Performance.as_u8(), Ordering::Relaxed);
+        }
+        Some(Self {
+            boot_cpu,
+            timer_hz,
+            cpu_to_mpidr,
+            host_ipi_count,
+            host_stray_ipi: AtomicU64::new(0),
+            core_classes,
+            psci_method: None,
+        })
+    }
+
+    /// The number of dense CPU slots this handle's affinity map covers —
+    /// the discovered core count when the handle was built with
+    /// [`Self::with_cpus`] / [`Self::with_cpu_slices`] over an
+    /// exactly-sized backing (a single-CPU handle reports `1`).
+    #[must_use]
+    pub fn cpu_count(&self) -> u32 {
+        u32::try_from(self.cpu_to_mpidr.len()).unwrap_or(u32::MAX)
+    }
+
     /// Populate dense `cpu`'s map slot with `mpidr`. An out-of-range
     /// `cpu` (beyond the caller-sized capacity) is silently ignored, so a
     /// sparse or undersized storage cannot corrupt memory (fail closed). Called only at construction.

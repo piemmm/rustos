@@ -95,11 +95,15 @@ static PREEMPT_LEN: AtomicUsize = AtomicUsize::new(0);
 /// rather than silently re-pointing the live per-CPU slices.
 static PREEMPT_REGISTERED: AtomicBool = AtomicBool::new(false);
 
-/// Failure mode of [`PreemptStorage::register`].
+/// Failure mode of [`PreemptStorage::register`] /
+/// [`register_preempt_slices`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum PreemptStorageError {
     /// Storage was already registered; the slot is set-once per boot.
     AlreadyRegistered,
+    /// The caller's per-CPU slices disagree on the CPU count; nothing
+    /// was published (fail closed).
+    MismatchedLengths,
 }
 
 /// Caller-owned, `&'static` per-CPU preemption backing, sized by the
@@ -145,19 +149,65 @@ impl<const N: usize> PreemptStorage<N> {
     /// [`PreemptStorageError::AlreadyRegistered`] on the second publish
     /// (set-once per boot).
     pub fn register(&'static self) -> Result<usize, PreemptStorageError> {
-        if PREEMPT_REGISTERED
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(PreemptStorageError::AlreadyRegistered);
-        }
-        PREEMPT_INTERVAL_PTR.store(self.interval_ticks.as_ptr().cast_mut(), Ordering::Release);
-        PREEMPT_CPU_ID_PTR.store(self.cpu_id.as_ptr().cast_mut(), Ordering::Release);
-        PREEMPT_QUANTUM_PTR.store(self.quantum_abs.as_ptr().cast_mut(), Ordering::Release);
-        PREEMPT_WAKEUP_PTR.store(self.wakeup_abs.as_ptr().cast_mut(), Ordering::Release);
-        PREEMPT_LEN.store(N, Ordering::Release);
-        Ok(N)
+        register_preempt_slices(
+            &self.interval_ticks,
+            &self.cpu_id,
+            &self.quantum_abs,
+            &self.wakeup_abs,
+        )
     }
+}
+
+/// Publish caller-leaked per-CPU preemption slices — the runtime-sized
+/// twin of [`PreemptStorage::register`] for an allocator-having boot
+/// path that sizes its backing to the *discovered* core count instead
+/// of a compile-time `N`. The `const`-generic register delegates here,
+/// so there is exactly one publish body.
+///
+/// Every slot is (re-)initialised to its documented sentinel before the
+/// publish (`0` interval, `NO_CPU`, `NO_DEADLINE`), so a caller may hand
+/// in plainly-zeroed slices. All four slices must be the same length;
+/// set-once per boot.
+///
+/// # Errors
+///
+/// * [`PreemptStorageError::MismatchedLengths`] when the slices
+///   disagree on the CPU count (nothing is published — fail closed).
+/// * [`PreemptStorageError::AlreadyRegistered`] on the second publish.
+pub fn register_preempt_slices(
+    interval_ticks: &'static [AtomicU64],
+    cpu_id: &'static [AtomicU64],
+    quantum_abs: &'static [AtomicU64],
+    wakeup_abs: &'static [AtomicU64],
+) -> Result<usize, PreemptStorageError> {
+    let count = interval_ticks.len();
+    if cpu_id.len() != count || quantum_abs.len() != count || wakeup_abs.len() != count {
+        return Err(PreemptStorageError::MismatchedLengths);
+    }
+    if PREEMPT_REGISTERED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(PreemptStorageError::AlreadyRegistered);
+    }
+    for slot in interval_ticks {
+        slot.store(0, Ordering::Relaxed);
+    }
+    for slot in cpu_id {
+        slot.store(NO_CPU, Ordering::Relaxed);
+    }
+    for slot in quantum_abs {
+        slot.store(NO_DEADLINE, Ordering::Relaxed);
+    }
+    for slot in wakeup_abs {
+        slot.store(NO_DEADLINE, Ordering::Relaxed);
+    }
+    PREEMPT_INTERVAL_PTR.store(interval_ticks.as_ptr().cast_mut(), Ordering::Release);
+    PREEMPT_CPU_ID_PTR.store(cpu_id.as_ptr().cast_mut(), Ordering::Release);
+    PREEMPT_QUANTUM_PTR.store(quantum_abs.as_ptr().cast_mut(), Ordering::Release);
+    PREEMPT_WAKEUP_PTR.store(wakeup_abs.as_ptr().cast_mut(), Ordering::Release);
+    PREEMPT_LEN.store(count, Ordering::Release);
+    Ok(count)
 }
 
 impl<const N: usize> Default for PreemptStorage<N> {

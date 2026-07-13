@@ -134,9 +134,12 @@ impl<M: GicMmio + Send + Sync> GicIrqController<M> {
 
 /// GICv2 distributor target byte selecting the boot CPU (CPU interface 0).
 ///
-/// Production is single-CPU today (`BootInfo::new(BOOT_CPU, 1, …)`), so a
-/// device SPI is routed to CPU 0; secondary-core routing is selected from
-/// the discovered core count when SMP bring-up lands.
+/// Every device SPI is deliberately routed to the boot CPU: it is the one
+/// core guaranteed online in every configuration (a no-PSCI tree boots
+/// single-CPU), and a single interrupt target keeps the deferred-wake
+/// hand-off simple while the secondaries take work through the
+/// scheduler's placement IPIs instead. Spreading device IRQs across the
+/// online cores is a measured optimisation, not a correctness need.
 /// Defined once here so the in-kernel block path and the user-space-driver
 /// re-arm path route through the same value.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
@@ -855,15 +858,17 @@ pub fn install_device_irq_dispatch(table: &'static IrqTable) {
     }
 }
 
-/// Caller-owned per-CPU preemption backing for the production boot CPU.
-///
-/// The production aarch64 image is single-CPU (`BootInfo::new(BOOT_CPU, 1,
-/// …)`), so a `PreemptStorage<1>` covers it; secondary-core preemption is
-/// sized from the discovered CPU count when SMP bring-up lands (the per-CPU timer bookkeeping is the discovered core count,
-/// never a baked-in ceiling). Published once by [`arm_preemption`].
+/// Leak a zeroed `&'static [AtomicU64]` of `count` slots — the per-CPU
+/// preemption backing sized to the *discovered* core count (never a
+/// baked-in ceiling), alive for the kernel's lifetime like the other
+/// boot-leaked state.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
-static PREEMPT_STORAGE: rustos_arch_aarch64::preempt::PreemptStorage<1> =
-    rustos_arch_aarch64::preempt::PreemptStorage::new();
+fn leak_per_cpu_slots(count: usize) -> &'static [core::sync::atomic::AtomicU64] {
+    use core::sync::atomic::AtomicU64;
+    let mut slots = alloc::vec::Vec::with_capacity(count);
+    slots.resize_with(count, || AtomicU64::new(0));
+    alloc::boxed::Box::leak(slots.into_boxed_slice())
+}
 
 /// The EL0-preemption callback the timer IRQ path invokes for a tick taken
 /// from EL0 (installed via
@@ -885,6 +890,24 @@ static PREEMPT_STORAGE: rustos_arch_aarch64::preempt::PreemptStorage<1> =
 extern "C" fn production_preempt_dispatch(cpu: rustos_arch_api::CpuId) {
     let _ =
         rustos_kernel_core::reschedule_current(cpu, rustos_kernel_core::RescheduleAction::Yield);
+}
+
+/// The IPI callback the SGI IRQ path invokes on every delivered
+/// inter-processor interrupt (installed via
+/// [`rustos_arch_aarch64::preempt::set_ipi_callback`]).
+///
+/// The scheduler sends an IPI when it places new or newly-woken work on
+/// another CPU. Delivery alone already does the load-bearing part — it
+/// pulls an idle core out of the dispatch loop's `wfi` park, whose next
+/// `step` finds the queued task. The callback's own body handles the
+/// busy-target case: latching the pending reschedule
+/// ([`rustos_kernel_core::note_preempt_tick`]) makes an EL0 task on the
+/// targeted CPU yield at its next syscall boundary, so cross-CPU
+/// placement is honoured promptly on a busy core too (pure accounting,
+/// safe from interrupt context; never a context switch).
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+extern "C" fn production_ipi_dispatch(cpu: rustos_arch_api::CpuId) {
+    rustos_kernel_core::note_preempt_tick(cpu);
 }
 
 /// The per-tick callback the timer IRQ path invokes on **every** tick
@@ -948,14 +971,25 @@ extern "C" fn production_tick_dispatch(cpu: rustos_arch_api::CpuId) {
 /// A zero `CNTFRQ_EL0` reading (a board that does not report the counter
 /// frequency) leaves the kernel cooperative rather than arming a nonsense
 /// interval — fail-safe.
-pub fn arm_preemption() {
+pub fn arm_preemption(cpu_count: u32) {
     #[cfg(all(freestanding, kernel_isa = "aarch64"))]
     {
         use rustos_arch_aarch64::preempt;
 
-        // Set-once per boot; a stray re-call fails closed by halting rather
+        // Per-CPU backing sized to the discovered core count and leaked
+        // for the kernel's lifetime (the heap is live: this runs post-MMU
+        // inside the kernel-core init phases). Set-once per boot; a stray
+        // re-call or mismatched sizing fails closed by halting rather
         // than re-pointing the live per-CPU slices.
-        if PREEMPT_STORAGE.register().is_err() {
+        let count = cpu_count.max(1) as usize;
+        if preempt::register_preempt_slices(
+            leak_per_cpu_slots(count),
+            leak_per_cpu_slots(count),
+            leak_per_cpu_slots(count),
+            leak_per_cpu_slots(count),
+        )
+        .is_err()
+        {
             rustos_arch_aarch64::halt_current_cpu();
         }
 
@@ -969,6 +1003,10 @@ pub fn arm_preemption() {
         // re-arms the one-shot to the next deadline.
         preempt::set_timer_callback(production_tick_dispatch);
 
+        // Install the IPI callback before any core — this one included —
+        // can receive the scheduler's placement SGI.
+        preempt::set_ipi_callback(production_ipi_dispatch);
+
         // Derive the tick interval from the discovered counter frequency
         // (never a board constant). A zero reading is a
         // fail-safe skip.
@@ -978,16 +1016,62 @@ pub fn arm_preemption() {
         }
         let interval = preempt::interval_for_hz(counter_hz, PREEMPT_TICK_HZ);
 
-        // SAFETY: this is the boot CPU (id 0); the preempt callback is
-        // installed (above), the per-CPU storage is registered (above), the
-        // EL1 vector table is installed (`boot::init_vectors`), and the GIC
-        // is up (`install_device_irq_dispatch` ran immediately before). It
-        // records the quantum, enables the timer PPI, and leaves the timer
-        // disarmed; the scheduler arms the first one-shot on its next
-        // dispatch onto a contended CPU (tickless).
+        // SAFETY: this is the boot CPU (id 0); the preempt and IPI
+        // callbacks are installed (above), the per-CPU storage is
+        // registered (above), the EL1 vector table is installed
+        // (`boot::init_vectors`), and the GIC is up
+        // (`install_device_irq_dispatch` ran immediately before).
+        // `enable_ipi` unmasks this core's SGI line so a secondary's
+        // placement IPI reaches the boot CPU; `init_local_preempt`
+        // records the quantum, enables the timer PPI, and leaves the
+        // timer disarmed — the scheduler arms the first one-shot on its
+        // next dispatch onto a contended CPU (tickless).
         unsafe {
+            preempt::enable_ipi();
             preempt::init_local_preempt(0, interval);
         }
+    }
+    #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
+    {
+        let _ = cpu_count;
+    }
+}
+
+/// Arm tickless timer-driven preemption on a freshly-started secondary
+/// core: record its per-quantum interval and enable its timer PPI and
+/// IPI SGI, leaving the one-shot disarmed exactly as the boot CPU's
+/// [`arm_preemption`] does.
+///
+/// Called on the secondary core itself, from the production secondary
+/// entry, after its EL1 vectors and GICv2 CPU interface are up. The
+/// callbacks and the per-CPU backing were installed once by the boot
+/// CPU's `arm_preemption` before any `CPU_ON` was issued, so this is
+/// purely the per-core half. A zero counter frequency leaves the core
+/// cooperative rather than arming a nonsense interval (fail-safe, same
+/// as the boot CPU).
+pub fn init_secondary_preemption(cpu: rustos_arch_api::CpuId) {
+    #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+    {
+        use rustos_arch_aarch64::preempt;
+
+        let counter_hz = rustos_arch_aarch64::kernel_arch::read_cntfrq();
+        if counter_hz == 0 {
+            return;
+        }
+        let interval = preempt::interval_for_hz(counter_hz, PREEMPT_TICK_HZ);
+        // SAFETY: runs on `cpu` itself during its bring-up, before it
+        // enters the dispatch loop: its EL1 vectors and GICv2 CPU
+        // interface are installed (the secondary entry ran them just
+        // before), and the callbacks + per-CPU storage were registered by
+        // the boot CPU before it issued `CPU_ON` for this core.
+        unsafe {
+            preempt::enable_ipi();
+            preempt::init_local_preempt(cpu, interval);
+        }
+    }
+    #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
+    {
+        let _ = cpu;
     }
 }
 

@@ -21,13 +21,21 @@
 //!    framebuffer boot console to be active (the harness attaches
 //!    `-device ramfb`, so the pre-MMU video bring-up must have found
 //!    the tree's `fw_cfg` node and programmed the scan-out — the
-//!    display path `cargo xtask run` relies on), and writes the ARM
-//!    semihosting PASS finisher (`qemu_exit::exit_success`); an
-//!    inactive video console is reported as FAIL.
+//!    display path `cargo xtask run` relies on — an inactive video
+//!    console is reported as FAIL), then waits for the production SMP
+//!    bring-up: the run is `-smp 4`, so `kernel_main` PSCI-starts the
+//!    three secondaries the embedded tree's `/cpus` declares, and each
+//!    attests its arrival in the kernel dispatch loop with
+//!    `AuditEvent::SecondaryCpuOnline` (`EventId(4072)`). The PASS
+//!    finisher fires only once all three are online — the end-to-end
+//!    proof the production boot brings every discovered core into
+//!    service; a `SecondaryCpuStartFailed` (`EventId(4071)`) is an
+//!    immediate FAIL.
 //!
-//! A regression that fails any init phase never reaches the finisher, so
-//! the run times out and the harness reports `Outcome::Timeout` — the
-//! documented fail-loud behaviour.
+//! A regression that fails any init phase — or that loses a secondary
+//! core — never reaches the finisher, so the run times out and the
+//! harness reports `Outcome::Timeout` — the documented fail-loud
+//! behaviour.
 //!
 //! ## Embedded `virt` device tree
 //!
@@ -55,6 +63,7 @@
 #[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
+    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     use rustos_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
     use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
@@ -91,17 +100,63 @@ mod kernel {
     /// `kernel/core/src/audit.rs`.
     const BOOT_COMPLETED_EVENT_ID: EventId = EventId(4004);
 
-    /// Sink that replays every event through [`SERIAL_SINK`] and, on
-    /// [`BOOT_COMPLETED_EVENT_ID`], reports PASS to QEMU — but only if
-    /// the ramfb framebuffer boot console came up.
+    /// `EventId` of `AuditEvent::SecondaryCpuStartFailed` — a refused
+    /// PSCI `CPU_ON` on this fully-emulable board is a regression, not a
+    /// degrade to tolerate. Pinned by `event_ids_are_unique`.
+    const SECONDARY_START_FAILED_EVENT_ID: EventId = EventId(4071);
+
+    /// `EventId` of `AuditEvent::SecondaryCpuOnline` — each started
+    /// secondary core's own attestation that it reached the kernel
+    /// dispatch loop. Pinned by `event_ids_are_unique`.
+    const SECONDARY_ONLINE_EVENT_ID: EventId = EventId(4072);
+
+    /// Secondary cores the `-smp 4` run must bring online (the embedded
+    /// tree's `/cpus` minus the boot core). Matches the harness `cpus`
+    /// and the `build.rs` DTB dump — all three name the same topology.
+    const EXPECTED_SECONDARIES: u32 = 3;
+
+    /// Set once `BootCompleted` was observed (with the video console
+    /// active); the PASS finisher additionally requires every secondary
+    /// online.
+    static BOOT_COMPLETED: AtomicBool = AtomicBool::new(false);
+
+    /// Count of `SecondaryCpuOnline` attestations observed.
+    static SECONDARIES_ONLINE: AtomicU32 = AtomicU32::new(0);
+
+    /// Sink that replays every event through [`SERIAL_SINK`] and reports
+    /// PASS to QEMU once `BootCompleted` **and** all
+    /// [`EXPECTED_SECONDARIES`] `SecondaryCpuOnline` attestations have
+    /// been observed — but only if the ramfb framebuffer boot console
+    /// came up.
     ///
     /// The harness attaches `-device ramfb`, so the production pre-MMU
     /// video bring-up must have discovered the `virt` tree's `fw_cfg`
     /// node, programmed the scan-out, and switched the console to the
     /// screen (`video::is_active`). A boot that completed with the
     /// console still on the UART is a display regression reported as
-    /// FAIL, not a pass with a dark screen.
+    /// FAIL, not a pass with a dark screen. A `SecondaryCpuStartFailed`
+    /// is an immediate FAIL: on the emulated `virt` board with a
+    /// discovered PSCI conduit every `CPU_ON` must be accepted.
+    ///
+    /// `write_event` runs concurrently once the secondaries are live
+    /// (each core emits through this same sink), so the completion
+    /// bookkeeping is plain atomics and the PASS condition is checked on
+    /// both the boot-completed and the online edges — whichever lands
+    /// last fires the finisher exactly once (the semihosting exit ends
+    /// the whole machine).
     struct BootCompletedExitSink;
+
+    impl BootCompletedExitSink {
+        /// Fire the PASS finisher iff boot completed and every
+        /// secondary attested.
+        fn exit_if_complete() {
+            if BOOT_COMPLETED.load(Ordering::SeqCst)
+                && SECONDARIES_ONLINE.load(Ordering::SeqCst) >= EXPECTED_SECONDARIES
+            {
+                qemu_exit::exit_success();
+            }
+        }
+    }
 
     impl Sink for BootCompletedExitSink {
         fn write_event(&self, event: &Event<'_>) {
@@ -109,10 +164,16 @@ mod kernel {
             // records the full boot timeline.
             SerialSink::new().write_event(event);
             if event.id == BOOT_COMPLETED_EVENT_ID {
-                if rustos_arch_aarch64::video::is_active() {
-                    qemu_exit::exit_success();
+                if !rustos_arch_aarch64::video::is_active() {
+                    qemu_exit::exit_failure(1);
                 }
-                qemu_exit::exit_failure(1);
+                BOOT_COMPLETED.store(true, Ordering::SeqCst);
+                Self::exit_if_complete();
+            } else if event.id == SECONDARY_ONLINE_EVENT_ID {
+                SECONDARIES_ONLINE.fetch_add(1, Ordering::SeqCst);
+                Self::exit_if_complete();
+            } else if event.id == SECONDARY_START_FAILED_EVENT_ID {
+                qemu_exit::exit_failure(2);
             }
         }
     }

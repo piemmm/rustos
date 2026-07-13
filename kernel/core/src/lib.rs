@@ -110,6 +110,7 @@ pub mod sleeplock;
 // the concrete policy must not leak to crates that should depend on the
 // `rustos_kernel_sched_api` contract instead.
 pub(crate) mod sched;
+pub mod smp;
 pub mod spawn;
 pub mod syscalls;
 pub mod useradmin;
@@ -218,6 +219,7 @@ pub use seat::{
     seat_errno, PresentGate, SeatRegistry, KEYBOARD_CHANNEL_CAPACITY, NULL_SEAT_REGISTRY,
 };
 pub use sleeplock::{SleepGuard, SleepLock};
+pub use smp::{run_secondary, SecondaryExit};
 pub use spawn::{
     refuse_admit, refuse_spawn, spawn_and_enter, spawn_caller_errno, spawn_image, AdmitError,
     EmbeddedProgram, InitSpawn, InitSpawnCtx, NullProcessSpawn, ProcessSpawn, ProgramRegistry,

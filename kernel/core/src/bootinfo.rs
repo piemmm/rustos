@@ -24,7 +24,7 @@
 
 use alloc::sync::Arc;
 
-use rustos_arch_api::{ContextSwitch, PlatformEntropy};
+use rustos_arch_api::{ContextSwitch, PlatformEntropy, SecondaryBringup};
 
 use crate::sched::{CpuId, SchedulerArch, SchedulerConfig};
 use rustos_kernel_irq::{IrqController, IrqTable, UNSUPPORTED_CONTROLLER};
@@ -125,6 +125,28 @@ pub trait KernelArch: SchedulerArch {
     /// to apply per-CPU TSC offset compensation; the contract does
     /// not require them to.
     fn monotonic_ns(&self, cpu: CpuId) -> u64;
+
+    /// The platform's secondary-CPU bring-up surface, when this port can
+    /// start additional CPUs.
+    ///
+    /// [`crate::kernel_main`] drives it once per boot, after every init
+    /// phase has succeeded (the scheduler, IRQ dispatch, and syscall hook
+    /// are live) and after the secondary dispatch hand-off is published,
+    /// asking for each dense CPU id in `1..cpu_count`. The port must have
+    /// installed its secondary entry and stacks **before** handing over a
+    /// `BootInfo` with `cpu_count > 1`; the started core performs its own
+    /// per-CPU hardware init and joins the scheduler through
+    /// [`crate::run_secondary`].
+    ///
+    /// The default is `None` — a single-CPU port (or the host test arch)
+    /// simply has no bring-up surface, and `kernel_main` starts nothing.
+    /// A port returning `Some` must fail closed inside
+    /// [`SecondaryBringup::start_secondary`] for an unstartable id; a
+    /// refused core is reported on the audit log and the system continues
+    /// on the cores that are online.
+    fn secondary_bringup(&self) -> Option<&dyn SecondaryBringup> {
+        None
+    }
 
     /// The Tier-1 architecture identity of this port, or `None` for a
     /// port that is not a shippable target (the host test arch).

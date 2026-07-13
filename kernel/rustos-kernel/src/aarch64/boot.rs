@@ -50,15 +50,17 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use core::sync::atomic::{AtomicU64, AtomicU8};
 use rustos_abi::HwNode;
 use rustos_arch_aarch64::kernel_arch::{read_cntfrq, timer_frequency_hz};
 use rustos_arch_aarch64::paging::{
     configure_device_gigapages, configure_ram_gigapages, guard_arena_pool_capacity,
     identity_device_mask, identity_ram_mask, ram_gigapages, AddressSpace, PageTablePool,
 };
+
 use rustos_arch_aarch64::{
-    console, enable_fp_el1, exceptions, fdt, gic, halt_current_cpu, platform, serial,
-    syscall_entry, uart_init, video, Aarch64Arch, Aarch64ArchStorage,
+    console, enable_fp_el1, exceptions, fdt, gic, halt_current_cpu, platform, serial, smp,
+    syscall_entry, uart_init, video, Aarch64Arch, SERIAL_SINK,
 };
 use rustos_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery, SchedulerArch};
 use rustos_fdt::Fdt;
@@ -113,9 +115,11 @@ static BOOT_PAGE_TABLES: PageTablePool<
     { guard_arena_pool_capacity(crate::mem_map::STACK_ARENA_MAX_BYTES) },
 > = PageTablePool::new();
 
-/// The boot CPU's logical id. The boot trampoline parks every other CPU
-/// (`MPIDR_EL1` affinity ≠ 0) until the SMP bring-up (`plans/PI.md` P5)
-/// starts it, so this binary runs single-CPU on logical CPU 0.
+/// The boot CPU's dense logical id. The boot trampoline parks every
+/// other CPU until `kernel_main`'s SMP bring-up issues PSCI `CPU_ON`
+/// for each discovered secondary; [`crate::cpu_topology::order_cpus`]
+/// places the running boot core at dense id 0, so this constant and the
+/// dense map agree by construction.
 const BOOT_CPU: u32 = 0;
 
 /// Audit event: the aarch64 production kernel reached its Stage-P1 boot
@@ -135,6 +139,13 @@ const KERNEL_BOOT_AARCH64_REACHED: EventId = EventId(4097);
 /// `4098`/`4099`; the id is part of the audit contract and may not be
 /// renumbered.
 const KERNEL_PCIE_DISCOVERED: EventId = EventId(4100);
+
+/// Audit event: a started secondary CPU left the kernel dispatch loop
+/// (hand-off refused or scheduler stopped) and is parking fail-closed.
+/// Sits in the `kernel/core`-owned `4000..5000` range, clear of the ids
+/// above and of `kernel/core`'s own `40xx` block; the id is part of the
+/// audit contract and may not be renumbered.
+const KERNEL_SECONDARY_PARKED: EventId = EventId(4102);
 
 /// Stable `"true"`/`"false"` audit-field value for a boolean condition.
 /// Keeping the boot log to `&'static str` fields means the path takes no
@@ -543,12 +554,31 @@ pub fn boot(
     // override when present, else the `CNTFRQ_EL0` register value
     // (`discovered.timer_hz`).
     let counter_hz = discovered.timer_hz;
-    // Per-CPU bookkeeping backing: the boot/timer
-    // slice brings up only the boot core, so one slot suffices today;
-    // sizing this from the discovered CPU count is the SMP-bring-up
-    // increment that also resizes the `smp.s` secondary-stack pool.
-    static ARCH_STORAGE: Aarch64ArchStorage<1> = Aarch64ArchStorage::new();
-    let arch = Aarch64Arch::new(&ARCH_STORAGE, BOOT_CPU, counter_hz);
+    // Dense `CpuId` → `MPIDR_EL1` map from the discovered `/cpus` list,
+    // validated and ordered with the running boot core at dense id 0
+    // (a malformed list fails closed to a single-CPU boot), capped at
+    // the kernel core's per-CPU table bound. Every per-CPU backing —
+    // the arch handle's slots, the preemption slices, the secondary
+    // stacks, and the scheduler's run queues — is sized from this one
+    // list, exactly to the machine (no compile-time core ceiling).
+    let cpu_mpidrs = crate::cpu_topology::order_cpus(
+        &discovered.cpu_mpidrs,
+        smp::current_affinity(),
+        rustos_kernel_core::kthread::KTHREAD_MAX_CPUS,
+    );
+    let arch = build_arch_handle(&cpu_mpidrs, counter_hz);
+    // Discover each core's static class (`capacity-dmips-mhz`) so the
+    // scheduler can place background work on efficiency cores. A
+    // full-tree walk — safe here, post-MMU; a missing/malformed tree
+    // leaves the homogeneous Performance default.
+    if mmu_on && dtb != 0 {
+        // SAFETY: `dtb` is the firmware pointer `Fdt::from_ptr` validated
+        // for the walks above (magic + `totalsize` bounds); the MMU is on,
+        // so a whole-tree traversal is safe.
+        if let Ok(fdt) = unsafe { Fdt::from_ptr(dtb as *const u8) } {
+            arch.classify_from_fdt(&fdt);
+        }
+    }
     // Install the PSCI conduit discovered from the firmware tree (`hvc`
     // at EL2-hosted, `smc` at EL3-hosted — the Pi 4's `armstub8.bin`
     // exposes `smc`), so the SMP bring-up that follows (`plans/PI.md` P5)
@@ -566,6 +596,12 @@ pub fn boot(
     // make the monotonic clock unusable.
     let boot_cpu_ok = arch.current_cpu() == BOOT_CPU;
     let timer_present = counter_hz != 0;
+
+    // Stage the secondary bring-up (stacks + entry) before the hand-off:
+    // `kernel_main` issues the PSCI `CPU_ON`s once every init phase is
+    // green, and each start is refused fail-closed (and audited) unless
+    // this preparation succeeded. Single-CPU boots prepare nothing.
+    let smp_prepared = mmu_on && prepare_secondary_bringup(arch.cpu_count());
 
     // P6c-1: translate the firmware-discovered `/memory` windows into the
     // canonical physical-memory map `kernel_core::kernel_main` consumes.
@@ -649,6 +685,10 @@ pub fn boot(
     // pause (measure, don't guess).
     let mut timer_hz_buf = [0u8; 16];
     let timer_hz_hex = format_hex_u64(discovered.timer_hz, &mut timer_hz_buf);
+    // The dense CPU count every per-CPU structure was sized from — on a
+    // Pi 4 the four `/cpus` cores; `1` when discovery failed closed.
+    let mut cpu_count_buf = [0u8; 12];
+    let cpu_count_str = rustos_util::fmt::format_usize(cpu_mpidrs.len(), &mut cpu_count_buf);
 
     log(
         log_sink,
@@ -718,6 +758,14 @@ pub fn boot(
                     value: rustos_log::FieldValue::Str(yes_no(discovered.psci_method.is_some())),
                 },
                 Field {
+                    key: "cpu_count",
+                    value: rustos_log::FieldValue::Str(cpu_count_str),
+                },
+                Field {
+                    key: "smp_prepared",
+                    value: rustos_log::FieldValue::Str(yes_no(smp_prepared)),
+                },
+                Field {
                     key: "mmu_enabled",
                     value: rustos_log::FieldValue::Str(yes_no(mmu_on)),
                 },
@@ -767,6 +815,160 @@ pub fn boot(
     // check failed); park fail-closed, leaving the serial trail intact for
     // bisection.
     serial::beacon("pi-beacon 6/6: handover REJECTED, parking (see boot log)");
+    halt_current_cpu()
+}
+
+/// Leak a zeroed `&'static [AtomicU64]` of `count` slots for the arch
+/// handle's per-CPU bookkeeping, alive for the kernel's lifetime like
+/// the leaked console grids.
+fn leak_u64_slots(count: usize) -> &'static [AtomicU64] {
+    let mut slots = Vec::with_capacity(count);
+    slots.resize_with(count, || AtomicU64::new(0));
+    Box::leak(slots.into_boxed_slice())
+}
+
+/// Leak a zeroed `&'static [AtomicU8]` of `count` slots (the per-CPU
+/// core-class table).
+fn leak_u8_slots(count: usize) -> &'static [AtomicU8] {
+    let mut slots = Vec::with_capacity(count);
+    slots.resize_with(count, || AtomicU8::new(0));
+    Box::leak(slots.into_boxed_slice())
+}
+
+/// Build the [`Aarch64Arch`] handle over leaked per-CPU slices sized
+/// exactly to the validated dense CPU map.
+///
+/// `cpu_mpidrs` comes from [`crate::cpu_topology::order_cpus`], which
+/// guarantees a non-empty list with the running boot core at dense id
+/// 0 — the only ways `with_cpu_slices` can refuse are therefore
+/// programmer errors, on which the boot parks fail-closed with a serial
+/// beacon rather than continuing over per-CPU state of the wrong shape.
+fn build_arch_handle(cpu_mpidrs: &[u64], counter_hz: u64) -> Aarch64Arch {
+    let count = cpu_mpidrs.len();
+    match Aarch64Arch::with_cpu_slices(
+        leak_u64_slots(count),
+        leak_u64_slots(count),
+        leak_u8_slots(count),
+        BOOT_CPU,
+        counter_hz,
+        cpu_mpidrs,
+    ) {
+        Some(arch) => arch,
+        None => {
+            serial::beacon("pi-boot: arch handle construction FAILED, parking");
+            halt_current_cpu()
+        }
+    }
+}
+
+/// Leak a zeroed secondary-stack region of `count` slots (one per dense
+/// CPU id; slot 0 belongs to the never-started boot CPU).
+///
+/// Allocated zeroed straight from the global allocator — never built on
+/// the boot stack, whose budget a 64 KiB-per-slot array would blow — and
+/// leaked for the kernel's lifetime, exactly as the `smp.s` trampoline
+/// requires. An impossible layout or an out-of-memory boot heap parks
+/// fail-closed: without stacks no secondary may ever be started.
+fn leak_zeroed_secondary_stacks(count: usize) -> &'static [smp::SecondaryStack] {
+    let Ok(layout) = core::alloc::Layout::array::<smp::SecondaryStack>(count) else {
+        serial::beacon("pi-boot: secondary stack layout FAILED, parking");
+        halt_current_cpu()
+    };
+    // SAFETY: `layout` is non-zero-sized (count >= 2 when called — a
+    // single-CPU boot never reaches here) and well-formed per the check
+    // above; `alloc_zeroed` returns either null (handled) or a block of
+    // `layout`'s size and alignment.
+    let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) }.cast::<smp::SecondaryStack>();
+    if ptr.is_null() {
+        serial::beacon("pi-boot: secondary stack allocation FAILED, parking");
+        halt_current_cpu()
+    }
+    // SAFETY: `ptr` addresses `count` properly-aligned `SecondaryStack`
+    // slots, all zero — a valid bit pattern for the plain byte arrays
+    // they are — and the allocation is never freed (leaked to `'static`).
+    unsafe { core::slice::from_raw_parts(ptr, count) }
+}
+
+/// Stage the multi-core bring-up: size and publish the secondary stack
+/// region and install the production secondary entry, so the PSCI
+/// `CPU_ON`s `kernel_main` issues later find both in place.
+///
+/// Returns `true` when the machine is ready to start secondaries (or is
+/// single-CPU, where there is nothing to prepare). Both installs are
+/// set-once per boot and this is their only production call site, so a
+/// refusal is a programmer error; it is reported (`false` → the boot
+/// line's `smp_prepared` field) and every later `CPU_ON` fails closed
+/// and audited rather than starting a core with no stack.
+fn prepare_secondary_bringup(cpu_count: u32) -> bool {
+    if cpu_count <= 1 {
+        return true;
+    }
+    let stacks = leak_zeroed_secondary_stacks(cpu_count as usize);
+    if smp::register_secondary_stacks(stacks).is_err() {
+        return false;
+    }
+    smp::set_secondary_entry(production_secondary_entry).is_ok()
+}
+
+/// The entry every started secondary core runs (via the `smp.s`
+/// trampoline): per-CPU hardware init, then join the live kernel's
+/// dispatch loop.
+///
+/// Ordering is load-bearing:
+///
+/// 1. FP/SIMD on, before any code the compiler may lower to NEON.
+/// 2. Adopt the boot identity map — the very first memory-system act,
+///    while this core has performed no atomic read-modify-write (LDXR/
+///    STXR exclusives are unreliable on MMU-off Device-typed DRAM).
+/// 3. EL1 vectors + GICv2 CPU interface + per-CPU preemption/IPI arming
+///    — each banked or per-core state that must be programmed on the
+///    core that uses it.
+/// 4. [`rustos_kernel_core::run_secondary`], which audits the arrival
+///    and dispatches until the kernel stops.
+///
+/// The kernel-core hand-off was published before this core's `CPU_ON`
+/// was issued, so a refusal from `run_secondary` is a genuine fault; it
+/// is reported on the UART debug line and the core parks fail-closed.
+extern "C" fn production_secondary_entry(cpu: u32) -> ! {
+    // SAFETY: this secondary core's first action, exactly once, before
+    // any FP/SIMD instruction executes on it.
+    unsafe {
+        enable_fp_el1();
+    }
+    // SAFETY: the trampoline hands over MMU-off with all interrupts
+    // masked and this core has touched no exclusives yet; the boot CPU
+    // published the park root before any `CPU_ON` (it enabled its own
+    // MMU during `boot`), so the adopted tables are live and coherent.
+    if !unsafe { rustos_arch_aarch64::paging::adopt_boot_translation() } {
+        // No published boot root: nothing sane to run on — park.
+        halt_current_cpu()
+    }
+    // SAFETY: per-CPU installs on this core, exactly once each, before
+    // any interrupt source is armed here: the EL1 vector base and the
+    // GICv2 CPU interface are banked per core (the distributor write in
+    // `gic::init` idempotently re-enables what the boot CPU enabled).
+    unsafe {
+        exceptions::init_vectors();
+        gic::init();
+    }
+    // Per-CPU tickless preemption + IPI arming (the callbacks and the
+    // per-CPU backing were installed by the boot CPU before `CPU_ON`).
+    crate::aarch64::gic_irq::init_secondary_preemption(cpu);
+
+    // Join the live kernel. Returns only when this core must stop.
+    let exit = rustos_kernel_core::run_secondary(cpu);
+    log(
+        &SERIAL_SINK,
+        &Event {
+            level: Level::Warn,
+            id: KERNEL_SECONDARY_PARKED,
+            message: "aarch64: secondary cpu left the dispatch loop; parking",
+            fields: &[Field {
+                key: "cause",
+                value: rustos_log::FieldValue::Str(exit.as_str()),
+            }],
+        },
+    );
     halt_current_cpu()
 }
 
@@ -970,13 +1172,16 @@ fn enter_kernel_core(
         rustos_arch_aarch64::kernel_arch::halt_current_cpu();
     }
 
+    // The discovered dense CPU count sizes the scheduler's run queues
+    // and names how many cores `kernel_main`'s SMP phase brings online.
+    let cpu_count = arch.cpu_count();
     let arch = Arc::new(Aarch64BinArch::new(arch));
     let boot_info = BootInfo::new(
         BOOT_CPU,
-        1,
+        cpu_count,
         "",
         memory_map,
-        SchedulerConfig::defaults_for(1),
+        SchedulerConfig::defaults_for(cpu_count),
         arch,
         log_sink,
         audit_sink,
@@ -1176,6 +1381,13 @@ struct Discovered {
     /// tree declares no PSCI node, so bring-up fails closed rather than
     /// assuming a conduit.
     psci_method: Option<fdt::PsciMethod>,
+    /// Every `/cpus/cpu@*` `reg` affinity (`MPIDR_EL1` `Aff0`–`Aff2`)
+    /// the firmware tree declares, in tree order — the CPU inventory
+    /// [`crate::cpu_topology::order_cpus`] validates into the dense map
+    /// every per-CPU structure is sized from. Empty when the tree
+    /// declares none or the walk fails (the boot then falls back closed
+    /// to a single-CPU map).
+    cpu_mpidrs: Vec<u64>,
 }
 
 /// Discover the board's post-MMU facts from the device tree at `dtb`:
@@ -1194,6 +1406,7 @@ fn configure_from_dtb(dtb: u64) -> Discovered {
         timer_hz: read_cntfrq(),
         timer_hz_from_tree: false,
         psci_method: None,
+        cpu_mpidrs: Vec::new(),
     };
     if dtb == 0 {
         return out;
@@ -1235,6 +1448,21 @@ fn configure_from_dtb(dtb: u64) -> Discovered {
     // declares, so secondary-core bring-up issues `CPU_ON` over the
     // board's conduit rather than an assumed one.
     out.psci_method = fdt::psci_method(&fdt);
+    // Collect every `/cpus/cpu@*` affinity so the bring-up starts the
+    // cores the board *declares* (the Pi 4's four Cortex-A72s), never an
+    // assumed count. A malformed walk discards the partial list — the
+    // boot then sizes for the one running core rather than trusting a
+    // truncated inventory (fail closed).
+    let mut cpus = Vec::new();
+    if fdt
+        .each_cpu(|mpidr, _capacity| {
+            cpus.push(mpidr & smp::MPIDR_AFFINITY_MASK);
+        })
+        .is_err()
+    {
+        cpus.clear();
+    }
+    out.cpu_mpidrs = cpus;
     // Record the console UART's receive-interrupt line so the root-unlock
     // console handoff can switch `login`'s input from polled to
     // interrupt-driven (`crate::aarch64::gic_irq::enable_uart_console_irq`).

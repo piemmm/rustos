@@ -1038,10 +1038,11 @@ fn finish_unlock<B: Block + 'static>(
     match ctx.spawn_kernel_service(alloc::boxed::Box::new(unlock_body)) {
         // Publish the interactive unlock kthread's scheduler id so its
         // passphrase reader can register on `CONSOLE_WAITQ` and the console
-        // RX interrupt can unpark it by id. This seam is
-        // single-CPU and continues straight to the driver-store serve loop
-        // (parking only later), so the id is published before the spawned
-        // body ever runs and constructs its reader.
+        // RX interrupt can unpark it by id. On a multi-core boot the
+        // spawned body can start on another CPU before this store lands;
+        // the reader tolerates that by re-resolving the id on every poll
+        // (`KthreadConsoleRead::read`), so a pre-publish start degrades to
+        // at most one transient cooperative yield, never a lost wake.
         Some(unlock_task) => crate::unlock_service::set_unlock_console_task(unlock_task),
         // The unlock task could not be admitted: nothing will prompt for the
         // passphrase or open the console-0 gate, so open it here (login still

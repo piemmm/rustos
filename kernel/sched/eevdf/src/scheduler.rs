@@ -73,10 +73,9 @@ pub struct Scheduler<A: SchedulerArch> {
     /// Dense list of the performance-class CPUs.
     perf_cpus: Box<[CpuId]>,
     /// Dense list of the efficiency-class CPUs. Empty on a homogeneous
-    /// machine, where placement then falls back to the task's home CPU.
+    /// machine, where placement then draws from the performance pool
+    /// (every CPU).
     eff_cpus: Box<[CpuId]>,
-    /// Round-robin cursor used to spread same-class placements.
-    class_rr: AtomicU64,
 }
 
 impl<A: SchedulerArch> Scheduler<A> {
@@ -138,7 +137,6 @@ impl<A: SchedulerArch> Scheduler<A> {
             core_classes: core_classes.into_boxed_slice(),
             perf_cpus: perf_cpus.into_boxed_slice(),
             eff_cpus: eff_cpus.into_boxed_slice(),
-            class_rr: AtomicU64::new(0),
         })
     }
 
@@ -152,31 +150,85 @@ impl<A: SchedulerArch> Scheduler<A> {
         }
     }
 
-    /// Choose the CPU a task at `prio` should be enqueued on, given its
-    /// current `home`. Keeps `home` when it already matches the preferred
-    /// class (so the path is a strict no-op on a homogeneous machine);
-    /// otherwise round-robins across the CPUs of the preferred class,
-    /// falling back to `home` when that pool is empty.
-    fn preferred_home(&self, prio: Priority, home: CpuId) -> CpuId {
+    /// The CPU in `pool` carrying the least competing weight, preferring
+    /// `prefer` on a tie so an equally-loaded hint keeps its locality.
+    /// `None` only for an empty pool.
+    ///
+    /// Each admission adds the placed task's weight to its queue, so a
+    /// burst of placements spreads across equally-idle CPUs instead of
+    /// herding onto one. The scan is O(pool) uncontended lock reads —
+    /// placement runs per spawn/wake, never per dispatch.
+    fn least_loaded(&self, pool: &[CpuId], prefer: CpuId) -> Option<CpuId> {
+        let mut best: Option<(u64, CpuId)> = None;
+        for &cpu in pool {
+            let Some(state) = self.cpus.get(cpu as usize) else {
+                continue;
+            };
+            let weight = state.queue.competing_weight();
+            let better = match best {
+                None => true,
+                Some((best_weight, best_cpu)) => {
+                    weight < best_weight
+                        || (weight == best_weight && cpu == prefer && best_cpu != prefer)
+                }
+            };
+            if better {
+                best = Some((weight, cpu));
+            }
+        }
+        best.map(|(_, cpu)| cpu)
+    }
+
+    /// The CPUs a task of class `want` may be placed on: its own class's
+    /// pool, or — when the machine has no CPU of that class — the other
+    /// class's pool, so placement always has a real candidate set.
+    fn placement_pool(&self, want: CoreClass) -> &[CpuId] {
+        let (own, other): (&[CpuId], &[CpuId]) = match want {
+            CoreClass::Performance => (&self.perf_cpus, &self.eff_cpus),
+            CoreClass::Efficiency => (&self.eff_cpus, &self.perf_cpus),
+        };
+        if own.is_empty() {
+            other
+        } else {
+            own
+        }
+    }
+
+    /// Choose the CPU new or newly-woken work at `prio` lands on: the
+    /// least-loaded CPU of its preferred class (`hint`-preferring on a
+    /// tie). An idle CPU competes with weight `0`, so it is chosen ahead
+    /// of a busy hint and the follow-up IPI wakes it from its idle park
+    /// — work spreads to sleeping cores instead of piling onto the
+    /// spawning CPU while they sleep.
+    fn placement_for(&self, prio: Priority, hint: CpuId) -> CpuId {
+        let want = Self::preferred_class(prio);
+        self.least_loaded(self.placement_pool(want), hint)
+            .unwrap_or(hint)
+    }
+
+    /// The CPU a task **already running** on `home` should stay or be
+    /// re-homed on after a yield: `home` itself when its class matches
+    /// the task's priority, else the least-loaded CPU of the preferred
+    /// class (falling back to `home` on a machine without one).
+    ///
+    /// Deliberately *not* [`Self::placement_for`]: a same-class yield
+    /// must stay put — re-placing on every yield would migrate a task
+    /// each time another CPU dipped below its home's load, thrashing
+    /// caches for no fairness gain. Only a class mismatch (e.g. a `Low`
+    /// task work-stealing parked on a performance core) migrates.
+    fn class_home(&self, prio: Priority, home: CpuId) -> CpuId {
         let want = Self::preferred_class(prio);
         if self.class_of(home) == want {
             return home;
         }
-        let pool = match want {
+        let pool: &[CpuId] = match want {
             CoreClass::Performance => &self.perf_cpus,
             CoreClass::Efficiency => &self.eff_cpus,
         };
         if pool.is_empty() {
             return home;
         }
-        // `pool.len()` is at most the CPU count (`u32`), so the modulus
-        // result fits a `usize` without truncation.
-        #[allow(clippy::cast_possible_truncation)]
-        let idx = {
-            let len = pool.len() as u64;
-            (self.class_rr.fetch_add(1, Ordering::Relaxed) % len) as usize
-        };
-        pool[idx]
+        self.least_loaded(pool, home).unwrap_or(home)
     }
 
     /// The static [`CoreClass`] of `cpu`, or [`CoreClass::Performance`]
@@ -247,11 +299,12 @@ impl<A: SchedulerArch> Scheduler<A> {
 
     /// Spawn a new task at `priority` with a body closure.
     ///
-    /// `home_cpu` is the caller's hint. On a heterogeneous machine the
-    /// task is placed on a CPU of the [`CoreClass`] its priority calls
-    /// for (`preferred_home`) — a `Low` background task on an
-    /// efficiency core, interactive work on a performance core; on a
-    /// homogeneous machine the hint is honoured unchanged.
+    /// `home_cpu` is the caller's hint. The task lands on the
+    /// least-loaded CPU of the [`CoreClass`] its priority calls for —
+    /// a `Low` background task on an efficiency core, interactive work
+    /// on a performance core — with the hint preferred on an equal-load
+    /// tie, so an idle core is put to work ahead of an already-busy
+    /// hint.
     ///
     /// # Errors
     /// * [`SchedError::NoSuchCpu`] if `home_cpu` is out of range.
@@ -260,7 +313,7 @@ impl<A: SchedulerArch> Scheduler<A> {
         F: FnMut(&mut TaskContext) -> TaskAction + Send + 'static,
     {
         self.cpu_state(home_cpu)?;
-        let placed = self.preferred_home(priority, home_cpu);
+        let placed = self.placement_for(priority, home_cpu);
         let cpu = self.cpu_state(placed)?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let id = if id == 0 {
@@ -333,11 +386,12 @@ impl<A: SchedulerArch> Scheduler<A> {
         task.cas_state(TaskState::Parked, TaskState::Ready)
             .map_err(|_| SchedError::InvalidState)?;
         // A wake is the moment a previously-idle task "needs power":
-        // re-place it onto a CPU of the class its priority calls for
-        // before re-admitting its weight there. On a homogeneous machine
-        // this is its old home, so admission is unchanged.
+        // re-place it onto the least-loaded CPU of the class its
+        // priority calls for before re-admitting its weight there, so a
+        // woken task fills an idle core (whose IPI below un-parks it)
+        // rather than queueing behind its old home's backlog.
         let home = task.home_cpu.load(Ordering::Acquire);
-        let target = self.preferred_home(task.load_priority(), home);
+        let target = self.placement_for(task.load_priority(), home);
         task.home_cpu.store(target, Ordering::Release);
         let cpu = self.cpu_state(target)?;
         let entry = Self::admit(&task, &cpu.queue);
@@ -606,7 +660,7 @@ impl<A: SchedulerArch> Scheduler<A> {
             }
             TaskAction::Yield => {
                 task.store_state(TaskState::Ready);
-                let dest = self.preferred_home(task.load_priority(), cpu);
+                let dest = self.class_home(task.load_priority(), cpu);
                 if dest == cpu {
                     // EEVDF: the fulfilled request rolls the eligible time
                     // forward to the old deadline and sets the next
@@ -927,6 +981,71 @@ mod tests {
     fn idle_when_no_work() {
         let (_arch, sched) = mk(2);
         assert_eq!(sched.step(0), Ok(StepOutcome::Idle));
+    }
+
+    /// Placement prefers an idle CPU over a busy hint: with weight
+    /// already competing on the hinted CPU, a new spawn lands on the
+    /// idle sibling and IPIs it — the wake that pulls a `wfi`-parked
+    /// secondary core into service.
+    #[test]
+    fn spawn_prefers_an_idle_cpu_over_a_busy_hint() {
+        let (arch, sched) = mk(2);
+        let _busy = sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Yield)
+            .expect("spawn busy");
+        let ipis_before = arch.ipi_count(1);
+        let placed = sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Exit)
+            .expect("spawn placed");
+        assert!(
+            arch.ipi_count(1) > ipis_before,
+            "the idle CPU must receive the placement IPI"
+        );
+        arch.set_current_cpu(1);
+        assert_eq!(sched.step(1), Ok(StepOutcome::Ran(placed)));
+    }
+
+    /// A burst of spawns from one CPU spreads over every idle CPU:
+    /// each admission adds the placed task's weight, so the next
+    /// placement sees that CPU as loaded and moves on.
+    #[test]
+    fn spawn_burst_from_one_cpu_spreads_over_idle_cpus() {
+        let (arch, sched) = mk(4);
+        for _ in 0..4 {
+            sched
+                .spawn(0, Priority::Normal, |_| TaskAction::Yield)
+                .expect("spawn");
+        }
+        for cpu in 0..4 {
+            assert!(
+                arch.ipi_count(cpu) >= 1,
+                "cpu {cpu} must have been placed work (got no IPI)"
+            );
+        }
+    }
+
+    /// A woken task is re-placed onto an idle CPU (and that CPU is
+    /// IPI'd) rather than queueing behind its old home's backlog.
+    #[test]
+    fn unpark_moves_a_woken_task_to_an_idle_cpu() {
+        let (arch, sched) = mk(2);
+        let parker = sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Park)
+            .expect("spawn parker");
+        arch.set_current_cpu(0);
+        assert_eq!(sched.step(0), Ok(StepOutcome::Ran(parker)));
+        assert_eq!(sched.state_of(parker), TaskState::Parked);
+        let _busy = sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Yield)
+            .expect("spawn busy");
+        let ipis_before = arch.ipi_count(1);
+        sched.unpark(parker).expect("unpark");
+        assert!(
+            arch.ipi_count(1) > ipis_before,
+            "the idle CPU must be IPI'd for the woken task"
+        );
+        arch.set_current_cpu(1);
+        assert_eq!(sched.step(1), Ok(StepOutcome::Ran(parker)));
     }
 
     #[test]

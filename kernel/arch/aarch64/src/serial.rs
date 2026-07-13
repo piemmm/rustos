@@ -142,7 +142,7 @@
 //! the event into a ring buffer consumed by an async drainer").
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use rustos_log::{Event, Sink};
 
@@ -251,13 +251,27 @@ impl SerialRing {
 /// not re-create the general lock library's surface — the carve-out
 /// for a constrained primitive the shared crate cannot supply here.
 struct RingLock {
-    locked: AtomicBool,
+    /// The lock word *and* owner record in one atomic: [`NO_HOLDER`]
+    /// when free, else the id of the CPU inside the critical section.
+    /// A single word (taken with `CAS(NO_HOLDER → cpu)`) leaves no
+    /// window in which the lock is held but the owner unknown, so a
+    /// contended producer can always tell a *cross-CPU* hold (safe to
+    /// spin for — the critical section is a bounded memcpy +
+    /// non-blocking drain, never a UART wait) apart from *same-CPU
+    /// re-entrancy* (an interrupt that logged while this CPU held the
+    /// lock — spinning would deadlock). That distinction is what keeps
+    /// multi-core output whole-line without re-introducing the deadlock
+    /// the try-lock design exists to prevent.
+    holder: AtomicU32,
     ring: UnsafeCell<SerialRing>,
 }
 
+/// [`RingLock::holder`] sentinel for "no CPU holds the lock".
+const NO_HOLDER: u32 = u32::MAX;
+
 // SAFETY: every path to the inner `SerialRing` goes through `try_with`, which
 // hands out the `&mut SerialRing` only after a successful `compare_exchange`
-// on `locked` and releases it before returning — so at most one reference
+// on `holder` and releases it before returning — so at most one reference
 // exists at a time. The contents are plain bytes (no `Drop`), and the
 // kernel does not unwind, so a (forbidden) panic inside the closure
 // cannot leave a dangling borrow; it halts.
@@ -267,7 +281,7 @@ impl RingLock {
     /// An empty, unlocked ring. `const` so it can back a `static`.
     const fn new() -> Self {
         Self {
-            locked: AtomicBool::new(false),
+            holder: AtomicU32::new(NO_HOLDER),
             ring: UnsafeCell::new(SerialRing::new()),
         }
     }
@@ -278,9 +292,12 @@ impl RingLock {
     /// logged while a producer held it), so the caller falls back to a
     /// direct, bounded write rather than risking a deadlock.
     fn try_with<R>(&self, f: impl FnOnce(&mut SerialRing) -> R) -> Option<R> {
+        // The CPU's masked affinity is at most 24 bits, so it can never
+        // collide with the `NO_HOLDER` sentinel.
+        let me = crate::smp::current_cpu_index();
         if self
-            .locked
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .holder
+            .compare_exchange(NO_HOLDER, me, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
             return None;
@@ -290,17 +307,45 @@ impl RingLock {
         // below releases it after `f` returns.
         let ring = unsafe { &mut *self.ring.get() };
         let result = f(ring);
-        self.locked.store(false, Ordering::Release);
+        self.holder.store(NO_HOLDER, Ordering::Release);
         Some(result)
+    }
+
+    /// Run `f` with exclusive access to the ring, spinning through a
+    /// *cross-CPU* hold so concurrent producers emit whole lines instead
+    /// of interleaving bytes on the wire. Returns `None` — without
+    /// blocking — only for same-CPU re-entrancy (an interrupt that logs
+    /// while this CPU already holds the lock), where spinning would
+    /// deadlock; the caller then falls back to the direct, bounded
+    /// write. Safe to spin: the ring critical section is a bounded
+    /// memcpy plus a non-blocking FIFO drain — the holder never waits on
+    /// the UART inside the lock.
+    fn with_producer<R>(&self, mut f: impl FnMut(&mut SerialRing) -> R) -> Option<R> {
+        loop {
+            if let Some(result) = self.try_with(&mut f) {
+                return Some(result);
+            }
+            if self.holder.load(Ordering::Relaxed) == crate::smp::current_cpu_index() {
+                return None;
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Test observer: `true` while some CPU is inside the critical
+    /// section.
+    #[cfg(test)]
+    fn is_locked(&self) -> bool {
+        self.holder.load(Ordering::Relaxed) != NO_HOLDER
     }
 }
 
 /// The single ring through which **all** UART output is buffered — the
 /// diagnostic log [`SerialSink`] and raw console output
 /// ([`write_console_bytes`]) alike — so the two share one ordered stream
-/// on the wire. Producers never interleave a line
-/// because [`RingLock::try_with`] serialises access; a contended or
-/// re-entrant caller falls back to a direct, bounded write.
+/// on the wire. Producers never interleave a line because
+/// [`RingLock::with_producer`] serialises access across CPUs; only a
+/// re-entrant same-CPU caller falls back to a direct, bounded write.
 static SERIAL_RING: RingLock = RingLock::new();
 
 /// Whether the console transmitter was declared wedged by a budget
@@ -464,12 +509,12 @@ fn enqueue_byte(ring: &mut SerialRing, byte: u8) {
 }
 
 /// Append `bytes` **verbatim** to the buffered serial ring and push out
-/// whatever the FIFO will accept now, without spinning — the non-blocking
-/// console-output path. Falls back to a direct, bounded [`putchar`] write
-/// only when the ring is momentarily locked (another CPU / a re-entrant
-/// interrupt), never spinning on the lock.
+/// whatever the FIFO will accept now — the non-blocking console-output
+/// path. A cross-CPU hold is waited out (whole chunks never interleave
+/// on the wire); the direct, bounded [`putchar`] fallback remains only
+/// for same-CPU re-entrancy, where waiting would deadlock.
 fn buffered_uart_write(bytes: &[u8]) {
-    let buffered = SERIAL_RING.try_with(|ring| {
+    let buffered = SERIAL_RING.with_producer(|ring| {
         for &byte in bytes {
             enqueue_byte(ring, byte);
         }
@@ -1000,12 +1045,13 @@ impl Sink for SerialSink {
         // blocked spinning on the slow UART transmit — the defect that let
         // logging starve the keyboard report pump (
         // `lib/log`: "sinks copy the event into a ring buffer consumed by
-        // an async drainer"). `RingLock::try_with` — try-lock only, never a
-        // blocking acquire — keeps this re-entrancy- and deadlock-free: if
-        // the ring is momentarily held (another CPU, or an interrupt that
-        // logged while a task held it) the line falls back to the direct,
-        // bounded `ConsoleWriter` UART path rather than spinning on the lock.
-        let buffered = SERIAL_RING.try_with(|ring| {
+        // an async drainer"). `RingLock::with_producer` waits out a
+        // cross-CPU hold (bounded: the holder's critical section is a
+        // memcpy + non-blocking drain) so concurrent CPUs emit whole
+        // lines; only same-CPU re-entrancy (an interrupt that logged
+        // while a task held the ring) falls back to the direct, bounded
+        // `ConsoleWriter` UART path, where waiting would deadlock.
+        let buffered = SERIAL_RING.with_producer(|ring| {
             let mut w = RingWriter { ring };
             write_formatted(&mut w, event);
             // Push what the FIFO will accept right now, without spinning, so
@@ -1033,6 +1079,23 @@ pub static SERIAL_SINK: SerialSink = SerialSink::new();
 mod tests {
     use super::*;
     use core::fmt::Write as _;
+
+    #[test]
+    fn producer_lock_refuses_same_cpu_reentrancy_and_recovers() {
+        let lock = RingLock::new();
+        let outer = lock.with_producer(|_ring| {
+            // The host reports every caller as CPU 0, so this nested
+            // acquire is exactly the same-CPU re-entrancy case (an
+            // interrupt logging mid-line): it must refuse — never spin —
+            // so the caller takes the bounded direct fallback.
+            assert!(lock.is_locked());
+            lock.with_producer(|_r| ()).is_none()
+        });
+        assert_eq!(outer, Some(true));
+        // Released cleanly: a fresh acquire succeeds again.
+        assert!(!lock.is_locked());
+        assert!(lock.try_with(|_r| ()).is_some());
+    }
 
     #[test]
     fn serial_ring_starts_empty() {

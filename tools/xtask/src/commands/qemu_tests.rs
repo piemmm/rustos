@@ -1779,18 +1779,23 @@ const TESTS: &[QemuTest] = &[
     // `BootMemoryMap`, installs the discovered-UART console + `svc`
     // dispatch callback, and hands a validated `BootInfo` to
     // `kernel_core::kernel_main`; the audit sink reports PASS through the
-    // ARM semihosting finisher on `EventId(4004)` — and only with the
-    // ramfb framebuffer boot console active: the run attaches `-device
-    // ramfb`, so the production pre-MMU video bring-up must discover the
-    // tree's `fw_cfg` node, program the scan-out over `lib/fwcfg`, and
-    // switch the console to the screen (`video::is_active`), proving the
-    // display path `cargo xtask run` relies on end to end. Single CPU and
-    // a 60-second budget match the other boot-then-do-fixed-work tests.
+    // ARM semihosting finisher — and only with the ramfb framebuffer boot
+    // console active: the run attaches `-device ramfb`, so the production
+    // pre-MMU video bring-up must discover the tree's `fw_cfg` node,
+    // program the scan-out over `lib/fwcfg`, and switch the console to
+    // the screen (`video::is_active`), proving the display path `cargo
+    // xtask run` relies on end to end. The run is `-smp 4` (matching the
+    // embedded tree's `/cpus`): after `EventId(4004)` the sink waits for
+    // the production SMP bring-up to PSCI-start all three secondaries and
+    // for each to attest `SecondaryCpuOnline` (`EventId(4072)`) from the
+    // kernel dispatch loop — the end-to-end multi-core boot proof; a
+    // `SecondaryCpuStartFailed` (`EventId(4071)`) is an immediate FAIL.
+    // A 60-second budget matches the other boot-then-do-fixed-work tests.
     QemuTest {
         package: "rustos-test-kernel-arch-boot-aarch64",
         binary: "rustos-test-kernel-arch-boot-aarch64",
         target: "aarch64-unknown-none",
-        cpus: 1,
+        cpus: 4,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
         virtio_net: false,

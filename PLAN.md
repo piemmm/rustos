@@ -3666,7 +3666,9 @@ and fail-closed (§24.4) — this work must not loosen them.
   with no fixed buffer, and `send_ipi`/every accessor bound by the slice length,
   so the handle imposes no `MAX_CPUS` ceiling (`MAX_CPUS` survives only for the
   `smp.s`/`preempt` secondary-bring-up bound). The production boot path supplies
-  a `static Aarch64ArchStorage<1>` and every aarch64 vertical a right-sized
+  the handle over exactly-sized leaked slices (`Aarch64Arch::with_cpu_slices`)
+  from the validated `/cpus` dense map (`rustos-kernel`'s host-tested
+  `cpu_topology::order_cpus`); every aarch64 vertical supplies a right-sized
   `static`. **x86_64 done** (`kernel/arch/x86_64/src/kernel_arch.rs`):
   `X86_64Arch` borrows three `&'static` slices — the dense-`CpuId` → LAPIC-ID
   map (`&[AtomicU16]`, `u16::MAX` `NO_LAPIC` sentinel since a LAPIC id is a
@@ -3697,7 +3699,10 @@ and fail-closed (§24.4) — this work must not loosen them.
   per-core stride the `smp.s` trampoline computes each core's stack top from
   (`base + (cpuid+1)*stride`), and the per-CPU timer slots are a caller-sized
   `preempt::PreemptStorage<N>` published as `&'static [AtomicU64]` slices; both
-  set-once and fail closed before registration (§2.9), with the §17.2/§4
+  set-once and fail closed before registration (§2.9) — plus runtime-sized
+  twins (`smp::register_secondary_stacks` over a leaked `[SecondaryStack]`,
+  `preempt::register_preempt_slices`) the production boot sizes from the
+  discovered `/cpus` count — with the §17.2/§4
   invariants preserved. **riscv64 done** (L3b): the `smp.s` `.equ
   SECONDARY_MAX_HARTS` + `.skip` pool and the `smp::MAX_HARTS` const are deleted;
   the secondary stack is a caller-sized `smp::SecondaryStackPool<N>` whose
@@ -3889,7 +3894,12 @@ and fail-closed (§24.4) — this work must not loosen them.
   refused, §2.9), the per-stack 64 KiB size stays a fixed §24.4 bound, and the
   §17.2 break-before-make + §4 guard-page invariants hold. The four aarch64 SMP
   / timer verticals register a right-sized pool/storage and stay green on
-  `-M virt`; production `rustos-kernel` is single-CPU and registers neither.
+  `-M virt`; production `rustos-kernel` registers runtime-sized backings from
+  the discovered `/cpus` count and brings every discovered core online after
+  `BootCompleted` (the `kernel_core` SMP phase: published secondary dispatch
+  hand-off, audited PSCI `CPU_ON` per core, each secondary adopting the boot
+  translation and joining the shared dispatch loop — proven end to end by the
+  `-smp 4` `kernel-arch-boot-aarch64` vertical).
   The **riscv64** secondary-bring-up bound is now converted the same way (its
   `smp.s` `SECONDARY_MAX_HARTS` `.skip` pool and `smp::MAX_HARTS` const deleted
   in favour of a caller-sized `SecondaryStackPool<N>` / `PreemptStorage<N>`,

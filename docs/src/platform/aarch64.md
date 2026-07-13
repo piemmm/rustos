@@ -162,6 +162,23 @@ installs it on the handle (`with_psci_method`), logging
 conduit the board declares (`hvc` on `virt`, `smc` on the Pi) rather than
 an assumed one (see
 [SMP secondary-core bring-up](#smp-secondary-core-bring-up-psci--gicv2-ipi)).
+The production boot **uses** that conduit end to end: it collects every
+`/cpus/cpu@*` affinity, validates the list into the dense CPU map
+(`cpu_topology::order_cpus` — boot core at dense id 0, fail-closed to a
+single-CPU map on an empty/duplicated/foreign list), sizes every per-CPU
+backing exactly from it (the arch handle's leaked slices, the preemption
+slices, the `smp.s` secondary-stack region — cleaned to PoC so a
+cache-off starter observes them), and logs `cpu_count` / `smp_prepared`
+on the boot line. After `BootCompleted`, `kernel_core::kernel_main`
+PSCI-starts each secondary (audited `SecondaryCpuStarted` /
+`SecondaryCpuStartFailed`); each core's entry adopts the boot identity
+map (`paging::adopt_boot_translation` over the published park root),
+installs its own EL1 vectors, GICv2 CPU interface, and tickless
+preemption/IPI arming, and joins the shared kernel dispatch loop through
+`rustos_kernel_core::run_secondary`, attesting `SecondaryCpuOnline`. On
+a Pi 4B with a PSCI-providing armstub this brings all four Cortex-A72
+cores into service; a tree with no `/psci` node fails each start closed
+and the system continues single-CPU — degraded, loud, and correct.
 Since **P6c-1** it builds the canonical `BootMemoryMap` from the discovered
 `/memory` window and records its usable/reserved split (`mem_map_built` /
 `mem_map_status` / `usable_bytes_hex` / `reserved_bytes_hex`); see
@@ -1026,9 +1043,14 @@ through the semihosting finisher. They are enrolled in
   then `switch`) + EL1 vectors, discovers the rest of the board
   (`/memory`, timer, PSCI), builds the `BootMemoryMap`, installs the discovered-UART
   `console_write` device + the `svc` dispatch callback, and hands a
-  validated `BootInfo` to `kernel_core::kernel_main`; the audit sink
-  reports PASS on `AuditEvent::BootCompleted` — the aarch64 analogue of
-  the x86_64 / riscv64 boot verticals.
+  validated `BootInfo` to `kernel_core::kernel_main`. The run is
+  `-smp 4`: after `AuditEvent::BootCompleted` the audit sink waits for
+  the production SMP bring-up to PSCI-start the three secondaries the
+  embedded tree's `/cpus` declares and for each to attest
+  `SecondaryCpuOnline` from the kernel dispatch loop; PASS fires only
+  with all three online (a `SecondaryCpuStartFailed` is an immediate
+  FAIL) — the aarch64 analogue of the x86_64 / riscv64 boot verticals,
+  extended into the end-to-end multi-core boot proof.
 - `rustos-test-uart-console-qemu-aarch64` — **the console base is
   discovered, not hard-wired** (PI Stage P2): poisons the console base,
   then proves `console::configure_from_fdt` overwrites it with the base

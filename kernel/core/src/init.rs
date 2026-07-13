@@ -217,6 +217,10 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
     let log_sink: &'static (dyn Sink + Sync) = boot.log_sink;
     let audit_sink: &'static (dyn Sink + Sync) = boot.audit_sink;
     let arch_for_halt = Arc::clone(&boot.arch);
+    // The CPU topology the SMP bring-up below drives, captured before
+    // `boot` is consumed by `run_phases` (both fields are `Copy`).
+    let boot_cpu = boot.boot_cpu;
+    let cpu_count = boot.cpu_count;
     // The arch port's PID-1 spawn seam (`plans/PI.md` P6c-3), captured
     // before `boot` is consumed by `run_phases`. `Option<&dyn _>` is
     // `Copy`, so this is a copy of the reference, not a move.
@@ -291,6 +295,15 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
             value: rustos_log::FieldValue::Str("spawn_init"),
         }],
     );
+
+    // Bring the remaining discovered CPUs online now that every init
+    // phase has succeeded: the scheduler, IRQ dispatch, and syscall hook
+    // are live, so a started core can immediately join the shared
+    // dispatch loop. Each secondary performs its own per-CPU hardware
+    // init in the arch port's entry and arrives through
+    // `crate::run_secondary`; until PID 1 spawns work it parks on its
+    // idle instruction, woken by the scheduler's placement IPI.
+    start_secondaries(state, boot_cpu, cpu_count);
 
     // Spawn PID 1 (`init`) into user mode when the arch port installed a
     // spawn seam (`plans/PI.md` P6c-3). On success the seam diverges into
@@ -398,6 +411,135 @@ fn publish_wait_queue_arch<A: KernelArch + 'static>(state: &'static KernelState<
         arch: state.arch.as_ref(),
     }));
     let _ = crate::waitq::install_wait_arch(wait_arch);
+}
+
+/// Type-erased secondary-CPU hand-off over the boot-leaked
+/// [`KernelState`]: what [`crate::run_secondary`] needs to join a
+/// started core to the live scheduler without naming the concrete
+/// `Scheduler<A>` / arch pair (see [`crate::smp::SecondaryDispatch`]).
+struct KernelSecondaryDispatch<A: KernelArch + 'static> {
+    state: &'static KernelState<A>,
+    boot_cpu: CpuId,
+    cpu_count: u32,
+}
+
+impl<A: KernelArch + 'static> crate::smp::SecondaryDispatch for KernelSecondaryDispatch<A> {
+    fn boot_cpu(&self) -> CpuId {
+        self.boot_cpu
+    }
+
+    fn cpu_count(&self) -> u32 {
+        self.cpu_count
+    }
+
+    fn audit_sink(&self) -> &'static (dyn Sink + Sync) {
+        self.state.audit_sink
+    }
+
+    fn run(&self, cpu: CpuId) {
+        run_dispatch_loop(
+            &self.state.scheduler,
+            self.state.arch.as_ref(),
+            cpu,
+            DispatchRole::Secondary,
+        );
+    }
+}
+
+/// Bring every discovered secondary CPU online: publish the dispatch
+/// hand-off, then ask the arch port to start each dense id in
+/// `0..cpu_count` other than the boot CPU, auditing every acceptance
+/// and refusal.
+///
+/// A refusal is degraded-but-correct, never fatal: the failure is loud
+/// on the audit log (`SecondaryCpuStartFailed` with the port's cause)
+/// and the system continues on the cores that are online — the
+/// scheduler's placement and work stealing simply never see the missing
+/// core run. A single-CPU handover (or a port with no bring-up surface
+/// on a `cpu_count == 1` boot) starts nothing and publishes nothing.
+fn start_secondaries<A: KernelArch + 'static>(
+    state: &'static KernelState<A>,
+    boot_cpu: CpuId,
+    cpu_count: u32,
+) {
+    if cpu_count <= 1 {
+        return;
+    }
+    let audit_sink = state.audit_sink;
+    let Some(bringup) = state.arch.secondary_bringup() else {
+        // A multi-CPU handover from a port with no bring-up surface is a
+        // wiring defect: report it loudly rather than silently running
+        // single-CPU with a scheduler sized for more.
+        emit(
+            audit_sink,
+            Level::Warn,
+            AuditEvent::SecondaryCpuStartFailed,
+            &[Field {
+                key: "cause",
+                value: rustos_log::FieldValue::Str("no_bringup_surface"),
+            }],
+        );
+        return;
+    };
+    let handle: &'static KernelSecondaryDispatch<A> =
+        Box::leak(Box::new(KernelSecondaryDispatch {
+            state,
+            boot_cpu,
+            cpu_count,
+        }));
+    if crate::smp::publish_secondary_dispatch(handle).is_err() {
+        // The hand-off slot is set-once per boot; a second publish means
+        // this path ran twice — refuse to start anything against a stale
+        // handle (fail closed) and say so.
+        emit(
+            audit_sink,
+            Level::Error,
+            AuditEvent::SecondaryCpuStartFailed,
+            &[Field {
+                key: "cause",
+                value: rustos_log::FieldValue::Str("dispatch_already_published"),
+            }],
+        );
+        return;
+    }
+    for cpu in 0..cpu_count {
+        if cpu == boot_cpu {
+            continue;
+        }
+        let mut cpu_buf = [0u8; 12];
+        let cpu_str = rustos_util::fmt::format_usize(cpu as usize, &mut cpu_buf);
+        // SAFETY: the `KernelArch::secondary_bringup` contract obliges a
+        // port returning `Some` to have installed its secondary entry
+        // and stack pool before handing over a multi-CPU `BootInfo`;
+        // `cpu` is a dense id inside the validated `0..cpu_count` range
+        // and is not the (already running) boot CPU.
+        match unsafe { bringup.start_secondary(cpu) } {
+            Ok(()) => emit(
+                audit_sink,
+                Level::Info,
+                AuditEvent::SecondaryCpuStarted,
+                &[Field {
+                    key: "cpu",
+                    value: rustos_log::FieldValue::Str(cpu_str),
+                }],
+            ),
+            Err(err) => emit(
+                audit_sink,
+                Level::Warn,
+                AuditEvent::SecondaryCpuStartFailed,
+                &[
+                    Field {
+                        key: "cpu",
+                        value: rustos_log::FieldValue::Str(cpu_str),
+                    },
+                    Field {
+                        key: "cause",
+                        value: rustos_log::FieldValue::Str(err.as_str()),
+                    },
+                ],
+            ),
+        }
+    }
 }
 
 /// Seed the kernel CSPRNG output reserve from the arch port's platform
@@ -601,35 +743,124 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
             shared_mem_facility,
         }
     }
+}
 
-    /// Service the work the dispatch loop owes between two task dispatches,
-    /// once the just-run task has suspended and no kernel lock or scheduler
-    /// critical section is in flight.
-    ///
-    /// Two things, in order:
-    ///
-    /// 1. Perform any wake a device-IRQ / timer handler deferred while the
-    ///    task ran. The handler is lock-free and only flagged the wake; the
-    ///    real `unpark` runs here, where taking the scheduler/run-queue locks
-    ///    is safe.
-    /// 2. Top up the buffered console transmit
-    ///    ([`KernelArch::pump_console_tx`]). The loop calls this on **every**
-    ///    successful dispatch, not only when it idles, so a port whose
-    ///    transmit is buffered keeps draining even while a perpetually
-    ///    runnable in-kernel kthread (e.g. the polled USB-keyboard report
-    ///    pump) keeps the loop from ever reaching its idle park — the output
-    ///    then flows at the loop's dispatch rate, independent of the
-    ///    transmit-FIFO interrupt the silicon may not self-sustain. A no-op on ports with synchronous
-    ///    console output.
-    fn service_between_dispatches(&self) {
-        let _ = crate::waitq::drain_pending_wakes();
-        // Deliver any foreground `^C`/`^Z` the console line discipline
-        // queued from interrupt context: like the deferred wakes, the actual
-        // scheduler-driving delivery runs here, where taking the run-queue
-        // locks is safe.
-        let _ = crate::procsignal::drain_pending_foreground();
-        self.arch.pump_console_tx();
+/// Which CPU is driving [`run_dispatch_loop`], deciding who may end it.
+///
+/// The boot CPU owns system termination: when every live task has exited
+/// it breaks out so `kernel_main` halts fail-closed. A secondary CPU
+/// never terminates the system — before PID 1 is admitted (and again
+/// whenever the machine is momentarily drained) its queue is simply
+/// empty, so it parks on the idle path and waits for the scheduler's
+/// placement IPI or a device interrupt to bring it work.
+#[derive(Clone, Copy)]
+enum DispatchRole {
+    /// The boot CPU: breaks out once no live task remains.
+    Boot,
+    /// A started secondary CPU: parks on idle, never terminates.
+    Secondary,
+}
+
+/// Service the work the dispatch loop owes between two task dispatches,
+/// once the just-run task has suspended and no kernel lock or scheduler
+/// critical section is in flight.
+///
+/// Two things, in order:
+///
+/// 1. Perform any wake a device-IRQ / timer handler deferred while the
+///    task ran. The handler is lock-free and only flagged the wake; the
+///    real `unpark` runs here, where taking the scheduler/run-queue locks
+///    is safe.
+/// 2. Top up the buffered console transmit
+///    ([`KernelArch::pump_console_tx`]). The loop calls this on **every**
+///    successful dispatch, not only when it idles, so a port whose
+///    transmit is buffered keeps draining even while a perpetually
+///    runnable in-kernel kthread (e.g. the polled USB-keyboard report
+///    pump) keeps the loop from ever reaching its idle park — the output
+///    then flows at the loop's dispatch rate, independent of the
+///    transmit-FIFO interrupt the silicon may not self-sustain. A no-op on ports with synchronous
+///    console output.
+fn service_between_dispatches<A: KernelArch>(arch: &A) {
+    let _ = crate::waitq::drain_pending_wakes();
+    // Deliver any foreground `^C`/`^Z` the console line discipline
+    // queued from interrupt context: like the deferred wakes, the actual
+    // scheduler-driving delivery runs here, where taking the run-queue
+    // locks is safe.
+    let _ = crate::procsignal::drain_pending_foreground();
+    arch.pump_console_tx();
+}
+
+/// The kernel dispatch loop — the one definition every CPU runs, boot
+/// and secondary alike (`role` decides only who may end it).
+///
+/// Runs with device IRQs **enabled** so RustOS is fully preemptive:
+/// every in-kernel task and kthread the loop dispatches executes with
+/// interrupts deliverable, so a long in-kernel operation (a slow MMIO
+/// bring-up read, a busy driver poll) can no longer mask interrupts for
+/// its whole span and starve the preemption one-shot, the
+/// buffered-serial transmit drain, or an interrupt-driven waiter — the
+/// cooperative dispatch loop the charter forbids. A device IRQ taken
+/// mid-task services its source and returns to the same task (the
+/// kernel stays non-preemptible); its lock-free handler flags a
+/// deferred wake that [`service_between_dispatches`] performs here, in
+/// dispatcher context, where taking the scheduler/run-queue locks is
+/// safe.
+///
+/// The idle path parks race-free: it masks device IRQs, drains once
+/// more so a wake a handler flagged just before the commit to sleep is
+/// observed rather than slept through (no lost wake-up), and only then
+/// parks on [`KernelArch::wait_for_interrupt`], which still wakes on
+/// the pending-but-masked interrupt. Device IRQs are left masked when
+/// the loop returns: whichever way it ended, there is no dispatcher
+/// left on this CPU to service them.
+fn run_dispatch_loop<A: KernelArch>(
+    scheduler: &Scheduler<A>,
+    arch: &A,
+    cpu: CpuId,
+    role: DispatchRole,
+) {
+    arch.set_device_irqs(true);
+    loop {
+        match scheduler.step(cpu) {
+            // A task ran. On the boot CPU, stop once every task has
+            // exited so `kernel_main` halts; keep dispatching otherwise.
+            Ok(StepOutcome::Ran(_)) => {
+                if matches!(role, DispatchRole::Boot) && scheduler.live_task_count() == 0 {
+                    break;
+                }
+                // Service the per-dispatch background work (deferred
+                // wakes + buffered console transmit) now that the task
+                // has suspended and no kernel lock / scheduler critical
+                // section is in flight.
+                service_between_dispatches(arch);
+            }
+            // No runnable task this step. The boot CPU treats a fully
+            // drained system as finished; otherwise the live tasks are
+            // all parked (or homed elsewhere), so park this CPU until
+            // the next interrupt — the scheduler's placement IPI when
+            // work lands here, or a device IRQ — then re-step. Never
+            // busy-spin (tickless idle).
+            Ok(StepOutcome::Idle) => {
+                if matches!(role, DispatchRole::Boot) && scheduler.live_task_count() == 0 {
+                    break;
+                }
+                arch.set_device_irqs(false);
+                let woke = crate::waitq::drain_pending_wakes();
+                // A queued foreground signal is dispatchable work too: a
+                // `^C` typed while every task is parked must terminate
+                // the foreground job now, not after the next unrelated
+                // interrupt.
+                let delivered = crate::procsignal::drain_pending_foreground();
+                if !(woke || delivered) {
+                    arch.pump_console_tx();
+                    arch.wait_for_interrupt();
+                }
+                arch.set_device_irqs(true);
+            }
+            Err(_) => break,
+        }
     }
+    arch.set_device_irqs(false);
 }
 
 impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
@@ -776,75 +1007,11 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // method's contract); the `pre_resume` hook keeps the correct root
         // active across every later switch into a user kthread.
         let _ = task_id;
-        // Run the dispatch loop with device IRQs **enabled** so RustOS is
-        // fully preemptive: every in-kernel task and
-        // kthread the loop dispatches executes with interrupts deliverable,
-        // so a long in-kernel operation (a slow MMIO bring-up read, a busy
-        // driver poll) can no longer mask interrupts for its whole span and
-        // starve the preemption one-shot, the buffered-serial transmit
-        // drain, or an interrupt-driven waiter — the cooperative
-        // dispatch loop the charter forbids. A device IRQ taken mid-task services
-        // its source and returns to the same task (the kernel stays
-        // non-preemptible); its lock-free handler flags a deferred wake
-        // that `drain_pending_wakes` performs here, in dispatcher context,
-        // where taking the scheduler/run-queue locks is safe.
-        self.arch.set_device_irqs(true);
-        loop {
-            match self.scheduler.step(cpu) {
-                // A task ran. Keep dispatching while live tasks remain;
-                // stop once every task has exited so `kernel_main` halts.
-                Ok(StepOutcome::Ran(_)) => {
-                    if self.scheduler.live_task_count() == 0 {
-                        break;
-                    }
-                    // Service the per-dispatch background work (deferred
-                    // wakes + buffered console transmit) now that the task
-                    // has suspended and no kernel lock / scheduler critical
-                    // section is in flight.
-                    self.service_between_dispatches();
-                }
-                // No runnable task this step. If every live task has
-                // exited, the system is finished — break so `kernel_main`
-                // halts fail-closed. Otherwise the live
-                // tasks are all **parked** (a perpetual service blocked in
-                // a blocking-wait syscall, e.g. `devmgr` on `hw_tree_wait`):
-                // park the CPU until the next interrupt, then re-step —
-                // never busy-spin (tickless idle).
-                Ok(StepOutcome::Idle) => {
-                    if self.scheduler.live_task_count() == 0 {
-                        break;
-                    }
-                    // Race-free park: mask device IRQs, then drain once more
-                    // so a wake a handler flagged just before we commit to
-                    // sleep is observed and re-dispatched rather than slept
-                    // through (no lost wake-up). If
-                    // nothing became runnable, top up the buffered console
-                    // transmit one last time (so a port whose transmit FIFO
-                    // is the `wfi` wake source has it armed against the
-                    // remaining backlog) and `wait_for_interrupt` parks
-                    // on a `wfi`-class instruction that still wakes on the
-                    // pending-but-masked interrupt; re-enabling IRQs then
-                    // *takes* it, its handler flags the wake, and the loop
-                    // re-steps and drains it.
-                    self.arch.set_device_irqs(false);
-                    let woke = crate::waitq::drain_pending_wakes();
-                    // A queued foreground signal is dispatchable work too: a
-                    // `^C` typed while every task is parked must terminate
-                    // the foreground job now, not after the next unrelated
-                    // interrupt.
-                    let delivered = crate::procsignal::drain_pending_foreground();
-                    if !(woke || delivered) {
-                        self.arch.pump_console_tx();
-                        self.arch.wait_for_interrupt();
-                    }
-                    self.arch.set_device_irqs(true);
-                }
-                Err(_) => break,
-            }
-        }
-        // Leave device IRQs masked before returning to `kernel_main`'s
-        // fail-closed halt: there is no dispatcher left to service them.
-        self.arch.set_device_irqs(false);
+        // Drive the shared kernel dispatch loop as the boot CPU: it runs
+        // until every task has exited (or the scheduler errors), then
+        // returns with device IRQs masked so `kernel_main` halts
+        // fail-closed with no dispatcher left to service them.
+        run_dispatch_loop(self.scheduler, self.arch, cpu, DispatchRole::Boot);
     }
 
     fn spawn_kernel_service(
@@ -1898,24 +2065,13 @@ mod tests {
         let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
         let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
 
-        let ctx = KernelInitSpawner::new(
-            &state.frame_allocator,
-            audit_sink,
-            &state.scheduler,
-            &state.caps,
-            &state.aspaces,
-            state.arch.as_ref(),
-            process_wait,
-            &state.irq,
-            &crate::devres::NULL_SHARED_MEM_FACILITY,
-        );
-
+        let _ = process_wait;
         assert_eq!(state.arch.pump_console_tx_count(), 0);
         // Each per-dispatch servicing pumps the console transmit exactly
         // once (on top of draining any deferred wake).
-        ctx.service_between_dispatches();
+        service_between_dispatches(state.arch.as_ref());
         assert_eq!(state.arch.pump_console_tx_count(), 1);
-        ctx.service_between_dispatches();
+        service_between_dispatches(state.arch.as_ref());
         assert_eq!(state.arch.pump_console_tx_count(), 2);
     }
 

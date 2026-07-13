@@ -90,17 +90,24 @@ pub enum SecondaryStackError {
 
 /// One secondary core's kernel stack: a [`SECONDARY_STACK_BYTES`] buffer
 /// aligned for an AArch64 stack pointer (16 bytes).
+///
+/// Public so an allocator-having boot path can size a **runtime** pool
+/// to the discovered core count (a zeroed, leaked `[SecondaryStack]`
+/// registered through [`register_secondary_stacks`]) instead of a
+/// compile-time `SecondaryStackPool<N>` — the per-core stack count is
+/// derived from discovery, never a baked-in ceiling.
 #[repr(C, align(16))]
-struct SecondaryStackSlot {
+pub struct SecondaryStack {
     bytes: [u8; SECONDARY_STACK_BYTES],
 }
 
-impl SecondaryStackSlot {
-    // A 64 KiB zero array is a deliberately large *static* backing (a
-    // secondary core's whole kernel stack), only ever const-evaluated into a
-    // `static SecondaryStackPool` — never materialised on a runtime stack —
-    // so the large-array lint does not apply (: a per-stack
-    // size is a fixed bound, not a runtime stack allocation).
+impl SecondaryStack {
+    // A 64 KiB zero array is a deliberately large backing (a secondary
+    // core's whole kernel stack), const-evaluated into a `static`
+    // `SecondaryStackPool` or written directly into a zeroed heap
+    // allocation — never materialised on a runtime stack — so the
+    // large-array lint does not apply (a per-stack size is a fixed
+    // bound, not a runtime stack allocation).
     #[allow(clippy::large_stack_arrays)]
     const fn new() -> Self {
         Self {
@@ -130,7 +137,7 @@ impl SecondaryStackSlot {
 /// core that owns it.
 #[repr(C, align(16))]
 pub struct SecondaryStackPool<const N: usize> {
-    stacks: [SecondaryStackSlot; N],
+    stacks: [SecondaryStack; N],
 }
 
 impl<const N: usize> SecondaryStackPool<N> {
@@ -139,7 +146,7 @@ impl<const N: usize> SecondaryStackPool<N> {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            stacks: [const { SecondaryStackSlot::new() }; N],
+            stacks: [const { SecondaryStack::new() }; N],
         }
     }
 
@@ -157,30 +164,62 @@ impl<const N: usize> SecondaryStackPool<N> {
     /// [`SecondaryStackError::AlreadyRegistered`] on the second publish
     /// (set-once per boot — never silently re-points the live trampoline).
     pub fn register(&'static self) -> Result<usize, SecondaryStackError> {
-        if SECONDARY_STACKS_REGISTERED
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(SecondaryStackError::AlreadyRegistered);
-        }
-        let base = self.stacks.as_ptr() as u64;
-        SECONDARY_STACK_BASE.store(base, Ordering::Release);
-        SECONDARY_STACK_STRIDE.store(SECONDARY_STACK_BYTES as u64, Ordering::Release);
-        SECONDARY_STACK_COUNT.store(N, Ordering::Release);
-        // Order the pool publish ahead of any secondary core's MMU-off
-        // read of the globals. The PSCI `CPU_ON` firmware call that starts
-        // a core is itself a barrier, but the explicit `dsb sy` makes the
-        // ordering local and unconditional (explicit
-        // synchronisation for cross-CPU shared state).
-        #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-        // SAFETY: `dsb sy` is a full data-synchronisation barrier with no
-        // operands and no memory effects beyond ordering; it is always
-        // valid at EL1.
-        unsafe {
-            core::arch::asm!("dsb sy", options(nostack, preserves_flags));
-        }
-        Ok(N)
+        register_secondary_stacks(&self.stacks)
     }
+}
+
+/// Publish `stacks` (one [`SecondaryStack`] slot per dense CPU id, slot
+/// 0 belonging to the never-started boot CPU) to the secondary-core
+/// trampoline and the [`is_valid_cpu`] bound, returning the covered CPU
+/// count.
+///
+/// This is the runtime-sized registration path: an allocator-having
+/// boot path leaks a zeroed `[SecondaryStack]` sized to the discovered
+/// core count and registers it here; the `const`-generic
+/// [`SecondaryStackPool::register`] delegates to the same set-once
+/// body. Must be called on the boot core, exactly once, before any
+/// `start_secondary`; the slice must stay mapped at its physical
+/// address for the kernel's lifetime (the `&'static` pins that).
+///
+/// A freshly-started core reads the published globals — and writes its
+/// first stack frames — with the MMU (and therefore its data cache)
+/// **off**, while this boot-CPU write path runs cacheable. The publish
+/// therefore clean+invalidates the globals *and* the whole stack region
+/// to the point of coherency: a dirty line left over a stack slot would
+/// later evict on the boot CPU and overwrite the started core's live
+/// stack — real-silicon corruption cache-less QEMU cannot show.
+///
+/// # Errors
+///
+/// [`SecondaryStackError::AlreadyRegistered`] on the second publish
+/// (set-once per boot — never silently re-points the live trampoline).
+pub fn register_secondary_stacks(
+    stacks: &'static [SecondaryStack],
+) -> Result<usize, SecondaryStackError> {
+    if SECONDARY_STACKS_REGISTERED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(SecondaryStackError::AlreadyRegistered);
+    }
+    let base = stacks.as_ptr() as u64;
+    SECONDARY_STACK_BASE.store(base, Ordering::Release);
+    SECONDARY_STACK_STRIDE.store(SECONDARY_STACK_BYTES as u64, Ordering::Release);
+    SECONDARY_STACK_COUNT.store(stacks.len(), Ordering::Release);
+    // Make the publish observable to a core that starts with its cache
+    // off: sweep the globals and the stack region to the point of
+    // coherency, then `dsb sy` (inside the sweep) so the maintenance
+    // completes before any `CPU_ON`. On the host the sweep is vacuous.
+    crate::paging::clean_invalidate_range_to_poc(
+        core::ptr::addr_of!(SECONDARY_STACK_BASE) as u64,
+        core::mem::size_of::<AtomicU64>() as u64,
+    );
+    crate::paging::clean_invalidate_range_to_poc(
+        core::ptr::addr_of!(SECONDARY_STACK_STRIDE) as u64,
+        core::mem::size_of::<AtomicU64>() as u64,
+    );
+    crate::paging::clean_invalidate_range_to_poc(base, core::mem::size_of_val(stacks) as u64);
+    Ok(stacks.len())
 }
 
 impl<const N: usize> Default for SecondaryStackPool<N> {
@@ -259,8 +298,15 @@ pub fn set_secondary_entry(entry: extern "C" fn(CpuId) -> !) -> Result<(), SetEn
     let raw = entry as usize;
     SECONDARY_ENTRY_FN
         .compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire)
-        .map(|_| ())
-        .map_err(|_| SetEntryError::AlreadyInstalled)
+        .map_err(|_| SetEntryError::AlreadyInstalled)?;
+    // The freshly-started core reads this slot before it enables its
+    // MMU/cache; push the cacheable write to the point of coherency so
+    // the MMU-off read observes it (vacuous on the host).
+    crate::paging::clean_invalidate_range_to_poc(
+        core::ptr::addr_of!(SECONDARY_ENTRY_FN) as u64,
+        core::mem::size_of::<AtomicUsize>() as u64,
+    );
+    Ok(())
 }
 
 /// Address of the installed secondary entry (`0` if none).
@@ -291,15 +337,26 @@ pub const MPIDR_AFFINITY_MASK: u64 = 0x00FF_FFFF;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 #[must_use]
 pub fn current_cpu_index() -> CpuId {
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        current_affinity() as CpuId
+    }
+}
+
+/// Read the calling core's full `MPIDR_EL1` affinity (`Aff0`–`Aff2`,
+/// [`MPIDR_AFFINITY_MASK`]) — the value a device tree's `/cpus/cpu@*`
+/// `reg` carries, so the boot path can locate the running boot core
+/// inside the discovered CPU list.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+#[must_use]
+pub fn current_affinity() -> u64 {
     let mpidr: u64;
     // SAFETY: `mrs x, MPIDR_EL1` reads the multiprocessor-affinity
     // register; it is side-effect-free and readable at EL1.
     unsafe {
         core::arch::asm!("mrs {}, MPIDR_EL1", out(reg) mpidr, options(nomem, nostack, preserves_flags));
     }
-    #[allow(clippy::cast_possible_truncation)]
-    let id = (mpidr & MPIDR_AFFINITY_MASK) as u32;
-    id
+    mpidr & MPIDR_AFFINITY_MASK
 }
 
 /// Host substitute for the `MPIDR_EL1` affinity read: the single-core

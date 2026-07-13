@@ -28,7 +28,7 @@
 use rustos_arch_aarch64::context_hal::ContextSwitchHal;
 use rustos_arch_aarch64::entropy::PlatformRng as Aarch64PlatformEntropy;
 use rustos_arch_aarch64::{halt_current_cpu, serial, Aarch64Arch};
-use rustos_arch_api::{CpuId, PlatformEntropy, SchedulerArch};
+use rustos_arch_api::{CpuId, PlatformEntropy, SchedulerArch, SecondaryBringup};
 use rustos_kernel_core::{ConsoleRead, ConsoleWrite, IrqRouting, KernelArch, SeatRegistry};
 use rustos_kernel_irq::IrqTable;
 
@@ -285,14 +285,25 @@ impl KernelArch for Aarch64BinArch {
         crate::aarch64::gic_irq::install_device_irq_dispatch(table);
 
         // Arm timer-driven preemption now that the GICv2 is up (P-1,
-        // `plans/PI.md` D2b-2b-A): register the per-CPU preempt storage,
-        // install the EL0-preemption callback, and start the periodic
-        // generic timer. PE IRQs stay masked until EL0 runs preemptibly /
+        // `plans/PI.md` D2b-2b-A): register the per-CPU preempt storage
+        // (sized to the discovered core count), install the
+        // EL0-preemption + IPI callbacks, and enable this core's timer
+        // PPI and SGI. PE IRQs stay masked until EL0 runs preemptibly /
         // the unlock kthread unmasks, so the armed timer is inert until a
         // handler context exists — additive and non-regressing. A tick taken in EL1 never preempts (non-preemptible
         // kernel); a tick taken in EL0 round-robin-preempts the running
         // user task back to the scheduler.
-        crate::aarch64::gic_irq::arm_preemption();
+        crate::aarch64::gic_irq::arm_preemption(self.arch.cpu_count());
+    }
+
+    fn secondary_bringup(&self) -> Option<&dyn SecondaryBringup> {
+        // The arch handle is the PSCI `CPU_ON` bring-up surface
+        // (`SecondaryBringup`); `kernel_main` drives it for each
+        // secondary once the boot phases are green. A handle with no
+        // discovered PSCI conduit fails each start closed inside
+        // `start_secondary` (`SmpError::NotReady`), which `kernel_main`
+        // audits — never a silent fallback.
+        Some(&self.arch)
     }
 }
 

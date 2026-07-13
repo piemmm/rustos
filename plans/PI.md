@@ -522,7 +522,15 @@ cover the conduit read from both the `virt` (`hvc`) and `raspi` (`smc`)
 fixtures and the fail-closed no-`/psci` path. The Pi's `smc` conduit (via
 `armstub8.bin`) flows through the identical path and is an on-metal
 acceptance item (no `-M raspi4b` in QEMU — the same gap as P2/P3/P4).
-`cargo xtask cfg-check` stays clean.
+`cargo xtask cfg-check` stays clean. The **production multi-core bring-up
+now rides this conduit end to end**: `boot_aarch64` sizes every per-CPU
+backing from the validated `/cpus` dense map, `kernel_core::kernel_main`
+PSCI-starts each secondary after `BootCompleted` (audited
+`SecondaryCpuStarted`/`StartFailed`/`Online`), and each core adopts the
+boot translation and joins the shared kernel dispatch loop — proven by
+the `-smp 4` `kernel-arch-boot-aarch64` vertical (see
+`docs/src/platform/aarch64.md`). A no-`/psci` tree still fails each
+start closed and boots single-CPU.
 
 ### P6 — Spawn `init` into EL0 on the Pi `[x]`
 

@@ -104,6 +104,13 @@ pub mod dispatch_core;
 // in the following increment (`plans/PI.md` P11 Chunk B).
 pub mod root_mount;
 
+// Pure validation/ordering of a boot path's discovered CPU list into the
+// dense-`CpuId` → hardware-affinity map the arch handle and every per-CPU
+// storage are sized from. Architecture-neutral by design (device-tree
+// `/cpus` and ACPI MADT consumers alike), so it is un-gated and its
+// fail-closed rules are host-unit-tested.
+pub mod cpu_topology;
+
 // The in-kernel driver registry (`plans/PI.md` P10 5c / PLAN Stage 4.HW
 // item 5): the single source of truth pairing each in-kernel driver's
 // canonical `BIND_KEYS`, `/System/Drivers/` image path, build-signed

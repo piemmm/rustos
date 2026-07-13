@@ -567,10 +567,13 @@ impl<'a> KthreadConsoleRead<'a> {
     /// kthread through `yielder` between empty polls and registering `task`
     /// on [`rustos_kernel_core::CONSOLE_WAITQ`] so the RX interrupt unparks
     /// it. `task` is the kthread's scheduler id from
-    /// [`unlock_console_task`]; [`None`] (the id not yet published) degrades
-    /// to a cooperative yield rather than parking a task no wake could
-    /// reach. `secret` is the passphrase prompt's activity feedback, fed
-    /// and animated while armed.
+    /// [`unlock_console_task`]; [`None`] is re-resolved against that cell
+    /// on every poll (on a multi-core boot the kthread's first instructions
+    /// can race the spawner's publish, so the reader must not latch a
+    /// pre-publish `None` for its lifetime) and, while still unpublished,
+    /// degrades to a cooperative yield rather than parking a task no wake
+    /// could reach. `secret` is the passphrase prompt's activity feedback,
+    /// fed and animated while armed.
     #[must_use]
     pub fn new(
         inner: &'static (dyn ConsoleRead + Sync + 'static),
@@ -593,6 +596,12 @@ impl ConsoleRead for KthreadConsoleRead<'_> {
             return Ok(0);
         }
         loop {
+            // Resolve the kthread's id afresh each poll: on a multi-core
+            // boot this body can start on another CPU before the spawner's
+            // `set_unlock_console_task` publish lands, and a `None` latched
+            // at construction would leave the whole passphrase entry on the
+            // cooperative-yield fallback — a busy loop — for its lifetime.
+            let task = self.task.or_else(unlock_console_task);
             // The secret feedback's one-shot animation deadline, when the
             // passphrase marker is animating; `NO_DEADLINE` the rest of the
             // time, so an ordinary wait takes no timer wake-ups (tickless).
@@ -603,7 +612,7 @@ impl ConsoleRead for KthreadConsoleRead<'_> {
             // Register before polling so a `console_wake` arriving between an
             // empty poll and the park is not lost (the register-before-poll
             // interlock).
-            if let Some(task) = self.task {
+            if let Some(task) = task {
                 rustos_kernel_core::CONSOLE_WAITQ.register(task, deadline);
             }
             let read = match self.inner.read(buf) {
@@ -611,14 +620,14 @@ impl ConsoleRead for KthreadConsoleRead<'_> {
                 Err(e) => {
                     // Leave the wait set first so no stale registration
                     // lingers, then propagate fail-closed.
-                    if let Some(task) = self.task {
+                    if let Some(task) = task {
                         rustos_kernel_core::console_deregister(task, deadline);
                     }
                     return Err(e);
                 }
             };
             if read > 0 {
-                if let Some(task) = self.task {
+                if let Some(task) = task {
                     rustos_kernel_core::console_deregister(task, deadline);
                 }
                 // Feed the consumed bytes to the armed feedback so the
@@ -630,7 +639,7 @@ impl ConsoleRead for KthreadConsoleRead<'_> {
                 }
                 return Ok(read);
             }
-            match self.task {
+            match task {
                 // Genuine park: suspend off the run queue until the RX
                 // interrupt's `console_wake` unparks this id — or, while the
                 // passphrase marker is animating, until the timed sweep
@@ -653,11 +662,14 @@ impl ConsoleRead for KthreadConsoleRead<'_> {
                         }
                     }
                 }
-                // The kthread's scheduler id was not published (a degenerate
-                // build that did not go through admission). A parked task
-                // with no registration could never be woken, so cooperatively
-                // yield and re-poll on the next dispatch instead — bounded,
-                // since the id is published before the body runs.
+                // The kthread's scheduler id is not published yet (the
+                // spawner's publish racing this body's first instructions on
+                // another CPU, or a degenerate build that skipped admission).
+                // A parked task with no registration could never be woken, so
+                // cooperatively yield and re-poll on the next dispatch — the
+                // per-iteration re-resolution above picks the id up the
+                // moment it lands, so this fallback is transient, never the
+                // read's steady state.
                 None => self.yielder.yield_now(),
             }
         }

@@ -620,13 +620,62 @@ fn translation_enabled() -> bool {
     true
 }
 
+/// Clean+invalidate every data-cache line of `[base, base + len)` to the
+/// point of coherency (`dc civac`, line size decoded from the live
+/// `CTR_EL0` by [`dcache_line_bytes`]), then `dsb sy`.
+///
+/// This is the bridge between the boot CPU's cacheable writes and an
+/// observer that reads the same bytes non-cacheably — the translation
+/// walker before the MMU enables, or a freshly-started secondary core
+/// running MMU-off: without the sweep, a dirty (or stale) line over the
+/// range would shadow — or later overwrite — the DRAM bytes the
+/// non-cacheable observer works with on real silicon (cache-less QEMU
+/// cannot show it).
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub fn clean_invalidate_range_to_poc(base: u64, len: u64) {
+    if len == 0 {
+        return;
+    }
+    let ctr: u64;
+    // SAFETY: `CTR_EL0` is an unprivileged read-only identification
+    // register; reading it has no side effects.
+    unsafe {
+        core::arch::asm!("mrs {ctr}, CTR_EL0", ctr = out(reg) ctr,
+            options(nomem, nostack, preserves_flags));
+    }
+    let line = dcache_line_bytes(ctr);
+    // Sweep from the line-aligned base so the first partial line is
+    // covered too.
+    let mut addr = base & !(line - 1);
+    let end = base.saturating_add(len);
+    while addr < end {
+        // SAFETY: `dc civac` performs cache maintenance only — it never
+        // changes memory contents — so it is sound for any address; the
+        // caller names a range it owns.
+        unsafe {
+            core::arch::asm!("dc civac, {addr}", addr = in(reg) addr,
+                options(nostack, preserves_flags));
+        }
+        addr += line;
+    }
+    // SAFETY: barrier-only instruction — completes the maintenance in
+    // the full-system domain before the non-cacheable observer reads.
+    unsafe {
+        core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+    }
+}
+
+/// Host stand-in for [`clean_invalidate_range_to_poc`]: the host has no
+/// data cache to maintain, so the sweep is vacuous.
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+pub fn clean_invalidate_range_to_poc(_base: u64, _len: u64) {}
+
 /// Smallest data-cache line size in bytes encoded by a `CTR_EL0` value:
 /// `DminLine` (bits `[19:16]`) is the log2 of that line's length in
 /// *words*, so the byte length is `4 << DminLine` (ARM ARM D13.2.34 —
 /// 64 bytes on the Cortex-A72's `0x8444_C004`). Pure so the decode is
-/// host-unit-tested; the freestanding cache-maintenance loop
-/// (`PageTablePool::clean_invalidate_to_poc`) feeds it the live
-/// register.
+/// host-unit-tested; the freestanding cache-maintenance sweep
+/// ([`clean_invalidate_range_to_poc`]) feeds it the live register.
 #[must_use]
 pub const fn dcache_line_bytes(ctr_el0: u64) -> u64 {
     4 << ((ctr_el0 >> 16) & 0xF)
@@ -822,32 +871,10 @@ impl<const CAPACITY: usize> PageTablePool<CAPACITY> {
     /// path), not just the slots handed out so far.
     #[cfg(all(target_arch = "aarch64", target_os = "none"))]
     pub fn clean_invalidate_to_poc(&self) {
-        let base = self.storage.as_ptr() as u64;
-        let len = core::mem::size_of_val(&self.storage) as u64;
-        let ctr: u64;
-        // SAFETY: `CTR_EL0` is an unprivileged read-only identification
-        // register; reading it has no side effects.
-        unsafe {
-            core::arch::asm!("mrs {ctr}, CTR_EL0", ctr = out(reg) ctr,
-                options(nomem, nostack, preserves_flags));
-        }
-        let line = dcache_line_bytes(ctr);
-        let mut addr = base;
-        while addr < base + len {
-            // SAFETY: `dc civac` performs cache maintenance only — it
-            // never changes memory contents — and every address swept
-            // lies inside this pool's own statically-allocated storage.
-            unsafe {
-                core::arch::asm!("dc civac, {addr}", addr = in(reg) addr,
-                    options(nostack, preserves_flags));
-            }
-            addr += line;
-        }
-        // SAFETY: barrier-only instruction — completes the maintenance
-        // in the full-system domain before the caller enables the MMU.
-        unsafe {
-            core::arch::asm!("dsb sy", options(nostack, preserves_flags));
-        }
+        clean_invalidate_range_to_poc(
+            self.storage.as_ptr() as u64,
+            core::mem::size_of_val(&self.storage) as u64,
+        );
     }
 
     /// Host twin of the freestanding clean+invalidate: host builds have
@@ -1279,26 +1306,91 @@ impl AddressSpace {
         // root teardown and the dispatcher's suspend path re-install so a
         // dead user root is never left active (see [`park_kernel_root`]).
         let _ = PARK_ROOT.compare_exchange(0, self.root_phys, Ordering::AcqRel, Ordering::Relaxed);
-        unsafe {
-            core::arch::asm!(
-                "msr MAIR_EL1, {mair}",
-                "msr TCR_EL1, {tcr}",
-                "msr TTBR0_EL1, {ttbr}",
-                "dsb sy",
-                "tlbi vmalle1",
-                "ic iallu",
-                "dsb ish",
-                "isb",
-                "msr SCTLR_EL1, {sctlr}",
-                "isb",
-                mair = in(reg) MAIR_VALUE,
-                tcr = in(reg) TCR_VALUE,
-                ttbr = in(reg) self.root_phys,
-                sctlr = in(reg) SCTLR_MMU_ON,
-                options(nostack, preserves_flags),
-            );
-        }
+        unsafe { program_stage1_translation(self.root_phys) }
     }
+}
+
+/// Program the calling CPU's stage-1 translation registers and enable
+/// the MMU + caches with the full known [`SCTLR_MMU_ON`] value — the one
+/// enable sequence [`AddressSpace::switch`] (boot CPU) and
+/// [`adopt_boot_translation`] (secondary CPUs) share.
+///
+/// # Safety
+///
+/// The tables rooted at `root_phys` must identity-map the caller's `pc`,
+/// stack, and every MMIO region touched before the next switch, and must
+/// be observable at the point of coherency (written MMU-off, or cleaned
+/// with [`clean_invalidate_range_to_poc`]). Runs with interrupts masked
+/// on the calling CPU.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+unsafe fn program_stage1_translation(root_phys: u64) {
+    // SAFETY: the caller asserts the mapping/coherency contract above.
+    // Programming MAIR/TCR/TTBR0 then writing `SCTLR_EL1` is the
+    // documented stage-1 enable sequence; the first barrier is `dsb sy`
+    // — not `ish` — because tables written with the MMU off are ordered
+    // in the *full-system* domain (an inner-shareable barrier is not
+    // architecturally guaranteed to order them ahead of the walker's
+    // first cacheable read; QEMU cannot show the difference). The
+    // `tlbi vmalle1` + `dsb`/`isb` flush stale translations, `ic iallu`
+    // starts the instruction cache invalid before [`SCTLR_MMU_ON`]
+    // enables it, and the *whole-register* write installs a fully known
+    // value — an OR of `M` into the live register would carry the
+    // architecturally UNKNOWN EL1 reset bits (`WXN`, `EE`, …) into
+    // translated execution, which hangs real silicon (see
+    // [`SCTLR_MMU_OFF`]).
+    unsafe {
+        core::arch::asm!(
+            "msr MAIR_EL1, {mair}",
+            "msr TCR_EL1, {tcr}",
+            "msr TTBR0_EL1, {ttbr}",
+            "dsb sy",
+            "tlbi vmalle1",
+            "ic iallu",
+            "dsb ish",
+            "isb",
+            "msr SCTLR_EL1, {sctlr}",
+            "isb",
+            mair = in(reg) MAIR_VALUE,
+            tcr = in(reg) TCR_VALUE,
+            ttbr = in(reg) root_phys,
+            sctlr = in(reg) SCTLR_MMU_ON,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+/// Enable the MMU on a freshly-started secondary core by adopting the
+/// boot address space whose root [`AddressSpace::switch`] published
+/// (`PARK_ROOT`) — a secondary allocates no tables of its own; it joins
+/// the identity map the boot CPU already runs on.
+///
+/// Returns `false`, changing nothing, when no boot root has been
+/// published yet: a secondary started before the boot CPU enabled its
+/// MMU has no coherent tables to adopt, so it must park rather than run
+/// MMU-off into the allocator's cacheable-memory requirements (fail
+/// closed).
+///
+/// # Safety
+///
+/// Must be called on a secondary core with the MMU off and interrupts
+/// masked, before its first atomic read-modify-write access (LDXR/STXR
+/// exclusives are unreliable on MMU-off Device-typed DRAM — the boot
+/// path's documented constraint). The published boot tables identity-map
+/// the kernel image, the secondary stacks, and the board MMIO window for
+/// the image's lifetime, which upholds [`program_stage1_translation`]'s
+/// mapping contract.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub unsafe fn adopt_boot_translation() -> bool {
+    let root = PARK_ROOT.load(Ordering::Acquire);
+    if root == 0 {
+        return false;
+    }
+    // SAFETY: the caller upholds the MMU-off/interrupts-masked contract;
+    // the published root is the boot space's, whose tables live (and
+    // stay coherent — they were cleaned to PoC before the boot switch)
+    // for the image's lifetime.
+    unsafe { program_stage1_translation(root) };
+    true
 }
 
 impl MmuAddressSpace for AddressSpace {

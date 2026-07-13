@@ -40,8 +40,12 @@ fn main() {
         );
         println!("cargo:rerun-if-changed={linker_script}");
         println!("cargo:rustc-link-arg=-T{linker_script}");
-        // One CPU: the boot-to-`BootCompleted` slice runs single-core.
-        rustos_itest_harness::dump_aarch64_virt_dtb(&out_dir, 1)
+        // Four CPUs: the vertical proves the production SMP bring-up
+        // (PSCI `CPU_ON` of every `/cpus` secondary into the kernel
+        // dispatch loop), so the embedded tree and the harness run
+        // (`qemu_tests.rs` `cpus: 4`) declare the same Pi-4-shaped
+        // topology.
+        rustos_itest_harness::dump_aarch64_virt_dtb(&out_dir, 4)
     } else {
         // Host builds compile the bin to a no-op `main`; no DTB needed.
         Vec::new()
