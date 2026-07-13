@@ -842,7 +842,9 @@ where
     S: KernelStack + Send + 'static,
     W: FnMut(&mut Yielder<C>) + Send + 'static,
 {
-    spawn_control(scheduler, home_cpu, priority, cs, stack, work, None, None)
+    spawn_control(
+        scheduler, home_cpu, priority, cs, stack, work, None, None, false,
+    )
 }
 
 /// Admit a resumable **user** (EL0) kthread onto `scheduler`, giving it a
@@ -887,6 +889,7 @@ where
         priority,
         pre_resume,
         work,
+        false,
     )
 }
 
@@ -896,9 +899,15 @@ where
 /// The stack-owning counterpart of [`spawn_user_kthread`], in the same
 /// relation [`spawn_kthread_with_stack`] holds to [`spawn_kthread`].
 ///
+/// `parked` admits the task suspended (see
+/// [`SchedulerPolicy::spawn_parked`]): the caller installs the task's
+/// per-task state under the returned id and unparks it. `false` is the
+/// ordinary Ready admission.
+///
 /// # Errors
 ///
 /// As [`spawn_kthread`].
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_user_kthread_with_stack<C, A, P, S, R, W>(
     scheduler: &P,
     cs: C,
@@ -907,6 +916,7 @@ pub fn spawn_user_kthread_with_stack<C, A, P, S, R, W>(
     priority: Priority,
     pre_resume: R,
     work: W,
+    parked: bool,
 ) -> SchedResult<TaskId>
 where
     C: ContextSwitch + Copy + Send + 'static,
@@ -925,6 +935,7 @@ where
         work,
         Some(Box::new(pre_resume)),
         None,
+        parked,
     )
 }
 
@@ -940,6 +951,10 @@ where
 /// [`with_current_live_space`]. The space (and its page-table frames) is
 /// reclaimed when the task exits and the control block is dropped.
 ///
+/// `parked` admits the task suspended (see
+/// [`SchedulerPolicy::spawn_parked`]); `false` is the ordinary Ready
+/// admission.
+///
 /// # Errors
 ///
 /// As [`spawn_kthread`].
@@ -953,6 +968,7 @@ pub fn spawn_user_kthread_with_stack_live<C, A, P, S, R, W>(
     pre_resume: R,
     live: Box<dyn LiveUserSpace + Send>,
     work: W,
+    parked: bool,
 ) -> SchedResult<TaskId>
 where
     C: ContextSwitch + Copy + Send + 'static,
@@ -971,6 +987,7 @@ where
         work,
         Some(Box::new(pre_resume)),
         Some(live),
+        parked,
     )
 }
 
@@ -994,6 +1011,7 @@ fn spawn_control<C, A, P, S, W>(
     work: W,
     pre_resume: Option<PreResume>,
     live: Option<Box<dyn LiveUserSpace + Send>>,
+    parked: bool,
 ) -> SchedResult<TaskId>
 where
     C: ContextSwitch + Copy + Send + 'static,
@@ -1018,7 +1036,7 @@ where
     // stays stable for the raw-pointer protocol; `&mut control` derefs to
     // the `&mut ThreadControl` the shim step takes. `step.cpu` keys the
     // per-CPU resume table for a user kthread.
-    scheduler.spawn(home_cpu, priority, move |step| {
+    let body = move |step: &mut rustos_kernel_sched_api::TaskContext| {
         // A task stopped by `Signal::Stop` is re-parked instead of run: the
         // scheduler's park state is shared with every blocking wait, so a
         // broadcast wake (a console byte waking all parked readers) can make
@@ -1028,7 +1046,17 @@ where
             return TaskAction::Park;
         }
         dispatch_step(&mut control, step.cpu)
-    })
+    };
+    // A `parked` admission is born suspended: the caller installs the
+    // task's per-task kernel state (capabilities, address space, streams,
+    // …) under the returned id and only then unparks it, so no CPU can
+    // dispatch — and take a syscall from — the task before that state
+    // exists. Otherwise the task is enqueued runnable immediately.
+    if parked {
+        scheduler.spawn_parked(home_cpu, priority, body)
+    } else {
+        scheduler.spawn(home_cpu, priority, body)
+    }
 }
 
 /// Run one dispatch step of the kthread whose control block is `control`.

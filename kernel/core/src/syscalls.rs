@@ -2407,7 +2407,6 @@ where
         if !store.is_pending() {
             return Ok(());
         }
-        let cpu = SchedulerArch::current_cpu(self.arch);
         let task = caller.task_id.0;
         // Register so a waker can find and `unpark` us, then loop check →
         // park. The scheduler's wake-pending token closes the check/park
@@ -2417,17 +2416,14 @@ where
             if !store.is_pending() {
                 break Ok(());
             }
-            // Park off the run queue until woken. `reschedule_current`
-            // returns `false` only when the caller is not a resumable user
-            // kthread (host tests with no live dispatch loop); fall back to
-            // a cooperative yield then, mirroring `users_db_wait`, so a
-            // degenerate caller never busy-spins.
-            if !crate::kthread::reschedule_current(cpu, RescheduleAction::Park) {
-                match self.sched.yield_current(task) {
-                    Ok(()) | Err(SchedError::InvalidState) => {}
-                    Err(SchedError::NoSuchTask) => break Err(Errno::NotFound),
-                    Err(_) => break Err(Errno::OutOfRange),
-                }
+            // Park off the run queue until woken, keyed to the CPU this task
+            // occupies right now (`park_current_task` reads it live, so a
+            // mid-wait migration is handled); the fallback yield covers a
+            // caller with no live dispatch loop so it never busy-spins.
+            match park_current_task(self.sched, self.arch, task) {
+                ParkStep::Parked => {}
+                ParkStep::TaskVanished => break Err(Errno::NotFound),
+                ParkStep::SchedulerError => break Err(Errno::OutOfRange),
             }
             // A doomed waiter never re-parks: a termination deferred against
             // this task unwinds the wait so the kill lands at the syscall
@@ -3090,12 +3086,6 @@ where
         let waiter = SyscallIrqWaiter {
             sched: self.sched,
             arch: self.arch,
-            // The CPU is captured once: `monotonic_ns` is documented
-            // as non-decreasing per CPU, and the handler never
-            // migrates mid-wait, so every clock read inside the loop
-            // observes the same monotone source
-            // (`docs/src/security/irq.md`).
-            cpu,
             task: caller.task_id,
             // Re-arm the bound line through the wired controller before each
             // park so an interrupt-driven user-space driver (which holds no
@@ -4886,8 +4876,12 @@ where
         //
         // The deadline is one saturating add from the first clock reading,
         // so a `u64::MAX` timeout stays `NO_DEADLINE` (no timed wake, only
-        // an explicit one) rather than wrapping to a tiny value (fail closed); `monotonic_ns` is non-decreasing per CPU
-        // and the handler does not migrate mid-wait.
+        // an explicit one) rather than wrapping to a tiny value (fail
+        // closed). The monotonic clock is non-decreasing regardless of which
+        // CPU reads it, so a mid-wait migration cannot make the deadline
+        // check regress; the park itself re-reads the live CPU each
+        // iteration (`park_current_task`), so a work-stolen task is always
+        // suspended on the core it is running on.
         let cpu = SchedulerArch::current_cpu(self.arch);
         let task = caller.task_id.0;
 
@@ -4927,17 +4921,14 @@ where
             // an otherwise-idle CPU without dropping another queue's earlier
             // wake (the nearest armed wakeup).
             self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
-            // Park off the run queue until woken. `reschedule_current`
-            // returns `false` only when the caller is not a resumable user
-            // kthread (host tests with no live dispatch loop); fall back to
-            // a cooperative yield then, mirroring the IRQ-wait fail-closed
-            // shape, so a degenerate caller never busy-spins.
-            if !crate::kthread::reschedule_current(cpu, RescheduleAction::Park) {
-                match self.sched.yield_current(task) {
-                    Ok(()) | Err(SchedError::InvalidState) => {}
-                    Err(SchedError::NoSuchTask) => break Err(Errno::NotFound),
-                    Err(_) => break Err(Errno::OutOfRange),
-                }
+            // Park off the run queue until woken, keyed to the CPU this
+            // task occupies right now (`park_current_task` reads it live, so
+            // a mid-wait migration is handled); the fallback yield covers a
+            // caller with no live dispatch loop so it never busy-spins.
+            match park_current_task(self.sched, self.arch, task) {
+                ParkStep::Parked => {}
+                ParkStep::TaskVanished => break Err(Errno::NotFound),
+                ParkStep::SchedulerError => break Err(Errno::OutOfRange),
             }
             // A doomed waiter never re-parks: a termination deferred against
             // this task unwinds the wait so the kill lands at the syscall
@@ -4972,8 +4963,12 @@ where
         //
         // The deadline is one saturating add from the first clock reading,
         // so a `u64::MAX` timeout stays `NO_DEADLINE` (no timed wake, only
-        // an explicit one) rather than wrapping to a tiny value (fail closed); `monotonic_ns` is non-decreasing per CPU
-        // and the handler does not migrate mid-wait.
+        // an explicit one) rather than wrapping to a tiny value (fail
+        // closed). The monotonic clock is non-decreasing regardless of which
+        // CPU reads it, so a mid-wait migration cannot make the deadline
+        // check regress; the park itself re-reads the live CPU each
+        // iteration (`park_current_task`), so a work-stolen task is always
+        // suspended on the core it is running on.
         let cpu = SchedulerArch::current_cpu(self.arch);
         let task = caller.task_id.0;
 
@@ -5011,17 +5006,14 @@ where
             // an otherwise-idle CPU without dropping another queue's earlier
             // wake (the nearest armed wakeup).
             self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
-            // Park off the run queue until woken. `reschedule_current`
-            // returns `false` only when the caller is not a resumable user
-            // kthread (host tests with no live dispatch loop); fall back to
-            // a cooperative yield then, mirroring `hw_tree_wait`, so a
-            // degenerate caller never busy-spins.
-            if !crate::kthread::reschedule_current(cpu, RescheduleAction::Park) {
-                match self.sched.yield_current(task) {
-                    Ok(()) | Err(SchedError::InvalidState) => {}
-                    Err(SchedError::NoSuchTask) => break Err(Errno::NotFound),
-                    Err(_) => break Err(Errno::OutOfRange),
-                }
+            // Park off the run queue until woken, keyed to the CPU this
+            // task occupies right now (`park_current_task` reads it live, so
+            // a mid-wait migration is handled); the fallback yield covers a
+            // caller with no live dispatch loop so it never busy-spins.
+            match park_current_task(self.sched, self.arch, task) {
+                ParkStep::Parked => {}
+                ParkStep::TaskVanished => break Err(Errno::NotFound),
+                ParkStep::SchedulerError => break Err(Errno::OutOfRange),
             }
             // A doomed waiter never re-parks: a termination deferred against
             // this task unwinds the wait so the kill lands at the syscall
@@ -5133,7 +5125,6 @@ where
         // request was posted under (`caller.caps.task()`), while the
         // wait-queue and the scheduler park/unpark use the *scheduler* task
         // id (`caller.task_id`), exactly as `hw_tree_wait` does.
-        let cpu = SchedulerArch::current_cpu(self.arch);
         let sched_task = caller.task_id.0;
         let claimant = caller.caps.task().0;
         crate::waitq::CALL_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
@@ -5144,17 +5135,15 @@ where
                 // ours: abandon the call fail-closed.
                 ReplyOutcome::Cancelled | ReplyOutcome::Unknown => break Err(Errno::NotFound),
                 ReplyOutcome::Pending => {
-                    // Park off the run queue until woken. `reschedule_current`
-                    // returns `false` only when the caller is not a resumable
-                    // user kthread (host tests with no live dispatch loop);
-                    // fall back to a cooperative yield then, mirroring
-                    // `hw_tree_wait`, so a degenerate caller never busy-spins.
-                    if !crate::kthread::reschedule_current(cpu, RescheduleAction::Park) {
-                        match self.sched.yield_current(sched_task) {
-                            Ok(()) | Err(SchedError::InvalidState) => {}
-                            Err(SchedError::NoSuchTask) => break Err(Errno::NotFound),
-                            Err(_) => break Err(Errno::OutOfRange),
-                        }
+                    // Park off the run queue until woken, keyed to the CPU
+                    // this task occupies right now (`park_current_task` reads
+                    // it live, so a mid-wait migration is handled); the
+                    // fallback yield covers a caller with no live dispatch
+                    // loop so it never busy-spins.
+                    match park_current_task(self.sched, self.arch, sched_task) {
+                        ParkStep::Parked => {}
+                        ParkStep::TaskVanished => break Err(Errno::NotFound),
+                        ParkStep::SchedulerError => break Err(Errno::OutOfRange),
                     }
                     // A doomed waiter never re-parks: a termination deferred
                     // against this task unwinds the wait so the kill lands at
@@ -5336,7 +5325,6 @@ where
         // `serve_wake` unparks this task, and the scheduler's wake-pending
         // token closes the poll/park race (the same interlock `ipc_call` uses
         // on `CALL_WAITQ`).
-        let cpu = SchedulerArch::current_cpu(self.arch);
         let sched_task = caller.task_id.0;
         // Record this server's scheduler id on the endpoint (post-gate, so
         // only the owning task can ever be recorded): from now on a post to
@@ -5364,12 +5352,15 @@ where
                     if flags.is_non_blocking() {
                         break Err(Errno::WouldBlock);
                     }
-                    if !crate::kthread::reschedule_current(cpu, RescheduleAction::Park) {
-                        match self.sched.yield_current(sched_task) {
-                            Ok(()) | Err(SchedError::InvalidState) => {}
-                            Err(SchedError::NoSuchTask) => break Err(Errno::NotFound),
-                            Err(_) => break Err(Errno::OutOfRange),
-                        }
+                    // Park keyed to the CPU this task occupies right now
+                    // (`park_current_task` reads it live, so a mid-wait
+                    // migration is handled); the fallback yield covers a
+                    // caller with no live dispatch loop so it never
+                    // busy-spins.
+                    match park_current_task(self.sched, self.arch, sched_task) {
+                        ParkStep::Parked => {}
+                        ParkStep::TaskVanished => break Err(Errno::NotFound),
+                        ParkStep::SchedulerError => break Err(Errno::OutOfRange),
                     }
                     // A doomed waiter never re-parks: a termination deferred
                     // against this task unwinds the wait so the kill lands at
@@ -6192,12 +6183,14 @@ where
             // wake-pending token closes the poll/park race exactly as
             // `call_recv` / `irq_wait` rely on.
             self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
-            if !crate::kthread::reschedule_current(cpu, RescheduleAction::Park) {
-                match self.sched.yield_current(sched_task) {
-                    Ok(()) | Err(SchedError::InvalidState) => {}
-                    Err(SchedError::NoSuchTask) => break Err(Errno::NotFound),
-                    Err(_) => break Err(Errno::OutOfRange),
-                }
+            // Park keyed to the CPU this task occupies right now
+            // (`park_current_task` reads it live, so a mid-wait migration is
+            // handled); the fallback yield covers a caller with no live
+            // dispatch loop so it never busy-spins.
+            match park_current_task(self.sched, self.arch, sched_task) {
+                ParkStep::Parked => {}
+                ParkStep::TaskVanished => break Err(Errno::NotFound),
+                ParkStep::SchedulerError => break Err(Errno::OutOfRange),
             }
             // A doomed waiter never re-parks: a termination deferred against
             // this task unwinds the wait so the kill lands at the syscall
@@ -7224,6 +7217,68 @@ where
             sandbox,
         }
     }
+
+    /// Derive the child's kernel-attested capability record for `sec_id`:
+    /// the `user ceiling ∩ manifest request` effective set plus the process
+    /// identity, parentage, credential, start time, and console attestation
+    /// — every field kernel-resolved, never caller-supplied — with a sandbox
+    /// child's sets structurally stripped last. `caps` is the program's
+    /// manifest request. Factored out of `admit_process` so that admission
+    /// path stays a readable linear sequence.
+    fn derive_child_record(&self, sec_id: SecTaskId, caps: CapabilitySet) -> TaskCapabilities {
+        // The parent's own attested process-instance identity (read from its
+        // kernel-held record, never a caller value) so the child is
+        // attributable to the exact parent instance even across PID reuse; a
+        // kernel-parented admit leaves the kernel sentinel.
+        let parent_proc_id = self
+            .caps
+            .read()
+            .caps_for(self.parent)
+            .map_or(ProcId::KERNEL, TaskCapabilities::proc_id);
+        // Kernel monotonic clock at admission: lets an audit/origin consumer
+        // order and age the instance and tell apart two lifetimes that reused
+        // a numeric id. Read kernel-side, never caller-supplied.
+        let start_time = SchedulerArch::ticks_now(self.arch);
+        // The one console backing every attached standard descriptor, or the
+        // "not console-backed" sentinel for a closed/split table — a
+        // per-console service trusts this to place a caller.
+        let console = self
+            .streams
+            .session_console()
+            .map_or(rustos_abi::ORIGIN_CONSOLE_NONE, u64::from);
+        // Effective set = `user ceiling ∩ manifest request`
+        // (`plans/CAPABILITY_USE.md` CU1): `caps` is the manifest request and
+        // the ceiling rides on the credential. A system-principal credential
+        // carries no users-db ceiling, so its manifest is its ceiling (`caps`
+        // stands on both sides — the one legitimate manifest-as-ceiling
+        // shape) and the record is marked so its inherit-spawns stay
+        // manifest-bounded.
+        let record = match self.credential.ceiling {
+            Some(ceiling) => {
+                TaskCapabilities::derive(sec_id, self.credential.uid, ceiling, caps, self.audit)
+            }
+            None => TaskCapabilities::derive(sec_id, self.credential.uid, caps, caps, self.audit)
+                .as_system_principal(),
+        }
+        .with_proc_id(self.proc_id)
+        .with_parent_proc_id(parent_proc_id)
+        .with_name(self.name.clone())
+        .with_spawn_path(self.spawn_path.clone())
+        .with_credential(
+            self.credential.primary_gid,
+            self.credential.supplementary_gids.clone(),
+        )
+        .with_start_time(start_time)
+        .with_console(console);
+        // Brand a sandbox child last, after every attestation is attached:
+        // the brand strips all three capability sets structurally and marks
+        // the record for the dispatcher's allow-list confinement.
+        if self.sandbox {
+            record.as_sandboxed()
+        } else {
+            record
+        }
+    }
 }
 
 impl<A> SpawnCtx for KernelSpawnCtx<'_, A>
@@ -7275,6 +7330,13 @@ where
         // space through the per-CPU live-space slot (`plans/PI.md`
         // 5d-0-ii (b′)); otherwise admit the plain form and those syscalls
         // fail closed.
+        //
+        // The child is admitted **parked** (the trailing `true`): registered
+        // but off every run queue, so no CPU can dispatch it and take its
+        // first syscall before the per-task state below exists. The `unpark`
+        // at the end makes it runnable once that state is installed. On a
+        // multi-core boot a Ready admission here raced those installs and the
+        // child's first syscall found no capability record.
         let admitted = match live {
             Some(live) => crate::kthread::spawn_user_kthread_with_stack_live(
                 self.sched,
@@ -7285,6 +7347,7 @@ where
                 pre_resume,
                 live,
                 work,
+                true,
             ),
             None => crate::kthread::spawn_user_kthread_with_stack(
                 self.sched,
@@ -7294,103 +7357,32 @@ where
                 Priority::Normal,
                 pre_resume,
                 work,
+                true,
             ),
         };
         let task_id = admitted.map_err(|_| AdmitError::SchedulerFull)?;
 
         // Register the child's caps under the *same* numeric id the
         // dispatcher recovers (`SecTaskId(task_id)`), so its first syscall
-        // resolves a caller context.
+        // (once unparked below) resolves a caller context. The record's
+        // kernel-attested fields are built by `derive_child_record`.
         let sec_id = SecTaskId(task_id);
-        // Attach the kernel-minted process-instance identity to the record so
-        // every syscall this child makes is attributed to the exact instance
-        // (the audit log distinguishes it from a later task that reuses the
-        // numeric id). The id is kernel-minted, never caller-supplied.
-        //
-        // Also record the child's parentage: the spawning parent's own
-        // attested process-instance identity, read from the parent's
-        // kernel-held capability record (never a caller-supplied value), so
-        // an audit or origin consumer can attribute the child to the exact
-        // parent instance even across PID reuse. A parent whose record is
-        // absent (a kernel-parented admit) leaves the kernel sentinel.
-        let parent_proc_id = self
-            .caps
-            .read()
-            .caps_for(self.parent)
-            .map_or(ProcId::KERNEL, TaskCapabilities::proc_id);
-        // Snapshot the child's kernel-attested credential onto its record:
-        // the owning uid plus the full group set the call site resolved
-        // (inherited from the parent, switched to a target user, or the fixed
-        // system credential). The credential is identity for the filesystem
-        // permission model and the attested `Origin`.
-        //
-        // The child's effective capability set is derived here as
-        // `user ceiling ∩ manifest request` (`plans/CAPABILITY_USE.md` CU1):
-        // `caps` is the program's manifest request and the ceiling rides on
-        // the credential — the account's `capability_grants` snapshot for a
-        // user-session spawn. A system-principal credential carries no
-        // users-db ceiling; its manifest is its ceiling, so `caps` stands on
-        // both sides (the one legitimate manifest-as-ceiling shape) and the
-        // record is marked so the child's own inherit-spawns stay
-        // manifest-bounded too.
-        //
-        // Snapshot the kernel's monotonic clock at admission as the child's
-        // attested start time, so an audit or origin consumer can order and
-        // age the instance and tell apart two lifetimes that reused a numeric
-        // id. Read kernel-side from the Arch HAL counter, never caller-supplied.
-        let start_time = SchedulerArch::ticks_now(self.arch);
-        // Attest which console the child sits on from the descriptor table
-        // the spawn path itself resolved (kernel state, never a
-        // caller-supplied value): the one console backing every attached
-        // standard descriptor, or the "not console-backed" sentinel for a
-        // closed or split table — a per-console service (the session
-        // supervisor's elevation endpoint) trusts this to place a caller.
-        let console = self
-            .streams
-            .session_console()
-            .map_or(rustos_abi::ORIGIN_CONSOLE_NONE, u64::from);
-        let record = match self.credential.ceiling {
-            Some(ceiling) => {
-                TaskCapabilities::derive(sec_id, self.credential.uid, ceiling, caps, self.audit)
-            }
-            None => TaskCapabilities::derive(sec_id, self.credential.uid, caps, caps, self.audit)
-                .as_system_principal(),
-        }
-        .with_proc_id(self.proc_id)
-        .with_parent_proc_id(parent_proc_id)
-        .with_name(self.name.clone())
-        .with_spawn_path(self.spawn_path.clone())
-        .with_credential(
-            self.credential.primary_gid,
-            self.credential.supplementary_gids.clone(),
-        )
-        .with_start_time(start_time)
-        .with_console(console);
-        // Brand a sandbox child last, after every attestation is attached:
-        // the brand strips all three capability sets structurally and marks
-        // the record for the dispatcher's allow-list confinement.
-        let record = if self.sandbox {
-            record.as_sandboxed()
-        } else {
-            record
-        };
+        let record = self.derive_child_record(sec_id, caps);
         self.caps.write().insert(record);
 
         // Register the child's frozen address space + direct map under the
         // same id, so its first user-memory copy resolves its own mappings
         // instead of failing closed with `BadAddress` (`plans/PI.md` P6c-3
-        // follow-up). A fresh task id is never already present; a refusal
-        // signals a kernel invariant violation, so fail closed rather than admit a task whose user memory the
-        // kernel cannot reach. The already-admitted scheduler task is reaped
-        // when it is next dispatched and finds no caps/aspace — but that
-        // path cannot occur for a fresh id, so the conflict is reported as
-        // an invariant violation to the caller.
+        // follow-up). A fresh task id is never already present; a refusal is
+        // a kernel invariant violation — retire the still-parked task and
+        // fail closed rather than leave an unrunnable orphan.
         if self
             .aspaces
             .write()
             .register(sec_id, space, physmap)
             .is_err()
         {
+            let _ = self.sched.exit(task_id);
             return Err(AdmitError::AspaceConflict);
         }
 
@@ -7423,6 +7415,8 @@ where
                     .install_std_entry(sec_id, *fd, file.clone())
                     .is_err()
                 {
+                    drop(aspaces);
+                    let _ = self.sched.exit(task_id);
                     return Err(AdmitError::AspaceConflict);
                 }
             }
@@ -7488,7 +7482,56 @@ where
         // observes the returned PID can immediately and soundly reap it.
         self.process_wait.register_child(self.parent, sec_id);
 
+        // Every piece of per-task state is installed, so make the parked
+        // task runnable. `unpark` performs the placement, enqueue, and wake
+        // IPI. A refused wake on a freshly parked task is a kernel invariant
+        // violation: retire it and fail closed rather than leak it parked.
+        if self.sched.unpark(task_id).is_err() {
+            let _ = self.sched.exit(task_id);
+            return Err(AdmitError::SchedulerFull);
+        }
+
         Ok(task_id)
+    }
+}
+
+/// Outcome of one [`park_current_task`] step.
+enum ParkStep {
+    /// The task suspended off the run queue (or, for a caller with no live
+    /// dispatch loop, cooperatively yielded); re-poll the wait condition.
+    Parked,
+    /// The task can no longer be scheduled — torn down between two polls.
+    TaskVanished,
+    /// The yield seam refused for any other reason (defensive).
+    SchedulerError,
+}
+
+/// Park the calling task off the run queue for one wait iteration,
+/// suspending it on the CPU it is running on **right now**.
+///
+/// The live CPU is read here, on every call, never captured once before a
+/// wait loop: a parked task can be woken and re-dispatched (work-stolen)
+/// onto a different core, so a `CpuId` captured before the first park goes
+/// stale after any migration. Passing a stale id to `reschedule_current`
+/// misses that core's resume handle, so the suspend fails and the
+/// `yield_current` fallback clears the task's live current-task slot while
+/// it keeps running — the task then returns to user space with no recorded
+/// current task and its next syscall faults the core closed. Reading the
+/// live CPU keeps the suspend keyed to the core the task actually occupies.
+///
+/// `reschedule_current` returns `false` only for a caller that is not a
+/// resumable user kthread (a host test with no live dispatch loop); the
+/// `yield_current` fallback keeps such a degenerate caller from
+/// busy-spinning while the wait's own deadline still bounds it.
+fn park_current_task<A: KernelArch>(sched: &Scheduler<A>, arch: &A, task: u64) -> ParkStep {
+    let cpu = SchedulerArch::current_cpu(arch);
+    if crate::kthread::reschedule_current(cpu, RescheduleAction::Park) {
+        return ParkStep::Parked;
+    }
+    match sched.yield_current(task) {
+        Ok(()) | Err(SchedError::InvalidState) => ParkStep::Parked,
+        Err(SchedError::NoSuchTask) => ParkStep::TaskVanished,
+        Err(_) => ParkStep::SchedulerError,
     }
 }
 
@@ -7496,15 +7539,16 @@ where
 /// scheduler + architecture borrows into the shared
 /// [`block_until_ready`] loop.
 ///
-/// Holds only borrows and a captured CPU id; constructed fresh per
-/// `irq_wait` call on the issuing CPU's process context.
+/// Holds only borrows; constructed fresh per `irq_wait` call. The CPU is
+/// read live on each `now_ns` / `yield_now` (never captured), so a task
+/// work-stolen to another core across a park is always suspended on the
+/// core it is running on now.
 struct SyscallIrqWaiter<'a, A>
 where
     A: KernelArch + 'static,
 {
     sched: &'a Scheduler<A>,
     arch: &'a A,
-    cpu: CpuId,
     task: SecTaskId,
     /// The controller the bound line is re-armed through before each park.
     irq_controller: &'a (dyn IrqController + Sync),
@@ -7519,7 +7563,8 @@ where
     A: KernelArch + 'static,
 {
     fn now_ns(&self) -> u64 {
-        self.arch.monotonic_ns(self.cpu)
+        self.arch
+            .monotonic_ns(SchedulerArch::current_cpu(self.arch))
     }
 
     fn yield_now(&self) -> Result<(), IrqWaitAbort> {
@@ -7546,17 +7591,14 @@ where
         // wake-pending token (no busy yield). This
         // mirrors `hw_tree_wait`'s park exactly.
         self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
-        // `reschedule_current` returns `false` only when the caller is not
-        // a resumable user kthread (host tests with no live dispatch loop);
-        // fall back to a cooperative yield then so a degenerate caller
-        // never busy-spins and the loop still terminates on the monotone
-        // clock reaching its deadline.
-        if !crate::kthread::reschedule_current(self.cpu, RescheduleAction::Park) {
-            match self.sched.yield_current(self.task.0) {
-                Ok(()) | Err(SchedError::InvalidState) => {}
-                Err(SchedError::NoSuchTask) => return Err(IrqWaitAbort::TaskVanished),
-                Err(_) => return Err(IrqWaitAbort::SchedulerError),
-            }
+        // Park off the run queue, keyed to the CPU this task occupies right
+        // now (`park_current_task` reads it live, so a mid-wait migration is
+        // handled); the fallback yield covers a caller with no live dispatch
+        // loop so the wait still terminates on its deadline.
+        match park_current_task(self.sched, self.arch, self.task.0) {
+            ParkStep::Parked => {}
+            ParkStep::TaskVanished => return Err(IrqWaitAbort::TaskVanished),
+            ParkStep::SchedulerError => return Err(IrqWaitAbort::SchedulerError),
         }
         // A doomed waiter never re-parks: a termination deferred against
         // this task aborts the wait so the kill lands at the syscall
@@ -8234,6 +8276,46 @@ mod tests {
     fn make_sched(arch: Arc<TestArch>) -> Scheduler<TestArch> {
         let cfg = SchedulerConfig::defaults_for(1);
         Scheduler::new(cfg, arch).expect("scheduler builds")
+    }
+
+    /// `park_current_task` reads the arch's *current* CPU on every call and
+    /// fails the park closed when the task can no longer be scheduled.
+    ///
+    /// Setting the arch's current CPU past the per-CPU resume table forces
+    /// `reschedule_current` to find no published handle and fall to the
+    /// `yield_current` seam — the degenerate "no live dispatch loop" path a
+    /// host test exercises. An unknown task id must map to `TaskVanished`
+    /// rather than pretending to suspend a task that does not exist.
+    #[test]
+    fn park_current_task_fails_closed_for_a_vanished_task() {
+        let past_resume_table =
+            u32::try_from(crate::kthread::KTHREAD_MAX_CPUS).expect("resume-table bound fits u32");
+        let arch = Arc::new(TestArch::with_cpus(past_resume_table + 1));
+        arch.set_current_cpu(past_resume_table);
+        let sched = make_sched(Arc::clone(&arch));
+        assert!(matches!(
+            park_current_task(&sched, &arch, 0xDEAD_BEEF),
+            ParkStep::TaskVanished
+        ));
+    }
+
+    /// A freshly spawned task is `Ready`, not `Running`, so the
+    /// `yield_current` fallback reports `InvalidState`; the helper maps that
+    /// to `Parked` so the wait loop re-polls rather than aborting.
+    #[test]
+    fn park_current_task_parks_a_ready_task_via_yield_fallback() {
+        let past_resume_table =
+            u32::try_from(crate::kthread::KTHREAD_MAX_CPUS).expect("resume-table bound fits u32");
+        let arch = Arc::new(TestArch::with_cpus(past_resume_table + 1));
+        arch.set_current_cpu(past_resume_table);
+        let sched = make_sched(Arc::clone(&arch));
+        let id = sched
+            .spawn(0, Priority::Normal, |_ctx| TaskAction::Exit)
+            .expect("spawn a task");
+        assert!(matches!(
+            park_current_task(&sched, &arch, id),
+            ParkStep::Parked
+        ));
     }
 
     /// Deterministic stand-in entropy source for the `random_get`

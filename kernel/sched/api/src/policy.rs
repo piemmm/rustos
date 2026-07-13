@@ -65,6 +65,33 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     where
         F: FnMut(&mut TaskContext) -> TaskAction + Send + 'static;
 
+    /// Admit a new task at `priority` with a body closure, but leave it
+    /// [`TaskState::Parked`] and **not** enqueued on any run queue — the
+    /// task is registered and given an id, yet no CPU can dispatch it
+    /// until an explicit [`unpark`](Self::unpark).
+    ///
+    /// This is the birth form for a task whose per-task kernel state
+    /// (capability record, address space, standard streams, resource
+    /// limits, device grants) is installed *after* the id is minted but
+    /// *before* the task may run its first instruction. Admitting it
+    /// [`spawn`](Self::spawn)-Ready would let another CPU dispatch the
+    /// task — and take its first syscall — before that state exists, so
+    /// the caller admits it parked, installs the state under the returned
+    /// id, then unparks it. Unlike `spawn`, this sends no wake IPI: the
+    /// task becomes runnable only through the later `unpark`, which
+    /// performs the placement, enqueue, and IPI.
+    ///
+    /// Implementations must never panic on a full home queue (there is no
+    /// enqueue here, so the constraint is trivially met) and must place
+    /// the parked task's home so a subsequent `unpark` re-homes it exactly
+    /// as `spawn` would.
+    ///
+    /// # Errors
+    /// * [`crate::SchedError::NoSuchCpu`] if `home_cpu` is out of range.
+    fn spawn_parked<F>(&self, home_cpu: CpuId, priority: Priority, body: F) -> SchedResult<TaskId>
+    where
+        F: FnMut(&mut TaskContext) -> TaskAction + Send + 'static;
+
     /// Block a task. Cancellation-safe.
     ///
     /// # Errors

@@ -906,6 +906,13 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // space through the per-CPU live-space slot (`plans/PI.md`
         // 5d-0-ii (b′)); otherwise admit the plain form and those syscalls
         // fail closed.
+        //
+        // PID 1 is admitted **parked** (the trailing `true`): the secondary
+        // CPUs are already online by the time this runs, so a Ready
+        // admission could be work-stolen onto another core and take its
+        // first syscall before the caps/aspace/streams below exist. It is
+        // made runnable only by the `unpark` just before the dispatch loop,
+        // once that state is installed.
         let admitted = match live {
             Some(live) => crate::kthread::spawn_user_kthread_with_stack_live(
                 self.scheduler,
@@ -916,6 +923,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
                 pre_resume,
                 live,
                 work,
+                true,
             ),
             None => crate::kthread::spawn_user_kthread_with_stack(
                 self.scheduler,
@@ -925,6 +933,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
                 Priority::Normal,
                 pre_resume,
                 work,
+                true,
             ),
         };
         let Ok(task_id) = admitted else {
@@ -971,6 +980,9 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             .register(sec_id, space, physmap)
             .is_err()
         {
+            // PID 1 is still parked; retire it so it is not left an
+            // unrunnable orphan before we halt.
+            let _ = self.scheduler.exit(task_id);
             return;
         }
 
@@ -1006,7 +1018,16 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // is installed, so the new program's first syscall is handled (this
         // method's contract); the `pre_resume` hook keeps the correct root
         // active across every later switch into a user kthread.
-        let _ = task_id;
+        // PID 1's caps, address space, and streams are now installed, so it
+        // is safe to make it runnable. Unpark is the single point that
+        // enqueues it and must run **before** the dispatch loop — a parked
+        // PID 1 would leave the loop idling forever with nothing to wake it.
+        // A refused wake on a freshly parked task is a kernel invariant
+        // violation: retire it and fail closed to the halt.
+        if self.scheduler.unpark(task_id).is_err() {
+            let _ = self.scheduler.exit(task_id);
+            return;
+        }
         // Drive the shared kernel dispatch loop as the boot CPU: it runs
         // until every task has exited (or the scheduler errors), then
         // returns with device IRQs masked so `kernel_main` halts

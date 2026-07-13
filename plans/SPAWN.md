@@ -330,10 +330,14 @@ landed first; the real device/producer wired in a following increment).
   core-side `SpawnCtx` (`frames`/`audit`/`admit_process`). The `spawn`
   handler copies the path in through the validated `copy_from_user`
   boundary, resolves it, and delegates to the producer; `SpawnCtx`'s
-  `HandlerSpawnCtx` impl admits the child as a **Ready** resumable user
-  kthread (`spawn_user_kthread`) + registers its caps + frozen address
-  space, returning the PID **without** entering/draining (the caller keeps
-  running). Handler fields default in `new`, with `with_frames` /
+  `HandlerSpawnCtx` impl admits the child **parked**
+  (`spawn_user_kthread*(…, parked = true)`), registers its caps + frozen
+  address space + streams + limits + grants under the returned id, and only
+  then `unpark`s it — so on an SMP machine no core can dispatch the child
+  and take its first syscall before that per-task state exists (a Ready
+  admission raced the installs and the child's first syscall found no
+  capability record). It returns the PID **without** entering/draining (the
+  caller keeps running). Handler fields default in `new`, with `with_frames` /
   `with_spawn` builders (mirroring `with_consoles`), so the kernel binary
   needs no change yet and production `spawn` fails closed with
   `NotImplemented`.
