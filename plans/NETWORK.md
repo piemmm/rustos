@@ -397,17 +397,27 @@ docs, and the full gate) because the whole was too large for one change:
   coverage. Nothing links it.
 
 ### N4 — UDP + the socket ABI + multicast membership `[ ]`
-- UDP over both families; the socket ABI (`lib/abi/src/net.rs`) with
+- **Engine UDP layer landed:** `lib/net::udp` is the dual-stack UDP
+  codec (RFC 768) — one `write`/`UdpDatagram::parse` core folding the
+  family-appropriate pseudo-header checksum, IPv4-optional /
+  IPv6-mandatory checksum discipline, total/bounded/fail-closed, with
+  the `fuzz_net_udp` harness. `Stack` demuxes received UDP in both
+  families to a verbatim `StackEvent::UdpDatagram` (the service decides
+  socket delivery / port-unreachable, not the engine) and originates it
+  with `Stack::send_datagram` (unicast this increment; the ICMP send
+  helpers were generalised to carry the protocol, no duplication).
+- **Remaining:** the socket ABI (`lib/abi/src/net.rs`) with
   `socket`/`bind`/`connect`/`send`/`recv`/`close`, `CAP_NET`
   introduced + enforced, ephemeral ports CSPRNG-randomised, per-socket
   and per-principal buffer accounting (§24.3), `WaitSourceKind::Socket`
   readiness.
-- Multicast: IGMPv2 + MLDv2 host-side membership, socket join/leave,
-  reception filtering; solicited-node multicast for ND (already needed
-  by N2) formalised here.
+- **Remaining — multicast:** IGMPv2 + MLDv2 host-side membership,
+  socket join/leave, reception filtering, multicast UDP transmit;
+  solicited-node multicast for ND (already needed by N2) formalised
+  here.
 - Tests: two-process QEMU vertical (UDP echo v4+v6, multicast join +
-  receive), fuzz `fuzz_net_udp`/`fuzz_net_sockabi`, limit-exhaustion
-  tests failing closed.
+  receive), fuzz `fuzz_net_udp` (landed) / `fuzz_net_sockabi`,
+  limit-exhaustion tests failing closed.
 - Docs: `docs/src/abi/net-sockets.md`.
 
 ### N5 — TCP core: the RFC 9293 state machine, retransmission, flow control `[ ]`

@@ -43,9 +43,13 @@
 //!   above: frames in, frames + typed events out, one folded one-shot
 //!   timer deadline.
 //!
-//! Later increments extend this crate in place with `igmp`/`mld`, `udp`,
-//! and `tcp` (`plans/NETWORK.md` §2.1); none of that surface is
-//! speculated here.
+//! - [`udp`] — the dual-stack UDP codec (RFC 768): one parse/emit core
+//!   folding the family-appropriate pseudo-header checksum, with the
+//!   IPv4-optional / IPv6-mandatory checksum discipline.
+//!
+//! Later increments extend this crate in place with `igmp`/`mld` and
+//! `tcp` (`plans/NETWORK.md` §2.1); none of that surface is speculated
+//! here.
 //!
 //! # Security
 //!
@@ -75,6 +79,7 @@ pub mod nd;
 pub mod neigh;
 pub mod route;
 pub mod stack;
+pub mod udp;
 
 pub use addr::{IpAddr, Ipv4Addr, Ipv6Addr};
 pub use checksum::internet_checksum;

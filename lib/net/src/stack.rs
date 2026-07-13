@@ -62,6 +62,7 @@ use crate::ipv6::{
 use crate::nd::{apply_redirect, NdMessage, ND_HOP_LIMIT};
 use crate::neigh::{LookupResult, NeighborAction, NeighborConfig, NeighborTable};
 use crate::route::{CandidateAddr, DefaultRouterList, PathMtuCache, Prefix, RoutingTable};
+use crate::udp::{self, UdpDatagram, PROTOCOL_UDP};
 
 /// Bound on frames parked awaiting neighbour resolution, in total.
 /// RFC 4861 §7.2.2 requires holding at least one packet per pending
@@ -153,6 +154,23 @@ pub enum StackEvent {
     ReassemblyExpired {
         /// Source of the expired datagram's fragments.
         source: IpAddr,
+    },
+    /// A validated UDP datagram addressed to this host arrived. The
+    /// engine surfaces it verbatim; demultiplexing to a bound socket
+    /// (and answering an unbound port with an ICMP error) is the
+    /// service layer's decision, not the engine's.
+    UdpDatagram {
+        /// Peer address the datagram came from.
+        source: IpAddr,
+        /// Local address it was delivered to (an interface address or,
+        /// once membership lands, a joined group).
+        destination: IpAddr,
+        /// Peer source port.
+        source_port: u16,
+        /// Local destination port.
+        destination_port: u16,
+        /// The datagram payload.
+        payload: Vec<u8>,
     },
 }
 
@@ -555,6 +573,24 @@ impl Stack {
             self.on_icmp_v4(out, header, payload, now);
             return;
         }
+        if header.protocol == PROTOCOL_UDP {
+            let pseudo = udp::Pseudo::V4 {
+                source: header.source,
+                destination: header.destination,
+            };
+            let Some(datagram) = UdpDatagram::parse(pseudo, payload) else {
+                self.counters.rx_dropped += 1;
+                return;
+            };
+            out.events.push(StackEvent::UdpDatagram {
+                source: IpAddr::V4(header.source),
+                destination: IpAddr::V4(header.destination),
+                source_port: datagram.source_port,
+                destination_port: datagram.destination_port,
+                payload: datagram.payload.to_vec(),
+            });
+            return;
+        }
         // Unknown transport: Destination Unreachable, protocol
         // (RFC 1122 §3.2.2.1), gated and rate-limited.
         let Some(original) = original else {
@@ -603,7 +639,14 @@ impl Stack {
                         self.counters.rx_dropped += 1;
                         return;
                     }
-                    self.send_ipv4_packet(out, header.destination, header.source, &message, now);
+                    self.send_ipv4_packet(
+                        out,
+                        header.destination,
+                        header.source,
+                        PROTOCOL_ICMP,
+                        &message,
+                        now,
+                    );
                     out.events.push(StackEvent::EchoRequestServed {
                         source: IpAddr::V4(header.source),
                         identifier: echo.identifier,
@@ -754,6 +797,24 @@ impl Stack {
             self.on_icmpv6(out, header, payload, dest_is_multicast, now);
             return;
         }
+        if protocol == PROTOCOL_UDP {
+            let pseudo = udp::Pseudo::V6 {
+                source: header.source,
+                destination: header.destination,
+            };
+            let Some(datagram) = UdpDatagram::parse(pseudo, payload) else {
+                self.counters.rx_dropped += 1;
+                return;
+            };
+            out.events.push(StackEvent::UdpDatagram {
+                source: IpAddr::V6(header.source),
+                destination: IpAddr::V6(header.destination),
+                source_port: datagram.source_port,
+                destination_port: datagram.destination_port,
+                payload: datagram.payload.to_vec(),
+            });
+            return;
+        }
         self.counters.rx_dropped += 1;
         // Unrecognised upper protocol: Parameter Problem code 1
         // pointing at the next-header field (RFC 4443 §3.4 / RFC 8200
@@ -848,6 +909,7 @@ impl Stack {
                             out,
                             header.destination,
                             header.source,
+                            NEXT_HEADER_ICMPV6,
                             &message,
                             self.hop_limit,
                             now,
@@ -1314,14 +1376,15 @@ impl Stack {
         Some(route.next_hop.unwrap_or(dest))
     }
 
-    /// Wrap an ICMP message for IPv4 and transmit it (fragmenting
-    /// when it exceeds the link MTU).
+    /// Wrap an upper-layer message (ICMP or UDP) for IPv4 and transmit
+    /// it, fragmenting when it exceeds the link MTU.
     fn send_ipv4_packet(
         &mut self,
         out: &mut StackOutput,
         source: Ipv4Addr,
         dest: Ipv4Addr,
-        icmp_message: &[u8],
+        protocol: u8,
+        upper_message: &[u8],
         now: Duration64,
     ) {
         if !self.link_up {
@@ -1330,23 +1393,23 @@ impl Stack {
         let Some(next_hop) = self.next_hop_v4(dest) else {
             return;
         };
-        let mut header = Ipv4Header::new(source, dest, PROTOCOL_ICMP);
+        let mut header = Ipv4Header::new(source, dest, protocol);
         header.identification = self.next_ident;
         self.next_ident = self.next_ident.wrapping_add(1);
-        if IPV4_HEADER_LEN + icmp_message.len() <= self.link_mtu {
-            let mut packet = vec![0u8; IPV4_HEADER_LEN + icmp_message.len()];
-            if header.write(&mut packet, icmp_message.len()).is_none() {
+        if IPV4_HEADER_LEN + upper_message.len() <= self.link_mtu {
+            let mut packet = vec![0u8; IPV4_HEADER_LEN + upper_message.len()];
+            if header.write(&mut packet, upper_message.len()).is_none() {
                 return;
             }
-            packet[IPV4_HEADER_LEN..].copy_from_slice(icmp_message);
+            packet[IPV4_HEADER_LEN..].copy_from_slice(upper_message);
             self.resolve_and_send(out, IpAddr::V4(next_hop), ETHERTYPE_IPV4, packet, now);
             return;
         }
-        let Some(parts) = crate::ipv4::fragment(header, icmp_message.len(), self.link_mtu) else {
+        let Some(parts) = crate::ipv4::fragment(header, upper_message.len(), self.link_mtu) else {
             return;
         };
         for part in parts {
-            let payload = &icmp_message[part.payload_start..part.payload_end];
+            let payload = &upper_message[part.payload_start..part.payload_end];
             let mut packet = vec![0u8; IPV4_HEADER_LEN + payload.len()];
             if part.header.write(&mut packet, payload.len()).is_none() {
                 continue;
@@ -1356,24 +1419,26 @@ impl Stack {
         }
     }
 
-    /// Wrap an `ICMPv6` message and transmit it: multicast
-    /// destinations map straight to their group MAC, unicast ones
-    /// resolve through the neighbour cache.
+    /// Wrap an upper-layer message (`ICMPv6` or UDP) and transmit it:
+    /// multicast destinations map straight to their group MAC, unicast
+    /// ones resolve through the neighbour cache.
+    #[allow(clippy::too_many_arguments)]
     fn send_ipv6_packet(
         &mut self,
         out: &mut StackOutput,
         source: Ipv6Addr,
         dest: Ipv6Addr,
-        icmp_message: &[u8],
+        next_header: u8,
+        upper_message: &[u8],
         hop_limit: u8,
         now: Duration64,
     ) {
         if !self.link_up {
             return;
         }
-        let mut header = Ipv6Header::new(source, dest, NEXT_HEADER_ICMPV6);
+        let mut header = Ipv6Header::new(source, dest, next_header);
         header.hop_limit = hop_limit;
-        let Some(packet) = ipv6_packet(&header, icmp_message) else {
+        let Some(packet) = ipv6_packet(&header, upper_message) else {
             return;
         };
         if dest.is_multicast() {
@@ -1411,7 +1476,7 @@ impl Stack {
             return;
         }
         self.counters.icmp_errors_sent += 1;
-        self.send_ipv4_packet(out, our_addr, invoking_source, &message, now);
+        self.send_ipv4_packet(out, our_addr, invoking_source, PROTOCOL_ICMP, &message, now);
     }
 
     /// Gate, rate-limit, and emit an `ICMPv6` error about a packet.
@@ -1453,7 +1518,15 @@ impl Stack {
             return;
         }
         self.counters.icmp_errors_sent += 1;
-        self.send_ipv6_packet(out, source, invoking.source, &message, self.hop_limit, now);
+        self.send_ipv6_packet(
+            out,
+            source,
+            invoking.source,
+            NEXT_HEADER_ICMPV6,
+            &message,
+            self.hop_limit,
+            now,
+        );
     }
 
     /// Originate an ICMP echo request to `dest`.
@@ -1495,7 +1568,7 @@ impl Stack {
                 let mut message = vec![0u8; echo.wire_len()];
                 echo.write(IcmpContext::V4, &mut message)
                     .ok_or(SendError::TooLarge)?;
-                self.send_ipv4_packet(&mut out, source, dest, &message, now);
+                self.send_ipv4_packet(&mut out, source, dest, PROTOCOL_ICMP, &message, now);
             }
             IpAddr::V6(dest) => {
                 if dest.is_multicast() || dest.is_unspecified() {
@@ -1522,7 +1595,105 @@ impl Stack {
                 let mut message = vec![0u8; echo.wire_len()];
                 echo.write(context, &mut message)
                     .ok_or(SendError::TooLarge)?;
-                self.send_ipv6_packet(&mut out, source, dest, &message, self.hop_limit, now);
+                self.send_ipv6_packet(
+                    &mut out,
+                    source,
+                    dest,
+                    NEXT_HEADER_ICMPV6,
+                    &message,
+                    self.hop_limit,
+                    now,
+                );
+            }
+        }
+        Ok(out)
+    }
+
+    /// Originate a UDP datagram from `source_port` to `dest`:`destination_port`.
+    ///
+    /// This increment addresses unicast destinations only; a multicast
+    /// destination is refused as [`SendError::NotUnicast`] (fail closed)
+    /// until group-membership transmit lands. Over IPv4 an oversize
+    /// datagram is fragmented on emit; over IPv6, which never fragments on
+    /// emit, a datagram past the path MTU is refused as
+    /// [`SendError::TooLarge`].
+    ///
+    /// # Errors
+    ///
+    /// Typed [`SendError`] refusals: link down, non-unicast destination,
+    /// no usable source address / v4 configuration, no route, or a payload
+    /// that cannot fit the path MTU (v6) or the datagram-length field.
+    pub fn send_datagram(
+        &mut self,
+        dest: IpAddr,
+        source_port: u16,
+        destination_port: u16,
+        payload: &[u8],
+        now: Duration64,
+    ) -> Result<StackOutput, SendError> {
+        if !self.link_up {
+            return Err(SendError::LinkDown);
+        }
+        let mut out = StackOutput::default();
+        match dest {
+            IpAddr::V4(dest) => {
+                if dest.is_multicast() || dest.is_broadcast() || dest.is_unspecified() {
+                    return Err(SendError::NotUnicast);
+                }
+                let Some((source, _)) = self.iface.ipv4() else {
+                    return Err(SendError::NoSourceAddress);
+                };
+                if self.next_hop_v4(dest).is_none() {
+                    return Err(SendError::NoRoute);
+                }
+                let mut message = vec![0u8; udp::UDP_HEADER_LEN + payload.len()];
+                udp::write(
+                    udp::Pseudo::V4 {
+                        source,
+                        destination: dest,
+                    },
+                    source_port,
+                    destination_port,
+                    payload,
+                    &mut message,
+                )
+                .map_err(|_| SendError::TooLarge)?;
+                self.send_ipv4_packet(&mut out, source, dest, PROTOCOL_UDP, &message, now);
+            }
+            IpAddr::V6(dest) => {
+                if dest.is_multicast() || dest.is_unspecified() {
+                    return Err(SendError::NotUnicast);
+                }
+                let source = self.source_for_v6(dest).ok_or(SendError::NoSourceAddress)?;
+                if self.next_hop_v6(dest, now).is_none() {
+                    return Err(SendError::NoRoute);
+                }
+                let total = udp::UDP_HEADER_LEN + payload.len();
+                let path_mtu = self.pmtu.mtu(dest, self.mtu_v6_wire(), now) as usize;
+                if IPV6_HEADER_LEN + total > path_mtu {
+                    return Err(SendError::TooLarge);
+                }
+                let mut message = vec![0u8; total];
+                udp::write(
+                    udp::Pseudo::V6 {
+                        source,
+                        destination: dest,
+                    },
+                    source_port,
+                    destination_port,
+                    payload,
+                    &mut message,
+                )
+                .map_err(|_| SendError::TooLarge)?;
+                self.send_ipv6_packet(
+                    &mut out,
+                    source,
+                    dest,
+                    PROTOCOL_UDP,
+                    &message,
+                    self.hop_limit,
+                    now,
+                );
             }
         }
         Ok(out)
