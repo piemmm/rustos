@@ -2424,6 +2424,26 @@ caller.
 
 ---
 
+## Stage 5 follow-up — RustFS FEC and multi-device redundancy (`plans/RUSTFS-FEC.md`)
+
+**Dependencies:** Stage 5 follow-up (RustFS v1). Staged plan:
+`plans/RUSTFS-FEC.md` (stages FEC0–FEC20).
+
+**Goal.** Always-on forward error correction and multi-device redundancy for
+RustFS: local RS(8+2) media repair on a one-device pool; replication or
+topology-selected RS(k+1)/RS(k+2) across distinct whole-device failure
+domains; a semantic "survive N whole-device failures" protection floor (never
+raw `k+m`); online add/remove/replace/rebalance/protection changes with
+second-failure-safe COW recovery; and one capability-gated administration
+service fronted by CLI and curses-TUI command apps. Devices are reached only
+through the existing storage-discovery path (`blkio` block-service endpoints
+on storage-class hardware-tree nodes, consumed by `drivers/storage/volmgr`).
+
+**Status: planned.** Design, invariants, staging, and acceptance live in
+`plans/RUSTFS-FEC.md`; no implementation has landed.
+
+---
+
 ## Stage 5 follow-up — filesystem path-walk performance (uncached first-access cost)
 
 RustOS runs its filesystems uncached by design (first-access speed is the

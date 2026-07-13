@@ -1548,7 +1548,7 @@ You are not exempt from any rule above. In addition:
     | Userland I/O library layer | `plans/IO.md` |
     | Display, seats, input routing, graphical session | `plans/DISPLAY.md`; `plans/GUI-CONTROLS-DESIGN.md` (GUI controls) |
     | Storage namespace: drives, volumes, aliases, paths, resource references | `docs/src/filesystem/drives.md` (binding spec); `plans/ALIAS.md`; `plans/DRIVES.md` |
-    | RustFS | `docs/src/filesystem/rustfs-spec.md` (binding spec); `plans/RUSTFS-METADATA.md`; `plans/RUSTFS-SNAPSHOT.md`; `plans/SPARSE.md` |
+    | RustFS | `docs/src/filesystem/rustfs-spec.md` (binding spec); `plans/RUSTFS-METADATA.md`; `plans/RUSTFS-SNAPSHOT.md`; `plans/RUSTFS-FEC.md`; `plans/SPARSE.md` |
     | System log / audit trail | `plans/SYSLOG.md` |
     | Memory pressure, reclaimable memory, swap tiers | `plans/SMARTRAM.md`; `plans/SWAPSWAPSWAP.md` |
     | Stress testing, load generation, live kernel/memory monitoring (`sysmon`, `stress`, memory pinning, signal observation) | `plans/STRESSTEST.md` |

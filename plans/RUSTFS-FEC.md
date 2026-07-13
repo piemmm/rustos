@@ -1,12 +1,14 @@
 # RUSTFS-FEC.md - Forward Error Correction and Multi-Device Redundancy for RustFS
 
 Status: planned specification for implementation work.
-Repository placement: `plans/RUSTFS-FEC.md`, unless the owner explicitly updates
-`AGENTS.md` section 3 to permit a different repository location.
+Repository placement: `plans/RUSTFS-FEC.md`, binding under `AGENTS.md` and
+listed in its section 15.18 jump-sheet.
 Primary code area: `drivers/filesystem/rustfs`.
-Primary userland area: `userland/apps/rustfs-admin`, producing the companion
-`rustfsctl` CLI and `rustfs-admin` curses TUI unless repository inspection proves
-an existing RustFS administration crate is the correct home.
+Primary userland area: `userland/apps/`, as self-contained command-app bundles
+(`AGENTS.md` sections 16.2/16.5, `plans/APPS.md`): a scriptable CLI command app
+and a curses TUI command app (working names `rustfs` and `rustfsadmin`; final
+names are fixed at implementation against the repository's command-app
+conventions — existing app crates are single-word command names).
 Possible shared code area: `lib/fec`, only if at least two production crates need
 the same FEC code and `AGENTS.md` section 3 plus `PLAN.md` are updated in the same
 change.
@@ -25,19 +27,37 @@ The implementing agent must read these files before touching code:
 2. `PLAN.md`.
 3. `docs/src/filesystem/rustfs-spec.md`.
 4. `docs/src/filesystem/rustfs.md`.
-5. Any existing RustFS check, rescue, scrub, formatter, and administration docs.
-6. This file.
-7. The existing RustFS code under `drivers/filesystem/rustfs`.
-8. The block-driver, hardware-tree, hotplug, IPC, sysinfo, curses, terminal, and
-   standard-I/O code used by the implementation.
+5. `docs/src/filesystem/drives.md` — the binding storage-namespace spec —
+   plus `plans/DEVICES.md`, `plans/DRIVES.md`, and `plans/ALIAS.md`.
+6. `plans/APPS.md`, for the administration command apps.
+7. Any existing RustFS check, rescue, scrub, formatter, and administration docs.
+8. This file.
+9. The existing RustFS code under `drivers/filesystem/rustfs`.
+10. The storage stack the implementation builds on: the block-service IPC
+    (`lib/abi/src/blkio.rs`), the volume attach/detach ABI
+    (`lib/abi/src/volume.rs`), the volume manager (`drivers/storage/volmgr`),
+    `lib/partition`, `lib/fsprobe`, the hardware tree
+    (`lib/abi/src/hwtree.rs`), and the hotplug, IPC, sysinfo, curses,
+    terminal, and standard-I/O code used by the implementation.
 
 If this document conflicts with `AGENTS.md`, `AGENTS.md` wins. If it conflicts
 with the actual RustFS code or `rustfs-spec.md`, the implementing agent must stop
 and surface the mismatch before implementing a guess.
 
 The agent must not assume Linux device paths, `/dev`, `/proc`, or `/sys`. RustOS
-forbids those top-level interfaces. Devices are identified through the existing
-hardware-tree/device-manager abstractions and stable device identities.
+has none of those top-level interfaces. Disks are reached the RustOS way: a
+user-space block driver publishes each logical unit as a block-service call
+endpoint plus shared data window, granted on the storage-class hardware-tree
+node it emits (`lib/abi/src/blkio.rs`, `plans/DEVICES.md`); the volume manager
+(`drivers/storage/volmgr`) inherits those grants, probes partitions and
+filesystem signatures (`lib/partition`, `lib/fsprobe`), and attaches a
+filesystem driver through the audited `volume_attach` syscall under
+`CAP_FS_MOUNT` (`lib/abi/src/volume.rs`). Discovered volume roots are published
+as durable `id::<volume-id>` roots and aliases per the binding storage-namespace
+spec (`docs/src/filesystem/drives.md`); raw device access is the
+capability-gated `dev::` resolver, which lands only with its first consumer.
+Live system information flows through the System Information API, never a
+`/proc`-style tree.
 
 ## 2. Assumptions to verify in the repository
 
@@ -60,8 +80,10 @@ Before implementation, verify and record:
 - The sparse-hole representation and allocation accounting.
 - The current scrub/check/rescue code-sharing boundaries.
 - The block-driver flush, discard, hotplug, identity, and error semantics.
-- The existing device-manager and hardware-tree APIs for listing, claiming,
-  removing, and identifying block devices.
+- The existing storage-discovery path for listing, claiming, removing, and
+  identifying block devices: storage-class hardware-tree nodes, their `blkio`
+  block-service endpoints, and the volume manager (`drivers/storage/volmgr`)
+  that consumes them.
 - The existing IPC service pattern for a capability-gated administration API.
 - The exact capability IDs already available for filesystem status,
   filesystem administration, block-device claiming, and audit access.
@@ -88,8 +110,10 @@ and validation policy.
 : One mounted RustFS filesystem backed by one or more block devices.
 
 **Device**
-: A block device with a stable RustFS device UUID. A transient hardware-tree
-  node id, bus address, or user-visible label is not the persistent identity.
+: A block device with a stable RustFS device UUID recorded in its pool label.
+  At runtime it is reached through the `blkio` block-service endpoint granted
+  on its hardware-tree node; a transient hardware-tree node id, bus address,
+  or user-visible label is not the persistent identity.
 
 **Failure domain**
 : The unit whose complete loss RustFS promises to tolerate. The initial desktop
@@ -916,8 +940,9 @@ pool keeps existing local mirrored/triplicated metadata in separate regions.
 
 Pool import:
 
-1. Obtains candidate block devices through the existing hardware-tree and
-   device-manager APIs.
+1. Obtains candidate block devices through the existing storage-discovery
+   path: the storage-class hardware-tree nodes and `blkio` block-service
+   endpoints the volume manager consumes.
 2. Reads bounded label rings and groups devices by authenticated pool UUID.
 3. Validates device UUID, membership generation, sector constraints, and label
    integrity.
@@ -957,8 +982,9 @@ A stale reappeared device becomes `Quarantined`, not automatically `Active`.
 
 Adding a device while mounted performs:
 
-1. Resolve a stable hardware-tree/device-manager identity. Never accept a Linux
-   path.
+1. Resolve the device through the storage-discovery path: its hardware-tree
+   node and `blkio` block-service endpoint, as consumed by the volume
+   manager. There is no `/dev`; a Linux-style device path is never accepted.
 2. Verify the device is unclaimed, writable, not mounted elsewhere, and meets
    sector/flush/alignment requirements.
 3. Detect existing foreign or RustFS signatures. Destructive initialisation
@@ -1566,7 +1592,8 @@ correct existing service host; do not create a second filesystem authority.
 The service owns:
 
 - Pool status and capacity accounting.
-- Device discovery/claim preflight through existing device-manager handles.
+- Device discovery/claim preflight through the volume manager's
+  storage-discovery path (hardware-tree nodes and their `blkio` endpoints).
 - Membership and protection changes.
 - Job planning, start, pause, resume, cancel, and status.
 - Stable warnings and audit events.
@@ -1577,14 +1604,16 @@ They never calculate authoritative placement or modify raw blocks.
 
 ### 27.2 Capabilities
 
-Reuse existing capabilities when their semantics exactly match. Otherwise add a
-minimal versioned capability surface with current callers in the same change.
-The required semantic split is:
+Reuse existing capabilities when their semantics exactly match (`CAP_FS_MOUNT`
+already gates volume attach/detach, and the `CAP_SYSINFO_*` family covers
+observation-only queries). Otherwise add a minimal versioned capability surface
+with current callers in the same change — never a capability minted ahead of
+the service that holds and enforces it. The required semantic split is:
 
 ```text
 read pool status and job progress
 administer pool membership/protection/jobs
-claim or initialise an unclaimed block device through devmgr
+claim or initialise an unclaimed block device through the volume-manager path
 audit-log access, only when displaying audit details
 ```
 
@@ -1594,55 +1623,56 @@ validates all fields, logs security-relevant decisions, and fails closed.
 
 ### 27.3 Source layout and code reuse
 
-Unless the repository already has a better current home, create one crate:
+The tools are OS command apps: self-contained `.app` bundles in the system app
+store, discovered from disk, each with its own signed `AppInfo`, `Run` binary,
+and on-disk `Help/` tree (`AGENTS.md` sections 16.2/16.5, `plans/APPS.md`).
+Help is authored in each bundle's `Help/<locale>/` documents and served through
+`lib/help` — never hardcoded into a binary. Command-app crates under
+`userland/apps/` are single-word command names (`mount`, `df`, `sysmon`, …);
+follow that convention. Working names, fixed at implementation:
 
 ```text
-userland/apps/rustfs-admin/
+userland/apps/rustfs/      - scriptable CLI command app
+userland/apps/rustfsadmin/ - curses TUI command app
 ```
 
-It produces:
-
-```text
-rustfsctl    - scriptable CLI
-rustfs-admin - curses TUI
-```
-
-Both binaries share private client/model/error-rendering modules within that
-crate. ABI request/response types live in the existing appropriate `lib/abi`
-module. Generic terminal rendering uses existing `lib/curses`, `lib/termcap`,
-and `lib/vt`; do not implement another terminal stack.
-
-If the app-bundle packaging model requires one entry point, install the TUI as
-`Run` and the CLI as an additional `Code/` binary, or follow the existing
-system-utility packaging convention discovered in the repository.
+Shared client/model/error-rendering logic is written once: two app crates
+sharing it means a `lib/*` crate, updating `AGENTS.md` section 3 and `PLAN.md`
+in the same change. ABI request/response types live in the existing appropriate
+`lib/abi` module. Generic terminal rendering uses existing `lib/curses`,
+`lib/termcap`, and `lib/vt`; do not implement another terminal stack.
 
 ### 27.4 CLI command surface
 
 The final names must be concise and tested. The initial required shape is:
 
 ```text
-rustfsctl pool status [POOL] [--json]
-rustfsctl pool capacity [POOL] [--json]
-rustfsctl pool protection show [POOL]
-rustfsctl pool protection set [POOL] --survive-devices <0|1|2>
+rustfs pool status [POOL] [--json]
+rustfs pool capacity [POOL] [--json]
+rustfs pool protection show [POOL]
+rustfs pool protection set [POOL] --survive-devices <0|1|2>
 
-rustfsctl device list [POOL] [--available] [--json]
-rustfsctl device add POOL --device <stable-hardware-id>
-rustfsctl device remove POOL --device <device-uuid>
-rustfsctl device replace POOL --missing <device-uuid> --with <stable-hardware-id>
+rustfs device list [POOL] [--available] [--json]
+rustfs device add POOL --device <stable-device-id>
+rustfs device remove POOL --device <device-uuid>
+rustfs device replace POOL --missing <device-uuid> --with <stable-device-id>
 
-rustfsctl scrub start POOL
-rustfsctl job list [POOL] [--json]
-rustfsctl job show POOL <job-uuid> [--json]
-rustfsctl job pause POOL <job-uuid>
-rustfsctl job resume POOL <job-uuid>
-rustfsctl job cancel POOL <job-uuid>
-rustfsctl explain <stable-diagnostic-code>
+rustfs scrub start POOL
+rustfs job list [POOL] [--json]
+rustfs job show POOL <job-uuid> [--json]
+rustfs job pause POOL <job-uuid>
+rustfs job resume POOL <job-uuid>
+rustfs job cancel POOL <job-uuid>
+rustfs explain <stable-diagnostic-code>
 ```
 
-Do not use `/dev/...` examples. Pool and device selectors use authenticated pool
-UUIDs, device UUIDs, stable hardware ids, or unambiguous human labels resolved
-by the service.
+Do not use `/dev/...` examples; there is no `/dev`. Pool selectors use
+authenticated pool UUIDs or the storage-namespace spellings the binding spec
+defines (`id::<volume-id>`, an unambiguous alias), resolved by the service.
+Device selectors use pool-member device UUIDs or, for an unclaimed candidate,
+the stable identity the storage-discovery path reports (its hardware-tree
+node/`blkio` endpoint via the volume manager). Unambiguous human labels may be
+accepted and are resolved server-side, failing closed on ambiguity.
 
 Every mutating command performs server-side preflight and displays:
 
@@ -1670,7 +1700,9 @@ Follow the repository's standard-I/O contract:
 - Requested tabular or JSON data goes to stdout.
 - Errors go to stderr.
 - Structured warnings, omissions, consequences, and safe next actions use the
-  existing `stdinfo` channel and stable codes where required.
+  existing `stdinfo` channel (fd 3) with the closed canonical record kinds
+  (`omission`, `summary`, `schema`, `suggestion`, `context`) and stable codes
+  where required.
 - Progress is rate-limited and does not spam `stdinfo`.
 - Secrets, raw capability tokens, and untrusted instructions never appear.
 
@@ -1693,7 +1725,7 @@ pool.protection_downgrade
 
 ### 27.6 Curses TUI
 
-`rustfs-admin` is keyboard-complete, obvious without a manual, and usable on
+`rustfsadmin` is keyboard-complete, obvious without a manual, and usable on
 truecolour, 256-colour, 16-colour, monochrome, and `TERM=dumb` fallbacks through
 `lib/curses`/`termcap`.
 
@@ -1771,11 +1803,10 @@ adversarial self-review under `AGENTS.md` section 23.
 
 Deliverables:
 
-- Place this file at `plans/RUSTFS-FEC.md` or the owner-approved location.
-- Update `PLAN.md` concisely to reference this staged work.
-- Update `PLAN.md`'s "one mandatory profile" wording so it means all safety
-  features remain mandatory while RustFS may select from a closed,
-  topology-derived profile set. Do not add raw user-selected `k+m` options.
+- Update `PLAN.md`'s and the spec's "one mandatory profile" wording so it
+  means all safety features remain mandatory while RustFS may select from a
+  closed, topology-derived profile set. Do not add raw user-selected `k+m`
+  options.
 - Update `docs/src/filesystem/rustfs-spec.md` with the high-level single- and
   multi-device model, protection-floor terminology, and mandatory invariants.
 - Confirm actual compression, dedupe limit, record size, integrity fields,
@@ -2117,7 +2148,8 @@ Dependencies: FEC13 and the repository's runtime block-device discovery path.
 
 Deliverables:
 
-- Add-device preflight through stable hardware identity/device-manager handle.
+- Add-device preflight through the stable identity the volume manager's
+  storage-discovery path reports for the candidate device.
 - Destructive-signature confirmation contract.
 - `Joining` labels, metadata-copy establishment, `Active` epoch commit.
 - Explicit combined add-and-floor-one plan when activating a second device for a
@@ -2239,7 +2271,7 @@ Docs:
 
 - Protection semantics versus raw copies/parity.
 
-### FEC18 - Versioned administration service and `rustfsctl`
+### FEC18 - Versioned administration service and the `rustfs` CLI
 
 Dependencies: FEC14-FEC17.
 
@@ -2249,8 +2281,8 @@ Deliverables:
 - Capability-checked RustFS administration service methods.
 - Pool status, capacity, device, protection, and job operations.
 - Stable plan/warning/diagnostic records.
-- `rustfsctl` CLI with human, JSON, dry-run, confirmation, exit-code, stdout,
-  stderr, and `stdinfo` behaviour from section 27.
+- The `rustfs` CLI command app with human, JSON, dry-run, confirmation,
+  exit-code, stdout, stderr, and `stdinfo` behaviour from section 27.
 - No direct raw-device access in the CLI.
 
 Tests:
@@ -2268,7 +2300,7 @@ Docs:
 
 - `docs/src/filesystem/rustfs-admin.md` and utilities documentation.
 
-### FEC19 - `rustfs-admin` curses TUI
+### FEC19 - `rustfsadmin` curses TUI
 
 Dependencies: FEC18 and existing `lib/curses` stack.
 
@@ -2279,8 +2311,8 @@ Deliverables:
 - Context-sensitive explanations and stable warning codes.
 - Two-step destructive/protection-lowering confirmations.
 - Monochrome and reduced-capability rendering.
-- Shared private client/model/error logic with `rustfsctl`; no duplicate pool
-  policy.
+- Client/model/error logic shared with the `rustfs` CLI through their common
+  crate; no duplicate pool policy.
 
 Tests:
 
@@ -2426,8 +2458,13 @@ An implementation agent may use this prompt:
 ```text
 You are implementing the next stage of `plans/RUSTFS-FEC.md` for RustOS.
 Before coding, read `AGENTS.md`, `PLAN.md`,
-`docs/src/filesystem/rustfs-spec.md`, `docs/src/filesystem/rustfs.md`, this
-plan, and all relevant RustFS/block-device/devmgr/IPC/sysinfo/curses code.
+`docs/src/filesystem/rustfs-spec.md`, `docs/src/filesystem/rustfs.md`,
+`docs/src/filesystem/drives.md`, `plans/DEVICES.md`, this plan, and all
+relevant RustFS, block-service (`lib/abi` blkio/volume), volmgr, IPC, sysinfo,
+and curses code. There is no /dev, /proc, or /sys: block devices are reached
+through blkio block-service endpoints on storage-class hardware-tree nodes,
+claimed and attached by the volume manager under CAP_FS_MOUNT, and volume
+roots are published as id:: roots and aliases.
 State the assumptions verified from the repository, including the current
 compression layer, dedupe limit, record size, integrity/AAD fields, metadata
 replication, block flush/hotplug/device-identity semantics, and existing admin
@@ -2541,14 +2578,17 @@ This specification is complete only when all applicable statements are true.
 ### Administration
 
 - One versioned capability-checked service owns pool administration.
-- `rustfsctl` and `rustfs-admin` use that service and share client/model logic.
+- The `rustfs` CLI and `rustfsadmin` TUI use that service and share
+  client/model logic.
 - The CLI has human and versioned JSON output, dry-run, explicit confirmation,
   stable codes, and correct stdout/stderr/stdinfo use.
 - The TUI uses the existing curses stack, has no GUI dependency, is
   keyboard-complete, works in monochrome, and does not rely on colour alone.
 - Both tools immediately show current protection, whether another disk may fail,
   writeability, capacity, jobs, blocking reasons, and safe next actions.
-- Neither tool accepts Linux `/dev` paths as the persistent identity model.
+- Neither tool accepts Linux `/dev` paths; selectors are the storage-namespace
+  and stable-identity forms (pool/device UUIDs, `id::` roots, unambiguous
+  aliases).
 - Destructive actions and protection lowering are never one-key accidents.
 
 ### Quality gate
