@@ -695,8 +695,9 @@ stricter `is_release_ready` gate rejects any `Pending`.
 - aarch64 now runs the virtio-blk and virtio-net `virt`-board MMIO
   verticals, the EL1/GICv2 analogue of the riscv64 ones:
   `tests/integration/virtio_blk_mmio_aarch64` (sector-0 verify +
-  sector-1 write/read-back) and `tests/integration/virtio_net_mmio_aarch64`
-  (ARP-resolve the SLIRP gateway + ICMP echo), both QEMU-green and
+  sector-1 write/read-back) and `tests/integration/netstack_mmio_aarch64`
+  (the netstack ring pump against the harness-side link peer,
+  `plans/NETWORK.md` N3c), both QEMU-green and
   enrolled in `tools/xtask/src/commands/qemu_tests.rs`.
 - **Shared bring-up (`tests/integration/virtio_qemu_support`).** Added the
   `imp_mmio_aarch64` module behind `cfg(itest_aarch64)`: it enables FP/SIMD

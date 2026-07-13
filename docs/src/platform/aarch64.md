@@ -2662,8 +2662,10 @@ The `virt` board's virtio-MMIO bus is driven end-to-end by two QEMU
 verticals, the EL1/GICv2 analogue of the riscv64 ones:
 `tests/integration/virtio_blk_mmio_aarch64` (read sector 0 and verify the
 host-planted pattern, then write and read back sector 1) and
-`tests/integration/virtio_net_mmio_aarch64` (ARP-resolve the QEMU
-user-mode gateway `10.0.2.2` from guest `10.0.2.15`, then ICMP echo).
+`tests/integration/netstack_mmio_aarch64` (the `rustos-netstack`
+engine's ring pump over the live device against the harness-side
+`netpeer` link peer: ping in/out over v4 and v6, neighbours resolved
+both ways — `plans/NETWORK.md` N3c).
 Both are enrolled in `tools/xtask/src/commands/qemu_tests.rs` and report
 through the `SYS_EXIT` semihosting finisher.
 

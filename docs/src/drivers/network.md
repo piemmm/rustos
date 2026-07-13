@@ -62,6 +62,8 @@ region itself; that remains the stack's responsibility.
 |---------------------------|---------------------------------|---------------------|----------------------------------------------------|
 | [virtio-net](./virtio.md) | `rustos-drv-network-virtio-net` | virtio (PCI / MMIO) | ring transport + facts; no offloads negotiated yet |
 
-The virtio-net QEMU verticals (`tests/integration/virtio_net_*`) drive
-a live emulated device end to end: ARP-resolve the SLIRP gateway and
-exchange one ICMP echo through the ring transport.
+The netstack QEMU verticals (`tests/integration/netstack_*`) drive a
+live emulated device end to end through the ring transport: the
+`rustos-netstack` engine answers the harness peer's ARP/NS resolution
+and v4+v6 echo campaign, then resolves and pings the peer over both
+families (`plans/NETWORK.md` N3c).

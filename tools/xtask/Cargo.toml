@@ -69,6 +69,13 @@ rustos-syshelp = { path = "../syshelp", version = "=0.0.0" }
 # crate keeps the test-execution contract (`isa-debug-exit`, strict
 # timeouts, no retries) in exactly one place — see AGENTS.md §2.2.
 rustos-qemu = { path = "../qemu", version = "=0.0.0" }
+
+# The QEMU netstack verticals' host-side link peer: the same pure
+# `lib/net` protocol engine the guest's netstack drives, run by the
+# harness over the QEMU dgram netdev, configured from the shared
+# `rustos-test-netstack-wire` topology so the two ends cannot drift.
+rustos-net = { path = "../../lib/net", version = "=0.0.0" }
+rustos-test-netstack-wire = { path = "../../tests/integration/netstack_wire", version = "=0.0.0" }
 # `test --qemu` plants the Stage 5 end-to-end FAT32 vertical's backing
 # image from the same `rustos-test-fat32-image` fixture the kernel-side
 # tail reads, so the planted layout and the guest's expectations share

@@ -20,7 +20,7 @@
 //!
 //! Adding a harness means adding a [`Target`] here, never teaching `ci`
 //! about it directly. The burn-down now covers the wire decoders,
-//! the syscall dispatcher, the `userland/net` protocol parsers, and the
+//! the syscall dispatcher, the `lib/net` protocol parsers, and the
 //! capability-checked IPC port endpoint.
 
 use std::ffi::OsString;
@@ -45,7 +45,7 @@ pub struct Target {
 ///
 /// Every entry is a deterministic `cargo test` harness; this registry is
 /// what wires them into the budgeted runs. The set covers the wire
-/// decoders (`lib/abi`), the syscall dispatcher, the `userland/net`
+/// decoders (`lib/abi`), the syscall dispatcher, the `lib/net`
 /// protocol parsers, and the capability-checked IPC port endpoint.
 pub const TARGETS: &[Target] = &[
     Target {
@@ -92,11 +92,6 @@ pub const TARGETS: &[Target] = &[
         package: "rustos-net",
         test: "fuzz_net_stack",
         description: "lib/net dual-stack host engine frame entry point",
-    },
-    Target {
-        package: "rustos-net-icmp",
-        test: "fuzz_parse",
-        description: "userland/net composed ARP/ICMP responder + client paths",
     },
     Target {
         package: "rustos-kernel-ipc",
@@ -678,11 +673,11 @@ mod tests {
     }
 
     #[test]
-    fn net_parser_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_parse"])).expect("flag parses");
+    fn net_stack_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_net_stack"])).expect("flag parses");
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "rustos-net-icmp");
+        assert_eq!(chosen[0].package, "rustos-net");
     }
 
     #[test]
@@ -785,8 +780,8 @@ mod tests {
 
     #[test]
     fn registry_covers_the_burn_down_endpoints() {
-        // wire decoders, dispatcher, userland/net parsers, IPC port.
-        for required in ["fuzz_decode", "fuzz_args", "fuzz_parse", "fuzz_port"] {
+        // wire decoders, dispatcher, lib/net protocol parsers, IPC port.
+        for required in ["fuzz_decode", "fuzz_args", "fuzz_net_icmp", "fuzz_port"] {
             assert!(
                 TARGETS.iter().any(|t| t.test == required),
                 "missing required fuzz harness {required}"

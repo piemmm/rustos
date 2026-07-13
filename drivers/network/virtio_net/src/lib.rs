@@ -81,6 +81,14 @@ use rustos_virtio::{
 /// Per-driver `DriverHandle` marker returned by [`register`].
 const REGISTER_HANDLE_MARKER: u64 = 0x564E_4554_0000_0001; // "VNET"
 
+/// Bounded parks per in-flight transmission. The host's device event is
+/// shared by every queue, so receive traffic can wake the transmit wait
+/// before the chain is consumed; each such wake parks again rather than
+/// faulting. A healthy device consumes a transmit chain within a wake
+/// or two — exhausting this budget means the device is genuinely stuck,
+/// and the transmit fails closed.
+const MAX_TX_WAITS: u32 = 64;
+
 /// Driver entry point.
 ///
 /// # Errors
@@ -353,12 +361,26 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
             .add_chain(&segments)
             .map_err(VirtioError::as_driver_error)?;
         self.tx_queue.kick(&mut self.transport);
-        self.host.notify_wait(self.tx_queue.index());
-        let _token = self
-            .tx_queue
-            .poll_used()
-            .map_err(VirtioError::as_driver_error)?;
-        Ok(TxOutcome::Sent)
+        // The device event the host waits on is shared by every queue,
+        // so a wake may announce *receive* traffic that landed while
+        // this transmission was still in flight. A not-yet-consumed
+        // chain after such a wake is normal: park again and re-check,
+        // within a bounded budget that fails closed on a genuinely
+        // stuck device.
+        let mut waits = 0;
+        loop {
+            self.host.notify_wait(self.tx_queue.index());
+            match self.tx_queue.poll_used() {
+                Ok(_token) => return Ok(TxOutcome::Sent),
+                Err(VirtioError::NoCompletion) => {
+                    waits += 1;
+                    if waits >= MAX_TX_WAITS {
+                        return Err(DriverError::DeviceFault);
+                    }
+                }
+                Err(e) => return Err(e.as_driver_error()),
+            }
+        }
     }
 
     /// Move delivered frames from the device into the RX ring until

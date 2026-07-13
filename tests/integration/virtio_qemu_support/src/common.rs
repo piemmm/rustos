@@ -30,6 +30,8 @@ use rustos_abi::driver::input::{Input, InputEvent, InputEventKind};
 use rustos_abi::driver::net::Net;
 use rustos_abi::driver::net_ring::{FrameRings, RingGeometry};
 use rustos_abi::driver::BufferClass;
+use rustos_abi::net_ipc::{NetAddrFamily, NetIfKind, IF_NAME_LEN};
+use rustos_abi::Duration64;
 use rustos_abi::{CapabilityId, DriverHandle, Errno};
 use rustos_caps::CapabilitySet;
 use rustos_crypto::Ed25519PublicKey;
@@ -42,7 +44,10 @@ use rustos_drvhost::{
 };
 use rustos_kernel_mem::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
 use rustos_kernel_mem::{PhysAddr, PAGE_SIZE};
-use rustos_net_icmp::{Client, Ipv4Addr};
+use rustos_net::addr::IpAddr;
+use rustos_net::stack::StackEvent;
+use rustos_netstack::Netstack;
+use rustos_test_netstack_wire as wire;
 use rustos_virtio::{Transport, VirtioHost, VirtioHostFactory};
 use rustos_virtio_input::VirtioInput;
 
@@ -511,25 +516,93 @@ pub fn users_db_load<Tr: Transport>(
     Ok(())
 }
 
-/// Fixed guest address under QEMU user-mode (SLIRP) networking — the
-/// same `10.0.2.0/24` topology on every arch's `-netdev user`.
-const GUEST_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 15);
-/// SLIRP gateway address that answers ARP and ICMP echo.
-const GATEWAY_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
-/// ICMP echo identifier the request carries and the reply must echo.
-const ECHO_ID: u16 = 0x1234;
-/// ICMP echo sequence number.
-const ECHO_SEQ: u16 = 1;
-/// Echo payload; the reply must mirror it byte-for-byte.
-const ECHO_PAYLOAD: &[u8] = b"rustos-virtio-net";
-/// Bounded poll budget for each ARP/ICMP exchange.
-const MAX_POLLS: usize = 64;
+/// Synthetic engine-clock step per pump pass. The scenario has no wall
+/// clock; each `service` call parks on the device interrupt, so a fixed
+/// step per pass drives the engine's timers (DAD confirmation, ARP/NS
+/// retransmission) deterministically while the real exchange is gated
+/// on frames actually arriving.
+const PUMP_STEP_NANOS: u64 = 250_000_000;
+/// Bounded pump budget per phase; exhausting it fails the run loudly.
+const MAX_PUMPS: usize = 2048;
+/// Pump passes between outbound echo retransmissions (the peer answers
+/// only after its own inbound campaign has passed, so retries are the
+/// expected steady state, never an error).
+const RESEND_EVERY: usize = 8;
 
-/// virtio-net device tail: open the device over `transport`, then drive
-/// `rustos_net_icmp::Client` to ARP-resolve the SLIRP gateway and
-/// exchange one ICMP echo. Generic over the transport so the PCI and
-/// MMIO verticals run identical code.
-pub fn virtio_net_ping<Tr: Transport>(
+/// The guest interface's `netstack` table alias, from the shared wire
+/// fixture.
+fn if_name() -> [u8; IF_NAME_LEN] {
+    let mut out = [0u8; IF_NAME_LEN];
+    out[..wire::IF_NAME.len()].copy_from_slice(wire::IF_NAME.as_bytes());
+    out
+}
+
+/// The synthetic engine clock after `tick` pump passes.
+fn pump_now(tick: u64) -> Duration64 {
+    Duration64::from_nanos(tick.saturating_mul(PUMP_STEP_NANOS))
+}
+
+/// Map a ring-pump refusal onto a distinct breadcrumb so a failing run
+/// names the concrete fault.
+fn pump_error(err: rustos_abi::Errno) -> &'static str {
+    match err {
+        rustos_abi::Errno::NotFound => "ring pump: unknown interface",
+        rustos_abi::Errno::DeviceFault => "ring pump: driver fault",
+        rustos_abi::Errno::BadMagic => "ring pump: ring corrupt",
+        rustos_abi::Errno::NoSpace => "ring pump: no space",
+        rustos_abi::Errno::LengthOutOfRange => "ring pump: length out of range",
+        rustos_abi::Errno::BufferTooSmall => "ring pump: buffer too small",
+        _ => "ring pump: other",
+    }
+}
+
+/// The `netstack` admin wire form of an IPv4 address.
+fn v4_bytes(addr: core::net::Ipv4Addr) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    out[..4].copy_from_slice(&addr.octets());
+    out
+}
+
+/// Queue one outbound echo request toward `dest`, tolerating transient
+/// refusals (an address still in DAD, a busy resolution queue, a full
+/// ring): the caller's retry cadence covers them, and a persistent
+/// refusal surfaces as the phase budget expiring.
+fn send_echo(
+    stack: &mut Netstack,
+    name: [u8; IF_NAME_LEN],
+    dest: IpAddr,
+    sequence: u16,
+    now: Duration64,
+    rings: &mut FrameRings<'_>,
+) {
+    let Some(iface) = stack.interface_mut(name) else {
+        return;
+    };
+    if let Ok(out) = iface.stack_mut().send_echo_request(
+        dest,
+        wire::GUEST_ECHO_ID,
+        sequence,
+        wire::GUEST_ECHO_PAYLOAD,
+        now,
+    ) {
+        for frame in &out.frames {
+            if rings.tx.push(frame).is_err() {
+                break;
+            }
+        }
+    }
+}
+
+/// virtio-net device tail (`plans/NETWORK.md` N3c): open the device over
+/// `transport`, then drive the `rustos-netstack` engine's ring pump over
+/// it against the harness-side peer stack on the other end of the QEMU
+/// dgram netdev. The choreography lives in the shared
+/// [`rustos_test_netstack_wire`] fixture: first the guest answers the
+/// peer's ARP/NS resolution and v4+v6 echo campaign (observed through
+/// the engine's `EchoRequestServed` events), then it resolves and pings
+/// the peer over both families and requires both replies. Generic over
+/// the transport so the PCI and MMIO verticals run identical code.
+pub fn netstack_ping<Tr: Transport>(
     env: &dyn QemuEnv,
     transport: Tr,
     vhost: &dyn VirtioHost,
@@ -537,51 +610,137 @@ pub fn virtio_net_ping<Tr: Transport>(
     let mut net = VirtioNet::open(transport, vhost).map_err(|_| "virtio-net open")?;
     let facts = net.device_facts().map_err(|_| "read device facts")?;
     facts.validate().map_err(|_| "device facts invalid")?;
-    let mac = facts.mac;
     env.log("virtio-qemu: virtio-net online");
 
-    // The shared-memory frame-ring pair the stack side owns: two
+    // The shared-memory frame-ring pair the stack side owns: sixteen
     // slots per direction, each holding one full Ethernet frame
-    // (MTU + 14-byte header) — ample for the one-in-flight ARP and
-    // echo exchanges this tail drives.
-    const RING_GEOMETRY: RingGeometry = match RingGeometry::new(2, 1514) {
+    // (MTU + 14-byte header) — ample for the neighbour + echo
+    // exchanges of both campaign phases.
+    const RING_GEOMETRY: RingGeometry = match RingGeometry::new(16, 1514) {
         Ok(g) => g,
         Err(_) => panic!("valid ring geometry"),
     };
-    let mut region = [0u8; RING_GEOMETRY.region_len()];
+    let mut region = alloc::vec![0u8; RING_GEOMETRY.region_len()];
     let mut rings = FrameRings::bind(&mut region, RING_GEOMETRY, BufferClass::NonSensitive)
         .map_err(|_| "bind frame rings")?;
 
-    let client = Client::new(mac, GUEST_IP);
-    let mut rx = [0u8; 2048];
-    let mut tx = [0u8; 2048];
-
-    let peer = client
-        .resolve(
-            &mut net, &mut rings, GATEWAY_IP, &mut rx, &mut tx, MAX_POLLS,
+    let name = if_name();
+    let mut stack = Netstack::new();
+    let mut tick: u64 = 0;
+    stack
+        .add_interface(
+            name,
+            NetIfKind::Ethernet,
+            facts,
+            wire::GUEST_IID,
+            7,
+            pump_now(tick),
         )
-        .map_err(|_| "ARP resolve error")?
-        .ok_or("ARP: no reply from gateway")?;
-    env.log("virtio-qemu: gateway ARP resolved");
-
-    let replied = client
-        .ping(
-            &mut net,
-            &mut rings,
-            peer,
-            GATEWAY_IP,
-            ECHO_ID,
-            ECHO_SEQ,
-            ECHO_PAYLOAD,
-            &mut rx,
-            &mut tx,
-            MAX_POLLS,
+        .map_err(|_| "add interface")?;
+    stack
+        .addr_add(
+            name,
+            NetAddrFamily::V4,
+            wire::V4_PREFIX,
+            v4_bytes(wire::GUEST_V4),
+            pump_now(tick),
         )
-        .map_err(|_| "ICMP echo error")?;
-    if !replied {
-        return Err("ICMP: no echo reply from gateway");
+        .map_err(|_| "assign IPv4 address")?;
+
+    let peer_v6 = wire::link_local(wire::PEER_IID);
+
+    // Phase 1 — inbound: pump until the peer's v4 and v6 echo requests
+    // were both answered (the peer resolved us by ARP and NS to get
+    // here, so neighbour resolution toward the guest is proven too).
+    let mut served_v4 = false;
+    let mut served_v6 = false;
+    let mut pumps = 0usize;
+    while !(served_v4 && served_v6) {
+        pumps += 1;
+        if pumps > MAX_PUMPS {
+            return Err("netstack: peer echo campaign never observed");
+        }
+        tick += 1;
+        let events = stack
+            .service_interface(name, &mut net, &mut rings, pump_now(tick))
+            .map_err(pump_error)?;
+        for event in events {
+            if let StackEvent::EchoRequestServed {
+                source, identifier, ..
+            } = event
+            {
+                if identifier == wire::PEER_ECHO_ID {
+                    match source {
+                        IpAddr::V4(v4) if v4 == wire::PEER_V4 => served_v4 = true,
+                        IpAddr::V6(v6) if v6 == peer_v6 => served_v6 = true,
+                        _ => {}
+                    }
+                }
+            }
+        }
     }
-    env.log("virtio-qemu: ICMP echo round-trip verified");
+    env.log("virtio-qemu: netstack answered the peer's v4+v6 pings");
+
+    // Phase 2 — outbound: resolve and ping the peer over both families,
+    // retransmitting with fresh sequence numbers until both replies
+    // arrive (the engine performs the ARP/NS resolution en route).
+    let mut reply_v4 = false;
+    let mut reply_v6 = false;
+    let mut sequence: u16 = 0;
+    let mut pumps = 0usize;
+    while !(reply_v4 && reply_v6) {
+        if pumps % RESEND_EVERY == 0 {
+            sequence = sequence.wrapping_add(1);
+            if !reply_v4 {
+                send_echo(
+                    &mut stack,
+                    name,
+                    IpAddr::V4(wire::PEER_V4),
+                    sequence,
+                    pump_now(tick),
+                    &mut rings,
+                );
+            }
+            if !reply_v6 {
+                send_echo(
+                    &mut stack,
+                    name,
+                    IpAddr::V6(peer_v6),
+                    sequence,
+                    pump_now(tick),
+                    &mut rings,
+                );
+            }
+        }
+        pumps += 1;
+        if pumps > MAX_PUMPS {
+            return Err("netstack: v4+v6 echo replies missing");
+        }
+        tick += 1;
+        let events = stack
+            .service_interface(name, &mut net, &mut rings, pump_now(tick))
+            .map_err(pump_error)?;
+        for event in events {
+            if let StackEvent::EchoReply {
+                source,
+                identifier,
+                payload,
+                ..
+            } = event
+            {
+                if identifier == wire::GUEST_ECHO_ID
+                    && payload.as_slice() == wire::GUEST_ECHO_PAYLOAD
+                {
+                    match source {
+                        IpAddr::V4(v4) if v4 == wire::PEER_V4 => reply_v4 = true,
+                        IpAddr::V6(v6) if v6 == peer_v6 => reply_v6 = true,
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    env.log("virtio-qemu: netstack v4+v6 echo round-trips verified");
     Ok(())
 }
 

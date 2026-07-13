@@ -34,7 +34,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
-use crate::{Outcome, SessionKind, Spec};
+use crate::{netdev_dgram_arg, Outcome, SessionKind, Spec};
 
 /// Default guest RAM size in mebibytes for an aarch64 QEMU integration
 /// test. Matches the x86_64 and riscv64 defaults so all three ports
@@ -142,10 +142,11 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     }
 
     // Attach each network interface as a virtio-mmio net device behind a
-    // user-mode (SLIRP) backend, with an optional pcap mirror.
+    // `dgram` unix-datagram backend (the harness is the guest's link
+    // peer), with an optional pcap mirror.
     for (i, dev) in spec.net_devices.iter().enumerate() {
         argv.push("-netdev".into());
-        argv.push(format!("user,id=net{i}").into());
+        argv.push(netdev_dgram_arg(i, dev));
         argv.push("-device".into());
         argv.push(format!("virtio-net-device,netdev=net{i}").into());
         if let Some(pcap) = &dev.pcap {
@@ -346,10 +347,15 @@ mod tests {
             image: PathBuf::from("/tmp/disk0.img"),
         }];
         spec.net_devices = vec![crate::NetDevice {
+            qemu_sock: PathBuf::from("/tmp/net0.qemu.sock"),
+            peer_sock: PathBuf::from("/tmp/net0.peer.sock"),
             pcap: Some(PathBuf::from("/tmp/cap0.pcap")),
         }];
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         assert!(argv.iter().any(|a| a == "virtio-blk-device,drive=blk0"));
+        assert!(argv.iter().any(|a| a
+            == "dgram,id=net0,local.type=unix,local.path=/tmp/net0.qemu.sock,\
+                remote.type=unix,remote.path=/tmp/net0.peer.sock"));
         assert!(argv.iter().any(|a| a == "virtio-net-device,netdev=net0"));
         assert!(argv
             .iter()

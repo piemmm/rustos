@@ -1623,15 +1623,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustos-net-icmp"
-version = "0.0.0"
-dependencies = [
- "rustos-abi",
- "rustos-fuzzseed",
- "rustos-net",
-]
-
-[[package]]
 name = "rustos-netstack"
 version = "0.0.0"
 dependencies = [
@@ -2710,6 +2701,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-netstack-mmio-aarch64"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "rustos-abi",
+ "rustos-drv-network-virtio-net",
+ "rustos-itest-harness",
+ "rustos-test-virtio-qemu-support",
+]
+
+[[package]]
+name = "rustos-test-netstack-mmio-riscv64"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "rustos-abi",
+ "rustos-drv-network-virtio-net",
+ "rustos-itest-harness",
+ "rustos-test-virtio-qemu-support",
+]
+
+[[package]]
+name = "rustos-test-netstack-pci-x86-64"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "rustos-abi",
+ "rustos-drv-network-virtio-net",
+ "rustos-drvhost",
+ "rustos-itest-harness",
+ "rustos-test-virtio-qemu-support",
+]
+
+[[package]]
+name = "rustos-test-netstack-wire"
+version = "0.0.0"
+
+[[package]]
 name = "rustos-test-pipeline-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -3565,41 +3594,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustos-test-virtio-net-mmio-aarch64"
-version = "0.0.0"
-dependencies = [
- "ed25519-dalek",
- "rustos-abi",
- "rustos-drv-network-virtio-net",
- "rustos-itest-harness",
- "rustos-test-virtio-qemu-support",
-]
-
-[[package]]
-name = "rustos-test-virtio-net-mmio-riscv64"
-version = "0.0.0"
-dependencies = [
- "ed25519-dalek",
- "rustos-abi",
- "rustos-drv-network-virtio-net",
- "rustos-itest-harness",
- "rustos-test-virtio-qemu-support",
-]
-
-[[package]]
-name = "rustos-test-virtio-net-pci-x86-64"
-version = "0.0.0"
-dependencies = [
- "ed25519-dalek",
- "rustos-abi",
- "rustos-drv-network-virtio-net",
- "rustos-drvhost",
- "rustos-itest-harness",
- "rustos-net-icmp",
- "rustos-test-virtio-qemu-support",
-]
-
-[[package]]
 name = "rustos-test-virtio-qemu-support"
 version = "0.0.0"
 dependencies = [
@@ -3627,9 +3621,11 @@ dependencies = [
  "rustos-kernel-sec",
  "rustos-kernel-virtio",
  "rustos-log",
- "rustos-net-icmp",
+ "rustos-net",
+ "rustos-netstack",
  "rustos-pci",
  "rustos-test-fat32-image",
+ "rustos-test-netstack-wire",
  "rustos-test-riscv64-boot",
  "rustos-test-rustfs-image",
  "rustos-users",
@@ -3903,6 +3899,7 @@ dependencies = [
  "rustos-kernel-ipc",
  "rustos-kernel-syscall",
  "rustos-mkimage",
+ "rustos-net",
  "rustos-qemu",
  "rustos-syshelp",
  "rustos-taskbar",
@@ -3912,6 +3909,7 @@ dependencies = [
  "rustos-test-encrypted-root-image",
  "rustos-test-fat32-image",
  "rustos-test-memsoak",
+ "rustos-test-netstack-wire",
  "rustos-test-rustfs-image",
  "rustos-theme",
  "rustos-util",

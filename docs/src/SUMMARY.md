@@ -103,7 +103,6 @@
 - [System Information service](./userland/sysinfod.md)
 - [Seat-manager service](./userland/seatmgr.md)
 - [Network-stack service](./userland/netstack.md)
-- [ICMP responder library](./userland/net_icmp.md)
 - [elsh (Element Shell)](./userland/shell.md)
 - [Text login](./userland/login.md)
 - [Application bundle loader](./userland/appmgr.md)

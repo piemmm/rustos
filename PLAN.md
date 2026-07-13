@@ -4712,9 +4712,8 @@ protocol-engine foundation: the dual-stack address vocabulary
 (`core::net` types + RFC 4007 `Ipv6Scope`/`ScopedIpv6Addr` zone rules),
 the one RFC 1071 checksum (incremental accumulator + v4/v6
 pseudo-header seeds), the Ethernet/ARP/IPv4/ICMP codecs migrated in from
-`userland/net/icmp` (which now re-exports them and keeps only the
-composed responder/client until N3 deletes it; IPv4 parse now verifies
-the header checksum), and the bounded, provider-agnostic RFC 4861
+the deleted interim `userland/net/icmp` responder (IPv4 parse now
+verifies the header checksum), and the bounded, provider-agnostic RFC 4861
 neighbour cache (`NeighborTable`: pure `now`-driven state machine,
 action-channel `advance`, one-shot `next_deadline`, LRU-of-resolved
 eviction failing closed) — fuzzed via `fuzz_net_eth`/`fuzz_net_addr`
@@ -4752,7 +4751,14 @@ by `sysinfod` (`NET_INTERFACE_FACTS`/`NET_INTERFACE_STATE`) and
 resolved by `lib/procinfo` (`info:net/…`, the first `state:net/…`
 namespace), and the seam's transport half evolved in place — `Net`
 frame I/O is now the shared-memory frame-ring transport
-(`rustos_abi::driver::net_ring`), served by `virtio_net`. The
+(`rustos_abi::driver::net_ring`), served by `virtio_net`. N3c (done)
+replaced the interim icmp responder's QEMU coverage with the
+`tests/integration/netstack_*` verticals on all three covered arches —
+the netstack engine's ring pump drives a live virtio-net device against
+the harness-side `netpeer` link peer (the same `lib/net` `Stack` over a
+QEMU dgram unix-socket netdev): ping in/out over v4 and v6, neighbours
+resolved both ways, the peer's own verdict required — and **deleted**
+`userland/net/icmp` (§2.13/§2.14). The
 remaining increments
 deliver the complete dual-stack user-space network
 stack above the link-layer driver seam: one pure, host-testable,
@@ -4776,8 +4782,7 @@ configured declaratively: the fail-closed
 `lib/sysconfig`-shaped sibling engine) plus stack-wide `configure net.*`
 keys, with interface bonding (`active-backup` failover + flow-hashed
 `balance`) as a stack-composed virtual interface over unmodified NIC
-drivers (N9). The interim `userland/net/icmp` responder is subsumed and
-deleted in N3c (§2.14). See `plans/NETWORK.md` for the binding design and
+drivers (N9). See `plans/NETWORK.md` for the binding design and
 per-increment guarantees.
 
 ---

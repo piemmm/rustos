@@ -107,6 +107,18 @@ pub enum StackEvent {
         /// Echoed payload.
         payload: Vec<u8>,
     },
+    /// An echo request addressed to this host was answered (the reply
+    /// is already queued in the same output). Lets the service layer —
+    /// and the QEMU vertical — observe the inbound direction without a
+    /// second decode path.
+    EchoRequestServed {
+        /// Address the request came from.
+        source: IpAddr,
+        /// The request's identifier.
+        identifier: u16,
+        /// The request's sequence number.
+        sequence: u16,
+    },
     /// An IPv6 address completed DAD and is usable.
     AddressPreferred {
         /// The address.
@@ -592,6 +604,11 @@ impl Stack {
                         return;
                     }
                     self.send_ipv4_packet(out, header.destination, header.source, &message, now);
+                    out.events.push(StackEvent::EchoRequestServed {
+                        source: IpAddr::V4(header.source),
+                        identifier: echo.identifier,
+                        sequence: echo.sequence,
+                    });
                 }
                 crate::icmp::EchoKind::Reply => out.events.push(StackEvent::EchoReply {
                     source: IpAddr::V4(header.source),
@@ -835,6 +852,11 @@ impl Stack {
                             self.hop_limit,
                             now,
                         );
+                        out.events.push(StackEvent::EchoRequestServed {
+                            source: IpAddr::V6(header.source),
+                            identifier: echo.identifier,
+                            sequence: echo.sequence,
+                        });
                     }
                     crate::icmp::EchoKind::Reply => out.events.push(StackEvent::EchoReply {
                         source: IpAddr::V6(header.source),

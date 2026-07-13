@@ -47,8 +47,12 @@ for filesystems, the feature section below.
 | Production kernel binary | ✓ | ✓ | ▢ | ▢ |
 | Bootable image | ▢ iso | ✓ rpi.img | ▢ | ▢ |
 
-Networking is the virtio-net link-layer driver plus a test ARP/ICMP-echo
-responder only; there is no IP stack (TCP/UDP/IPv4 routing) yet, hence `◐`.
+Networking is the virtio-net link-layer driver plus the user-space
+`netstack` service: a dual-stack (IPv4 + IPv6) network layer — ARP,
+Neighbour Discovery, ICMP/ICMPv6 echo + errors, fragment reassembly, and
+routing — driven over a capability-gated shared-memory frame-ring seam and
+exercised end to end in QEMU. Transport (TCP/UDP) and the socket ABI are
+the next stage, hence still `◐`.
 
 ## Filesystem feature support
 

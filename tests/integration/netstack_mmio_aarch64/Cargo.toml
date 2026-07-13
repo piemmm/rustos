@@ -1,6 +1,6 @@
 [package]
-name = "rustos-test-virtio-net-mmio-riscv64"
-description = "Stage 4.D Item 4 QEMU integration test: boot the riscv64 virt-board pipeline, build the virtio-MMIO bus from the device tree, provision an MmioTransport through the capability-gated KernelMmioMapper, arm the device's PLIC source + S-mode trap path, mint a KernelVirtioHost over a carved per-device DMA pool, load the signed virtio-net `.rxe`, then drive rustos-net-icmp over the device (ARP-resolve the SLIRP gateway 10.0.2.2 from guest 10.0.2.15, then ICMP echo) before reporting SiFive Test success. The MMIO analogue of the x86_64 virtio-net-pci vertical; the device-tail ping is the same shared code."
+name = "rustos-test-netstack-mmio-aarch64"
+description = "QEMU netstack vertical (aarch64): boot the aarch64 virt-board, build the virtio-MMIO bus from the device tree, provision an MmioTransport through the capability-gated KernelMmioMapper, arm the device's GICv2 SPI + EL1 IRQ path, mint a KernelVirtioHost over a static per-device DMA pool, load the signed virtio-net `.rxe`, then drive the rustos-netstack engine's ring pump over the device against the harness-side peer stack on the QEMU dgram netdev: answer the peer's ARP/NS resolution and v4+v6 echo campaign, then resolve and ping the peer over both families (plans/NETWORK.md N3c) before reporting success through ARM semihosting. The aarch64 analogue of the riscv64 netstack-mmio vertical; the device-tail ping is the same shared code."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,7 +12,7 @@ publish = false
 workspace = true
 
 [[bin]]
-name = "rustos-test-virtio-net-mmio-riscv64"
+name = "rustos-test-netstack-mmio-aarch64"
 path = "src/main.rs"
 
 [build-dependencies]
@@ -24,7 +24,7 @@ ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zer
 # ICMP-echo tail both live in the shared support crate; this bin pulls in
 # only the abi and the virtio-net driver it resolves the loaded image to
 # (`AGENTS.md` §2.2).
-[target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 rustos-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
 rustos-test-virtio-qemu-support = { path = "../virtio_qemu_support", version = "=0.0.0" }

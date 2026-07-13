@@ -149,24 +149,42 @@ pub struct BlockDevice {
 /// A virtio network interface attached to the guest.
 ///
 /// The attachment is a modern virtio-net device backed by QEMU's
-/// user-mode (SLIRP) network: a `virtio-net-pci` function on x86_64
-/// (driven by the Stage 4.D `PciTransport`) or a `virtio-net-device` on
-/// the riscv64 `virt` board's virtio-mmio bus (driven by
-/// `MmioTransport`). The user-mode backend needs no host privileges and
-/// gives the guest a fixed SLIRP topology (guest `10.0.2.15`, gateway
-/// `10.0.2.2`), so a kernel-side test can ARP for and ICMP-echo the
-/// gateway deterministically (no flaky tests).
+/// `dgram` netdev over a pair of unix datagram sockets: a
+/// `virtio-net-pci` function on x86_64 (driven by the Stage 4.D
+/// `PciTransport`) or a `virtio-net-device` on the aarch64/riscv64
+/// `virt` boards' virtio-mmio bus (driven by `MmioTransport`). QEMU
+/// binds [`qemu_sock`](Self::qemu_sock) and sends every guest frame as
+/// one raw Ethernet datagram to [`peer_sock`](Self::peer_sock); the
+/// harness binds `peer_sock` and answers as the guest's link peer.
+/// Datagram sockets need no host privileges and give each concurrent
+/// run its own private wire (no flaky tests, no port collisions).
 ///
 /// When [`NetDevice::pcap`] is set the runner attaches a
 /// `filter-dump` that writes every frame on the interface to that host
 /// path in `pcap` format, so the host harness can verify the on-wire
 /// exchange after the run without linking a packet-capture library into
 /// the guest.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NetDevice {
+    /// Unix datagram socket path QEMU binds (the guest end of the wire).
+    pub qemu_sock: PathBuf,
+    /// Unix datagram socket path the harness binds (the peer end); QEMU
+    /// sends every guest frame here.
+    pub peer_sock: PathBuf,
     /// Optional host path for a `pcap` capture of all traffic on this
     /// interface. `None` attaches no capture.
     pub pcap: Option<PathBuf>,
+}
+
+/// Render the `-netdev dgram,…` argument for net device `i` — the one
+/// definition every per-arch argv builder shares, so the socket wiring
+/// can never drift between transports.
+pub(crate) fn netdev_dgram_arg(i: usize, dev: &NetDevice) -> OsString {
+    let mut arg = OsString::from(format!("dgram,id=net{i},local.type=unix,local.path="));
+    arg.push(dev.qemu_sock.as_os_str());
+    arg.push(",remote.type=unix,remote.path=");
+    arg.push(dev.peer_sock.as_os_str());
+    arg
 }
 
 /// A deterministic key-injection request for an input vertical.
@@ -598,23 +616,23 @@ impl Spec {
         self
     }
 
-    /// Attach a virtio network interface backed by QEMU user-mode
-    /// networking, with no host-side capture. On x86_64 it surfaces as a
-    /// `virtio-net-pci` function; on riscv64 as a `virtio-net-device` on
-    /// the `virt` board's virtio-mmio bus.
+    /// Attach a virtio network interface backed by a QEMU `dgram` netdev
+    /// over the given unix datagram socket pair (QEMU binds `qemu_sock`
+    /// and sends guest frames to `peer_sock`, which the harness binds),
+    /// capturing every frame on it to `pcap` (in `pcap` format) so the
+    /// host harness can verify the on-wire exchange after
+    /// [`Runner::run`]. Bind `peer_sock` *before* the run so no early
+    /// guest frame is dropped.
     #[must_use]
-    pub fn with_virtio_net(mut self) -> Self {
-        self.net_devices.push(NetDevice::default());
-        self
-    }
-
-    /// Attach a virtio network interface backed by QEMU user-mode
-    /// networking and capture every frame on it to `pcap` (in `pcap`
-    /// format) so the host harness can verify the on-wire exchange after
-    /// [`Runner::run`].
-    #[must_use]
-    pub fn with_virtio_net_pcap(mut self, pcap: impl Into<PathBuf>) -> Self {
+    pub fn with_virtio_net_dgram(
+        mut self,
+        qemu_sock: impl Into<PathBuf>,
+        peer_sock: impl Into<PathBuf>,
+        pcap: impl Into<PathBuf>,
+    ) -> Self {
         self.net_devices.push(NetDevice {
+            qemu_sock: qemu_sock.into(),
+            peer_sock: peer_sock.into(),
             pcap: Some(pcap.into()),
         });
         self
@@ -1932,27 +1950,54 @@ mod tests {
     }
 
     #[test]
-    fn with_virtio_net_records_a_capture_free_interface() {
-        let s = Spec::for_x86_64_kernel("/tmp/k").with_virtio_net();
+    fn with_virtio_net_dgram_records_the_socket_pair_and_capture_path() {
+        let s = Spec::for_riscv64_kernel("/tmp/k").with_virtio_net_dgram(
+            "/tmp/net.qemu.sock",
+            "/tmp/net.peer.sock",
+            "/tmp/cap.pcap",
+        );
         assert_eq!(s.net_devices.len(), 1);
-        assert_eq!(s.net_devices[0].pcap, None);
-    }
-
-    #[test]
-    fn with_virtio_net_pcap_records_the_capture_path() {
-        let s = Spec::for_riscv64_kernel("/tmp/k").with_virtio_net_pcap("/tmp/cap.pcap");
-        assert_eq!(s.net_devices.len(), 1);
+        assert_eq!(
+            s.net_devices[0].qemu_sock,
+            PathBuf::from("/tmp/net.qemu.sock")
+        );
+        assert_eq!(
+            s.net_devices[0].peer_sock,
+            PathBuf::from("/tmp/net.peer.sock")
+        );
         assert_eq!(s.net_devices[0].pcap, Some(PathBuf::from("/tmp/cap.pcap")));
     }
 
     #[test]
     fn net_interfaces_accumulate_in_declaration_order() {
         let s = Spec::for_x86_64_kernel("/tmp/k")
-            .with_virtio_net()
-            .with_virtio_net_pcap("/tmp/cap.pcap");
+            .with_virtio_net_dgram("/tmp/a.qemu.sock", "/tmp/a.peer.sock", "/tmp/a.pcap")
+            .with_virtio_net_dgram("/tmp/b.qemu.sock", "/tmp/b.peer.sock", "/tmp/b.pcap");
         assert_eq!(s.net_devices.len(), 2);
-        assert_eq!(s.net_devices[0].pcap, None);
-        assert_eq!(s.net_devices[1].pcap, Some(PathBuf::from("/tmp/cap.pcap")));
+        assert_eq!(
+            s.net_devices[0].qemu_sock,
+            PathBuf::from("/tmp/a.qemu.sock")
+        );
+        assert_eq!(
+            s.net_devices[1].qemu_sock,
+            PathBuf::from("/tmp/b.qemu.sock")
+        );
+    }
+
+    #[test]
+    fn netdev_dgram_arg_renders_both_socket_paths() {
+        let dev = NetDevice {
+            qemu_sock: PathBuf::from("/tmp/net7.qemu.sock"),
+            peer_sock: PathBuf::from("/tmp/net7.peer.sock"),
+            pcap: None,
+        };
+        assert_eq!(
+            netdev_dgram_arg(7, &dev),
+            OsString::from(
+                "dgram,id=net7,local.type=unix,local.path=/tmp/net7.qemu.sock,\
+                 remote.type=unix,remote.path=/tmp/net7.peer.sock"
+            )
+        );
     }
 
     #[test]

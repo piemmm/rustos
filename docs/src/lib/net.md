@@ -211,8 +211,10 @@ through the budgeted `frag` engine, generates ICMP errors only through
 (SLAAC via `iface`, default routers, on-link prefixes, MTU within the
 link floor/ceiling, timing parameters — each bounded), and accepts a
 Redirect only from the destination's current first hop. Echo requests
-in either family are answered; `send_echo_request` and
-`EchoReplyReceived` support the diagnostic path.
+in either family are answered (reported as
+`StackEvent::EchoRequestServed`, so the service layer observes the
+inbound direction without a second decode path); `send_echo_request`
+and `StackEvent::EchoReply` support the diagnostic path.
 
 ## What lands next
 

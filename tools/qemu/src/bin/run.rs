@@ -10,7 +10,7 @@
 //! cargo run -p rustos-qemu --bin rustos-qemu-run -- \
 //!     --kernel path/to/kernel.elf [--arch x86_64|riscv64|aarch64] [--cpus N] \
 //!     [--timeout-secs S] [--virtio-blk path/to/disk.img ...] \
-//!     [--virtio-net] [--virtio-net-pcap path/to/capture.pcap] [--ramfb] \
+//!     [--virtio-net-dgram <qemu-sock> <peer-sock> <capture.pcap>] [--ramfb] \
 //!     [--virtio-keyboard <ready-marker> <qkeycode>]
 //! ```
 
@@ -27,8 +27,7 @@ fn main() -> ExitCode {
     let mut cpus: u32 = 1;
     let mut timeout = Duration::from_secs(30);
     let mut block_images: Vec<PathBuf> = Vec::new();
-    let mut virtio_net = false;
-    let mut net_pcap: Option<PathBuf> = None;
+    let mut net_dgram: Option<(PathBuf, PathBuf, PathBuf)> = None;
     let mut arch = Arch::X86_64;
     let mut ramfb = false;
     let mut keyboard: Option<(String, String)> = None;
@@ -75,13 +74,17 @@ fn main() -> ExitCode {
                 };
                 block_images.push(PathBuf::from(v));
             }
-            "--virtio-net" => virtio_net = true,
-            "--virtio-net-pcap" => {
-                let Some(v) = args.next() else {
-                    return usage_err("--virtio-net-pcap needs a path");
+            "--virtio-net-dgram" => {
+                let (Some(qemu_sock), Some(peer_sock), Some(pcap)) =
+                    (args.next(), args.next(), args.next())
+                else {
+                    return usage_err("--virtio-net-dgram needs <qemu-sock> <peer-sock> <pcap>");
                 };
-                net_pcap = Some(PathBuf::from(v));
-                virtio_net = true;
+                net_dgram = Some((
+                    PathBuf::from(qemu_sock),
+                    PathBuf::from(peer_sock),
+                    PathBuf::from(pcap),
+                ));
             }
             "-h" | "--help" => {
                 println!("{}", usage());
@@ -104,10 +107,8 @@ fn main() -> ExitCode {
     for image in block_images {
         spec = spec.with_virtio_blk(image);
     }
-    match net_pcap {
-        Some(pcap) => spec = spec.with_virtio_net_pcap(pcap),
-        None if virtio_net => spec = spec.with_virtio_net(),
-        None => {}
+    if let Some((qemu_sock, peer_sock, pcap)) = net_dgram {
+        spec = spec.with_virtio_net_dgram(qemu_sock, peer_sock, pcap);
     }
     if ramfb {
         spec = spec.with_ramfb();
@@ -143,8 +144,9 @@ fn report(result: std::io::Result<Outcome>) -> ExitCode {
 
 fn usage() -> &'static str {
     "usage: rustos-qemu-run --kernel <path> [--arch x86_64|riscv64|aarch64] [--cpus N] \
-[--timeout-secs S] [--virtio-blk <image> ...] [--virtio-net] \
-[--virtio-net-pcap <path>] [--ramfb] [--virtio-keyboard <ready-marker> <qkeycode>]"
+[--timeout-secs S] [--virtio-blk <image> ...] \
+[--virtio-net-dgram <qemu-sock> <peer-sock> <pcap>] [--ramfb] \
+[--virtio-keyboard <ready-marker> <qkeycode>]"
 }
 
 fn usage_err(msg: &str) -> ExitCode {

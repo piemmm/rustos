@@ -48,7 +48,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
-use crate::{Outcome, Spec};
+use crate::{netdev_dgram_arg, Outcome, Spec};
 
 /// Default guest RAM size in mebibytes for a riscv64 QEMU integration
 /// test.
@@ -181,15 +181,15 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     }
 
     // Attach each network interface as a virtio-mmio net device behind a
-    // user-mode (SLIRP) backend — the riscv64 analogue of the x86_64
+    // `dgram` unix-datagram backend — the riscv64 analogue of the x86_64
     // `virtio-net-pci` path. `virtio-net-device` binds to one of the
     // `virt` board's virtio-mmio transports, which the Stage 4.D
-    // `MmioTransport` drives; `-netdev user` presents the fixed
-    // `10.0.2.0/24` topology the kernel-side ARP/ICMP test relies on. An
-    // optional `filter-dump` mirrors every frame to a host pcap.
+    // `MmioTransport` drives; the dgram socket pair makes the harness
+    // the guest's link peer on a private per-run wire. An optional
+    // `filter-dump` mirrors every frame to a host pcap.
     for (i, dev) in spec.net_devices.iter().enumerate() {
         argv.push("-netdev".into());
-        argv.push(format!("user,id=net{i}").into());
+        argv.push(netdev_dgram_arg(i, dev));
         argv.push("-device".into());
         argv.push(format!("virtio-net-device,netdev=net{i}").into());
         if let Some(pcap) = &dev.pcap {
@@ -424,8 +424,8 @@ mod tests {
             "a network-free spec must not attach a virtio-net device"
         );
         assert!(
-            !argv.iter().any(|a| a.starts_with("user,id=net")),
-            "a network-free spec must not attach a user netdev"
+            !argv.iter().any(|a| a.starts_with("dgram,id=net")),
+            "a network-free spec must not attach a dgram netdev"
         );
     }
 
@@ -455,21 +455,31 @@ mod tests {
     fn argv_attaches_each_net_device_as_virtio_net_mmio() {
         let mut spec = fixture_spec(1);
         spec.net_devices = vec![
-            crate::NetDevice::default(),
             crate::NetDevice {
+                qemu_sock: PathBuf::from("/tmp/net0.qemu.sock"),
+                peer_sock: PathBuf::from("/tmp/net0.peer.sock"),
+                pcap: None,
+            },
+            crate::NetDevice {
+                qemu_sock: PathBuf::from("/tmp/net1.qemu.sock"),
+                peer_sock: PathBuf::from("/tmp/net1.peer.sock"),
                 pcap: Some(PathBuf::from("/tmp/cap1.pcap")),
             },
         ];
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
 
-        assert!(argv.iter().any(|a| a == "user,id=net0"));
-        assert!(argv.iter().any(|a| a == "user,id=net1"));
+        assert!(argv.iter().any(|a| a
+            == "dgram,id=net0,local.type=unix,local.path=/tmp/net0.qemu.sock,\
+                remote.type=unix,remote.path=/tmp/net0.peer.sock"));
+        assert!(argv.iter().any(|a| a
+            == "dgram,id=net1,local.type=unix,local.path=/tmp/net1.qemu.sock,\
+                remote.type=unix,remote.path=/tmp/net1.peer.sock"));
         assert!(argv.iter().any(|a| a == "virtio-net-device,netdev=net0"));
         assert!(argv.iter().any(|a| a == "virtio-net-device,netdev=net1"));
         assert!(
             !argv
                 .iter()
-                .any(|a| a.contains("filter-dump") && a.contains("net0")),
+                .any(|a| a.contains("filter-dump") && a.contains("dump0")),
             "capture-free interface must not attach a filter-dump"
         );
         assert!(argv.iter().any(|a| a.contains("filter-dump")

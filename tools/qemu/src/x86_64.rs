@@ -34,7 +34,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
-use crate::Spec;
+use crate::{netdev_dgram_arg, Spec};
 
 /// Default guest RAM size in mebibytes for an x86_64 QEMU integration
 /// test.
@@ -145,17 +145,18 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     }
 
     // Attach each network interface as a modern virtio-net-pci function
-    // behind a user-mode (SLIRP) backend. `-netdev user` needs no host
-    // privileges and presents the fixed `10.0.2.0/24` topology the
-    // kernel-side ARP/ICMP test relies on; `disable-legacy=on` pins the
-    // function to the modern virtio-1.x PCI layout the Stage 4.D boot
-    // walk decodes (device id 0x1041 = `0x1040 + virtio-net`), exactly
-    // as for virtio-blk above. An optional `filter-dump` mirrors every
-    // frame on the interface to a host pcap so the harness can verify
-    // the exchange after the run.
+    // behind a `dgram` unix-datagram backend: QEMU binds the device's
+    // `qemu_sock` and forwards every guest frame as one raw Ethernet
+    // datagram to the harness-bound `peer_sock`, so the harness is the
+    // guest's link peer with no host privileges and a private per-run
+    // wire. `disable-legacy=on` pins the function to the modern
+    // virtio-1.x PCI layout the Stage 4.D boot walk decodes (device id
+    // 0x1041 = `0x1040 + virtio-net`), exactly as for virtio-blk above.
+    // An optional `filter-dump` mirrors every frame on the interface to
+    // a host pcap so the harness can verify the exchange after the run.
     for (i, dev) in spec.net_devices.iter().enumerate() {
         argv.push("-netdev".into());
-        argv.push(format!("user,id=net{i}").into());
+        argv.push(netdev_dgram_arg(i, dev));
         argv.push("-device".into());
         argv.push(format!("virtio-net-pci,netdev=net{i},disable-legacy=on").into());
         if let Some(pcap) = &dev.pcap {
@@ -371,8 +372,8 @@ mod tests {
             "a network-free spec must not attach a virtio-net device"
         );
         assert!(
-            !argv.iter().any(|a| a.starts_with("user,id=net")),
-            "a network-free spec must not attach a user netdev"
+            !argv.iter().any(|a| a.starts_with("dgram,id=net")),
+            "a network-free spec must not attach a dgram netdev"
         );
     }
 
@@ -380,17 +381,27 @@ mod tests {
     fn argv_attaches_each_net_device_as_virtio_net_pci() {
         let mut spec = fixture_spec(1);
         spec.net_devices = vec![
-            crate::NetDevice::default(),
             crate::NetDevice {
+                qemu_sock: PathBuf::from("/tmp/net0.qemu.sock"),
+                peer_sock: PathBuf::from("/tmp/net0.peer.sock"),
+                pcap: None,
+            },
+            crate::NetDevice {
+                qemu_sock: PathBuf::from("/tmp/net1.qemu.sock"),
+                peer_sock: PathBuf::from("/tmp/net1.peer.sock"),
                 pcap: Some(PathBuf::from("/tmp/cap1.pcap")),
             },
         ];
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
 
-        // Each interface is a user-mode netdev bound to its own modern
+        // Each interface is a dgram netdev bound to its own modern
         // virtio-net-pci function by a matching id.
-        assert!(argv.iter().any(|a| a == "user,id=net0"));
-        assert!(argv.iter().any(|a| a == "user,id=net1"));
+        assert!(argv.iter().any(|a| a
+            == "dgram,id=net0,local.type=unix,local.path=/tmp/net0.qemu.sock,\
+                remote.type=unix,remote.path=/tmp/net0.peer.sock"));
+        assert!(argv.iter().any(|a| a
+            == "dgram,id=net1,local.type=unix,local.path=/tmp/net1.qemu.sock,\
+                remote.type=unix,remote.path=/tmp/net1.peer.sock"));
         assert!(argv
             .iter()
             .any(|a| a == "virtio-net-pci,netdev=net0,disable-legacy=on"));
@@ -401,7 +412,7 @@ mod tests {
         assert!(
             !argv
                 .iter()
-                .any(|a| a.contains("filter-dump") && a.contains("net0")),
+                .any(|a| a.contains("filter-dump") && a.contains("dump0")),
             "capture-free interface must not attach a filter-dump"
         );
         assert!(argv.iter().any(|a| a.contains("filter-dump")

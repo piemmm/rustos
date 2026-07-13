@@ -140,6 +140,12 @@ fn ipv4_ping_resolves_arp_and_round_trips() {
             payload: b"rustos-stack".to_vec(),
         }]
     );
+    // The responder observed the inbound request it answered.
+    assert!(events_b.contains(&StackEvent::EchoRequestServed {
+        source: IpAddr::V4(V4_A),
+        identifier: 0x77,
+        sequence: 1,
+    }));
     // Both ends resolved each other.
     assert!(matches!(
         a.neighbors.entry(IpAddr::V4(V4_B)),
@@ -184,6 +190,12 @@ fn ipv6_link_local_ping_resolves_nd_and_round_trips() {
             payload: b"ping6".to_vec(),
         }]
     );
+    // The responder observed the inbound request it answered.
+    assert!(events_b.contains(&StackEvent::EchoRequestServed {
+        source: IpAddr::V6(link_local(IID_A)),
+        identifier: 0x42,
+        sequence: 7,
+    }));
     assert!(matches!(
         a.neighbors.entry(IpAddr::V6(link_local(IID_B))),
         Some((_, Some(mac))) if mac == MAC_B

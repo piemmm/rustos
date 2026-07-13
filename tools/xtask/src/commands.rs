@@ -24,6 +24,7 @@ mod image_apps;
 mod image_drivers;
 mod linkcheck;
 mod model_check;
+mod netpeer;
 mod parallel;
 mod pie_build;
 mod proptest;

@@ -122,6 +122,33 @@ fn auto_host() -> &'static AutoDrainHost {
     Box::leak(Box::new(AutoDrainHost::new()))
 }
 
+/// `VirtioHost` whose first wakes are spurious: the device drains a
+/// queue only once `skips` wakes have passed — the shared-interrupt
+/// case where receive traffic wakes an in-flight transmit wait before
+/// the transmit chain was consumed.
+struct SpuriousWakeHost {
+    inner: AutoDrainHost,
+    skips: core::cell::Cell<u32>,
+}
+
+impl DmaHost for SpuriousWakeHost {
+    fn alloc_dma_zeroed(&self, size: usize) -> Result<rustos_virtio::DmaSlab, DriverError> {
+        self.inner.alloc_dma_zeroed(size)
+    }
+}
+
+impl VirtioHost for SpuriousWakeHost {
+    fn notify_wait(&self, queue_index: u16) {
+        let remaining = self.skips.get();
+        if remaining > 0 {
+            // A wake with nothing consumed on this queue.
+            self.skips.set(remaining - 1);
+            return;
+        }
+        self.inner.notify_wait(queue_index);
+    }
+}
+
 fn open_net_with_host(
     t: MockTransport,
 ) -> (
@@ -184,6 +211,30 @@ fn service_transmits_queued_frames_to_the_peer() {
     let frame = arp_frame();
     rings.tx.push(&frame).expect("queue");
     let report = net.service(&mut rings).expect("service");
+    assert_eq!(report.transmitted, 1);
+    let log = tx_log.borrow();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0], frame);
+}
+
+/// Regression test: a wake that announces *other* traffic (the shared
+/// device interrupt) must never fault an in-flight transmission — the
+/// driver parks again and completes the send on a later wake.
+#[test]
+fn spurious_wake_mid_transmit_is_parked_through_not_faulted() {
+    let (t, tx_log, _) = build_device();
+    let host = Box::leak(Box::new(SpuriousWakeHost {
+        inner: AutoDrainHost::new(),
+        skips: core::cell::Cell::new(2),
+    }));
+    let mut net = Box::new(VirtioNet::open(t, host).expect("open"));
+    host.inner
+        .install_transport(net.transport_mut() as *mut MockTransport);
+    let mut region = rings_region();
+    let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
+    let frame = arp_frame();
+    rings.tx.push(&frame).expect("queue");
+    let report = net.service(&mut rings).expect("spurious wakes tolerated");
     assert_eq!(report.transmitted, 1);
     let log = tx_log.borrow();
     assert_eq!(log.len(), 1);

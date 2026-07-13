@@ -261,17 +261,15 @@ planned, `[~]` in progress, `[x]` done.
   timer via `next_deadline`, LRU-of-resolved eviction that fails closed
   when all entries are mid-resolution, unsolicited confirmations never
   create entries).
-- The `userland/net/icmp` parsers migrated in (evolved: `Ipv4Addr`
-  vocabulary; IPv4 parse now verifies the header checksum per RFC 1122
-  §3.2.1.2). `userland/net/icmp` re-exports the codecs and keeps only
-  the composed responder/client until N3 deletes it.
+- The former `userland/net/icmp` parsers were folded into `lib/net`
+  (evolved: `Ipv4Addr` vocabulary; IPv4 parse verifies the header
+  checksum per RFC 1122 §3.2.1.2). The `netstack` service subsumed the
+  responder and the standalone crate was deleted at N3c.
 - Tests landed: parse/emit round-trips and rejection matrices, checksum
   vectors + independent-oracle/split properties, the 14-test neighbour
   state-machine suite, and the `fuzz_net_eth`/`fuzz_net_addr` harnesses
-  registered in `cargo xtask fuzz` (the icmp `fuzz_parse` harness now
-  covers only the composed paths).
-- Docs: `docs/src/lib/net.md` (+ `docs/src/userland/net_icmp.md`
-  refreshed).
+  registered in `cargo xtask fuzz`.
+- Docs: `docs/src/lib/net.md`.
 
 ### N2 — IPv4 + IPv6 network layer: parse/emit, ICMP+ICMPv6, ND, reassembly, routing `[x]`
 - `ipv4` evolved in place: options-tolerant parse (checksum-verified,
@@ -316,10 +314,10 @@ planned, `[~]` in progress, `[x]` done.
   harnesses registered in `cargo xtask fuzz`. Docs:
   `docs/src/lib/net.md` + `lib/net/README.md` refreshed.
 
-### N3 — the `netstack` service + evolved driver seam: frames flow end to end
+### N3 — the `netstack` service + evolved driver seam: frames flow end to end `[x]`
 
-N3 lands as three tree-green sub-increments (each complete with tests,
-docs, and the full gate) because the whole is too large for one change:
+N3 landed as three tree-green sub-increments (each complete with tests,
+docs, and the full gate) because the whole was too large for one change:
 
 #### N3a — interface/address engine + host engine in `lib/net` `[x]`
 - Landed: `iface` — the per-interface RFC 4862 address engine (static
@@ -376,21 +374,27 @@ docs, and the full gate) because the whole is too large for one change:
   boundary is the synchronisation — safe Rust, no shared-memory
   atomics); `virtio_net` serves it (park-once on the host's device
   waiter when nothing moved, lossless staged-RX back-pressure, still
-  no offloads); `userland/net/icmp` and the QEMU verticals drive the
-  same rings until N3c deletes the responder.
+  no offloads); the QEMU netstack verticals drive the same rings.
 - Tests landed: netstack loopback end-to-end (a peer-`Stack` fake:
   v4 ARP+echo and v6 DAD+ND+echo through the real pump), the
   audited-refusal dispatch matrix, ring/codec fail-closed suites in
   `lib/abi`, and the gated/audited sysinfod + procinfo query tests.
-  Docs: `docs/src/userland/netstack.md`, `docs/src/drivers/network.md`
-  + driver-trait/net_icmp pages refreshed.
+  Docs: `docs/src/userland/netstack.md`, `docs/src/drivers/network.md`,
+  and the driver-trait page refreshed.
 
-#### N3c — QEMU verticals + `userland/net/icmp` deletion `[ ]`
-- `userland/net/icmp` is **deleted**; its QEMU ARP/ping coverage is
-  re-landed as the `netstack` vertical (ping in/out over v4 *and* v6:
-  answers echo, resolves neighbours both ways) in
-  `tests/integration/netstack_*` on the covered arches.
-- Final N3 docs/plan marks; root `README.md` matrix rows updated.
+#### N3c — QEMU verticals + `userland/net/icmp` deletion `[x]`
+- Landed: the `netstack` engine drives a live virtio-net device end to
+  end through the ring pump in the QEMU verticals
+  `tests/integration/netstack_{pci_x86_64,mmio_riscv64,mmio_aarch64}`.
+  A host-side peer (`cargo xtask` `netpeer`, the same `lib/net` `Stack`
+  over the QEMU dgram netdev) and the guest resolve each other and ping
+  in *and* out over v4 *and* v6 (ARP + Neighbour Solicitation both ways,
+  echoes answered both ways); the shared wire topology lives once in
+  `tests/integration/netstack_wire` so guest and peer cannot drift.
+- Landed: `userland/net/icmp` is **deleted** (crate, workspace member,
+  its `fuzz_parse` harness registration, `docs/src/userland/net_icmp.md`,
+  SUMMARY entry); the `lib/net` `fuzz_net_*` harnesses carry its parser
+  coverage. Nothing links it.
 
 ### N4 — UDP + the socket ABI + multicast membership `[ ]`
 - UDP over both families; the socket ABI (`lib/abi/src/net.rs`) with

@@ -1,6 +1,6 @@
 [package]
-name = "rustos-test-virtio-net-pci-x86-64"
-description = "Stage 4.D Item 4 QEMU integration test: boot the rustos-kernel pipeline, walk PCI to the modern virtio-net-pci function, provision a PciTransport through the capability-gated KernelMmioMapper, route its MSI-X interrupt, mint a KernelVirtioHost over a carved per-device DMA pool, load the signed virtio-net `.rxe`, then drive rustos-net-icmp over the real device: ARP-resolve the SLIRP gateway 10.0.2.2 from guest 10.0.2.15 and exchange an ICMP echo before signalling QEMU success."
+name = "rustos-test-netstack-pci-x86-64"
+description = "QEMU netstack vertical (x86_64): boot the rustos-kernel pipeline, walk PCI to the modern virtio-net-pci function, provision a PciTransport through the capability-gated KernelMmioMapper, route its MSI-X interrupt, mint a KernelVirtioHost over a carved per-device DMA pool, load the signed virtio-net `.rxe`, then drive the rustos-netstack engine's ring pump over the device against the harness-side peer stack on the QEMU dgram netdev: answer the peer's ARP/NS resolution and v4+v6 echo campaign, then resolve and ping the peer over both families (plans/NETWORK.md N3c) before signalling QEMU success."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,14 +15,15 @@ workspace = true
 # shared `rustos-test-virtio-qemu-support` bring-up scaffolding and the
 # production boot pipeline; it differs from the virtio-blk vertical only in
 # the device id, the signed `.rxe` it loads, and the device-driving tail
-# (ARP + ICMP echo against the SLIRP gateway via `rustos-net-icmp`).
+# (the rustos-netstack ring pump pinging in/out over v4 and v6 against
+# the harness-side peer stack).
 #
 # The signed `.rxe` manifest and the matching trust-anchor public key are
 # generated at build time by `build.rs` so the integration test itself
 # stays `no_std` + `no_main` and pulls in no host-only crypto crate.
 
 [[bin]]
-name = "rustos-test-virtio-net-pci-x86-64"
+name = "rustos-test-netstack-pci-x86-64"
 path = "src/main.rs"
 
 [build-dependencies]
@@ -30,13 +31,12 @@ rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
 
-# The device-agnostic bring-up scaffolding lives in the shared support
-# crate; this bin pulls in only the abi, the virtio-net driver, the
-# userland ICMP client it drives, and the driver host it resolves the
-# loaded image to (`AGENTS.md` §2.2).
+# The device-agnostic bring-up scaffolding and the netstack ping tail
+# live in the shared support crate; this bin pulls in only the abi, the
+# virtio-net driver, and the driver host it resolves the loaded image to
+# (`AGENTS.md` §2.2).
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 rustos-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
 rustos-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
-rustos-net-icmp = { path = "../../../userland/net/icmp", version = "=0.0.0" }
 rustos-test-virtio-qemu-support = { path = "../virtio_qemu_support", version = "=0.0.0" }

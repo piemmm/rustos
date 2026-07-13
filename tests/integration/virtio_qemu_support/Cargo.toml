@@ -51,7 +51,9 @@ rustos-drv-fs-rustfs = { path = "../../../drivers/filesystem/rustfs", version = 
 rustos-test-fat32-image = { path = "../fat32_image", version = "=0.0.0" }
 rustos-test-rustfs-image = { path = "../rustfs_image", version = "=0.0.0" }
 rustos-users = { path = "../../../lib/users", version = "=0.0.0" }
-rustos-net-icmp = { path = "../../../userland/net/icmp", version = "=0.0.0" }
+rustos-net = { path = "../../../lib/net", version = "=0.0.0" }
+rustos-netstack = { path = "../../../userland/net/netstack", version = "=0.0.0", default-features = false }
+rustos-test-netstack-wire = { path = "../netstack_wire", version = "=0.0.0" }
 
 # --- aarch64 (`virt`-board MMIO) -------------------------------------
 # The aarch64 vertical owns its bring-up directly from `kernel_main` (the
@@ -84,7 +86,9 @@ rustos-drv-fs-rustfs = { path = "../../../drivers/filesystem/rustfs", version = 
 rustos-test-fat32-image = { path = "../fat32_image", version = "=0.0.0" }
 rustos-test-rustfs-image = { path = "../rustfs_image", version = "=0.0.0" }
 rustos-users = { path = "../../../lib/users", version = "=0.0.0" }
-rustos-net-icmp = { path = "../../../userland/net/icmp", version = "=0.0.0" }
+rustos-net = { path = "../../../lib/net", version = "=0.0.0" }
+rustos-netstack = { path = "../../../userland/net/netstack", version = "=0.0.0", default-features = false }
+rustos-test-netstack-wire = { path = "../netstack_wire", version = "=0.0.0" }
 
 # --- riscv64 (`virt`-board MMIO) -------------------------------------
 [target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
@@ -117,4 +121,6 @@ rustos-drv-fs-rustfs = { path = "../../../drivers/filesystem/rustfs", version = 
 rustos-test-fat32-image = { path = "../fat32_image", version = "=0.0.0" }
 rustos-test-rustfs-image = { path = "../rustfs_image", version = "=0.0.0" }
 rustos-users = { path = "../../../lib/users", version = "=0.0.0" }
-rustos-net-icmp = { path = "../../../userland/net/icmp", version = "=0.0.0" }
+rustos-net = { path = "../../../lib/net", version = "=0.0.0" }
+rustos-netstack = { path = "../../../userland/net/netstack", version = "=0.0.0", default-features = false }
+rustos-test-netstack-wire = { path = "../netstack_wire", version = "=0.0.0" }

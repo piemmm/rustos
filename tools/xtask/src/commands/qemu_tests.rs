@@ -44,10 +44,12 @@ struct QemuTest {
     /// image whose sector 0 carries the deterministic pattern
     /// `byte[i] = i mod 256` (which the kernel-side test verifies).
     disk_sectors: Option<u64>,
-    /// When `true`, attach a QEMU user-mode (SLIRP) virtio-net interface
-    /// and dump every frame to a `<binary>.pcap` capture beside the
-    /// kernel image so a host can inspect the on-wire exchange.
-    virtio_net: bool,
+    /// When `true`, attach a virtio-net interface over a QEMU `dgram`
+    /// unix-socket netdev, run the harness-side `netpeer` link peer on
+    /// its other end, and dump every frame to a `<binary>.pcap` capture
+    /// beside the kernel image so a host can inspect the on-wire
+    /// exchange.
+    netstack_peer: bool,
     /// When `true`, attach a QEMU `ramfb` display device (a
     /// firmware-programmed linear framebuffer in guest RAM). Used by the
     /// framebuffer-display vertical on the riscv64 `virt` board.
@@ -447,7 +449,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -468,7 +470,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 4,
         timeout: Duration::from_secs(120),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -497,7 +499,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -527,7 +529,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -559,7 +561,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -592,7 +594,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -626,7 +628,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -661,7 +663,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -691,7 +693,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -726,7 +728,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -762,7 +764,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -801,7 +803,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -835,7 +837,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -870,7 +872,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -908,7 +910,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -930,7 +932,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -967,7 +969,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -997,7 +999,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1029,7 +1031,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: Some(2048),
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1054,7 +1056,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::Fat32,
         keyboard: None,
@@ -1080,7 +1082,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::Rustfs,
         keyboard: None,
@@ -1089,27 +1091,28 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // Stage 4.D Item 4: `rustos-test-virtio-net-pci-x86-64` performs a
-    // full real virtio-net-pci round-trip on the same shared bring-up
-    // scaffolding as the virtio-blk vertical — boot → `mechanism_one`
-    // PCI walk → map the four virtio register windows → route MSI-X →
-    // mint a `KernelVirtioHost` over a per-device DMA pool → load the
-    // signed virtio-net `.rxe` → drive `rustos-net-icmp` over the device:
-    // ARP-resolve the QEMU user-mode (SLIRP) gateway `10.0.2.2` from guest
-    // `10.0.2.15`, then send an ICMP echo and confirm the reply →
-    // `qemu_exit`. A user-mode netdev (no host privileges) plus a frame
-    // dump to `<binary>.pcap` lets a host inspect the exchange after the
-    // run. The guest must initiate (SLIRP never pings the guest), which
-    // the `rustos-net-icmp` `Client` does. Single CPU and a 60-second
-    // budget match the other Stage-3/4 boot-then-do-fixed-work tests.
+    // `plans/NETWORK.md` N3c: `rustos-test-netstack-pci-x86-64` performs a
+    // full real netstack-over-virtio-net-pci round-trip on the same shared
+    // bring-up scaffolding as the virtio-blk vertical — boot →
+    // `mechanism_one` PCI walk → map the four virtio register windows →
+    // route MSI-X → mint a `KernelVirtioHost` over a per-device DMA pool →
+    // load the signed virtio-net `.rxe` → drive the `rustos-netstack`
+    // engine's ring pump over the device against the harness-side
+    // `netpeer` link peer on the QEMU dgram netdev: answer the peer's
+    // ARP/NS resolution and v4+v6 echo campaign, then resolve and ping
+    // the peer over both families → `qemu_exit`. The peer thread's own
+    // verdict is required too, and a frame dump to `<binary>.pcap` lets a
+    // host inspect the exchange after the run. Single CPU and a
+    // 60-second budget match the other Stage-3/4 boot-then-do-fixed-work
+    // tests.
     QemuTest {
-        package: "rustos-test-virtio-net-pci-x86-64",
-        binary: "rustos-test-virtio-net-pci-x86-64",
+        package: "rustos-test-netstack-pci-x86-64",
+        binary: "rustos-test-netstack-pci-x86-64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: true,
+        netstack_peer: true,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1133,7 +1136,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1166,7 +1169,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1194,7 +1197,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1223,7 +1226,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 2,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1251,7 +1254,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 2,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1286,7 +1289,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1324,7 +1327,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1356,7 +1359,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1387,7 +1390,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1418,7 +1421,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1442,7 +1445,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 2,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1465,7 +1468,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 2,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1490,7 +1493,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 2,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1519,7 +1522,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1552,7 +1555,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1580,7 +1583,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1596,7 +1599,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1615,7 +1618,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1653,7 +1656,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1681,7 +1684,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: Some(2048),
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1690,24 +1693,25 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // Stage 4.D Item 4: `rustos-test-virtio-net-mmio-riscv64` is the
-    // riscv64 `virt`-board MMIO analogue of the x86_64 virtio-net-pci
-    // vertical — same bring-up as the blk MMIO vertical, then drive
-    // `rustos-net-icmp` over the device: ARP-resolve the QEMU user-mode
-    // (SLIRP) gateway `10.0.2.2` from guest `10.0.2.15`, then send an
-    // ICMP echo and confirm the reply → `SiFive` Test PASS. The
-    // device-tail ping is the same shared code the x86_64 vertical runs.
-    // A user-mode netdev (no host privileges) plus a frame dump to
+    // `plans/NETWORK.md` N3c: `rustos-test-netstack-mmio-riscv64` is the
+    // riscv64 `virt`-board MMIO analogue of the x86_64 netstack-pci
+    // vertical — same bring-up as the blk MMIO vertical, then drive the
+    // `rustos-netstack` engine's ring pump over the device against the
+    // harness-side `netpeer` link peer on the QEMU dgram netdev: answer
+    // the peer's ARP/NS resolution and v4+v6 echo campaign, then resolve
+    // and ping the peer over both families → `SiFive` Test PASS. The
+    // device-tail ping is the same shared code the x86_64 vertical runs,
+    // the peer thread's own verdict is required too, and a frame dump to
     // `<binary>.pcap` lets a host inspect the exchange. Single CPU and a
     // 60-second budget match the other boot-then-do-fixed-work tests.
     QemuTest {
-        package: "rustos-test-virtio-net-mmio-riscv64",
-        binary: "rustos-test-virtio-net-mmio-riscv64",
+        package: "rustos-test-netstack-mmio-riscv64",
+        binary: "rustos-test-netstack-mmio-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: true,
+        netstack_peer: true,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1736,7 +1740,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: true,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1766,7 +1770,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: true,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1805,7 +1809,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 4,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: true,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1837,7 +1841,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -1891,7 +1895,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(120),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
@@ -1951,7 +1955,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(120),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
@@ -1983,7 +1987,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2020,7 +2024,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(120),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2060,7 +2064,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(120),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2105,7 +2109,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(120),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2144,7 +2148,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(120),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2183,7 +2187,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2215,7 +2219,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2249,7 +2253,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2285,7 +2289,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2306,7 +2310,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2344,7 +2348,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2378,7 +2382,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2413,7 +2417,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2434,7 +2438,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2459,7 +2463,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2494,7 +2498,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2533,7 +2537,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2570,7 +2574,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2608,7 +2612,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2647,7 +2651,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2685,7 +2689,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2724,7 +2728,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2758,7 +2762,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2793,7 +2797,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2831,7 +2835,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2875,7 +2879,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2911,7 +2915,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2955,7 +2959,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -2990,7 +2994,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -3024,7 +3028,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -3070,7 +3074,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -3108,7 +3112,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -3145,7 +3149,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -3177,7 +3181,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -3207,7 +3211,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: Some(2048),
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -3236,7 +3240,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::UsersRoot,
         keyboard: None,
@@ -3271,7 +3275,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
@@ -3331,7 +3335,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(300),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
@@ -3393,7 +3397,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(120),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
@@ -3477,7 +3481,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(300),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::MemsoakRootDisk,
         keyboard: None,
@@ -3528,7 +3532,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(120),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
@@ -3594,7 +3598,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(120),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
@@ -3650,7 +3654,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(120),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
@@ -3765,7 +3769,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(240),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: true,
         fs_disk: FsDisk::AutoloadRootDisk,
         keyboard: None,
@@ -3809,25 +3813,26 @@ const TESTS: &[QemuTest] = &[
         pointer_script: Some(autoload_desktop_pointer_script),
         serial: &[],
     },
-    // Stage W11 (`plans/WIRING.md` §3):
-    // `rustos-test-virtio-net-mmio-aarch64` is the aarch64 `virt`-board
-    // MMIO analogue of the riscv64 virtio-net-mmio vertical — same
-    // bring-up as the blk MMIO vertical, then drive `rustos-net-icmp`
-    // over the device: ARP-resolve the QEMU user-mode (SLIRP) gateway
-    // `10.0.2.2` from guest `10.0.2.15`, then send an ICMP echo and
-    // confirm the reply → ARM semihosting PASS. The device-tail ping is
-    // the same shared code the riscv64 / x86_64 verticals run. A
-    // user-mode netdev (no host privileges) plus a frame dump to
-    // `<binary>.pcap` lets a host inspect the exchange. Single CPU and a
-    // 60-second budget match the other boot-then-do-fixed-work tests.
+    // `plans/NETWORK.md` N3c: `rustos-test-netstack-mmio-aarch64` is the
+    // aarch64 `virt`-board MMIO analogue of the riscv64 netstack-mmio
+    // vertical — same bring-up as the blk MMIO vertical, then drive the
+    // `rustos-netstack` engine's ring pump over the device against the
+    // harness-side `netpeer` link peer on the QEMU dgram netdev: answer
+    // the peer's ARP/NS resolution and v4+v6 echo campaign, then resolve
+    // and ping the peer over both families → ARM semihosting PASS. The
+    // device-tail ping is the same shared code the riscv64 / x86_64
+    // verticals run, the peer thread's own verdict is required too, and
+    // a frame dump to `<binary>.pcap` lets a host inspect the exchange.
+    // Single CPU and a 60-second budget match the other
+    // boot-then-do-fixed-work tests.
     QemuTest {
-        package: "rustos-test-virtio-net-mmio-aarch64",
-        binary: "rustos-test-virtio-net-mmio-aarch64",
+        package: "rustos-test-netstack-mmio-aarch64",
+        binary: "rustos-test-netstack-mmio-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: true,
+        netstack_peer: true,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -3858,7 +3863,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: true,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -3882,7 +3887,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -3910,7 +3915,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -3942,7 +3947,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -3976,7 +3981,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -4013,7 +4018,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -4045,7 +4050,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -4083,7 +4088,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -4116,7 +4121,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: Some(("virtio-qemu: virtio-input eventq armed", "a")),
@@ -4150,7 +4155,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
-        virtio_net: false,
+        netstack_peer: false,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: Some(("virtio-qemu: virtio-input eventq armed", "a")),
@@ -4999,12 +5004,24 @@ fn fs_disk_image(
 /// `kernel` is the enrolment's binary path, which names the sibling capture
 /// file.
 fn finish_run(t: &QemuTest, kernel: &Path, mut spec: Spec) -> Result<(), String> {
-    // Attach a QEMU user-mode (SLIRP) virtio-net interface for networking
-    // tests, dumping every frame to a `<binary>.pcap` capture beside the
-    // kernel image so a failing run leaves the on-wire exchange to inspect.
-    if t.virtio_net {
+    // Attach a virtio-net interface over a `dgram` unix-socket netdev and
+    // start the harness-side `netpeer` link peer on its other end, dumping
+    // every frame to a `<binary>.pcap` capture beside the kernel image so
+    // a failing run leaves the on-wire exchange to inspect. The socket
+    // paths live in the temp dir: unix datagram paths are length-bounded
+    // (108 bytes) and the target dir can exceed that; the per-binary +
+    // per-process name keeps concurrent runs on private wires.
+    let mut peer = None;
+    if t.netstack_peer {
         let pcap = kernel.with_extension("pcap");
-        spec = spec.with_virtio_net_pcap(&pcap);
+        let sock_base = std::env::temp_dir().join(format!("{}-{}", t.binary, std::process::id()));
+        let qemu_sock = sock_base.with_extension("qemu.sock");
+        let peer_sock = sock_base.with_extension("peer.sock");
+        peer = Some(
+            super::netpeer::NetPeer::spawn(&qemu_sock, &peer_sock)
+                .map_err(|e| format!("test --qemu ({}): {e}", t.package))?,
+        );
+        spec = spec.with_virtio_net_dgram(&qemu_sock, &peer_sock, &pcap);
     }
 
     // Attach a QEMU `ramfb` display device for the framebuffer vertical.
@@ -5065,10 +5082,17 @@ fn finish_run(t: &QemuTest, kernel: &Path, mut spec: Spec) -> Result<(), String>
         spec = spec.with_serial_input(*marker, *line);
     }
 
-    match Runner::run(&spec).map_err(|e| format!("test --qemu ({}): {e}", t.package))? {
+    // Always collect the peer's verdict, even when the run itself failed,
+    // so the thread never outlives the run unjoined.
+    let run = Runner::run(&spec).map_err(|e| format!("test --qemu ({}): {e}", t.package));
+    let peer_verdict = peer.map(super::netpeer::NetPeer::stop_and_join);
+    match run? {
         Outcome::Pass => {
             for (path, assert) in &screendump_paths {
                 assert(t, path)?;
+            }
+            if let Some(Err(e)) = peer_verdict {
+                return Err(format!("test --qemu ({}): {e}", t.package));
             }
             Ok(())
         }
