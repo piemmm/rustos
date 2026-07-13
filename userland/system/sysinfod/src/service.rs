@@ -2,11 +2,13 @@
 //! capability-checked, audited, and answered.
 
 use rustos_abi::hwtree::{HwNode, HwTreeHeader};
+use rustos_abi::net_ipc::{NetInterfaceFactsRecord, NetInterfaceStateRecord};
 use rustos_abi::sysinfo::{
     spec_for, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord,
-    HardwareTreeRequest, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
-    ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord,
-    SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord, UserDirectoryRequest,
+    HardwareTreeRequest, MountListRequest, MountRecord, NetInterfaceListRequest,
+    ProcessListRequest, ProcessRecord, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
+    SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord,
+    UserDirectoryRequest,
 };
 use rustos_abi::{Errno, LimitKind};
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
@@ -171,6 +173,10 @@ fn dispatch(
         write_bytes(&source.ramzip_stats(caller)?.to_le_bytes(), response)
     } else if query == SysinfoQueryId::CPU_LOAD {
         cpu_load_list(source, caller, payload, response)
+    } else if query == SysinfoQueryId::NET_INTERFACE_FACTS {
+        net_facts_list(source, caller, payload, response)
+    } else if query == SysinfoQueryId::NET_INTERFACE_STATE {
+        net_state_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::PROCESS_IDENTITY {
         // The answer is the caller's own kernel-attested origin, which the
         // dispatcher already holds: it is the attested principal, not state a
@@ -288,6 +294,46 @@ fn mount_list(
         request.limit as usize,
         records.len(),
         MountRecord::WIRE_LEN,
+        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
+    )
+}
+
+/// Decode the [`NetInterfaceListRequest`] and page the interface-facts
+/// records into `response`.
+fn net_facts_list(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let request = NetInterfaceListRequest::from_bytes(payload)?;
+    let records = source.net_interface_facts(caller)?;
+    page_records(
+        response,
+        request.offset as usize,
+        request.limit as usize,
+        records.len(),
+        NetInterfaceFactsRecord::WIRE_LEN,
+        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
+    )
+}
+
+/// Decode the [`NetInterfaceListRequest`] and page the interface-state
+/// records into `response`.
+fn net_state_list(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let request = NetInterfaceListRequest::from_bytes(payload)?;
+    let records = source.net_interface_state(caller)?;
+    page_records(
+        response,
+        request.offset as usize,
+        request.limit as usize,
+        records.len(),
+        NetInterfaceStateRecord::WIRE_LEN,
         |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
     )
 }
@@ -460,6 +506,8 @@ mod tests {
     use core::cell::RefCell;
     use rustos_abi::driver::filesystem::{MountFlags, VolumeStats};
     use rustos_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
+    use rustos_abi::net_ipc::{NetInterfaceFactsRecord, NetInterfaceStateRecord};
+    use rustos_abi::sysinfo::NetInterfaceListRequest;
     use rustos_abi::sysinfo::{
         CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord, HardwareTreeRequest,
         KernelMemoryStats, LoadAverage, MemoryPressureStats, MountAvailability, MountListRequest,
@@ -767,6 +815,20 @@ mod tests {
                 foreground_console: 1,
                 flags: SEAT_FLAG_OWNED,
             }])
+        }
+
+        fn net_interface_facts(
+            &self,
+            _caller: &Caller,
+        ) -> Result<alloc::vec::Vec<NetInterfaceFactsRecord>, Errno> {
+            Ok(alloc::vec![fixture_net_facts()])
+        }
+
+        fn net_interface_state(
+            &self,
+            _caller: &Caller,
+        ) -> Result<alloc::vec::Vec<NetInterfaceStateRecord>, Errno> {
+            Ok(alloc::vec![fixture_net_state()])
         }
         fn resource_limits(
             &self,
@@ -1257,6 +1319,130 @@ mod tests {
         assert_eq!(
             serve(&source, &caller(&caps), &sink, &req_end, &mut resp),
             Ok(0)
+        );
+    }
+
+    /// The interface-facts record the fixture serves.
+    fn fixture_net_facts() -> NetInterfaceFactsRecord {
+        let mut name = [0u8; rustos_abi::net_ipc::IF_NAME_LEN];
+        name[..3].copy_from_slice(b"wan");
+        NetInterfaceFactsRecord {
+            name,
+            kind: rustos_abi::net_ipc::NetIfKind::Ethernet,
+            mac: [0x52, 0x54, 0, 0x12, 0x34, 0x56],
+            mtu: 1500,
+            offloads: 0,
+            rx_queues: 1,
+        }
+    }
+
+    /// The interface-state record the fixture serves.
+    fn fixture_net_state() -> NetInterfaceStateRecord {
+        let mut name = [0u8; rustos_abi::net_ipc::IF_NAME_LEN];
+        name[..3].copy_from_slice(b"wan");
+        let mut addrs =
+            [NetInterfaceStateRecord::EMPTY_ADDR; rustos_abi::net_ipc::NET_IF_MAX_ADDRS];
+        addrs[0] = rustos_abi::net_ipc::NetIfAddr {
+            family: rustos_abi::net_ipc::NetAddrFamily::V4,
+            prefix: 24,
+            state: rustos_abi::net_ipc::NetAddrState::Preferred,
+            addr: {
+                let mut a = [0u8; 16];
+                a[..4].copy_from_slice(&[10, 0, 2, 15]);
+                a
+            },
+        };
+        NetInterfaceStateRecord {
+            name,
+            link_up: true,
+            addr_count: 1,
+            addrs,
+        }
+    }
+
+    #[test]
+    fn net_interface_facts_is_gated_audited_and_pages() {
+        rustos_log::set_max_level(Level::Trace);
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        let nlr = NetInterfaceListRequest {
+            offset: 0,
+            limit: 8,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::NET_INTERFACE_FACTS, &nlr.to_le_bytes());
+        let mut resp = [0u8; 256];
+
+        // Denied without `CAP_SYSINFO_HW`; the refusal is logged.
+        let denied = Caps(&[CapabilityId::SYSINFO_GLOBAL]);
+        assert_eq!(
+            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Warn, events::QUERY_DENIED)]
+        );
+
+        // Served (and audited) for a `CAP_SYSINFO_HW` holder.
+        let granted = Caps(&[CapabilityId::SYSINFO_HW]);
+        let sink = RecordingSink::new();
+        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, NetInterfaceFactsRecord::WIRE_LEN);
+        let record = NetInterfaceFactsRecord::from_bytes(&resp[..n]).unwrap();
+        assert_eq!(record, fixture_net_facts());
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Debug, events::QUERY_SERVED)]
+        );
+
+        // Paging past the single interface returns the empty terminator.
+        let nlr_end = NetInterfaceListRequest {
+            offset: 1,
+            limit: 8,
+            flags: 0,
+        };
+        let req_end = request_bytes(SysinfoQueryId::NET_INTERFACE_FACTS, &nlr_end.to_le_bytes());
+        assert_eq!(
+            serve(&source, &caller(&granted), &sink, &req_end, &mut resp),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn net_interface_state_is_gated_audited_and_round_trips() {
+        rustos_log::set_max_level(Level::Trace);
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        let nlr = NetInterfaceListRequest {
+            offset: 0,
+            limit: 8,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::NET_INTERFACE_STATE, &nlr.to_le_bytes());
+        let mut resp = [0u8; 512];
+
+        // Denied without `CAP_SYSINFO_GLOBAL`; the refusal is logged.
+        let denied = Caps(&[CapabilityId::SYSINFO_HW]);
+        assert_eq!(
+            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Warn, events::QUERY_DENIED)]
+        );
+
+        // Served (and audited) for a `CAP_SYSINFO_GLOBAL` holder.
+        let granted = Caps(&[CapabilityId::SYSINFO_GLOBAL]);
+        let sink = RecordingSink::new();
+        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, NetInterfaceStateRecord::WIRE_LEN);
+        let record = NetInterfaceStateRecord::from_bytes(&resp[..n]).unwrap();
+        assert_eq!(record, fixture_net_state());
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Debug, events::QUERY_SERVED)]
         );
     }
 

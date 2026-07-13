@@ -45,7 +45,8 @@ use rustos_abi::CapabilityId;
 use rustos_caps::CapabilitySet;
 
 use crate::grants::{
-    capability_set, DEVMGR_CEILING, LOGIN_CEILING, SEATMGR_CEILING, SYSINFOD_CEILING,
+    capability_set, DEVMGR_CEILING, LOGIN_CEILING, NETSTACK_CEILING, SEATMGR_CEILING,
+    SYSINFOD_CEILING,
 };
 use crate::groups::GroupRecord;
 use crate::password::StoredPassword;
@@ -98,6 +99,12 @@ pub const LOGIN_USERNAME: &str = "login";
 /// The [`Uid`] of [`LOGIN_USERNAME`].
 pub const LOGIN_UID: Uid = Uid(13);
 
+/// Name of the network-stack service account.
+pub const NETSTACK_USERNAME: &str = "netstack";
+
+/// The [`Uid`] of [`NETSTACK_USERNAME`].
+pub const NETSTACK_UID: Uid = Uid(14);
+
 /// One compiled-in account's specification: the single row both
 /// [`system_accounts`] and [`system_account_uid`] read, so the record
 /// set and the name→uid lookup can never diverge.
@@ -146,6 +153,13 @@ const SYSTEM_ACCOUNTS: &[SystemAccountSpec] = &[
         primary_gid: SERVICES_GID,
         display_name: "Login Service",
         ceiling: LOGIN_CEILING,
+    },
+    SystemAccountSpec {
+        username: NETSTACK_USERNAME,
+        uid: NETSTACK_UID,
+        primary_gid: SERVICES_GID,
+        display_name: "Network Stack",
+        ceiling: NETSTACK_CEILING,
     },
 ];
 
@@ -287,6 +301,7 @@ mod tests {
                 ("sysinfod", 11, 101),
                 ("seatmgr", 12, 101),
                 ("login", 13, 101),
+                ("netstack", 14, 101),
             ]
         );
         for record in &records {

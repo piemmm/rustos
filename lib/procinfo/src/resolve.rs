@@ -1,7 +1,7 @@
-//! The userspace `info:`/`stats:` resource resolver (`plans/ALIAS.md` §6.2,
-//! §6.3, §14).
+//! The userspace `info:`/`state:`/`stats:` resource resolver
+//! (`plans/ALIAS.md` §6.2, §6.3, §6.4, §14).
 //!
-//! `info:` and `stats:` references are **not** kernel-owned resources: they
+//! `info:`, `state:`, and `stats:` references are **not** kernel-owned resources: they
 //! name facts and measurements that must be served by the System Information
 //! API, never by a virtual file, by text scraping, or by a kernel
 //! `resource_open` backing (which would bypass the `sysinfod` broker's
@@ -20,17 +20,23 @@
 //! `info:process/{pid,uid,gid,proc-id,trust-domain,caps}`,
 //! `info:mem/{physical,page-size}`,
 //! `info:limits/<kind>/{soft,hard}`, `stats:uptime`, `stats:mem/*`, and
-//! `stats:limits/<kind>`).
+//! `stats:limits/<kind>`) plus the network-interface queries `netstack`
+//! answers through the broker (`info:net/<iface>/{mac,mtu,kind}` and
+//! `state:net/<iface>/{link,address}`, `plans/NETWORK.md` §5).
 
 use alloc::string::{String, ToString};
 
 use alloc::vec::Vec;
 use rustos_abi::origin::{Origin, TrustDomain};
 
+use rustos_abi::net_ipc::{
+    NetAddrFamily, NetAddrState, NetIfAddr, NetIfKind, NetInterfaceFactsRecord,
+    NetInterfaceStateRecord, IF_NAME_LEN,
+};
 use rustos_abi::sysinfo::{
-    reclaim_class_from_name, CpuLoadRecord, KernelMemoryStats, MemoryPressureStats, RamzipStats,
-    ReclaimClassRecord, ResourceLimitRecord, SysinfoQueryId, SystemIdentity, Uptime,
-    PRESSURE_BAND_NAMES, RESOURCE_LIMITS_REPORT_LEN,
+    reclaim_class_from_name, CpuLoadRecord, KernelMemoryStats, MemoryPressureStats,
+    NetInterfaceListRequest, RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SysinfoQueryId,
+    SystemIdentity, Uptime, PRESSURE_BAND_NAMES, RESOURCE_LIMITS_REPORT_LEN,
 };
 use rustos_abi::time::Time64;
 use rustos_abi::{CapabilityId, Errno, LimitKind, ResourceLimit};
@@ -53,9 +59,10 @@ use crate::transport::Transport;
 /// it does not offer, or could not be answered by the service.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResolveInfoError {
-    /// The reference is not in the `info:` or `stats:` namespace; this
-    /// resolver does not own it (the caller routed it to the wrong resolver).
-    NotInfoOrStats,
+    /// The reference is not in the `info:`, `state:`, or `stats:` namespace;
+    /// this resolver does not own it (the caller routed it to the wrong
+    /// resolver).
+    NamespaceNotServed,
     /// The namespace is served but the selector names no resource in it.
     UnknownSelector,
     /// The selector is understood but the request is not serviceable: a
@@ -85,9 +92,62 @@ pub fn resolve(
 ) -> Result<ResourceResponse, ResolveInfoError> {
     match reference.namespace().known() {
         Some(KnownNamespace::Info) => resolve_info(reference, now, transport),
+        Some(KnownNamespace::State) => resolve_state(reference, now, transport),
         Some(KnownNamespace::Stats) => resolve_stats(reference, now, transport),
-        _ => Err(ResolveInfoError::NotInfoOrStats),
+        _ => Err(ResolveInfoError::NamespaceNotServed),
     }
+}
+
+/// Resolve a `state:` reference (current mutable state) to a single
+/// [`ResponsePayload::State`] reading.
+fn resolve_state(
+    reference: &ResourceRef,
+    now: Time64,
+    transport: &dyn Transport,
+) -> Result<ResourceResponse, ResolveInfoError> {
+    reject_decoration(reference)?;
+    let selector = selector(reference);
+    let (value, authorization) = match selector.as_slice() {
+        // Whether the interface's link carries frames right now. Served
+        // by `netstack` through the broker's `CAP_SYSINFO_GLOBAL`-gated
+        // interface-state page; a denial surfaces below.
+        ["net", iface, "link"] => {
+            let record = net_state_for(transport, iface)?;
+            (
+                InfoValue::new_str(
+                    Sensitivity::Public,
+                    if record.link_up { "up" } else { "down" },
+                ),
+                Authorization::Capability(CapabilityId::SYSINFO_GLOBAL),
+            )
+        }
+        // The interface's bound address set, each `addr/prefix` with its
+        // SLAAC/DAD state where it is not simply preferred.
+        ["net", iface, "address"] => {
+            let record = net_state_for(transport, iface)?;
+            let mut rendered = String::new();
+            for entry in record.addrs.iter().take(record.addr_count as usize) {
+                if !rendered.is_empty() {
+                    rendered.push_str(", ");
+                }
+                push_if_addr(&mut rendered, entry);
+            }
+            if rendered.is_empty() {
+                rendered.push_str("none");
+            }
+            (
+                InfoValue::new_str(Sensitivity::Public, &rendered),
+                Authorization::Capability(CapabilityId::SYSINFO_GLOBAL),
+            )
+        }
+        _ => return Err(ResolveInfoError::UnknownSelector),
+    };
+    envelope(
+        reference,
+        now,
+        authorization,
+        ResponsePayload::State(value.map_err(|_| ResolveInfoError::Malformed)?),
+    )
 }
 
 /// Resolve an `info:` reference (a stable fact) to a single [`InfoValue`].
@@ -198,6 +258,22 @@ fn resolve_info_value(
                 InfoValue::new_str(Sensitivity::Public, &cpus.len().to_string()),
                 Authorization::Capability(CapabilityId::SYSINFO_KERNEL),
             )
+        }
+        // One interface's static facts, served by `netstack` through the
+        // broker's `CAP_SYSINFO_HW`-gated interface-facts page. The MAC is
+        // stable hardware identity (`plans/ALIAS.md` §6.2), so it is
+        // Sensitive; the whole family costs `CAP_SYSINFO_HW` and a denial
+        // surfaces below.
+        ["net", iface, leaf @ ("mac" | "mtu" | "kind")] => {
+            let record = net_facts_for(transport, iface)?;
+            // The or-pattern fixes `leaf` to one of these three, so the
+            // final arm is `kind` and there is no unhandled case.
+            let value = match *leaf {
+                "mac" => InfoValue::new_str(Sensitivity::Sensitive, &mac_string(record.mac)),
+                "mtu" => InfoValue::new_str(Sensitivity::Public, &record.mtu.to_string()),
+                _ => InfoValue::new_str(Sensitivity::Public, net_kind_name(record.kind)),
+            };
+            (value, Authorization::Capability(CapabilityId::SYSINFO_HW))
         }
         // A configured soft/hard bound on one of the caller's own resources.
         // The self-scoped `RESOURCE_LIMITS` query needs no capability and
@@ -681,6 +757,185 @@ fn envelope(
     .map_err(|_| ResolveInfoError::Malformed)
 }
 
+/// Records per page the interface walks request — small enough for one
+/// framed reply of the widest record, large enough that one page covers
+/// every realistic interface table.
+const NET_PAGE_LIMIT: u16 = 16;
+
+/// Whether a NUL-padded interface-name field spells `iface`.
+fn if_name_matches(name: &[u8; IF_NAME_LEN], iface: &str) -> bool {
+    let len = name.iter().position(|&b| b == 0).unwrap_or(IF_NAME_LEN);
+    &name[..len] == iface.as_bytes()
+}
+
+/// Page [`SysinfoQueryId::NET_INTERFACE_FACTS`] until the record whose
+/// alias is `iface` is found.
+fn net_facts_for(
+    transport: &dyn Transport,
+    iface: &str,
+) -> Result<NetInterfaceFactsRecord, ResolveInfoError> {
+    find_net_record(
+        transport,
+        SysinfoQueryId::NET_INTERFACE_FACTS,
+        NetInterfaceFactsRecord::WIRE_LEN,
+        NetInterfaceFactsRecord::from_bytes,
+        |record| if_name_matches(&record.name, iface),
+    )
+}
+
+/// Page [`SysinfoQueryId::NET_INTERFACE_STATE`] until the record whose
+/// alias is `iface` is found.
+fn net_state_for(
+    transport: &dyn Transport,
+    iface: &str,
+) -> Result<NetInterfaceStateRecord, ResolveInfoError> {
+    find_net_record(
+        transport,
+        SysinfoQueryId::NET_INTERFACE_STATE,
+        NetInterfaceStateRecord::WIRE_LEN,
+        NetInterfaceStateRecord::from_bytes,
+        |record| if_name_matches(&record.name, iface),
+    )
+}
+
+/// Page one interface-record query until `matches` selects a record; an
+/// exhausted table fails closed as an unknown selector.
+fn find_net_record<R>(
+    transport: &dyn Transport,
+    query: SysinfoQueryId,
+    record_len: usize,
+    decode: impl Fn(&[u8]) -> Result<R, Errno>,
+    matches: impl Fn(&R) -> bool,
+) -> Result<R, ResolveInfoError> {
+    let mut offset: u32 = 0;
+    loop {
+        let request = NetInterfaceListRequest {
+            offset,
+            limit: NET_PAGE_LIMIT,
+            flags: 0,
+        };
+        let reply = call(transport, query, &request.to_le_bytes()).map_err(map_call_error)?;
+        if reply.len() % record_len != 0 {
+            return Err(ResolveInfoError::Malformed);
+        }
+        let count = reply.len() / record_len;
+        for chunk in reply.chunks_exact(record_len) {
+            let record = decode(chunk).map_err(|_| ResolveInfoError::Malformed)?;
+            if matches(&record) {
+                return Ok(record);
+            }
+        }
+        if count < NET_PAGE_LIMIT as usize {
+            return Err(ResolveInfoError::UnknownSelector);
+        }
+        // The loop only continues on a full page, so the next window
+        // starts exactly one page further on.
+        offset = offset.saturating_add(u32::from(NET_PAGE_LIMIT));
+    }
+}
+
+/// The display name of an interface's link kind.
+fn net_kind_name(kind: NetIfKind) -> &'static str {
+    match kind {
+        NetIfKind::Ethernet => "ethernet",
+        NetIfKind::Loopback => "loopback",
+    }
+}
+
+/// Render a MAC address as colon-separated lowercase hex octets.
+fn mac_string(mac: [u8; 6]) -> String {
+    let mut out = String::new();
+    for (index, byte) in mac.iter().enumerate() {
+        if index > 0 {
+            out.push(':');
+        }
+        out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
+        out.push(char::from_digit(u32::from(byte & 0xF), 16).unwrap_or('0'));
+    }
+    out
+}
+
+/// Append one bound address as `addr/prefix`, suffixed with its DAD/SLAAC
+/// state when it is not simply preferred.
+fn push_if_addr(out: &mut String, entry: &NetIfAddr) {
+    match entry.family {
+        NetAddrFamily::V4 => {
+            for (index, byte) in entry.addr[..4].iter().enumerate() {
+                if index > 0 {
+                    out.push('.');
+                }
+                out.push_str(&byte.to_string());
+            }
+        }
+        NetAddrFamily::V6 => out.push_str(&ipv6_string(&entry.addr)),
+    }
+    out.push('/');
+    out.push_str(&entry.prefix.to_string());
+    match entry.state {
+        NetAddrState::Preferred => {}
+        NetAddrState::Tentative => out.push_str(" (tentative)"),
+        NetAddrState::Deprecated => out.push_str(" (deprecated)"),
+    }
+}
+
+/// Render an IPv6 address in RFC 5952 canonical text: lowercase hex
+/// groups with leading zeros suppressed and the leftmost longest run of
+/// two or more zero groups compressed to `::`.
+fn ipv6_string(octets: &[u8; 16]) -> String {
+    let mut groups = [0u16; 8];
+    for (index, group) in groups.iter_mut().enumerate() {
+        *group = u16::from_be_bytes([octets[index * 2], octets[index * 2 + 1]]);
+    }
+    // Find the leftmost longest zero run of length >= 2.
+    let (mut best_start, mut best_len) = (0usize, 0usize);
+    let mut index = 0;
+    while index < groups.len() {
+        if groups[index] == 0 {
+            let start = index;
+            while index < groups.len() && groups[index] == 0 {
+                index += 1;
+            }
+            let len = index - start;
+            if len >= 2 && len > best_len {
+                best_start = start;
+                best_len = len;
+            }
+        } else {
+            index += 1;
+        }
+    }
+    let mut out = String::new();
+    let mut index = 0;
+    while index < groups.len() {
+        if best_len >= 2 && index == best_start {
+            out.push_str("::");
+            index += best_len;
+            continue;
+        }
+        if !out.is_empty() && !out.ends_with(':') {
+            out.push(':');
+        }
+        push_u16_hex(&mut out, groups[index]);
+        index += 1;
+    }
+    if out.is_empty() {
+        out.push_str("::");
+    }
+    out
+}
+
+/// Append `value` as minimal lowercase hex (no leading zeros).
+fn push_u16_hex(out: &mut String, value: u16) {
+    let mut started = false;
+    for shift in [12u32, 8, 4, 0] {
+        let nibble = (value >> shift) & 0xF;
+        if nibble != 0 || started || shift == 0 {
+            started = true;
+            out.push(char::from_digit(u32::from(nibble), 16).unwrap_or('0'));
+        }
+    }
+}
+
 /// Issue [`SysinfoQueryId::SYSTEM_IDENTITY`] and decode the reply.
 fn query_identity(transport: &dyn Transport) -> Result<SystemIdentity, ResolveInfoError> {
     let reply = call(transport, SysinfoQueryId::SYSTEM_IDENTITY, &[]).map_err(map_call_error)?;
@@ -855,11 +1110,16 @@ mod tests {
     use alloc::string::String;
     use alloc::vec::Vec;
     use core::cell::RefCell;
+    use rustos_abi::net_ipc::{
+        NetAddrFamily, NetAddrState, NetIfAddr, NetIfKind, NetInterfaceFactsRecord,
+        NetInterfaceStateRecord, IF_NAME_LEN, NET_IF_MAX_ADDRS,
+    };
     use rustos_abi::origin::{CapabilitySummary, Origin, ProcId, TrustDomain};
     use rustos_abi::sysinfo::{
-        CpuLoadRecord, CpuLoadRequest, KernelMemoryStats, MemoryPressureStats, RamzipStats,
-        ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SysinfoQueryId,
-        SysinfoRequestHeader, SystemIdentity, Uptime, RECLAIM_CLASS_COUNT,
+        CpuLoadRecord, CpuLoadRequest, KernelMemoryStats, MemoryPressureStats,
+        NetInterfaceListRequest, RamzipStats, ReclaimClassRecord, ReclaimListRequest,
+        ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+        RECLAIM_CLASS_COUNT,
     };
     use rustos_abi::time::{Duration64, Time64};
     use rustos_abi::{CapabilityId, Errno, LimitKind, ResourceLimit};
@@ -1093,6 +1353,24 @@ mod tests {
                         .collect();
                     Ok(Self::page_reply(&encoders, req.offset, req.limit))
                 }
+                SysinfoQueryId::NET_INTERFACE_FACTS => {
+                    let req = NetInterfaceListRequest::from_bytes(payload)?;
+                    let records = alloc::vec![fixture_net_facts()];
+                    let encoders: Vec<_> = records
+                        .iter()
+                        .map(|record| move || record.to_le_bytes())
+                        .collect();
+                    Ok(Self::page_reply(&encoders, req.offset, req.limit))
+                }
+                SysinfoQueryId::NET_INTERFACE_STATE => {
+                    let req = NetInterfaceListRequest::from_bytes(payload)?;
+                    let records = alloc::vec![fixture_net_state()];
+                    let encoders: Vec<_> = records
+                        .iter()
+                        .map(|record| move || record.to_le_bytes())
+                        .collect();
+                    Ok(Self::page_reply(&encoders, req.offset, req.limit))
+                }
                 _ => Err(Errno::NotFound),
             }
         }
@@ -1122,7 +1400,7 @@ mod tests {
                 assert_eq!(v.value(), "rustbox");
                 assert_eq!(v.sensitivity, Sensitivity::Public);
             }
-            ResponsePayload::Metric(_) => panic!("expected info value"),
+            _ => panic!("expected info value"),
         }
     }
 
@@ -1132,7 +1410,7 @@ mod tests {
         let r = resolve_str("info:system/kernel", &fixture).expect("ok");
         match r.payload {
             ResponsePayload::Info(v) => assert_eq!(v.value(), "1.2.3"),
-            ResponsePayload::Metric(_) => panic!("expected info value"),
+            _ => panic!("expected info value"),
         }
     }
 
@@ -1145,7 +1423,7 @@ mod tests {
                 assert_eq!(v.value(), "abababababababababababababababab");
                 assert_eq!(v.sensitivity, Sensitivity::Sensitive);
             }
-            ResponsePayload::Metric(_) => panic!("expected info value"),
+            _ => panic!("expected info value"),
         }
     }
 
@@ -1162,7 +1440,7 @@ mod tests {
                 assert_eq!(v.value(), "1000");
                 assert_eq!(v.sensitivity, Sensitivity::Public);
             }
-            ResponsePayload::Metric(_) => panic!("expected info value"),
+            _ => panic!("expected info value"),
         }
     }
 
@@ -1190,7 +1468,7 @@ mod tests {
                     assert_eq!(v.value(), expected);
                     assert_eq!(v.sensitivity, Sensitivity::Public);
                 }
-                ResponsePayload::Metric(_) => panic!("expected info value"),
+                _ => panic!("expected info value"),
             }
         }
         // Every field rode the one self-scoped, ungated identity query.
@@ -1224,7 +1502,7 @@ mod tests {
                 assert_ne!(v.value(), "0".repeat(64));
                 assert_eq!(v.sensitivity, Sensitivity::Public);
             }
-            ResponsePayload::Metric(_) => panic!("expected info value"),
+            _ => panic!("expected info value"),
         }
     }
 
@@ -1283,7 +1561,7 @@ mod tests {
                 assert_eq!(m.reset_behavior, ResetBehavior::Boot);
                 assert_eq!(m.window, None);
             }
-            ResponsePayload::Info(_) => panic!("expected metric"),
+            _ => panic!("expected metric"),
         }
     }
 
@@ -1303,17 +1581,17 @@ mod tests {
                 assert_eq!(m.unit, Unit::Bytes);
                 assert_eq!(m.reset_behavior, ResetBehavior::Never);
             }
-            ResponsePayload::Info(_) => panic!("expected metric"),
+            _ => panic!("expected metric"),
         }
         let avail = resolve_str("stats:mem/available", &fixture).expect("ok");
         match avail.payload {
             ResponsePayload::Metric(m) => assert_eq!(m.value, 2048),
-            ResponsePayload::Info(_) => panic!("expected metric"),
+            _ => panic!("expected metric"),
         }
         let total = resolve_str("stats:mem/total", &fixture).expect("ok");
         match total.payload {
             ResponsePayload::Metric(m) => assert_eq!(m.value, 8192),
-            ResponsePayload::Info(_) => panic!("expected metric"),
+            _ => panic!("expected metric"),
         }
     }
 
@@ -1333,7 +1611,7 @@ mod tests {
                 assert_eq!(m.unit, Unit::Bytes);
                 assert_eq!(m.reset_behavior, ResetBehavior::Never);
             }
-            ResponsePayload::Info(_) => panic!("expected metric"),
+            _ => panic!("expected metric"),
         }
         let resident = resolve_str("stats:mem/user-resident", &fixture).expect("ok");
         match resident.payload {
@@ -1341,7 +1619,7 @@ mod tests {
                 assert_eq!(m.name(), "mem/user-resident");
                 assert_eq!(m.value, 4096);
             }
-            ResponsePayload::Info(_) => panic!("expected metric"),
+            _ => panic!("expected metric"),
         }
     }
 
@@ -1362,7 +1640,7 @@ mod tests {
                 assert_eq!(v.value(), "8192");
                 assert_eq!(v.sensitivity, Sensitivity::Public);
             }
-            ResponsePayload::Metric(_) => panic!("expected info value"),
+            _ => panic!("expected info value"),
         }
     }
 
@@ -1393,7 +1671,7 @@ mod tests {
                 assert_eq!(v.value(), "4096");
                 assert_eq!(v.sensitivity, Sensitivity::Public);
             }
-            ResponsePayload::Metric(_) => panic!("expected info value"),
+            _ => panic!("expected info value"),
         }
     }
 
@@ -1421,7 +1699,7 @@ mod tests {
                 assert_eq!(m.reset_behavior, ResetBehavior::Never);
                 assert_eq!(m.window, None);
             }
-            ResponsePayload::Info(_) => panic!("expected metric"),
+            _ => panic!("expected metric"),
         }
         // A countable resource reports a dimensionless count.
         let procs = resolve_str("stats:limits/processes", &fixture).expect("ok");
@@ -1431,7 +1709,7 @@ mod tests {
                 assert_eq!(m.value, 3);
                 assert_eq!(m.unit, Unit::Count);
             }
-            ResponsePayload::Info(_) => panic!("expected metric"),
+            _ => panic!("expected metric"),
         }
     }
 
@@ -1446,18 +1724,18 @@ mod tests {
                 assert_eq!(v.value(), "16");
                 assert_eq!(v.sensitivity, Sensitivity::Public);
             }
-            ResponsePayload::Metric(_) => panic!("expected info value"),
+            _ => panic!("expected info value"),
         }
         let hard = resolve_str("info:limits/open-streams/hard", &fixture).expect("ok");
         match hard.payload {
             ResponsePayload::Info(v) => assert_eq!(v.value(), "32"),
-            ResponsePayload::Metric(_) => panic!("expected info value"),
+            _ => panic!("expected info value"),
         }
         // An unlimited bound renders as `unlimited`, not as a raw sentinel.
         let unlimited = resolve_str("info:limits/processes/soft", &fixture).expect("ok");
         match unlimited.payload {
             ResponsePayload::Info(v) => assert_eq!(v.value(), "unlimited"),
-            ResponsePayload::Metric(_) => panic!("expected info value"),
+            _ => panic!("expected info value"),
         }
     }
 
@@ -1736,7 +2014,144 @@ mod tests {
         let fixture = Fixture::new();
         assert_eq!(
             resolve_str("sys:random", &fixture),
-            Err(ResolveInfoError::NotInfoOrStats)
+            Err(ResolveInfoError::NamespaceNotServed)
+        );
+    }
+
+    /// The interface-facts record the fixture serves for `wan`.
+    fn fixture_net_facts() -> NetInterfaceFactsRecord {
+        let mut name = [0u8; IF_NAME_LEN];
+        name[..3].copy_from_slice(b"wan");
+        NetInterfaceFactsRecord {
+            name,
+            kind: NetIfKind::Ethernet,
+            mac: [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
+            mtu: 1500,
+            offloads: 0,
+            rx_queues: 1,
+        }
+    }
+
+    /// The interface-state record the fixture serves for `wan`: one
+    /// preferred v4 address and one tentative v6 link-local.
+    fn fixture_net_state() -> NetInterfaceStateRecord {
+        let mut name = [0u8; IF_NAME_LEN];
+        name[..3].copy_from_slice(b"wan");
+        let mut addrs = [NetInterfaceStateRecord::EMPTY_ADDR; NET_IF_MAX_ADDRS];
+        let mut v4 = [0u8; 16];
+        v4[..4].copy_from_slice(&[10, 0, 2, 15]);
+        addrs[0] = NetIfAddr {
+            family: NetAddrFamily::V4,
+            prefix: 24,
+            state: NetAddrState::Preferred,
+            addr: v4,
+        };
+        let mut v6 = [0u8; 16];
+        v6[0] = 0xFE;
+        v6[1] = 0x80;
+        v6[15] = 0xB2;
+        addrs[1] = NetIfAddr {
+            family: NetAddrFamily::V6,
+            prefix: 64,
+            state: NetAddrState::Tentative,
+            addr: v6,
+        };
+        NetInterfaceStateRecord {
+            name,
+            link_up: true,
+            addr_count: 2,
+            addrs,
+        }
+    }
+
+    #[test]
+    fn info_net_facts_are_hw_gated_and_render() {
+        let fixture = Fixture::new();
+        let mac = resolve_str("info:net/wan/mac", &fixture).expect("ok");
+        assert_eq!(
+            mac.authorization,
+            Authorization::Capability(CapabilityId::SYSINFO_HW)
+        );
+        match mac.payload {
+            ResponsePayload::Info(v) => {
+                assert_eq!(v.value(), "52:54:00:12:34:56");
+                assert_eq!(v.sensitivity, Sensitivity::Sensitive);
+            }
+            _ => panic!("expected info value"),
+        }
+        let mtu = resolve_str("info:net/wan/mtu", &fixture).expect("ok");
+        match mtu.payload {
+            ResponsePayload::Info(v) => assert_eq!(v.value(), "1500"),
+            _ => panic!("expected info value"),
+        }
+        let kind = resolve_str("info:net/wan/kind", &fixture).expect("ok");
+        match kind.payload {
+            ResponsePayload::Info(v) => assert_eq!(v.value(), "ethernet"),
+            _ => panic!("expected info value"),
+        }
+    }
+
+    #[test]
+    fn state_net_link_and_address_render() {
+        let fixture = Fixture::new();
+        let link = resolve_str("state:net/wan/link", &fixture).expect("ok");
+        assert_eq!(
+            link.authorization,
+            Authorization::Capability(CapabilityId::SYSINFO_GLOBAL)
+        );
+        assert_eq!(link.query(), "state:net/wan/link");
+        match link.payload {
+            ResponsePayload::State(v) => {
+                assert_eq!(v.value(), "up");
+                assert_eq!(v.sensitivity, Sensitivity::Public);
+            }
+            _ => panic!("expected state value"),
+        }
+        // The v6 link-local renders in RFC 5952 form (zero run
+        // compressed) with its DAD state annotated.
+        let address = resolve_str("state:net/wan/address", &fixture).expect("ok");
+        match address.payload {
+            ResponsePayload::State(v) => {
+                assert_eq!(v.value(), "10.0.2.15/24, fe80::b2/64 (tentative)");
+            }
+            _ => panic!("expected state value"),
+        }
+    }
+
+    #[test]
+    fn net_unknown_interface_or_leaf_fails_closed() {
+        let fixture = Fixture::new();
+        assert_eq!(
+            resolve_str("info:net/lan9/mac", &fixture),
+            Err(ResolveInfoError::UnknownSelector)
+        );
+        assert_eq!(
+            resolve_str("info:net/wan/speed", &fixture),
+            Err(ResolveInfoError::UnknownSelector)
+        );
+        assert_eq!(
+            resolve_str("state:net/wan/routes", &fixture),
+            Err(ResolveInfoError::UnknownSelector)
+        );
+        assert_eq!(
+            resolve_str("state:net/lan9/link", &fixture),
+            Err(ResolveInfoError::UnknownSelector)
+        );
+    }
+
+    #[test]
+    fn net_denial_maps_to_capability_denied() {
+        let mut fixture = Fixture::new();
+        fixture.deny = Some(SysinfoQueryId::NET_INTERFACE_FACTS);
+        assert_eq!(
+            resolve_str("info:net/wan/mac", &fixture),
+            Err(ResolveInfoError::CapabilityDenied)
+        );
+        let mut fixture = Fixture::new();
+        fixture.deny = Some(SysinfoQueryId::NET_INTERFACE_STATE);
+        assert_eq!(
+            resolve_str("state:net/wan/link", &fixture),
+            Err(ResolveInfoError::CapabilityDenied)
         );
     }
 

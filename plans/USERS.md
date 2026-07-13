@@ -156,8 +156,9 @@ no-login service account.
     `FIRST_USER_UID`/`FIRST_USER_GID` (§0.3); `useradd`/`groupadd`
     allocate from the user band.
   - Per-service ceilings in `grants.rs` (`DEVMGR_CEILING`,
-    `SYSINFOD_CEILING`, `SEATMGR_CEILING`, `LOGIN_CEILING`), pinned and
-    sibling-disjoint by test; `capability_set` builds the stored set.
+    `SYSINFOD_CEILING`, `SEATMGR_CEILING`, `LOGIN_CEILING`,
+    `NETSTACK_CEILING`), pinned and sibling-disjoint by test;
+    `capability_set` builds the stored set.
   - The `users_admin` `ListUsers` entry reports the truthful tri-state
     (`AccountStateCode::{Active, Locked, NoLogin}`, fail-closed decode)
     and spells absent home/shell as `none`; the `users` tool renders all

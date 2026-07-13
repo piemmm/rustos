@@ -4,7 +4,8 @@
 //! frames. Higher-layer protocols (IP, ARP, …) live above this
 //! trait in user space and are out of scope for `abi-v1`.
 
-use super::{BufferClass, DriverError};
+use super::net_ring::{FrameRings, ServiceReport};
+use super::DriverError;
 use crate::Errno;
 
 /// Length of an Ethernet MAC address.
@@ -170,9 +171,17 @@ impl DeviceFacts {
 
 /// Trait every link-layer network driver implements.
 ///
+/// Frame I/O is the shared-memory frame-ring transport
+/// (`plans/NETWORK.md` §2.3): the stack owns a [`FrameRings`] pair
+/// (queued transmits in `tx`, delivered frames in `rx`) and hands it
+/// to [`Net::service`], the single doorbell that moves frames both
+/// ways. The driver mutates the rings only inside that call, so the
+/// call boundary is the synchronisation and no frame bytes cross the
+/// IPC when the rings live in a shared region.
+///
 /// # Capabilities
 ///
-/// `transmit` and `receive` are gated by
+/// `service` is gated by
 /// [`CapabilityId::NET_RAW`](crate::CapabilityId::NET_RAW) at the
 /// dispatch site, on top of the load-time
 /// [`CapabilityId::DRV_LOAD`](crate::CapabilityId::DRV_LOAD) check.
@@ -194,101 +203,40 @@ pub trait Net {
     /// [`DriverHandle`]: crate::driver::DriverHandle
     fn device_facts(&self) -> Result<DeviceFacts, DriverError>;
 
-    /// Transmit one frame.
+    /// Service the frame rings once: move every frame queued in
+    /// `rings.tx` into the device, then move delivered frames from
+    /// the device into `rings.rx` until the device is drained or the
+    /// ring is full ([`ServiceReport::rx_ring_full`] — nothing is
+    /// dropped; the stack drains the ring and calls again).
     ///
-    /// The frame is consumed by the device when this method returns
-    /// `Ok(())`; the caller may reuse the buffer.
+    /// A frame whose length the device refuses (runt, over-MTU) is
+    /// consumed from the TX ring and dropped — a malformed producer
+    /// must not wedge the queue behind it — and is excluded from
+    /// [`ServiceReport::transmitted`].
     ///
-    /// # Errors
-    ///
-    /// * [`DriverError::PermissionDenied`] if the dispatcher has not
-    ///   verified `CAP_NET_RAW`.
-    /// * [`DriverError::BufferTooSmall`] if `frame.len()` is shorter
-    ///   than the minimum link-layer frame size for the device.
-    /// * [`DriverError::LengthOutOfRange`] if `frame.len()` exceeds
-    ///   the device MTU.
-    /// * [`DriverError::Busy`] if the transmit queue is full.
-    ///
-    /// # Capabilities
-    ///
-    /// Requires [`CapabilityId::NET_RAW`](crate::CapabilityId::NET_RAW).
-    fn transmit(&mut self, frame: &[u8]) -> Result<(), DriverError>;
-
-    /// Drain one frame into `buf`, returning the number of bytes
-    /// written.
-    ///
-    /// Returns `Ok(0)` when no frame is available; `buf` is left
-    /// untouched in that case.
+    /// When `rings.class` is
+    /// [`BufferClass::Sensitive`](super::BufferClass::Sensitive) the
+    /// driver zeroes every internal staging copy before returning.
     ///
     /// # Errors
     ///
     /// * [`DriverError::PermissionDenied`] if the dispatcher has not
     ///   verified `CAP_NET_RAW`.
-    /// * [`DriverError::BufferTooSmall`] if the next pending frame is
-    ///   longer than `buf`.
+    /// * [`DriverError::BadMagic`] if the ring state is corrupt (the
+    ///   region's counters or a slot length fail validation).
+    /// * [`DriverError::DeviceFault`] if the underlying hardware
+    ///   failed.
     ///
     /// # Capabilities
     ///
     /// Requires [`CapabilityId::NET_RAW`](crate::CapabilityId::NET_RAW).
-    fn receive(&mut self, buf: &mut [u8]) -> Result<usize, DriverError>;
-
-    /// Transmit one frame, declaring the payload's sensitivity class.
-    ///
-    /// Behaviour is identical to [`Self::transmit`] except that when
-    /// `class == BufferClass::Sensitive` the driver is required to
-    /// zero every internal staging copy of the frame before this
-    /// method returns.
-    ///
-    /// The default implementation delegates to [`Self::transmit`]
-    /// and is only safe for drivers that DMA straight from `frame`
-    /// without retaining a private copy. Drivers that bounce-buffer
-    /// transmits **must** override.
-    ///
-    /// # Errors
-    ///
-    /// As for [`Self::transmit`].
-    ///
-    /// # Capabilities
-    ///
-    /// Requires [`CapabilityId::NET_RAW`](crate::CapabilityId::NET_RAW).
-    fn transmit_with_class(&mut self, frame: &[u8], class: BufferClass) -> Result<(), DriverError> {
-        let _ = class;
-        self.transmit(frame)
-    }
-
-    /// Drain one frame, declaring the receive buffer's sensitivity
-    /// class.
-    ///
-    /// Behaviour is identical to [`Self::receive`] except that when
-    /// `class == BufferClass::Sensitive` the driver is required to
-    /// zero every internal staging copy of the frame before this
-    /// method returns. The caller-owned `buf` is left populated; it
-    /// is the caller's responsibility to scrub `buf` once the
-    /// payload is consumed.
-    ///
-    /// The default implementation delegates to [`Self::receive`]
-    /// and is only safe for drivers that DMA straight into `buf`.
-    /// Drivers that bounce-buffer receives **must** override.
-    ///
-    /// # Errors
-    ///
-    /// As for [`Self::receive`].
-    ///
-    /// # Capabilities
-    ///
-    /// Requires [`CapabilityId::NET_RAW`](crate::CapabilityId::NET_RAW).
-    fn receive_with_class(
-        &mut self,
-        buf: &mut [u8],
-        class: BufferClass,
-    ) -> Result<usize, DriverError> {
-        let _ = class;
-        self.receive(buf)
-    }
+    fn service(&mut self, rings: &mut FrameRings<'_>) -> Result<ServiceReport, DriverError>;
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::net_ring::RingGeometry;
+    use super::super::BufferClass;
     use super::*;
 
     #[test]
@@ -324,11 +272,12 @@ mod tests {
         assert_eq!(no_queue.validate(), Err(Errno::OutOfRange));
     }
 
-    struct MockNet {
-        mac: MacAddress,
-        last_tx: [u8; 64],
-        last_tx_len: usize,
-    }
+    /// Test geometry: 4 slots of 128 bytes per ring.
+    const GEOMETRY: RingGeometry = match RingGeometry::new(4, 128) {
+        Ok(g) => g,
+        Err(_) => panic!("valid test geometry"),
+    };
+    const REGION_LEN: usize = GEOMETRY.region_len();
 
     fn facts(mac: MacAddress) -> DeviceFacts {
         DeviceFacts {
@@ -340,171 +289,177 @@ mod tests {
         }
     }
 
+    /// A loopback [`Net`] mock: frames drained from the TX ring queue
+    /// inside the device and come back on the RX ring, through a
+    /// staging buffer that records whether it was scrubbed.
+    struct MockNet {
+        mac: MacAddress,
+        pending: [([u8; 128], usize); 8],
+        pending_len: usize,
+        staging: [u8; 128],
+        scrubbed_after_last_call: bool,
+    }
+
+    impl MockNet {
+        fn new() -> Self {
+            Self {
+                mac: MacAddress::new([0; 6]),
+                pending: [([0; 128], 0); 8],
+                pending_len: 0,
+                staging: [0; 128],
+                scrubbed_after_last_call: false,
+            }
+        }
+    }
+
     impl Net for MockNet {
         fn device_facts(&self) -> Result<DeviceFacts, DriverError> {
             Ok(facts(self.mac))
         }
 
-        fn transmit(&mut self, frame: &[u8]) -> Result<(), DriverError> {
-            if frame.len() < 14 {
-                return Err(DriverError::BufferTooSmall);
+        fn service(&mut self, rings: &mut FrameRings<'_>) -> Result<ServiceReport, DriverError> {
+            let mut report = ServiceReport::default();
+            self.scrubbed_after_last_call = false;
+            // Drain the TX ring into the device's pending queue.
+            loop {
+                match rings.tx.pop(&mut self.staging) {
+                    Ok(Some(len)) => {
+                        // Device length policy: drop runts, count the rest.
+                        if len >= 14 && self.pending_len < self.pending.len() {
+                            self.pending[self.pending_len].0[..len]
+                                .copy_from_slice(&self.staging[..len]);
+                            self.pending[self.pending_len].1 = len;
+                            self.pending_len += 1;
+                            report.transmitted += 1;
+                        }
+                    }
+                    Ok(None) => break,
+                    // A corrupt slot was consumed; skip it and go on.
+                    Err(Errno::LengthOutOfRange) => {}
+                    Err(_) => return Err(DriverError::BadMagic),
+                }
             }
-            if frame.len() > self.last_tx.len() {
-                return Err(DriverError::LengthOutOfRange);
+            // Loop the pending frames back through the RX ring.
+            let mut delivered = 0;
+            for i in 0..self.pending_len {
+                let (frame, len) = &self.pending[i];
+                match rings.rx.push(&frame[..*len]) {
+                    Ok(()) => {
+                        report.received += 1;
+                        delivered += 1;
+                    }
+                    Err(Errno::NoSpace) => {
+                        report.rx_ring_full = true;
+                        break;
+                    }
+                    Err(_) => return Err(DriverError::BadMagic),
+                }
             }
-            self.last_tx[..frame.len()].copy_from_slice(frame);
-            self.last_tx_len = frame.len();
-            Ok(())
-        }
-
-        fn receive(&mut self, buf: &mut [u8]) -> Result<usize, DriverError> {
-            if self.last_tx_len == 0 {
-                return Ok(0);
+            self.pending.copy_within(delivered..self.pending_len, 0);
+            self.pending_len -= delivered;
+            if rings.class.is_sensitive() {
+                self.staging.fill(0);
+                self.scrubbed_after_last_call = true;
             }
-            if buf.len() < self.last_tx_len {
-                return Err(DriverError::BufferTooSmall);
-            }
-            buf[..self.last_tx_len].copy_from_slice(&self.last_tx[..self.last_tx_len]);
-            let n = self.last_tx_len;
-            self.last_tx_len = 0;
-            Ok(n)
+            Ok(report)
         }
     }
 
     #[test]
     fn loopback_round_trip() {
-        let mut n = MockNet {
-            mac: MacAddress::new([0; 6]),
-            last_tx: [0; 64],
-            last_tx_len: 0,
-        };
-        let frame = [0xAAu8; 16];
-        assert!(n.transmit(&frame).is_ok());
-        let mut buf = [0u8; 64];
-        assert_eq!(n.receive(&mut buf), Ok(16));
-        assert_eq!(&buf[..16], &frame[..]);
-        assert_eq!(n.receive(&mut buf), Ok(0));
-    }
-
-    /// `Net` impl that stages tx/rx through a private buffer and
-    /// scrubs the staging on Sensitive.
-    struct SensitiveStagingNet {
-        mac: MacAddress,
-        staging: [u8; 64],
-        staged_len: usize,
-        scrubbed_after_last_call: bool,
-    }
-
-    impl Net for SensitiveStagingNet {
-        fn device_facts(&self) -> Result<DeviceFacts, DriverError> {
-            Ok(facts(self.mac))
-        }
-        fn transmit(&mut self, frame: &[u8]) -> Result<(), DriverError> {
-            if frame.len() < 14 {
-                return Err(DriverError::BufferTooSmall);
-            }
-            if frame.len() > self.staging.len() {
-                return Err(DriverError::LengthOutOfRange);
-            }
-            self.staging[..frame.len()].copy_from_slice(frame);
-            self.staged_len = frame.len();
-            self.scrubbed_after_last_call = false;
-            Ok(())
-        }
-        fn receive(&mut self, buf: &mut [u8]) -> Result<usize, DriverError> {
-            if self.staged_len == 0 {
-                return Ok(0);
-            }
-            if buf.len() < self.staged_len {
-                return Err(DriverError::BufferTooSmall);
-            }
-            buf[..self.staged_len].copy_from_slice(&self.staging[..self.staged_len]);
-            let n = self.staged_len;
-            self.staged_len = 0;
-            self.scrubbed_after_last_call = false;
-            Ok(n)
-        }
-        fn transmit_with_class(
-            &mut self,
-            frame: &[u8],
-            class: BufferClass,
-        ) -> Result<(), DriverError> {
-            self.transmit(frame)?;
-            if class.is_sensitive() {
-                self.staging.fill(0);
-                self.scrubbed_after_last_call = true;
-            }
-            Ok(())
-        }
-        fn receive_with_class(
-            &mut self,
-            buf: &mut [u8],
-            class: BufferClass,
-        ) -> Result<usize, DriverError> {
-            let n = self.receive(buf)?;
-            if class.is_sensitive() {
-                self.staging.fill(0);
-                self.scrubbed_after_last_call = true;
-            }
-            Ok(n)
-        }
+        let mut n = MockNet::new();
+        let mut region = [0u8; REGION_LEN];
+        let mut rings =
+            FrameRings::bind(&mut region, GEOMETRY, BufferClass::NonSensitive).expect("bind");
+        rings.tx.push(&[0xAA; 16]).expect("queue tx");
+        let report = n.service(&mut rings).expect("service");
+        assert_eq!(report.transmitted, 1);
+        assert_eq!(report.received, 1);
+        assert!(!report.rx_ring_full);
+        let mut buf = [0u8; 128];
+        assert_eq!(rings.rx.pop(&mut buf), Ok(Some(16)));
+        assert_eq!(&buf[..16], &[0xAA; 16]);
+        assert_eq!(rings.rx.pop(&mut buf), Ok(None));
     }
 
     #[test]
-    fn net_sensitive_class_triggers_staging_scrub() {
-        let mut n = SensitiveStagingNet {
-            mac: MacAddress::new([0; 6]),
-            staging: [0; 64],
-            staged_len: 0,
-            scrubbed_after_last_call: false,
-        };
-        let frame = [0xC3u8; 24];
-        assert!(n
-            .transmit_with_class(&frame, BufferClass::Sensitive)
-            .is_ok());
+    fn runt_tx_frames_are_dropped_without_wedging() {
+        let mut n = MockNet::new();
+        let mut region = [0u8; REGION_LEN];
+        let mut rings =
+            FrameRings::bind(&mut region, GEOMETRY, BufferClass::NonSensitive).expect("bind");
+        rings.tx.push(&[0x01; 4]).expect("queue runt");
+        rings.tx.push(&[0x02; 20]).expect("queue good");
+        let report = n.service(&mut rings).expect("service");
+        // The runt was consumed and dropped; the good frame flowed.
+        assert_eq!(report.transmitted, 1);
+        assert_eq!(report.received, 1);
+        let mut buf = [0u8; 128];
+        assert_eq!(rings.rx.pop(&mut buf), Ok(Some(20)));
+        assert_eq!(buf[0], 0x02);
+    }
+
+    #[test]
+    fn rx_ring_full_backpressures_without_loss() {
+        let mut n = MockNet::new();
+        let mut region = [0u8; REGION_LEN];
+        let mut rings =
+            FrameRings::bind(&mut region, GEOMETRY, BufferClass::NonSensitive).expect("bind");
+        // Five frames through a four-slot RX ring: two service passes.
+        for _ in 0..4 {
+            rings.tx.push(&[0x33; 20]).expect("queue");
+        }
+        let report = n.service(&mut rings).expect("service");
+        assert_eq!(report.received, 4);
+        rings.tx.push(&[0x44; 20]).expect("queue fifth");
+        let report = n.service(&mut rings).expect("service");
+        assert_eq!(report.transmitted, 1);
+        assert!(report.rx_ring_full);
+        assert_eq!(report.received, 0);
+        // Drain and pump again: the fifth frame arrives, nothing lost.
+        let mut buf = [0u8; 128];
+        for _ in 0..4 {
+            assert_eq!(rings.rx.pop(&mut buf), Ok(Some(20)));
+        }
+        let report = n.service(&mut rings).expect("service");
+        assert_eq!(report.received, 1);
+        assert_eq!(rings.rx.pop(&mut buf), Ok(Some(20)));
+        assert_eq!(buf[0], 0x44);
+    }
+
+    #[test]
+    fn sensitive_class_triggers_staging_scrub() {
+        let mut n = MockNet::new();
+        let mut region = [0u8; REGION_LEN];
+        let mut rings =
+            FrameRings::bind(&mut region, GEOMETRY, BufferClass::Sensitive).expect("bind");
+        rings.tx.push(&[0xC3; 24]).expect("queue");
+        n.service(&mut rings).expect("service");
         assert!(n.scrubbed_after_last_call);
-        assert!(n.staging.iter().all(|b| *b == 0));
-        // Reload staging by transmitting non-sensitively then receiving
-        // non-sensitively; staging must NOT be wiped.
-        assert!(n
-            .transmit_with_class(&frame, BufferClass::NonSensitive)
-            .is_ok());
-        let mut buf = [0u8; 64];
-        assert_eq!(
-            n.receive_with_class(&mut buf, BufferClass::NonSensitive),
-            Ok(24)
-        );
+        assert!(n.staging.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn non_sensitive_class_leaves_staging() {
+        let mut n = MockNet::new();
+        let mut region = [0u8; REGION_LEN];
+        let mut rings =
+            FrameRings::bind(&mut region, GEOMETRY, BufferClass::NonSensitive).expect("bind");
+        rings.tx.push(&[0xC3; 24]).expect("queue");
+        n.service(&mut rings).expect("service");
         assert!(!n.scrubbed_after_last_call);
         assert!(n.staging.contains(&0xC3));
     }
 
     #[test]
-    fn net_default_with_class_delegates() {
-        let mut n = MockNet {
-            mac: MacAddress::new([0; 6]),
-            last_tx: [0; 64],
-            last_tx_len: 0,
-        };
-        let frame = [0xABu8; 20];
-        assert!(n
-            .transmit_with_class(&frame, BufferClass::NonSensitive)
-            .is_ok());
-        let mut buf = [0u8; 64];
-        assert_eq!(
-            n.receive_with_class(&mut buf, BufferClass::NonSensitive),
-            Ok(20)
-        );
-        assert_eq!(&buf[..20], &frame[..]);
-    }
-
-    #[test]
-    fn transmit_rejects_runt() {
-        let mut n = MockNet {
-            mac: MacAddress::new([0; 6]),
-            last_tx: [0; 64],
-            last_tx_len: 0,
-        };
-        let frame = [0u8; 4];
-        assert_eq!(n.transmit(&frame), Err(DriverError::BufferTooSmall));
+    fn corrupt_ring_counters_fail_closed() {
+        let mut n = MockNet::new();
+        let mut region = [0u8; REGION_LEN];
+        // Corrupt the TX ring's producer counter (second ring header).
+        let tx_header = GEOMETRY.ring_len();
+        region[tx_header..tx_header + 4].copy_from_slice(&100u32.to_le_bytes());
+        let mut rings =
+            FrameRings::bind(&mut region, GEOMETRY, BufferClass::NonSensitive).expect("bind");
+        assert_eq!(n.service(&mut rings), Err(DriverError::BadMagic));
     }
 }

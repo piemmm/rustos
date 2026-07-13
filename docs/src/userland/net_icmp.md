@@ -54,12 +54,14 @@ responder outright in its N3 increment.
   unsupported EtherTypes/protocols, and ICMP messages whose checksum
   fails verification are dropped silently (`Ok(None)`). A reply that
   does not fit in `out` returns `NetServiceError::OutputTooSmall`.
-- `poll(net, rx, tx)` runs one receive/answer/transmit cycle over a
-  `Net` driver and reports whether a frame was processed.
-- `run(net, rx, tx, max_polls)` drives `poll` a bounded number of
-  times. The bound is mandatory: there is no sleep-until or
-  retry-until loop (`AGENTS.md` §2.1); a long-running service supplies
-  its own budget and re-enters between blocking driver waits.
+- `poll(net, rings, rx, tx)` runs one service/answer cycle over a
+  `Net` driver's frame rings and reports whether a frame was
+  processed.
+- `run(net, rings, rx, tx, max_polls)` drives `poll` a bounded number
+  of times. The bound is mandatory: there is no sleep-until or
+  retry-until loop (`AGENTS.md` §2.1); each poll's device wait is
+  event-driven inside `Net::service`, so the budget bounds churn, not
+  a spin.
 
 ### `Client` API
 
@@ -70,18 +72,19 @@ responder outright in its N3 increment.
   `is_echo_reply(frame, dest, id, seq)` serialise an ICMP echo request
   to an already-resolved peer and recognise the matching checksum-valid
   echo reply.
-- `resolve(net, target, rx, tx, max_polls)` transmits one ARP request
-  and polls a bounded number of inbound frames for the reply, returning
-  `Ok(Some(mac))` once resolved or `Ok(None)` within the budget.
-- `ping(net, peer_mac, dest, id, seq, payload, rx, tx, max_polls)`
-  transmits one ICMP echo request and polls for the matching reply,
-  returning `Ok(true)` once confirmed. Both loops are bounded for the
-  same reason as `Responder::run`.
+- `resolve(net, rings, target, rx, tx, max_polls)` queues one ARP
+  request and services the rings a bounded number of times looking for
+  the reply, returning `Ok(Some(mac))` once resolved or `Ok(None)`
+  within the budget.
+- `ping(net, rings, peer_mac, dest, id, seq, payload, rx, tx,
+  max_polls)` queues one ICMP echo request and services the rings for
+  the matching reply, returning `Ok(true)` once confirmed. Both loops
+  are bounded for the same reason as `Responder::run`.
 
 ## Security
 
 The responder performs no privileged operation; it only transforms
-bytes. Capability enforcement for `Net::transmit` / `Net::receive`
+bytes. Capability enforcement for `Net::service`
 (`CAP_NET_RAW`) happens at the driver dispatch site (`AGENTS.md` §5.4),
 upstream of this crate. A reply is emitted only for a request that is
 correctly addressed, well-formed, and (for ICMP) checksum-valid;

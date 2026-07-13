@@ -190,6 +190,7 @@ members = [
     "userland/gui/taskbar",
     "userland/gui/session",
     "userland/net/icmp",
+    "userland/net/netstack",
 
     # Tooling
     "tools/xtask",

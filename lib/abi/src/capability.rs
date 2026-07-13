@@ -420,6 +420,21 @@ impl CapabilityId {
     /// exist to provoke and observe.
     pub const MEM_PIN: Self = Self(34);
 
+    /// Administer the network stack (`plans/NETWORK.md` §3).
+    ///
+    /// Gates the `netstack` service's admin surface: interface,
+    /// address, and route mutation, plus the per-interface counter
+    /// reads that surface alongside them. It guards the whole class of
+    /// network-configuration authority — every managed interface, not
+    /// one device — and no existing capability expresses it:
+    /// `CAP_NET_RAW` moves raw frames, and the `CAP_SYSINFO_*` family
+    /// only observes. Enforced by the `netstack` dispatcher against
+    /// the caller's kernel-attested origin before any state is
+    /// touched; every refusal is audited. Intended holders are the
+    /// administrative account ceiling and the network-configuration
+    /// tooling.
+    pub const NET_ADMIN: Self = Self(35);
+
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
     ///
@@ -464,6 +479,7 @@ impl CapabilityId {
         (Self::SYSINFO_INTROSPECT, "CAP_SYSINFO_INTROSPECT"),
         (Self::SEAT_ADMIN, "CAP_SEAT_ADMIN"),
         (Self::MEM_PIN, "CAP_MEM_PIN"),
+        (Self::NET_ADMIN, "CAP_NET_ADMIN"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an

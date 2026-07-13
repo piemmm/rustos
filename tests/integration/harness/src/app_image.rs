@@ -574,6 +574,7 @@ mod tests {
                 "man",
                 "mkdir",
                 "mv",
+                "netstack",
                 "printf",
                 "ps",
                 "reset",
@@ -607,7 +608,10 @@ mod tests {
             .filter(|d| d.manifest.kind == AppKind::Service)
             .map(|d| d.manifest.name.as_str())
             .collect();
-        assert_eq!(services, ["devmgr", "login", "seatmgr", "sysinfod"]);
+        assert_eq!(
+            services,
+            ["devmgr", "login", "netstack", "seatmgr", "sysinfod"]
+        );
     }
 
     #[test]

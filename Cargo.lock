@@ -1632,6 +1632,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-netstack"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-caps",
+ "rustos-log",
+ "rustos-net",
+ "rustos-rt",
+]
+
+[[package]]
 name = "rustos-partition"
 version = "0.0.0"
 dependencies = [

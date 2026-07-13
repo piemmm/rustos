@@ -54,5 +54,6 @@
 #define ROS_CAP_SYSINFO_INTROSPECT ((uint16_t)32u)
 #define ROS_CAP_SEAT_ADMIN ((uint16_t)33u)
 #define ROS_CAP_MEM_PIN ((uint16_t)34u)
+#define ROS_CAP_NET_ADMIN ((uint16_t)35u)
 
 #endif /* ROS_CAPABILITY_H */

@@ -351,20 +351,39 @@ docs, and the full gate) because the whole is too large for one change:
   `cargo xtask fuzz`. Docs: `docs/src/lib/net.md` + `lib/net/README.md`
   refreshed.
 
-#### N3b — the `netstack` service process `[ ]`
-- `userland/net/netstack` process: owns the interfaces, the event loop
-  (wait set over NIC rings + timer), calls the `lib/net` engines,
-  `CAP_NET_ADMIN` admin surface (typed IPC: interface list/addr
-  add/route add/counters), and the first `info:net`/`state:net` sysinfo
-  queries (§5: interface facts, link/address state) served through new
-  `SysinfoQueryId` members + the `lib/procinfo` resolver mapping.
-- The driver seam's transport half evolves in place: `Net` frame I/O
-  becomes the shared-memory frame-ring transport; `virtio_net` serves
-  it (still no offloads); the kernel provides only endpoint plumbing +
-  `irq_wait` wake. (`DeviceFacts` landed in N3a.)
-- Tests: engine-level end-to-end over a loopback fake, audited-refusal
-  tests for the admin surface. Docs: `docs/src/userland/netstack.md`;
-  driver README updates.
+#### N3b — the `netstack` service process `[x]`
+- Landed: `userland/net/netstack` (engine library + freestanding `Run`
+  binary, the `netstack.app` service bundle, service account uid 14
+  with the pinned `NETSTACK_CEILING`): the alias-named interface table
+  (one `lib/net` `Stack` per interface), the ring pump
+  (`service_interface`: engine output → TX ring → `Net::service` →
+  RX frames back through the engine), `next_deadline` arming the wait
+  set's one-shot timeout, and the capability-checked, audited
+  dispatcher on the reserved `NETSTACK_ENDPOINT` — `CAP_NET_ADMIN`
+  (new, id 35, in the administrator ceiling) gates interface
+  list/addr add/route add/counters; the whole-state facts/state pages
+  are the broker surface gated on `CAP_SYSINFO_INTROSPECT`, narrowed
+  per client by `sysinfod` (`CAP_SYSINFO_HW` facts / MAC,
+  `CAP_SYSINFO_GLOBAL` state) and resolved by `lib/procinfo` as
+  `info:net/<iface>/{mac,mtu,kind}` and
+  `state:net/<iface>/{link,address}` (the resolver's first `state:`
+  namespace; RFC 5952 v6 rendering).
+- Landed: the driver seam's transport half — `Net` frame I/O evolved
+  in place into the shared-memory frame-ring transport
+  (`rustos_abi::driver::net_ring`: validated `RingGeometry`,
+  fail-closed `FrameRing` push/pop/skip, `FrameRings` + `ServiceReport`;
+  rings mutated only inside the blocking `service` call, so the call
+  boundary is the synchronisation — safe Rust, no shared-memory
+  atomics); `virtio_net` serves it (park-once on the host's device
+  waiter when nothing moved, lossless staged-RX back-pressure, still
+  no offloads); `userland/net/icmp` and the QEMU verticals drive the
+  same rings until N3c deletes the responder.
+- Tests landed: netstack loopback end-to-end (a peer-`Stack` fake:
+  v4 ARP+echo and v6 DAD+ND+echo through the real pump), the
+  audited-refusal dispatch matrix, ring/codec fail-closed suites in
+  `lib/abi`, and the gated/audited sysinfod + procinfo query tests.
+  Docs: `docs/src/userland/netstack.md`, `docs/src/drivers/network.md`
+  + driver-trait/net_icmp pages refreshed.
 
 #### N3c — QEMU verticals + `userland/net/icmp` deletion `[ ]`
 - `userland/net/icmp` is **deleted**; its QEMU ARP/ping coverage is

@@ -28,27 +28,40 @@
 //!
 //! # Capabilities
 //!
-//! Loading requires [`CapabilityId::DRV_LOAD`]; `transmit` and
-//! `receive` additionally require the dispatcher to have verified
+//! Loading requires [`CapabilityId::DRV_LOAD`]; `service`
+//! additionally requires the dispatcher to have verified
 //! [`CapabilityId::NET_RAW`] (see `lib/abi/src/driver/net.rs`).
+//!
+//! # Frame rings
+//!
+//! Frame I/O is [`Net::service`] over the shared-memory frame-ring
+//! transport (`plans/NETWORK.md` §2.3): every call drains the TX
+//! ring into the device and harvests delivered frames into the RX
+//! ring. When nothing moved at all, the call parks once on the
+//! host's device-event waiter (`notify_wait`) and re-checks, so a
+//! caller looping on `service` stays event-driven, never a spin. A
+//! harvested frame that finds the RX ring full is kept staged (the
+//! receive chain is simply not re-posted) and delivered by the next
+//! call — back-pressure without loss.
 //!
 //! # Staging buffers
 //!
 //! DMA staging is allocated **once**, at [`VirtioNet::open`]: one
 //! header + one MTU-sized frame buffer per direction, reused for
 //! every packet. The receive pair is posted as a device-write chain
-//! at open and re-posted after every harvested completion, so the
-//! device always owns a receive buffer and an idle `receive` poll
+//! at open and re-posted after every delivered completion, so the
+//! device always owns a receive buffer and an idle `service` poll
 //! touches no allocator — no per-packet `dma_alloc`/`dma_free`
 //! round trip, no per-poll audit-log traffic on the hot path.
 //!
 //! # Zero-on-free
 //!
-//! [`Net::transmit_with_class`] and [`Net::receive_with_class`]
-//! honour [`BufferClass::Sensitive`](rustos_abi::driver::BufferClass)
-//! by scrubbing the persistent staging through
+//! [`Net::service`] honours a
+//! [`BufferClass::Sensitive`](rustos_abi::driver::BufferClass) ring
+//! class by scrubbing the persistent staging through
 //! [`rustos_virtio::BounceBuffer::into_slab`] before the buffers are
-//! reused for the next packet.
+//! reused for the next packet; a harvested frame still awaiting a
+//! free RX slot is scrubbed after it is delivered, never before.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -58,8 +71,8 @@ use core::convert::TryFrom;
 use rustos_abi::driver::net::{
     DeviceFacts, LinkState, MacAddress, Net, NetOffloads, MAC_ADDRESS_LEN,
 };
-use rustos_abi::driver::BufferClass;
-use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
+use rustos_abi::driver::net_ring::{FrameRings, ServiceReport};
+use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, Errno};
 use rustos_virtio::{
     BounceBuffer, ChainSegment, Direction, DmaSlab, SplitQueue, Status, Transport, VirtioError,
     VirtioHost,
@@ -130,9 +143,12 @@ pub struct VirtioNet<'h, T: Transport> {
     /// holds the pair in class-aware [`BounceBuffer`] wrappers.
     rx_header: Option<DmaSlab>,
     rx_data: Option<DmaSlab>,
-    /// Persistent transmit staging, reused by every `transmit`.
+    /// Persistent transmit staging, reused by every serviced frame.
     tx_header: Option<DmaSlab>,
     tx_data: Option<DmaSlab>,
+    /// Length of a harvested frame still waiting for RX-ring space
+    /// (the receive chain stays un-posted while this is `Some`).
+    rx_staged_len: Option<usize>,
 }
 
 impl<'h, T: Transport> VirtioNet<'h, T> {
@@ -197,6 +213,7 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
             rx_data: Some(rx_data),
             tx_header: Some(tx_header),
             tx_data: Some(tx_data),
+            rx_staged_len: None,
         };
         // Arm the receive path: the device owns a posted buffer from
         // DRIVER_OK onward, so a frame arriving before the first
@@ -262,47 +279,64 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         [0u8; wire::HEADER_LEN]
     }
 
-    fn run_transmit(&mut self, frame: &[u8], class: BufferClass) -> Result<(), DriverError> {
-        // Validate.
-        if frame.len() < wire::MIN_ETHERNET_FRAME {
-            return Err(DriverError::BufferTooSmall);
+    /// Drain every frame queued in the TX ring into the device.
+    fn drain_tx(
+        &mut self,
+        rings: &mut FrameRings<'_>,
+        report: &mut ServiceReport,
+    ) -> Result<(), DriverError> {
+        loop {
+            // Stage through the class-aware wrappers; `into_slab`
+            // scrubs the staging before it is put back when the ring
+            // class declares the traffic sensitive.
+            let (Some(header_slab), Some(data_slab)) = (self.tx_header.take(), self.tx_data.take())
+            else {
+                return Err(DriverError::DeviceFault);
+            };
+            let mut header_bb = BounceBuffer::new(header_slab, rings.class);
+            let mut data_bb = BounceBuffer::new(data_slab, rings.class);
+            let outcome = self.tx_one(rings, &mut header_bb, &mut data_bb);
+            self.tx_header = Some(header_bb.into_slab());
+            self.tx_data = Some(data_bb.into_slab());
+            match outcome? {
+                TxOutcome::Sent => report.transmitted += 1,
+                TxOutcome::Dropped => {}
+                TxOutcome::Empty => return Ok(()),
+            }
         }
-        if frame.len() > self.max_frame_len {
-            return Err(DriverError::LengthOutOfRange);
-        }
-        // Stage into the persistent buffers through the class-aware
-        // wrappers; `into_slab` scrubs the staging before it is put
-        // back when the caller declared the payload sensitive.
-        let (Some(header_slab), Some(data_slab)) = (self.tx_header.take(), self.tx_data.take())
-        else {
-            return Err(DriverError::DeviceFault);
-        };
-        let mut header_bb = BounceBuffer::new(header_slab, class);
-        let mut data_bb = BounceBuffer::new(data_slab, class);
-        let result = self.transmit_chain(&mut header_bb, &mut data_bb, frame);
-        self.tx_header = Some(header_bb.into_slab());
-        self.tx_data = Some(data_bb.into_slab());
-        result
     }
 
-    /// Stage `frame` into the wrapped transmit buffers, publish the
-    /// chain, and wait for the device to consume it. Split out of
-    /// [`Self::run_transmit`] so every early return still puts the
-    /// staging slabs back (the wrappers stay owned by the caller).
-    fn transmit_chain(
+    /// Pop one frame from the TX ring into the wrapped staging and
+    /// hand it to the device, waiting for consumption. A frame the
+    /// device cannot move (runt, over-MTU, corrupt slot) is consumed
+    /// and dropped so the queue behind it keeps flowing.
+    fn tx_one(
         &mut self,
+        rings: &mut FrameRings<'_>,
         header_bb: &mut BounceBuffer,
         data_bb: &mut BounceBuffer,
-        frame: &[u8],
-    ) -> Result<(), DriverError> {
+    ) -> Result<TxOutcome, DriverError> {
+        let staging = data_bb.full_region_mut();
+        let cap = self.max_frame_len.min(staging.len());
+        let len = match rings.tx.pop(&mut staging[..cap]) {
+            Ok(Some(len)) => len,
+            Ok(None) => return Ok(TxOutcome::Empty),
+            // Longer than the device moves: consume it and go on.
+            Err(Errno::BufferTooSmall) => {
+                rings.tx.skip().map_err(|_| DriverError::BadMagic)?;
+                return Ok(TxOutcome::Dropped);
+            }
+            // A corrupt slot was already consumed by the pop.
+            Err(Errno::LengthOutOfRange) => return Ok(TxOutcome::Dropped),
+            Err(_) => return Err(DriverError::BadMagic),
+        };
+        if len < wire::MIN_ETHERNET_FRAME {
+            return Ok(TxOutcome::Dropped);
+        }
         header_bb
             .stage(&Self::build_header())
             .map_err(|()| DriverError::BufferTooSmall)?;
-        data_bb
-            .stage(frame)
-            .map_err(|()| DriverError::BufferTooSmall)?;
-        let frame_len_u32 =
-            u32::try_from(frame.len()).map_err(|_| DriverError::LengthOutOfRange)?;
+        let frame_len_u32 = u32::try_from(len).map_err(|_| DriverError::LengthOutOfRange)?;
         let segments = [
             ChainSegment {
                 phys: header_bb.phys(),
@@ -324,59 +358,83 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
             .tx_queue
             .poll_used()
             .map_err(VirtioError::as_driver_error)?;
-        Ok(())
+        Ok(TxOutcome::Sent)
     }
 
-    fn run_receive(&mut self, buf: &mut [u8], class: BufferClass) -> Result<usize, DriverError> {
-        if buf.is_empty() {
-            return Err(DriverError::BufferTooSmall);
-        }
-        // Harvest the pre-posted chain. Poll before waiting so a
-        // completion the device published earlier is never missed
-        // (one interrupt can cover several completions); when the
-        // ring is idle, wait once for the device event and re-check.
-        // `NoCompletion` after the wait means no frame yet: the chain
-        // stays posted and the call reports "nothing pending".
-        let token = match self.rx_queue.poll_used() {
-            Ok(t) => t,
-            Err(VirtioError::NoCompletion) => {
-                self.host.notify_wait(self.rx_queue.index());
+    /// Move delivered frames from the device into the RX ring until
+    /// the device is drained or the ring is full.
+    ///
+    /// A frame whose completion was harvested but which found the
+    /// ring full is *kept staged* — the receive chain is not
+    /// re-posted until it is delivered — so back-pressure never drops
+    /// a frame the device already handed over.
+    fn harvest_rx(
+        &mut self,
+        rings: &mut FrameRings<'_>,
+        report: &mut ServiceReport,
+    ) -> Result<(), DriverError> {
+        loop {
+            if let Some(len) = self.rx_staged_len {
+                let Some(data_slab) = self.rx_data.as_mut() else {
+                    return Err(DriverError::DeviceFault);
+                };
+                match rings.rx.push(&data_slab.as_bytes()[..len]) {
+                    Ok(()) => {
+                        self.rx_staged_len = None;
+                        report.received += 1;
+                        // The frame left the staging: scrub it now
+                        // when the ring class demands it, then hand
+                        // the buffer back to the device.
+                        if rings.class.is_sensitive() {
+                            self.scrub_rx_staging();
+                        }
+                        self.post_receive_chain()?;
+                    }
+                    Err(Errno::NoSpace) => {
+                        report.rx_ring_full = true;
+                        return Ok(());
+                    }
+                    Err(_) => return Err(DriverError::BadMagic),
+                }
+            } else {
                 match self.rx_queue.poll_used() {
-                    Ok(t) => t,
-                    Err(VirtioError::NoCompletion) => return Ok(0),
+                    Ok(token) => {
+                        let total = token.written as usize;
+                        let frame_len = total.saturating_sub(wire::HEADER_LEN);
+                        if frame_len == 0 {
+                            // An empty completion carries nothing for
+                            // the stack: just re-arm the device.
+                            self.post_receive_chain()?;
+                            continue;
+                        }
+                        self.rx_staged_len = Some(frame_len.min(self.max_frame_len));
+                    }
+                    Err(VirtioError::NoCompletion) => return Ok(()),
                     Err(e) => return Err(e.as_driver_error()),
                 }
             }
-            Err(e) => return Err(e.as_driver_error()),
-        };
-        // The device reports total bytes written across the chain;
-        // header consumes `HEADER_LEN`, the rest is frame payload.
-        let total = token.written as usize;
-        let frame_len = total.saturating_sub(wire::HEADER_LEN);
-        // Copy out through the class-aware wrappers; `into_slab`
-        // scrubs the persistent staging before the chain is re-posted
-        // when the caller declared the traffic sensitive.
-        let (Some(header_slab), Some(data_slab)) = (self.rx_header.take(), self.rx_data.take())
-        else {
-            return Err(DriverError::DeviceFault);
-        };
-        let header_bb = BounceBuffer::new(header_slab, class);
-        let mut data_bb = BounceBuffer::new(data_slab, class);
-        let result = if frame_len > buf.len() {
-            Err(DriverError::BufferTooSmall)
-        } else {
-            if frame_len > 0 {
-                buf[..frame_len].copy_from_slice(&data_bb.full_region_mut()[..frame_len]);
-            }
-            Ok(frame_len)
-        };
-        self.rx_header = Some(header_bb.into_slab());
-        self.rx_data = Some(data_bb.into_slab());
-        // Re-arm so the device always owns a receive buffer — even
-        // when the caller's buffer was too small for this frame.
-        self.post_receive_chain()?;
-        result
+        }
     }
+
+    /// Zero the persistent receive staging (header + frame buffer).
+    fn scrub_rx_staging(&mut self) {
+        for slab in [self.rx_header.as_mut(), self.rx_data.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            slab.as_bytes_mut().fill(0);
+        }
+    }
+}
+
+/// Outcome of one TX-ring pop inside [`VirtioNet::tx_one`].
+enum TxOutcome {
+    /// A frame was handed to the device.
+    Sent,
+    /// A frame the device cannot move was consumed and dropped.
+    Dropped,
+    /// The TX ring is empty.
+    Empty,
 }
 
 impl<T: Transport> Net for VirtioNet<'_, T> {
@@ -393,21 +451,19 @@ impl<T: Transport> Net for VirtioNet<'_, T> {
             rx_queues: 1,
         })
     }
-    fn transmit(&mut self, frame: &[u8]) -> Result<(), DriverError> {
-        self.run_transmit(frame, BufferClass::NonSensitive)
-    }
-    fn receive(&mut self, buf: &mut [u8]) -> Result<usize, DriverError> {
-        self.run_receive(buf, BufferClass::NonSensitive)
-    }
-    fn transmit_with_class(&mut self, frame: &[u8], class: BufferClass) -> Result<(), DriverError> {
-        self.run_transmit(frame, class)
-    }
-    fn receive_with_class(
-        &mut self,
-        buf: &mut [u8],
-        class: BufferClass,
-    ) -> Result<usize, DriverError> {
-        self.run_receive(buf, class)
+
+    fn service(&mut self, rings: &mut FrameRings<'_>) -> Result<ServiceReport, DriverError> {
+        let mut report = ServiceReport::default();
+        self.drain_tx(rings, &mut report)?;
+        self.harvest_rx(rings, &mut report)?;
+        if report == ServiceReport::default() {
+            // Nothing moved: park once on the device event so a
+            // caller looping on `service` waits instead of spinning,
+            // then re-check for a completion the wake announced.
+            self.host.notify_wait(self.rx_queue.index());
+            self.harvest_rx(rings, &mut report)?;
+        }
+        Ok(report)
     }
 }
 

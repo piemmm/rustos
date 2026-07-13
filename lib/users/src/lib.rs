@@ -53,7 +53,7 @@ mod record;
 pub use db::{UsersDb, FORMAT_HEADER, MAX_DB_LEN, MAX_LINE_LEN, MAX_USERS};
 pub use grants::{
     administrator_ceiling, capability_set, session_baseline, ADMINISTRATIVE_SET, DEVMGR_CEILING,
-    LOGIN_CEILING, SEATMGR_CEILING, SESSION_BASELINE, SYSINFOD_CEILING,
+    LOGIN_CEILING, NETSTACK_CEILING, SEATMGR_CEILING, SESSION_BASELINE, SYSINFOD_CEILING,
 };
 pub use groups::{
     GroupRecord, GroupsDb, GROUPS_FORMAT_HEADER, MAX_GROUPNAME_LEN, MAX_GROUPS, MAX_GROUPS_DB_LEN,
@@ -67,8 +67,8 @@ pub use policy::{default_home, next_id, IdRange, DEFAULT_SHELL, FIRST_USER_GID, 
 pub use provision::{
     is_system_account_name, is_system_group_name, system_account_directory, system_account_uid,
     system_accounts, system_groups, DEVMGR_UID, DEVMGR_USERNAME, LOGIN_UID, LOGIN_USERNAME,
-    SEATMGR_UID, SEATMGR_USERNAME, SERVICES_GID, SERVICES_GROUP, SYSINFOD_UID, SYSINFOD_USERNAME,
-    SYSTEM_GID, SYSTEM_GROUP, SYSTEM_UID, SYSTEM_USERNAME,
+    NETSTACK_UID, NETSTACK_USERNAME, SEATMGR_UID, SEATMGR_USERNAME, SERVICES_GID, SERVICES_GROUP,
+    SYSINFOD_UID, SYSINFOD_USERNAME, SYSTEM_GID, SYSTEM_GROUP, SYSTEM_UID, SYSTEM_USERNAME,
 };
 pub use record::{
     AccountState, Gid, Identity, Uid, UserRecord, MAX_DISPLAY_NAME_LEN, MAX_PATH_LEN,

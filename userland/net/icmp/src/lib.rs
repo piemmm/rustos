@@ -26,15 +26,17 @@
 //! stateless: [`Responder::handle_frame`] is a pure function from an
 //! inbound frame plus a caller-owned scratch buffer to an optional
 //! outbound frame. [`Responder::poll`] and [`Responder::run`] drive
-//! that logic over any [`Net`] driver, so the same code runs against a
-//! real virtio-net device and against a mock in unit tests.
+//! that logic over any [`Net`] driver through a caller-owned
+//! [`FrameRings`] pair (the shared-memory frame-ring transport), so
+//! the same code runs against a real virtio-net device and against a
+//! mock in unit tests.
 //!
 //! # Security
 //!
 //! The responder performs no privileged operation itself; it only
-//! transforms bytes. Capability enforcement for [`Net::transmit`] /
-//! [`Net::receive`] (`CAP_NET_RAW`) happens at the driver dispatch
-//! site, upstream of this crate. Frames addressed
+//! transforms bytes. Capability enforcement for [`Net::service`]
+//! (`CAP_NET_RAW`) happens at the driver dispatch site, upstream of
+//! this crate. Frames addressed
 //! to neither this host nor the broadcast address are ignored, and a
 //! reply is only emitted for a request that is well-formed, correctly
 //! addressed, and (for ICMP) checksum-valid; everything else is
@@ -50,7 +52,8 @@ pub use rustos_net::{arp, eth as ethernet, icmp, ipv4};
 #[cfg(test)]
 use rustos_abi::driver::net::{DeviceFacts, LinkState, NetOffloads};
 use rustos_abi::driver::net::{MacAddress, Net};
-use rustos_abi::DriverError;
+use rustos_abi::driver::net_ring::FrameRings;
+use rustos_abi::{DriverError, Errno};
 
 use crate::arp::ArpPacket;
 use crate::ethernet::EthernetFrame;
@@ -62,6 +65,8 @@ use crate::ipv4::Ipv4Header;
 pub enum NetServiceError {
     /// The underlying [`Net`] driver returned an error.
     Driver(DriverError),
+    /// A frame-ring operation failed (corrupt state or no space).
+    Ring(Errno),
     /// The supplied transmit buffer was too small to hold the reply.
     OutputTooSmall,
 }
@@ -69,6 +74,12 @@ pub enum NetServiceError {
 impl From<DriverError> for NetServiceError {
     fn from(error: DriverError) -> Self {
         Self::Driver(error)
+    }
+}
+
+impl From<Errno> for NetServiceError {
+    fn from(error: Errno) -> Self {
+        Self::Ring(error)
     }
 }
 
@@ -123,24 +134,28 @@ impl Responder {
         }
     }
 
-    /// Run a single receive/answer/transmit cycle over `net`.
+    /// Run a single service/answer cycle over `net`.
     ///
+    /// Services the rings once (delivering pending frames), answers
+    /// the oldest received frame, and queues + flushes any reply.
     /// Returns `Ok(true)` when a frame was received and processed (it
     /// may or may not have warranted a reply) and `Ok(false)` when no
-    /// frame was pending. `rx` is the scratch buffer frames are received
+    /// frame was pending. `rx` is the scratch buffer frames are popped
     /// into and `tx` the buffer replies are assembled in.
     pub fn poll<N: Net>(
         &self,
         net: &mut N,
+        rings: &mut FrameRings<'_>,
         rx: &mut [u8],
         tx: &mut [u8],
     ) -> Result<bool, NetServiceError> {
-        let received = net.receive(rx)?;
-        if received == 0 {
+        net.service(rings)?;
+        let Some(received) = rings.rx.pop(rx)? else {
             return Ok(false);
-        }
+        };
         if let Some(len) = self.handle_frame(&rx[..received], tx)? {
-            net.transmit(&tx[..len])?;
+            rings.tx.push(&tx[..len])?;
+            net.service(rings)?;
         }
         Ok(true)
     }
@@ -149,18 +164,20 @@ impl Responder {
     /// were received and processed.
     ///
     /// The bound keeps the loop finite for tests and for callers that
-    /// interleave other work; a long-running service passes its own
-    /// budget and re-enters between blocking waits on the driver.
+    /// interleave other work; each poll's device wait is event-driven
+    /// inside [`Net::service`], so the budget bounds churn, not a
+    /// spin.
     pub fn run<N: Net>(
         &self,
         net: &mut N,
+        rings: &mut FrameRings<'_>,
         rx: &mut [u8],
         tx: &mut [u8],
         max_polls: usize,
     ) -> Result<usize, NetServiceError> {
         let mut handled = 0;
         for _ in 0..max_polls {
-            if self.poll(net, rx, tx)? {
+            if self.poll(net, rings, rx, tx)? {
                 handled += 1;
             }
         }
@@ -344,27 +361,28 @@ impl Client {
 
     /// Resolve `target`'s link-layer address over `net`.
     ///
-    /// Transmits one ARP request, then polls up to `max_polls` inbound
-    /// frames for the matching reply. Returns `Ok(Some(mac))` once
-    /// resolved, `Ok(None)` if no reply arrived within the budget, and
-    /// an error if the driver or buffer fails. `rx` is the scratch
-    /// buffer frames are received into and `tx` the buffer the request
-    /// is assembled in.
+    /// Queues one ARP request, then services the rings up to
+    /// `max_polls` times looking for the matching reply. Returns
+    /// `Ok(Some(mac))` once resolved, `Ok(None)` if no reply arrived
+    /// within the budget, and an error if the driver or a buffer
+    /// fails. `rx` is the scratch buffer frames are popped into and
+    /// `tx` the buffer the request is assembled in.
     pub fn resolve<N: Net>(
         &self,
         net: &mut N,
+        rings: &mut FrameRings<'_>,
         target: Ipv4Addr,
         rx: &mut [u8],
         tx: &mut [u8],
         max_polls: usize,
     ) -> Result<Option<MacAddress>, NetServiceError> {
         let len = self.write_arp_request(target, tx)?;
-        net.transmit(&tx[..len])?;
+        rings.tx.push(&tx[..len])?;
         for _ in 0..max_polls {
-            let received = net.receive(rx)?;
-            if received == 0 {
+            net.service(rings)?;
+            let Some(received) = rings.rx.pop(rx)? else {
                 continue;
-            }
+            };
             if let Some(mac) = self.parse_arp_reply(&rx[..received], target) {
                 return Ok(Some(mac));
             }
@@ -374,14 +392,16 @@ impl Client {
 
     /// Ping `dest` over `net` and confirm the echo reply.
     ///
-    /// Transmits one ICMP echo request to the already-resolved
-    /// `peer_mac` / `dest`, then polls up to `max_polls` inbound frames
-    /// for the matching echo reply. Returns `Ok(true)` once the reply
-    /// arrives, `Ok(false)` if none did within the budget.
+    /// Queues one ICMP echo request to the already-resolved
+    /// `peer_mac` / `dest`, then services the rings up to `max_polls`
+    /// times looking for the matching echo reply. Returns `Ok(true)`
+    /// once the reply arrives, `Ok(false)` if none did within the
+    /// budget.
     #[allow(clippy::too_many_arguments)]
     pub fn ping<N: Net>(
         &self,
         net: &mut N,
+        rings: &mut FrameRings<'_>,
         peer_mac: MacAddress,
         dest: Ipv4Addr,
         identifier: u16,
@@ -392,12 +412,12 @@ impl Client {
         max_polls: usize,
     ) -> Result<bool, NetServiceError> {
         let len = self.write_echo_request(peer_mac, dest, identifier, sequence, payload, tx)?;
-        net.transmit(&tx[..len])?;
+        rings.tx.push(&tx[..len])?;
         for _ in 0..max_polls {
-            let received = net.receive(rx)?;
-            if received == 0 {
+            net.service(rings)?;
+            let Some(received) = rings.rx.pop(rx)? else {
                 continue;
-            }
+            };
             if self.is_echo_reply(&rx[..received], dest, identifier, sequence) {
                 return Ok(true);
             }
@@ -472,6 +492,20 @@ mod tests {
         Responder::new(LOCAL_MAC, LOCAL_IP)
     }
 
+    use rustos_abi::driver::net_ring::{RingGeometry, ServiceReport};
+    use rustos_abi::driver::BufferClass;
+
+    /// Test ring geometry: four slots of 256 bytes per ring.
+    const GEOMETRY: RingGeometry = match RingGeometry::new(4, 256) {
+        Ok(g) => g,
+        Err(_) => panic!("valid test geometry"),
+    };
+    const REGION_LEN: usize = GEOMETRY.region_len();
+
+    fn bind_rings(region: &mut [u8; REGION_LEN]) -> FrameRings<'_> {
+        FrameRings::bind(region, GEOMETRY, BufferClass::NonSensitive).expect("bind rings")
+    }
+
     /// A [`Net`] mock holding at most one queued inbound frame and
     /// capturing the most recent transmitted frame.
     struct MockNet {
@@ -525,25 +559,29 @@ mod tests {
             Ok(local_facts())
         }
 
-        fn transmit(&mut self, frame: &[u8]) -> Result<(), DriverError> {
-            if frame.len() > self.tx.len() {
-                return Err(DriverError::LengthOutOfRange);
+        fn service(&mut self, rings: &mut FrameRings<'_>) -> Result<ServiceReport, DriverError> {
+            let mut report = ServiceReport::default();
+            // Drain queued transmits into the capture buffer.
+            let mut scratch = [0u8; 256];
+            while let Some(len) = rings
+                .tx
+                .pop(&mut scratch)
+                .map_err(|_| DriverError::BadMagic)?
+            {
+                self.tx[..len].copy_from_slice(&scratch[..len]);
+                self.tx_len = len;
+                report.transmitted += 1;
             }
-            self.tx[..frame.len()].copy_from_slice(frame);
-            self.tx_len = frame.len();
-            Ok(())
-        }
-
-        fn receive(&mut self, buf: &mut [u8]) -> Result<usize, DriverError> {
-            if self.delivered || self.rx_len == 0 {
-                return Ok(0);
+            // Deliver the single queued inbound frame once.
+            if !self.delivered && self.rx_len > 0 {
+                rings
+                    .rx
+                    .push(&self.rx[..self.rx_len])
+                    .map_err(|_| DriverError::BadMagic)?;
+                self.delivered = true;
+                report.received += 1;
             }
-            if buf.len() < self.rx_len {
-                return Err(DriverError::BufferTooSmall);
-            }
-            buf[..self.rx_len].copy_from_slice(&self.rx[..self.rx_len]);
-            self.delivered = true;
-            Ok(self.rx_len)
+            Ok(report)
         }
     }
 
@@ -665,21 +703,34 @@ mod tests {
     fn poll_transmits_a_reply() {
         let frame = arp_request_frame();
         let mut net = MockNet::with_inbound(&frame);
+        let mut region = [0u8; REGION_LEN];
+        let mut rings = bind_rings(&mut region);
         let mut rx = [0u8; 256];
         let mut tx = [0u8; 256];
-        assert_eq!(responder().poll(&mut net, &mut rx, &mut tx), Ok(true));
+        assert_eq!(
+            responder().poll(&mut net, &mut rings, &mut rx, &mut tx),
+            Ok(true)
+        );
         let eth = EthernetFrame::parse(net.transmitted()).expect("reply parses");
         assert_eq!(eth.ethertype, ethernet::ETHERTYPE_ARP);
         // A second poll finds nothing pending.
-        assert_eq!(responder().poll(&mut net, &mut rx, &mut tx), Ok(false));
+        assert_eq!(
+            responder().poll(&mut net, &mut rings, &mut rx, &mut tx),
+            Ok(false)
+        );
     }
 
     #[test]
     fn poll_on_empty_driver_is_idle() {
         let mut net = MockNet::empty();
+        let mut region = [0u8; REGION_LEN];
+        let mut rings = bind_rings(&mut region);
         let mut rx = [0u8; 64];
         let mut tx = [0u8; 64];
-        assert_eq!(responder().poll(&mut net, &mut rx, &mut tx), Ok(false));
+        assert_eq!(
+            responder().poll(&mut net, &mut rings, &mut rx, &mut tx),
+            Ok(false)
+        );
         assert!(net.transmitted().is_empty());
     }
 
@@ -687,31 +738,38 @@ mod tests {
     fn run_counts_processed_frames() {
         let frame = arp_request_frame();
         let mut net = MockNet::with_inbound(&frame);
+        let mut region = [0u8; REGION_LEN];
+        let mut rings = bind_rings(&mut region);
         let mut rx = [0u8; 256];
         let mut tx = [0u8; 256];
-        assert_eq!(responder().run(&mut net, &mut rx, &mut tx, 4), Ok(1));
+        assert_eq!(
+            responder().run(&mut net, &mut rings, &mut rx, &mut tx, 4),
+            Ok(1)
+        );
     }
 
     #[test]
     fn poll_propagates_driver_error() {
-        // A driver whose receive always faults surfaces as Driver(_).
+        // A driver whose service always faults surfaces as Driver(_).
         struct FaultyNet;
         impl Net for FaultyNet {
             fn device_facts(&self) -> Result<DeviceFacts, DriverError> {
                 Ok(local_facts())
             }
-            fn transmit(&mut self, _frame: &[u8]) -> Result<(), DriverError> {
-                Ok(())
-            }
-            fn receive(&mut self, _buf: &mut [u8]) -> Result<usize, DriverError> {
+            fn service(
+                &mut self,
+                _rings: &mut FrameRings<'_>,
+            ) -> Result<ServiceReport, DriverError> {
                 Err(DriverError::DeviceFault)
             }
         }
         let mut net = FaultyNet;
+        let mut region = [0u8; REGION_LEN];
+        let mut rings = bind_rings(&mut region);
         let mut rx = [0u8; 64];
         let mut tx = [0u8; 64];
         assert_eq!(
-            responder().poll(&mut net, &mut rx, &mut tx),
+            responder().poll(&mut net, &mut rings, &mut rx, &mut tx),
             Err(NetServiceError::Driver(DriverError::DeviceFault))
         );
     }
@@ -758,10 +816,12 @@ mod tests {
         let mut reply = [0u8; 64];
         let len = arp_reply_frame(&mut reply);
         let mut net = MockNet::with_inbound(&reply[..len]);
+        let mut region = [0u8; REGION_LEN];
+        let mut rings = bind_rings(&mut region);
         let mut rx = [0u8; 256];
         let mut tx = [0u8; 256];
         let resolved = client()
-            .resolve(&mut net, PEER_IP, &mut rx, &mut tx, 4)
+            .resolve(&mut net, &mut rings, PEER_IP, &mut rx, &mut tx, 4)
             .expect("no error");
         assert_eq!(resolved, Some(PEER_MAC));
 
@@ -778,10 +838,12 @@ mod tests {
     #[test]
     fn client_resolve_is_none_without_a_reply() {
         let mut net = MockNet::empty();
+        let mut region = [0u8; REGION_LEN];
+        let mut rings = bind_rings(&mut region);
         let mut rx = [0u8; 64];
         let mut tx = [0u8; 64];
         assert_eq!(
-            client().resolve(&mut net, PEER_IP, &mut rx, &mut tx, 4),
+            client().resolve(&mut net, &mut rings, PEER_IP, &mut rx, &mut tx, 4),
             Ok(None)
         );
     }
@@ -791,12 +853,21 @@ mod tests {
         let mut reply = [0u8; 64];
         let len = arp_reply_frame(&mut reply);
         let mut net = MockNet::with_inbound(&reply[..len]);
+        let mut region = [0u8; REGION_LEN];
+        let mut rings = bind_rings(&mut region);
         let mut rx = [0u8; 256];
         let mut tx = [0u8; 256];
         // Resolving a different target: the cached reply binds PEER_IP,
         // not 10.0.2.99, so no match.
         assert_eq!(
-            client().resolve(&mut net, Ipv4Addr::new(10, 0, 2, 99), &mut rx, &mut tx, 4),
+            client().resolve(
+                &mut net,
+                &mut rings,
+                Ipv4Addr::new(10, 0, 2, 99),
+                &mut rx,
+                &mut tx,
+                4
+            ),
             Ok(None)
         );
     }
@@ -807,11 +878,13 @@ mod tests {
         let mut reply = [0u8; 128];
         let len = echo_reply_frame(0xABCD, 9, &payload, &mut reply);
         let mut net = MockNet::with_inbound(&reply[..len]);
+        let mut region = [0u8; REGION_LEN];
+        let mut rings = bind_rings(&mut region);
         let mut rx = [0u8; 256];
         let mut tx = [0u8; 256];
         let pinged = client()
             .ping(
-                &mut net, PEER_MAC, PEER_IP, 0xABCD, 9, &payload, &mut rx, &mut tx, 4,
+                &mut net, &mut rings, PEER_MAC, PEER_IP, 0xABCD, 9, &payload, &mut rx, &mut tx, 4,
             )
             .expect("no error");
         assert!(pinged);
@@ -833,12 +906,14 @@ mod tests {
         let mut reply = [0u8; 128];
         let len = echo_reply_frame(0xABCD, 9, &payload, &mut reply);
         let mut net = MockNet::with_inbound(&reply[..len]);
+        let mut region = [0u8; REGION_LEN];
+        let mut rings = bind_rings(&mut region);
         let mut rx = [0u8; 256];
         let mut tx = [0u8; 256];
         // The reply carries sequence 9; we asked for sequence 10.
         let pinged = client()
             .ping(
-                &mut net, PEER_MAC, PEER_IP, 0xABCD, 10, &payload, &mut rx, &mut tx, 4,
+                &mut net, &mut rings, PEER_MAC, PEER_IP, 0xABCD, 10, &payload, &mut rx, &mut tx, 4,
             )
             .expect("no error");
         assert!(!pinged);
@@ -872,18 +947,20 @@ mod tests {
             fn device_facts(&self) -> Result<DeviceFacts, DriverError> {
                 Ok(local_facts())
             }
-            fn transmit(&mut self, _frame: &[u8]) -> Result<(), DriverError> {
+            fn service(
+                &mut self,
+                _rings: &mut FrameRings<'_>,
+            ) -> Result<ServiceReport, DriverError> {
                 Err(DriverError::Busy)
-            }
-            fn receive(&mut self, _buf: &mut [u8]) -> Result<usize, DriverError> {
-                Ok(0)
             }
         }
         let mut net = FaultyTx;
+        let mut region = [0u8; REGION_LEN];
+        let mut rings = bind_rings(&mut region);
         let mut rx = [0u8; 64];
         let mut tx = [0u8; 64];
         assert_eq!(
-            client().resolve(&mut net, PEER_IP, &mut rx, &mut tx, 4),
+            client().resolve(&mut net, &mut rings, PEER_IP, &mut rx, &mut tx, 4),
             Err(NetServiceError::Driver(DriverError::Busy))
         );
     }

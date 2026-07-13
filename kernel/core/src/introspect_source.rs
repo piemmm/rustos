@@ -709,20 +709,20 @@ mod tests {
         let cell = human_db();
         // The whole directory: compiled rows first, then the human half.
         let all = rows(&user_directory_page(&cell, 0, 64).expect("page encodes"));
-        assert_eq!(all.len(), 6);
+        assert_eq!(all.len(), 7);
         assert_eq!(all[0], (0, String::from("system")));
-        assert_eq!(all[5], (1000, String::from("root")));
+        assert_eq!(all[6], (1000, String::from("root")));
         // A page straddling the seam carries the tail of the compiled half
         // and the head of the human half.
-        let seam = rows(&user_directory_page(&cell, 4, 2).expect("page encodes"));
+        let seam = rows(&user_directory_page(&cell, 5, 2).expect("page encodes"));
         assert_eq!(
             seam,
             alloc::vec![
-                (rustos_users::LOGIN_UID.0, String::from("login")),
+                (rustos_users::NETSTACK_UID.0, String::from("netstack")),
                 (1000, String::from("root")),
             ]
         );
         // An offset past the end is the empty paging terminator.
-        assert!(rows(&user_directory_page(&cell, 6, 64).expect("page encodes")).is_empty());
+        assert!(rows(&user_directory_page(&cell, 7, 64).expect("page encodes")).is_empty());
     }
 }

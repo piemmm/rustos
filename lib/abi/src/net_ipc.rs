@@ -1,0 +1,1206 @@
+//! The network-stack service IPC protocol (`plans/NETWORK.md` N3b):
+//! the reserved rendezvous `netstack` binds and the fixed-width,
+//! fail-closed requests its admin surface and the sysinfo broker
+//! present.
+//!
+//! Two request classes share the one endpoint:
+//!
+//! * **Admin mutation and counters** (`InterfaceList`, `AddrAdd`,
+//!   `RouteAdd`, `Counters`) — gated on
+//!   [`CapabilityId::NET_ADMIN`](crate::CapabilityId::NET_ADMIN).
+//! * **Broker reads** (`InterfaceFacts`, `InterfaceState`) — the
+//!   whole-system interface facts/state the System Information
+//!   service pages on behalf of its own capability-checked clients,
+//!   gated on
+//!   [`CapabilityId::SYSINFO_INTROSPECT`](crate::CapabilityId::SYSINFO_INTROSPECT)
+//!   exactly as the kernel's introspection primitive is: `netstack`
+//!   answers whole state only to the sysinfo broker, and all
+//!   per-client narrowing lives in that audited broker.
+//!
+//! Every decode fails closed: an unknown magic, version, operation,
+//! family, name spelling, or a dirty reserved tail refuses rather
+//! than guessing (`AGENTS.md` §5.4).
+
+use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
+use crate::reply::{decode_status_reply, encode_status_reply, STATUS_REPLY_LEN};
+use crate::Errno;
+
+/// Reserved well-known call-endpoint id of the network-stack service
+/// (`"NET1"` little-endian, the [`crate::display_ipc::DISPLAY_ENDPOINT`]
+/// convention). Binding it requires `CAP_IPC_BIND_PRIVILEGED`
+/// ([`crate::ipc::is_reserved_endpoint`]): a squatter claiming the
+/// rendezvous first would receive interface mutations and serve forged
+/// network state.
+pub const NETSTACK_ENDPOINT: u64 = 0x4E45_5431;
+
+/// Magic number identifying a netstack request (`"NST1"`
+/// little-endian).
+pub const NETSTACK_REQUEST_MAGIC: u32 = u32::from_le_bytes(*b"NST1");
+
+/// The `netstack-v1` protocol version.
+pub const NETSTACK_VERSION_V1: u16 = 1;
+
+/// Byte length of an interface name field: NUL-padded ASCII.
+pub const IF_NAME_LEN: usize = 16;
+
+/// Most interfaces one paged read reports per call — a validation
+/// bound on the reply size, not an interface-count capacity.
+pub const NETSTACK_LIST_LIMIT_MAX: u16 = 32;
+
+/// Largest request the [`NETSTACK_ENDPOINT`] accepts: exactly one
+/// fixed-width request frame.
+pub const NETSTACK_MAX_REQUEST: usize = NetstackRequest::WIRE_LEN;
+
+/// An IP address family as carried on this protocol.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum NetAddrFamily {
+    /// IPv4; the address field's first four bytes are significant.
+    V4 = 4,
+    /// IPv6; all sixteen address bytes are significant.
+    V6 = 6,
+}
+
+impl NetAddrFamily {
+    /// The wire value for this family.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Recover a family from its wire value.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] if `value` names no family (fail closed).
+    pub const fn from_u8(value: u8) -> Result<Self, Errno> {
+        match value {
+            4 => Ok(Self::V4),
+            6 => Ok(Self::V6),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// Widest valid prefix length for this family.
+    #[must_use]
+    pub const fn max_prefix(self) -> u8 {
+        match self {
+            Self::V4 => 32,
+            Self::V6 => 128,
+        }
+    }
+}
+
+/// Validate an interface-name field: NUL-padded, non-empty, at most
+/// [`IF_NAME_LEN`] significant bytes of lowercase ASCII letters or
+/// digits (the ALIAS admin-chosen alias grammar), with nothing after
+/// the first NUL.
+///
+/// Returns the significant length.
+///
+/// # Errors
+///
+/// [`Errno::OutOfRange`] on an empty name, an illegal byte, or a
+/// non-NUL byte after the terminator.
+pub fn validate_if_name(name: &[u8; IF_NAME_LEN]) -> Result<usize, Errno> {
+    let len = name.iter().position(|&b| b == 0).unwrap_or(IF_NAME_LEN);
+    if len == 0 {
+        return Err(Errno::OutOfRange);
+    }
+    if !name[..len]
+        .iter()
+        .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    {
+        return Err(Errno::OutOfRange);
+    }
+    if name[len..].iter().any(|&b| b != 0) {
+        return Err(Errno::OutOfRange);
+    }
+    Ok(len)
+}
+
+/// One netstack-service operation.
+///
+/// Every request is one fixed-width frame; the service derives the
+/// caller's authority from its kernel-attested origin, never from a
+/// claimed field.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum NetstackRequest {
+    /// List the managed interfaces' names (admin surface).
+    InterfaceList,
+    /// Assign a static address to a named interface (admin surface).
+    AddrAdd {
+        /// The interface's admin-chosen alias, NUL-padded.
+        iface: [u8; IF_NAME_LEN],
+        /// Address family of `addr`.
+        family: NetAddrFamily,
+        /// On-link prefix length (`1..=max_prefix`).
+        prefix: u8,
+        /// The address; V4 uses the first four bytes.
+        addr: [u8; 16],
+    },
+    /// Add a route through a named interface (admin surface).
+    RouteAdd {
+        /// The interface's admin-chosen alias, NUL-padded.
+        iface: [u8; IF_NAME_LEN],
+        /// Address family of `dest` (and `next_hop` when present).
+        family: NetAddrFamily,
+        /// Destination prefix length (`0..=max_prefix`; 0 is the
+        /// default route).
+        prefix: u8,
+        /// The destination prefix; V4 uses the first four bytes.
+        dest: [u8; 16],
+        /// The gateway, or `None` for an on-link route.
+        next_hop: Option<[u8; 16]>,
+    },
+    /// Read a named interface's stack counters (admin surface).
+    Counters {
+        /// The interface's admin-chosen alias, NUL-padded.
+        iface: [u8; IF_NAME_LEN],
+    },
+    /// Page the whole system's interface facts (sysinfo broker).
+    InterfaceFacts {
+        /// First interface index to report.
+        offset: u32,
+        /// Most records to return (`1..=NETSTACK_LIST_LIMIT_MAX`).
+        limit: u16,
+    },
+    /// Page the whole system's interface link/address state (sysinfo
+    /// broker).
+    InterfaceState {
+        /// First interface index to report.
+        offset: u32,
+        /// Most records to return (`1..=NETSTACK_LIST_LIMIT_MAX`).
+        limit: u16,
+    },
+}
+
+/// Wire operation discriminant of [`NetstackRequest::InterfaceList`].
+const OP_IF_LIST: u16 = 1;
+/// Wire operation discriminant of [`NetstackRequest::AddrAdd`].
+const OP_ADDR_ADD: u16 = 2;
+/// Wire operation discriminant of [`NetstackRequest::RouteAdd`].
+const OP_ROUTE_ADD: u16 = 3;
+/// Wire operation discriminant of [`NetstackRequest::Counters`].
+const OP_COUNTERS: u16 = 4;
+/// Wire operation discriminant of [`NetstackRequest::InterfaceFacts`].
+const OP_IF_FACTS: u16 = 5;
+/// Wire operation discriminant of [`NetstackRequest::InterfaceState`].
+const OP_IF_STATE: u16 = 6;
+
+impl NetstackRequest {
+    /// Encoded size on the wire: magic (4), version (2), op (2), and a
+    /// 56-byte operation block whose unused tail must be zero.
+    pub const WIRE_LEN: usize = 64;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, NETSTACK_REQUEST_MAGIC);
+        put_u16(&mut out, 4, NETSTACK_VERSION_V1);
+        match *self {
+            Self::InterfaceList => {
+                put_u16(&mut out, 6, OP_IF_LIST);
+            }
+            Self::AddrAdd {
+                iface,
+                family,
+                prefix,
+                addr,
+            } => {
+                put_u16(&mut out, 6, OP_ADDR_ADD);
+                out[8..24].copy_from_slice(&iface);
+                out[24] = family.as_u8();
+                out[25] = prefix;
+                out[26..42].copy_from_slice(&addr);
+            }
+            Self::RouteAdd {
+                iface,
+                family,
+                prefix,
+                dest,
+                next_hop,
+            } => {
+                put_u16(&mut out, 6, OP_ROUTE_ADD);
+                out[8..24].copy_from_slice(&iface);
+                out[24] = family.as_u8();
+                out[25] = prefix;
+                out[26..42].copy_from_slice(&dest);
+                if let Some(gateway) = next_hop {
+                    out[42] = 1;
+                    out[43..59].copy_from_slice(&gateway);
+                }
+            }
+            Self::Counters { iface } => {
+                put_u16(&mut out, 6, OP_COUNTERS);
+                out[8..24].copy_from_slice(&iface);
+            }
+            Self::InterfaceFacts { offset, limit } => {
+                put_u16(&mut out, 6, OP_IF_FACTS);
+                put_u32(&mut out, 8, offset);
+                put_u16(&mut out, 12, limit);
+            }
+            Self::InterfaceState { offset, limit } => {
+                put_u16(&mut out, 6, OP_IF_STATE);
+                put_u32(&mut out, 8, offset);
+                put_u16(&mut out, 12, limit);
+            }
+        }
+        out
+    }
+
+    /// Decode from `bytes`, failing closed on any malformed input.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole
+    ///   request.
+    /// * [`Errno::BadMagic`] — wrong magic or a dirty reserved tail.
+    /// * [`Errno::AbiVersionUnsupported`] — not `netstack-v1`.
+    /// * [`Errno::OutOfRange`] — an unknown operation or family, an
+    ///   invalid interface name, or a prefix outside the family's
+    ///   bounds.
+    /// * [`Errno::LengthOutOfRange`] — a paging limit outside
+    ///   `1..=`[`NETSTACK_LIST_LIMIT_MAX`].
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        if read_u32(bytes, 0) != NETSTACK_REQUEST_MAGIC {
+            return Err(Errno::BadMagic);
+        }
+        if read_u16(bytes, 4) != NETSTACK_VERSION_V1 {
+            return Err(Errno::AbiVersionUnsupported);
+        }
+        let op = read_u16(bytes, 6);
+        match op {
+            OP_IF_LIST => {
+                reserved_zero(bytes, 8)?;
+                Ok(Self::InterfaceList)
+            }
+            OP_ADDR_ADD => {
+                reserved_zero(bytes, 42)?;
+                let iface = if_name(bytes)?;
+                let family = NetAddrFamily::from_u8(bytes[24])?;
+                let prefix = bytes[25];
+                if prefix == 0 || prefix > family.max_prefix() {
+                    return Err(Errno::OutOfRange);
+                }
+                let addr = address(bytes, 26, family)?;
+                Ok(Self::AddrAdd {
+                    iface,
+                    family,
+                    prefix,
+                    addr,
+                })
+            }
+            OP_ROUTE_ADD => {
+                reserved_zero(bytes, 59)?;
+                let iface = if_name(bytes)?;
+                let family = NetAddrFamily::from_u8(bytes[24])?;
+                let prefix = bytes[25];
+                if prefix > family.max_prefix() {
+                    return Err(Errno::OutOfRange);
+                }
+                let dest = address(bytes, 26, family)?;
+                let next_hop = match bytes[42] {
+                    0 => {
+                        if bytes[43..59].iter().any(|&b| b != 0) {
+                            return Err(Errno::BadMagic);
+                        }
+                        None
+                    }
+                    1 => Some(address(bytes, 43, family)?),
+                    _ => return Err(Errno::OutOfRange),
+                };
+                Ok(Self::RouteAdd {
+                    iface,
+                    family,
+                    prefix,
+                    dest,
+                    next_hop,
+                })
+            }
+            OP_COUNTERS => {
+                reserved_zero(bytes, 24)?;
+                Ok(Self::Counters {
+                    iface: if_name(bytes)?,
+                })
+            }
+            OP_IF_FACTS | OP_IF_STATE => {
+                reserved_zero(bytes, 14)?;
+                let offset = read_u32(bytes, 8);
+                let limit = read_u16(bytes, 12);
+                if limit == 0 || limit > NETSTACK_LIST_LIMIT_MAX {
+                    return Err(Errno::LengthOutOfRange);
+                }
+                Ok(if op == OP_IF_FACTS {
+                    Self::InterfaceFacts { offset, limit }
+                } else {
+                    Self::InterfaceState { offset, limit }
+                })
+            }
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// Read and validate the interface-name field at bytes `8..24`.
+fn if_name(bytes: &[u8]) -> Result<[u8; IF_NAME_LEN], Errno> {
+    let mut name = [0u8; IF_NAME_LEN];
+    name.copy_from_slice(&bytes[8..24]);
+    validate_if_name(&name)?;
+    Ok(name)
+}
+
+/// Read an address field, refusing a V4 address with a dirty tail.
+fn address(bytes: &[u8], from: usize, family: NetAddrFamily) -> Result<[u8; 16], Errno> {
+    let mut addr = [0u8; 16];
+    addr.copy_from_slice(&bytes[from..from + 16]);
+    if family == NetAddrFamily::V4 && addr[4..].iter().any(|&b| b != 0) {
+        return Err(Errno::BadMagic);
+    }
+    Ok(addr)
+}
+
+/// Refuse a request whose reserved tail (from `from` to the end of the
+/// fixed frame) carries any non-zero byte.
+fn reserved_zero(bytes: &[u8], from: usize) -> Result<(), Errno> {
+    if bytes[from..NetstackRequest::WIRE_LEN]
+        .iter()
+        .any(|&b| b != 0)
+    {
+        return Err(Errno::BadMagic);
+    }
+    Ok(())
+}
+
+/// The kind of link an interface record describes.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum NetIfKind {
+    /// A wired Ethernet-framed device.
+    Ethernet = 0,
+    /// The stack's own loopback interface.
+    Loopback = 1,
+}
+
+impl NetIfKind {
+    /// The wire value for this kind.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Recover a kind from its wire value.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] if `value` names no kind (fail closed).
+    pub const fn from_u8(value: u8) -> Result<Self, Errno> {
+        match value {
+            0 => Ok(Self::Ethernet),
+            1 => Ok(Self::Loopback),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// One interface's static facts (`info:net/<iface>/…`, plan §5): the
+/// response record of the interface-facts page.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NetInterfaceFactsRecord {
+    /// The interface's admin-chosen alias, NUL-padded.
+    pub name: [u8; IF_NAME_LEN],
+    /// The link kind.
+    pub kind: NetIfKind,
+    /// The device's 48-bit link-layer address. Sensitive: the sysinfo
+    /// broker gates the query exposing it on `CAP_SYSINFO_HW`.
+    pub mac: [u8; 6],
+    /// Link MTU in bytes.
+    pub mtu: u32,
+    /// The negotiated offload set
+    /// ([`NetOffloads`](crate::driver::net::NetOffloads) bits).
+    pub offloads: u32,
+    /// Receive-queue count (at least 1).
+    pub rx_queues: u16,
+}
+
+impl NetInterfaceFactsRecord {
+    /// Encoded size: name (16), kind (1), mac (6), reserved (1),
+    /// mtu (4), offloads (4), `rx_queues` (2), reserved (2).
+    pub const WIRE_LEN: usize = 36;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[..16].copy_from_slice(&self.name);
+        out[16] = self.kind.as_u8();
+        out[17..23].copy_from_slice(&self.mac);
+        put_u32(&mut out, 24, self.mtu);
+        put_u32(&mut out, 28, self.offloads);
+        put_u16(&mut out, 32, self.rx_queues);
+        out
+    }
+
+    /// Decode from `bytes`, failing closed on any malformed record.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a record.
+    /// * [`Errno::BadMagic`] — a dirty reserved byte.
+    /// * [`Errno::OutOfRange`] — an invalid name, kind, offload set,
+    ///   MTU, or a zero receive-queue count.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        if bytes[23] != 0 || bytes[34] != 0 || bytes[35] != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let mut name = [0u8; IF_NAME_LEN];
+        name.copy_from_slice(&bytes[..16]);
+        validate_if_name(&name)?;
+        let kind = NetIfKind::from_u8(bytes[16])?;
+        let mut mac = [0u8; 6];
+        mac.copy_from_slice(&bytes[17..23]);
+        let mtu = read_u32(bytes, 24);
+        let offloads = read_u32(bytes, 28);
+        crate::driver::net::NetOffloads::from_bits(offloads)?;
+        let rx_queues = read_u16(bytes, 32);
+        if !(crate::driver::net::DeviceFacts::MIN_MTU..=crate::driver::net::DeviceFacts::MAX_MTU)
+            .contains(&mtu)
+            || rx_queues == 0
+        {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self {
+            name,
+            kind,
+            mac,
+            mtu,
+            offloads,
+            rx_queues,
+        })
+    }
+}
+
+/// Address assignment state carried in a state record.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum NetAddrState {
+    /// Assigned and usable.
+    Preferred = 0,
+    /// Undergoing duplicate address detection.
+    Tentative = 1,
+    /// Valid but past its preferred lifetime.
+    Deprecated = 2,
+}
+
+impl NetAddrState {
+    /// The wire value for this state.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Recover a state from its wire value.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] if `value` names no state (fail closed).
+    pub const fn from_u8(value: u8) -> Result<Self, Errno> {
+        match value {
+            0 => Ok(Self::Preferred),
+            1 => Ok(Self::Tentative),
+            2 => Ok(Self::Deprecated),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// One bound address inside a state record.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NetIfAddr {
+    /// Address family.
+    pub family: NetAddrFamily,
+    /// On-link prefix length.
+    pub prefix: u8,
+    /// Assignment state.
+    pub state: NetAddrState,
+    /// The address; V4 uses the first four bytes.
+    pub addr: [u8; 16],
+}
+
+impl NetIfAddr {
+    /// Encoded size: family (1), prefix (1), state (1), reserved (1),
+    /// address (16).
+    pub const WIRE_LEN: usize = 20;
+
+    fn write(&self, out: &mut [u8]) {
+        out[0] = self.family.as_u8();
+        out[1] = self.prefix;
+        out[2] = self.state.as_u8();
+        out[4..20].copy_from_slice(&self.addr);
+    }
+
+    fn read(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes[3] != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let family = NetAddrFamily::from_u8(bytes[0])?;
+        let prefix = bytes[1];
+        if prefix > family.max_prefix() {
+            return Err(Errno::OutOfRange);
+        }
+        let state = NetAddrState::from_u8(bytes[2])?;
+        let mut addr = [0u8; 16];
+        addr.copy_from_slice(&bytes[4..20]);
+        if family == NetAddrFamily::V4 && addr[4..].iter().any(|&b| b != 0) {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            family,
+            prefix,
+            state,
+            addr,
+        })
+    }
+}
+
+/// Most addresses one state record reports — a reply-size validation
+/// bound; an interface with more reports its first
+/// [`NET_IF_MAX_ADDRS`] (the engine's own table is separately bounded).
+pub const NET_IF_MAX_ADDRS: usize = 8;
+
+/// One interface's live link/address state (`state:net/<iface>/…`,
+/// plan §5): the response record of the interface-state page.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NetInterfaceStateRecord {
+    /// The interface's admin-chosen alias, NUL-padded.
+    pub name: [u8; IF_NAME_LEN],
+    /// Whether the link carries frames.
+    pub link_up: bool,
+    /// How many entries of `addrs` are significant.
+    pub addr_count: u8,
+    /// The bound addresses; entries past `addr_count` must be zero.
+    pub addrs: [NetIfAddr; NET_IF_MAX_ADDRS],
+}
+
+impl NetInterfaceStateRecord {
+    /// Encoded size: name (16), link (1), count (1), reserved (2),
+    /// addresses (8 × 20).
+    pub const WIRE_LEN: usize = 20 + NET_IF_MAX_ADDRS * NetIfAddr::WIRE_LEN;
+
+    /// A zeroed address slot (the padding value past `addr_count`).
+    pub const EMPTY_ADDR: NetIfAddr = NetIfAddr {
+        family: NetAddrFamily::V4,
+        prefix: 0,
+        state: NetAddrState::Preferred,
+        addr: [0; 16],
+    };
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[..16].copy_from_slice(&self.name);
+        out[16] = u8::from(self.link_up);
+        out[17] = self.addr_count;
+        for (index, addr) in self.addrs.iter().enumerate().take(self.addr_count as usize) {
+            addr.write(&mut out[20 + index * NetIfAddr::WIRE_LEN..]);
+        }
+        out
+    }
+
+    /// Decode from `bytes`, failing closed on any malformed record.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a record.
+    /// * [`Errno::BadMagic`] — a dirty reserved byte, or a non-zero
+    ///   address slot past `addr_count`.
+    /// * [`Errno::OutOfRange`] — an invalid name, link flag, count,
+    ///   family, prefix, or address state.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        if bytes[18] != 0 || bytes[19] != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let mut name = [0u8; IF_NAME_LEN];
+        name.copy_from_slice(&bytes[..16]);
+        validate_if_name(&name)?;
+        let link_up = match bytes[16] {
+            0 => false,
+            1 => true,
+            _ => return Err(Errno::OutOfRange),
+        };
+        let addr_count = bytes[17];
+        if addr_count as usize > NET_IF_MAX_ADDRS {
+            return Err(Errno::OutOfRange);
+        }
+        let mut addrs = [Self::EMPTY_ADDR; NET_IF_MAX_ADDRS];
+        for (index, slot) in addrs.iter_mut().enumerate() {
+            let field =
+                &bytes[20 + index * NetIfAddr::WIRE_LEN..20 + (index + 1) * NetIfAddr::WIRE_LEN];
+            if index < addr_count as usize {
+                *slot = NetIfAddr::read(field)?;
+            } else if field.iter().any(|&b| b != 0) {
+                return Err(Errno::BadMagic);
+            }
+        }
+        Ok(Self {
+            name,
+            link_up,
+            addr_count,
+            addrs,
+        })
+    }
+}
+
+/// One interface's monotonic stack counters (the `Counters` reply
+/// payload; `stats:net`, plan §5).
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct NetCountersReply {
+    /// Frames received from the device.
+    pub rx_frames: u64,
+    /// Received frames dropped by validation or lack of a handler.
+    pub rx_dropped: u64,
+    /// Frames emitted for transmission.
+    pub tx_frames: u64,
+    /// ICMP/`ICMPv6` errors emitted.
+    pub icmp_errors_sent: u64,
+    /// ICMP/`ICMPv6` errors suppressed by the rate limiter.
+    pub icmp_errors_suppressed: u64,
+    /// Reassemblies expired incomplete.
+    pub reassembly_expired: u64,
+    /// Packets dropped from the pending-resolution queue.
+    pub pending_dropped: u64,
+}
+
+/// Number of `u64` counters in a [`NetCountersReply`].
+const COUNTERS_FIELDS: usize = 7;
+
+impl NetCountersReply {
+    /// Encoded payload size: seven little-endian `u64` counters.
+    pub const WIRE_LEN: usize = COUNTERS_FIELDS * 8;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        for (index, value) in [
+            self.rx_frames,
+            self.rx_dropped,
+            self.tx_frames,
+            self.icmp_errors_sent,
+            self.icmp_errors_suppressed,
+            self.reassembly_expired,
+            self.pending_dropped,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            put_u64(&mut out, index * 8, value);
+        }
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] — `bytes` cannot hold the payload.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        Ok(Self {
+            rx_frames: read_u64(bytes, 0),
+            rx_dropped: read_u64(bytes, 8),
+            tx_frames: read_u64(bytes, 16),
+            icmp_errors_sent: read_u64(bytes, 24),
+            icmp_errors_suppressed: read_u64(bytes, 32),
+            reassembly_expired: read_u64(bytes, 40),
+            pending_dropped: read_u64(bytes, 48),
+        })
+    }
+}
+
+/// Largest reply the [`NETSTACK_ENDPOINT`] emits: the status word, the
+/// page header, and a full page of state records (the widest reply).
+pub const NETSTACK_MAX_REPLY: usize = STATUS_REPLY_LEN
+    + PAGE_HEADER_LEN
+    + NETSTACK_LIST_LIMIT_MAX as usize * NetInterfaceStateRecord::WIRE_LEN;
+
+/// Byte length of the page header following the status word: the
+/// record count (2) and a reserved pair that must be zero (2).
+pub const PAGE_HEADER_LEN: usize = 4;
+
+/// Encode a paged reply: the status frame, the count, then `records`
+/// packed back-to-back (each already encoded to its fixed width).
+///
+/// # Errors
+///
+/// * [`Errno::LengthOutOfRange`] — more records than
+///   [`NETSTACK_LIST_LIMIT_MAX`].
+/// * [`Errno::BufferTooSmall`] — `out` cannot hold the reply.
+pub fn encode_page_reply<const RECORD_LEN: usize>(
+    records: &[[u8; RECORD_LEN]],
+    out: &mut [u8],
+) -> Result<usize, Errno> {
+    if records.len() > NETSTACK_LIST_LIMIT_MAX as usize {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let total = STATUS_REPLY_LEN + PAGE_HEADER_LEN + records.len() * RECORD_LEN;
+    if out.len() < total {
+        return Err(Errno::BufferTooSmall);
+    }
+    out[..STATUS_REPLY_LEN].copy_from_slice(&encode_status_reply(Ok(())));
+    // Record count fits u16: bounded by NETSTACK_LIST_LIMIT_MAX above.
+    let count = u16::try_from(records.len()).map_err(|_| Errno::LengthOutOfRange)?;
+    put_u16(out, STATUS_REPLY_LEN, count);
+    put_u16(out, STATUS_REPLY_LEN + 2, 0);
+    let mut cursor = STATUS_REPLY_LEN + PAGE_HEADER_LEN;
+    for record in records {
+        out[cursor..cursor + RECORD_LEN].copy_from_slice(record);
+        cursor += RECORD_LEN;
+    }
+    Ok(total)
+}
+
+/// Decode a paged reply's header, returning the record region.
+///
+/// # Errors
+///
+/// * [`Errno::BufferTooSmall`] — `bytes` cannot hold the declared
+///   records.
+/// * [`Errno::BadMagic`] — a dirty reserved pair.
+/// * [`Errno::LengthOutOfRange`] — a count beyond
+///   [`NETSTACK_LIST_LIMIT_MAX`].
+/// * The decoded [`Errno`] itself, when the service refused the
+///   request.
+pub fn decode_page_reply(bytes: &[u8], record_len: usize) -> Result<(u16, &[u8]), Errno> {
+    decode_status_reply(&bytes[..bytes.len().min(STATUS_REPLY_LEN)])?;
+    if bytes.len() < STATUS_REPLY_LEN + PAGE_HEADER_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    let count = read_u16(bytes, STATUS_REPLY_LEN);
+    if read_u16(bytes, STATUS_REPLY_LEN + 2) != 0 {
+        return Err(Errno::BadMagic);
+    }
+    if count > NETSTACK_LIST_LIMIT_MAX {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let body = &bytes[STATUS_REPLY_LEN + PAGE_HEADER_LEN..];
+    let need = count as usize * record_len;
+    if body.len() < need {
+        return Err(Errno::BufferTooSmall);
+    }
+    Ok((count, &body[..need]))
+}
+
+/// Encode a `Counters` outcome: the status frame followed by the
+/// counter payload on success, the status frame alone on refusal.
+///
+/// # Errors
+///
+/// [`Errno::BufferTooSmall`] — `out` cannot hold the reply.
+pub fn encode_counters_reply(
+    result: Result<NetCountersReply, Errno>,
+    out: &mut [u8],
+) -> Result<usize, Errno> {
+    match result {
+        Ok(counters) => {
+            let total = STATUS_REPLY_LEN + NetCountersReply::WIRE_LEN;
+            if out.len() < total {
+                return Err(Errno::BufferTooSmall);
+            }
+            out[..STATUS_REPLY_LEN].copy_from_slice(&encode_status_reply(Ok(())));
+            out[STATUS_REPLY_LEN..total].copy_from_slice(&counters.to_le_bytes());
+            Ok(total)
+        }
+        Err(err) => {
+            if out.len() < STATUS_REPLY_LEN {
+                return Err(Errno::BufferTooSmall);
+            }
+            out[..STATUS_REPLY_LEN].copy_from_slice(&encode_status_reply(Err(err)));
+            Ok(STATUS_REPLY_LEN)
+        }
+    }
+}
+
+/// Decode a `Counters` reply.
+///
+/// # Errors
+///
+/// * [`Errno::BufferTooSmall`] — `bytes` cannot hold the reply.
+/// * The decoded [`Errno`] itself, when the service refused the
+///   request.
+pub fn decode_counters_reply(bytes: &[u8]) -> Result<NetCountersReply, Errno> {
+    decode_status_reply(&bytes[..bytes.len().min(STATUS_REPLY_LEN)])?;
+    NetCountersReply::from_bytes(&bytes[STATUS_REPLY_LEN..])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn name(text: &str) -> [u8; IF_NAME_LEN] {
+        let mut out = [0u8; IF_NAME_LEN];
+        out[..text.len()].copy_from_slice(text.as_bytes());
+        out
+    }
+
+    fn v4(a: u8, b: u8, c: u8, d: u8) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        out[..4].copy_from_slice(&[a, b, c, d]);
+        out
+    }
+
+    #[test]
+    fn magic_is_the_ascii_tag() {
+        assert_eq!(NETSTACK_REQUEST_MAGIC, u32::from_le_bytes(*b"NST1"));
+    }
+
+    #[test]
+    fn requests_round_trip() {
+        for request in [
+            NetstackRequest::InterfaceList,
+            NetstackRequest::AddrAdd {
+                iface: name("wan"),
+                family: NetAddrFamily::V4,
+                prefix: 24,
+                addr: v4(10, 0, 2, 15),
+            },
+            NetstackRequest::AddrAdd {
+                iface: name("lan0"),
+                family: NetAddrFamily::V6,
+                prefix: 64,
+                addr: [0x20; 16],
+            },
+            NetstackRequest::RouteAdd {
+                iface: name("wan"),
+                family: NetAddrFamily::V4,
+                prefix: 0,
+                dest: [0; 16],
+                next_hop: Some(v4(10, 0, 2, 2)),
+            },
+            NetstackRequest::RouteAdd {
+                iface: name("wan"),
+                family: NetAddrFamily::V6,
+                prefix: 64,
+                dest: [0x21; 16],
+                next_hop: None,
+            },
+            NetstackRequest::Counters { iface: name("wan") },
+            NetstackRequest::InterfaceFacts {
+                offset: 3,
+                limit: 8,
+            },
+            NetstackRequest::InterfaceState {
+                offset: 0,
+                limit: NETSTACK_LIST_LIMIT_MAX,
+            },
+        ] {
+            let bytes = request.to_le_bytes();
+            assert_eq!(NetstackRequest::from_bytes(&bytes), Ok(request));
+        }
+    }
+
+    #[test]
+    fn decode_fails_closed_on_malformed_framing() {
+        let good = NetstackRequest::InterfaceList.to_le_bytes();
+        assert_eq!(
+            NetstackRequest::from_bytes(&good[..NetstackRequest::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        let mut bad_magic = good;
+        bad_magic[0] ^= 0xFF;
+        assert_eq!(
+            NetstackRequest::from_bytes(&bad_magic),
+            Err(Errno::BadMagic)
+        );
+        let mut bad_version = good;
+        bad_version[4] = 9;
+        assert_eq!(
+            NetstackRequest::from_bytes(&bad_version),
+            Err(Errno::AbiVersionUnsupported)
+        );
+        let mut bad_op = good;
+        bad_op[6] = 99;
+        assert_eq!(NetstackRequest::from_bytes(&bad_op), Err(Errno::OutOfRange));
+        let mut dirty_tail = good;
+        dirty_tail[63] = 1;
+        assert_eq!(
+            NetstackRequest::from_bytes(&dirty_tail),
+            Err(Errno::BadMagic)
+        );
+    }
+
+    #[test]
+    fn addr_add_bounds_are_enforced() {
+        let good = NetstackRequest::AddrAdd {
+            iface: name("wan"),
+            family: NetAddrFamily::V4,
+            prefix: 24,
+            addr: v4(10, 0, 2, 15),
+        }
+        .to_le_bytes();
+        // Prefix 0 and beyond the family maximum are refused.
+        let mut zero_prefix = good;
+        zero_prefix[25] = 0;
+        assert_eq!(
+            NetstackRequest::from_bytes(&zero_prefix),
+            Err(Errno::OutOfRange)
+        );
+        let mut wide_prefix = good;
+        wide_prefix[25] = 33;
+        assert_eq!(
+            NetstackRequest::from_bytes(&wide_prefix),
+            Err(Errno::OutOfRange)
+        );
+        // An unknown family is refused.
+        let mut bad_family = good;
+        bad_family[24] = 5;
+        assert_eq!(
+            NetstackRequest::from_bytes(&bad_family),
+            Err(Errno::OutOfRange)
+        );
+        // A V4 address with a dirty tail is refused.
+        let mut dirty_v4 = good;
+        dirty_v4[30] = 1;
+        assert_eq!(NetstackRequest::from_bytes(&dirty_v4), Err(Errno::BadMagic));
+        // An illegal interface name is refused.
+        let mut bad_name = good;
+        bad_name[8] = b'W';
+        assert_eq!(
+            NetstackRequest::from_bytes(&bad_name),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn route_add_gateway_flag_is_validated() {
+        let good = NetstackRequest::RouteAdd {
+            iface: name("wan"),
+            family: NetAddrFamily::V4,
+            prefix: 0,
+            dest: [0; 16],
+            next_hop: None,
+        }
+        .to_le_bytes();
+        // An unknown flag value is refused.
+        let mut bad_flag = good;
+        bad_flag[42] = 2;
+        assert_eq!(
+            NetstackRequest::from_bytes(&bad_flag),
+            Err(Errno::OutOfRange)
+        );
+        // A gateway payload with the flag clear is refused.
+        let mut smuggled = good;
+        smuggled[45] = 7;
+        assert_eq!(NetstackRequest::from_bytes(&smuggled), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn paging_limits_are_bounded() {
+        let good = NetstackRequest::InterfaceFacts {
+            offset: 0,
+            limit: 1,
+        }
+        .to_le_bytes();
+        let mut zero = good;
+        zero[12..14].copy_from_slice(&0u16.to_le_bytes());
+        assert_eq!(
+            NetstackRequest::from_bytes(&zero),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut wide = good;
+        wide[12..14].copy_from_slice(&(NETSTACK_LIST_LIMIT_MAX + 1).to_le_bytes());
+        assert_eq!(
+            NetstackRequest::from_bytes(&wide),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
+
+    #[test]
+    fn if_name_grammar_is_enforced() {
+        assert!(validate_if_name(&name("wan")).is_ok());
+        assert!(validate_if_name(&name("lan0")).is_ok());
+        assert_eq!(validate_if_name(&name("")), Err(Errno::OutOfRange));
+        assert_eq!(validate_if_name(&name("WAN")), Err(Errno::OutOfRange));
+        assert_eq!(validate_if_name(&name("w an")), Err(Errno::OutOfRange));
+        // A byte after the NUL terminator is refused.
+        let mut smuggled = name("wan");
+        smuggled[10] = b'x';
+        assert_eq!(validate_if_name(&smuggled), Err(Errno::OutOfRange));
+        // A full-width name is legal.
+        assert!(validate_if_name(&name("abcdefghijklmnop")).is_ok());
+    }
+
+    fn sample_facts() -> NetInterfaceFactsRecord {
+        NetInterfaceFactsRecord {
+            name: name("wan"),
+            kind: NetIfKind::Ethernet,
+            mac: [0x52, 0x54, 0, 0x12, 0x34, 0x56],
+            mtu: 1500,
+            offloads: 0,
+            rx_queues: 1,
+        }
+    }
+
+    #[test]
+    fn facts_record_round_trips_and_fails_closed() {
+        let record = sample_facts();
+        let bytes = record.to_le_bytes();
+        assert_eq!(NetInterfaceFactsRecord::from_bytes(&bytes), Ok(record));
+        let mut bad_kind = bytes;
+        bad_kind[16] = 9;
+        assert_eq!(
+            NetInterfaceFactsRecord::from_bytes(&bad_kind),
+            Err(Errno::OutOfRange)
+        );
+        let mut bad_offloads = bytes;
+        bad_offloads[31] = 0x80;
+        assert_eq!(
+            NetInterfaceFactsRecord::from_bytes(&bad_offloads),
+            Err(Errno::OutOfRange)
+        );
+        let mut runt_mtu = bytes;
+        runt_mtu[24..28].copy_from_slice(&10u32.to_le_bytes());
+        assert_eq!(
+            NetInterfaceFactsRecord::from_bytes(&runt_mtu),
+            Err(Errno::OutOfRange)
+        );
+        let mut dirty = bytes;
+        dirty[35] = 1;
+        assert_eq!(
+            NetInterfaceFactsRecord::from_bytes(&dirty),
+            Err(Errno::BadMagic)
+        );
+    }
+
+    fn sample_state() -> NetInterfaceStateRecord {
+        let mut addrs = [NetInterfaceStateRecord::EMPTY_ADDR; NET_IF_MAX_ADDRS];
+        addrs[0] = NetIfAddr {
+            family: NetAddrFamily::V4,
+            prefix: 24,
+            state: NetAddrState::Preferred,
+            addr: v4(10, 0, 2, 15),
+        };
+        addrs[1] = NetIfAddr {
+            family: NetAddrFamily::V6,
+            prefix: 64,
+            state: NetAddrState::Tentative,
+            addr: [0xFE; 16],
+        };
+        NetInterfaceStateRecord {
+            name: name("wan"),
+            link_up: true,
+            addr_count: 2,
+            addrs,
+        }
+    }
+
+    #[test]
+    fn state_record_round_trips_and_fails_closed() {
+        let record = sample_state();
+        let bytes = record.to_le_bytes();
+        assert_eq!(NetInterfaceStateRecord::from_bytes(&bytes), Ok(record));
+        let mut bad_link = bytes;
+        bad_link[16] = 2;
+        assert_eq!(
+            NetInterfaceStateRecord::from_bytes(&bad_link),
+            Err(Errno::OutOfRange)
+        );
+        let mut wide_count = bytes;
+        wide_count[17] = u8::try_from(NET_IF_MAX_ADDRS).expect("fits u8") + 1;
+        assert_eq!(
+            NetInterfaceStateRecord::from_bytes(&wide_count),
+            Err(Errno::OutOfRange)
+        );
+        // A non-zero address slot past addr_count is refused.
+        let mut smuggled = bytes;
+        smuggled[20 + 2 * NetIfAddr::WIRE_LEN + 5] = 1;
+        assert_eq!(
+            NetInterfaceStateRecord::from_bytes(&smuggled),
+            Err(Errno::BadMagic)
+        );
+        // A bad prefix inside a significant slot is refused.
+        let mut bad_prefix = bytes;
+        bad_prefix[20 + 1] = 33;
+        assert_eq!(
+            NetInterfaceStateRecord::from_bytes(&bad_prefix),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn counters_reply_round_trips_ok_and_error() {
+        let counters = NetCountersReply {
+            rx_frames: 1,
+            rx_dropped: 2,
+            tx_frames: 3,
+            icmp_errors_sent: 4,
+            icmp_errors_suppressed: 5,
+            reassembly_expired: 6,
+            pending_dropped: 7,
+        };
+        let mut out = [0u8; STATUS_REPLY_LEN + NetCountersReply::WIRE_LEN];
+        let len = encode_counters_reply(Ok(counters), &mut out).expect("encode");
+        assert_eq!(decode_counters_reply(&out[..len]), Ok(counters));
+        let len = encode_counters_reply(Err(Errno::NotFound), &mut out).expect("encode");
+        assert_eq!(decode_counters_reply(&out[..len]), Err(Errno::NotFound));
+    }
+
+    #[test]
+    fn page_reply_round_trips_and_fails_closed() {
+        let records = [sample_facts().to_le_bytes(), sample_facts().to_le_bytes()];
+        let mut out = [0u8; NETSTACK_MAX_REPLY];
+        let len = encode_page_reply(&records, &mut out).expect("encode");
+        let (count, body) =
+            decode_page_reply(&out[..len], NetInterfaceFactsRecord::WIRE_LEN).expect("decode");
+        assert_eq!(count, 2);
+        assert_eq!(body.len(), 2 * NetInterfaceFactsRecord::WIRE_LEN);
+        for chunk in body.chunks_exact(NetInterfaceFactsRecord::WIRE_LEN) {
+            assert_eq!(
+                NetInterfaceFactsRecord::from_bytes(chunk),
+                Ok(sample_facts())
+            );
+        }
+        // A truncated body fails closed.
+        assert_eq!(
+            decode_page_reply(&out[..len - 1], NetInterfaceFactsRecord::WIRE_LEN),
+            Err(Errno::BufferTooSmall)
+        );
+        // A dirty reserved pair fails closed.
+        let mut dirty = out;
+        dirty[STATUS_REPLY_LEN + 2] = 1;
+        assert_eq!(
+            decode_page_reply(&dirty[..len], NetInterfaceFactsRecord::WIRE_LEN),
+            Err(Errno::BadMagic)
+        );
+        // A refusal decodes to its errno.
+        let refusal = encode_status_reply(Err(Errno::PermissionDenied));
+        assert_eq!(
+            decode_page_reply(&refusal, NetInterfaceFactsRecord::WIRE_LEN),
+            Err(Errno::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn interface_list_reply_reuses_the_page_codec() {
+        let names = [name("wan"), name("lan0")];
+        let mut out = [0u8; NETSTACK_MAX_REPLY];
+        let len = encode_page_reply(&names, &mut out).expect("encode");
+        let (count, body) = decode_page_reply(&out[..len], IF_NAME_LEN).expect("decode");
+        assert_eq!(count, 2);
+        assert_eq!(&body[..IF_NAME_LEN], &name("wan"));
+        assert_eq!(&body[IF_NAME_LEN..], &name("lan0"));
+    }
+}

@@ -1,48 +1,67 @@
 # Network drivers
 
-Link-layer drivers send and receive raw Ethernet (or equivalent)
-frames. They implement
+Link-layer drivers move raw Ethernet (or equivalent) frames and report
+device facts. They implement
 [`rustos_abi::driver::net::Net`](../abi/driver_traits.md). Higher
-layers (ARP, IP, ICMP, …) live above this trait in user space and
-are out of scope for `abi-v1`.
+layers (ARP, IP, ICMP, …) live in the user-space `netstack` service
+above this trait (`plans/NETWORK.md`) and are out of scope for the
+driver class.
 
 ## Class trait
 
-`Net` exposes three method families:
+`Net` exposes two methods:
 
-| Method                                | Purpose                                        | Capability gate                |
-|---------------------------------------|------------------------------------------------|--------------------------------|
-| `mac_address`                         | report link-layer address                      | `DriverHandle` ownership       |
-| `transmit` / `receive`                | one-shot frame transfer                        | `CAP_NET_RAW` at dispatch site |
-| `transmit_with_class` / `receive_with_class` | classed transfer (see below)            | `CAP_NET_RAW` at dispatch site |
+| Method         | Purpose                                              | Capability gate                |
+|----------------|------------------------------------------------------|--------------------------------|
+| `device_facts` | typed device report (MAC, MTU, link, offloads, queues) | `DriverHandle` ownership     |
+| `service`      | pump the shared-memory frame rings once              | `CAP_NET_RAW` at dispatch site |
 
-Per `AGENTS.md` §2.9 every error path returns `Result<_, DriverError>`
-— under-MTU frames map to `BufferTooSmall`, over-MTU frames map to
-`LengthOutOfRange`, full transmit queues map to `Busy`, and missing
-`CAP_NET_RAW` maps to `PermissionDenied`.
+`device_facts` returns a `DeviceFacts` the consumer validates whole
+(`validate()`, fail closed): the MTU must sit inside the
+68..=65 535 bound and the receive-queue count must be at least 1, so a
+corrupt or hostile report can never size an attacker-controlled
+allocation.
+
+## The frame-ring transport
+
+Frame I/O is the shared-memory frame-ring transport
+(`rustos_abi::driver::net_ring`): the stack owns a `FrameRings` pair —
+queued transmits in `tx`, delivered frames in `rx` — and hands it to
+`service`, the single doorbell that moves frames both ways. The rings
+are mutated only *inside* the blocking `service` call, so the call
+boundary is the synchronisation and the whole transport is safe Rust;
+no frame bytes cross the IPC when the region is shared between
+processes. Ring state read back from the region is untrusted: corrupt
+counters or slot lengths are refused (`BadMagic`), and a corrupt slot
+is consumed so it cannot wedge the queue behind it.
+
+`service` semantics:
+
+- Every frame queued in `tx` is moved into the device; a frame the
+  device cannot move (runt, over-MTU, corrupt slot) is consumed and
+  dropped so the queue keeps flowing.
+- Delivered frames move into `rx` until the device is drained or the
+  ring is full (`ServiceReport::rx_ring_full` — nothing is dropped;
+  the stack drains and calls again).
+- When nothing moved at all, the driver parks once on its host's
+  device-event waiter and re-checks, so a caller looping on `service`
+  is event-driven, never a spin.
 
 ## `BufferClass` and zero-on-free
 
-`*_with_class` accept a `BufferClass` (`NonSensitive` /
-`Sensitive`). When `class == Sensitive` the driver is required to
-zero every internal staging copy of the frame before the method
-returns (`AGENTS.md` §4). The default implementations delegate to
-the plain methods and are safe only for drivers that DMA directly
-between the caller-owned slice and the wire; drivers that
-bounce-buffer (e.g. `virtio_net` over the Stage 4 host-side
-allocator) override them.
-
-The trait makes no guarantee about scrubbing the caller-owned
-`frame` / `buf`; that remains the caller's responsibility.
+`FrameRings::class` declares the traffic's sensitivity for the whole
+ring set. When it is `Sensitive` the driver zeroes every internal
+staging copy before `service` returns (`AGENTS.md` §4); a harvested
+frame still awaiting a free RX slot is scrubbed after it is delivered,
+never before. The trait makes no guarantee about scrubbing the ring
+region itself; that remains the stack's responsibility.
 
 ## Shipped drivers
 
-| Driver                                   | Crate                                | Supported buses     | Stage 4 status                          |
-|------------------------------------------|--------------------------------------|---------------------|------------------------------------------|
-| [virtio-net](./virtio.md)                | `rustos-drv-network-virtio-net`      | virtio (PCI / MMIO) | host-side tests + mock transport only    |
+| Driver                    | Crate                           | Supported buses     | Status                                             |
+|---------------------------|---------------------------------|---------------------|----------------------------------------------------|
+| [virtio-net](./virtio.md) | `rustos-drv-network-virtio-net` | virtio (PCI / MMIO) | ring transport + facts; no offloads negotiated yet |
 
-A full ARP + ICMP round-trip against `qemu user net` requires:
-
-1. Kernel DMA + IRQ routing (`.junie/next-session-prompt.md` items 1–2),
-2. PCI / MMIO bus-handle hand-off (item 3),
-3. The userland ARP / IP / ICMP responder (item 5).
+The virtio-net QEMU verticals (`tests/integration/virtio_net_*`) drive
+a live emulated device end to end: ARP-resolve the SLIRP gateway and
+exchange one ICMP echo through the ring transport.

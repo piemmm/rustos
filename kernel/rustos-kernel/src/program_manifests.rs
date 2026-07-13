@@ -132,6 +132,19 @@ pub const SEATMGR_MANIFEST: &[CapabilityId] = &[
     CapabilityId::LOG_EMIT,
 ];
 
+/// The `netstack` service's manifest: `CAP_NET_RAW` for the NIC frame
+/// rings it alone drives, `CAP_IPC_BIND_PRIVILEGED` for the reserved
+/// `NETSTACK_ENDPOINT` rendezvous, and `CAP_LOG_EMIT` for its audit
+/// records. It deliberately does not request `CAP_NET_ADMIN` — the
+/// service *enforces* that capability against its callers
+/// (`plans/NETWORK.md` §3); it never needs to hold it.
+#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
+pub const NETSTACK_MANIFEST: &[CapabilityId] = &[
+    CapabilityId::NET_RAW,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::LOG_EMIT,
+];
+
 /// The `ps` tool's manifest: `CAP_CONSOLE_WRITE` for its listing on fd 1
 /// and diagnostics on fd 2, `CAP_FS_ACCESS` because its short-help
 /// switches read the bundle's own `Help/` tree through the secured VFS
@@ -826,6 +839,7 @@ mod tests {
             ("man", AppKind::Command, MAN_MANIFEST),
             ("mkdir", AppKind::Command, PURE_TOOL_REQUEST),
             ("mv", AppKind::Command, FILE_TOOL_REQUEST),
+            ("netstack", AppKind::Service, NETSTACK_MANIFEST),
             ("printf", AppKind::Command, PURE_TOOL_REQUEST),
             ("ps", AppKind::Command, PS_MANIFEST),
             ("reset", AppKind::Command, RESET_MANIFEST),

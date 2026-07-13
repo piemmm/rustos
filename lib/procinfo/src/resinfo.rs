@@ -247,6 +247,10 @@ pub enum ResponsePayload {
     Info(InfoValue),
     /// A `stats:` metric.
     Metric(Metric),
+    /// A `state:` reading: current mutable state (a link state, a bound
+    /// address set), rendered like an `info:` value but never a stable
+    /// fact — it may change between reads (`plans/ALIAS.md` §6.4).
+    State(InfoValue),
 }
 
 /// A resolved `info:`/`stats:` response: the shared envelope

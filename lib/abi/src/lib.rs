@@ -36,6 +36,7 @@ pub mod log_ingress;
 pub mod mailbox_ipc;
 pub mod manifest;
 pub mod memory;
+pub mod net_ipc;
 pub mod origin;
 pub mod process;
 pub mod random;

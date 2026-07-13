@@ -1,0 +1,14 @@
+# Signed-AppInfo manifest source for the `netstack` network-stack
+# service (a service is an app, AGENTS.md §16.2; plans/NETWORK.md §2.2).
+# Discovered by the build's app-bundle composer and planted under
+# /System/Services/. The capability list is the bundle's request:
+# CAP_NET_RAW for the NIC frame rings it alone drives,
+# CAP_IPC_BIND_PRIVILEGED for the reserved well-known endpoint, and
+# CAP_LOG_EMIT for its audit records. It deliberately does NOT request
+# CAP_NET_ADMIN — the service *enforces* that capability against its
+# callers; it never needs to hold it.
+id = "os.rustos.netstack"
+name = "netstack"
+version = "0.1.0"
+kind = "service"
+capabilities = ["CAP_NET_RAW", "CAP_IPC_BIND_PRIVILEGED", "CAP_LOG_EMIT"]

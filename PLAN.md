@@ -4687,7 +4687,7 @@ format-conformance defect the evidence window exposed). See
 
 ## NETWORK — full IPv4 + IPv6 networking (`plans/NETWORK.md`)
 
-**Status: N1–N3a done; N3b–N9 planned.** N1 (done) landed the `lib/net`
+**Status: N1–N3b done; N3c–N9 planned.** N1 (done) landed the `lib/net`
 protocol-engine foundation: the dual-stack address vocabulary
 (`core::net` types + RFC 4007 `Ipv6Scope`/`ScopedIpv6Addr` zone rules),
 the one RFC 1071 checksum (incremental accumulator + v4/v6
@@ -4722,7 +4722,18 @@ and the driver seam's facts half (`Net::device_facts` returning the
 fail-closed-validated `DeviceFacts` with the closed `NetOffloads`
 vocabulary; `virtio_net` serves it) — end-to-end host tests (two
 stacks ping each other over v4 and v6) and the `fuzz_net_stack`
-harness. The remaining increments
+harness. N3b (done) landed the `netstack` service process
+(`userland/net/netstack`, service account uid 14): the alias-named
+interface table over per-interface `Stack`s, the frame-ring pump, the
+wait-set event loop with one-shot deadlines, the audited
+`CAP_NET_ADMIN` admin surface on the reserved `NETSTACK_ENDPOINT`,
+the broker facts/state reads behind `CAP_SYSINFO_INTROSPECT` narrowed
+by `sysinfod` (`NET_INTERFACE_FACTS`/`NET_INTERFACE_STATE`) and
+resolved by `lib/procinfo` (`info:net/…`, the first `state:net/…`
+namespace), and the seam's transport half evolved in place — `Net`
+frame I/O is now the shared-memory frame-ring transport
+(`rustos_abi::driver::net_ring`), served by `virtio_net`. The
+remaining increments
 deliver the complete dual-stack user-space network
 stack above the link-layer driver seam: one pure, host-testable,
 fuzzed protocol engine (`lib/net` — Ethernet, ARP/ND over one neighbour
@@ -4730,12 +4741,13 @@ contract, IPv4 + IPv6 as peers, ICMP/ICMPv6, IGMP/MLD multicast
 membership, UDP, full RFC 9293 TCP with SACK and pluggable congestion
 control), driven by the `userland/net/netstack` service (the §19.5
 minimum-capability parser process; event-driven, never polling), serving
-a versioned capability-gated socket ABI (`lib/abi/src/net.rs`; `CAP_NET`,
-`CAP_NET_BIND_PRIVILEGED`, `CAP_NET_ADMIN` land with their enforcement
-points) over kernel-brokered endpoints, and consuming an in-place-evolved
-NIC seam (shared-memory frame rings + a closed negotiated offload
-vocabulary `virtio_net` serves first; the software path stays the
-conformance oracle). DoS resistance is designed in: SYN cookies, RFC 5961
+a versioned capability-gated socket ABI (`lib/abi/src/net.rs`; `CAP_NET`
+and `CAP_NET_BIND_PRIVILEGED` land with their enforcement points, joining
+the live `CAP_NET_ADMIN`) over kernel-brokered endpoints, and completing
+the NIC seam's negotiated offload vocabulary over the landed
+shared-memory frame rings (`virtio_net` serves it first; the software
+path stays the conformance oracle). DoS resistance is designed in: SYN
+cookies, RFC 5961
 challenge ACKs, CSPRNG ISNs/ports/IDs, budgeted fail-closed reassembly
 and neighbour caches, per-principal §24.3 accounting. Interfaces are
 observable through `info:net`/`state:net`/`stats:net` sysinfo queries and

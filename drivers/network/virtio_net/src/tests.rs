@@ -9,6 +9,8 @@ use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use rustos_abi::driver::net_ring::RingGeometry;
+use rustos_abi::driver::BufferClass;
 use rustos_virtio::{ChainView, DmaHost, MockHost, MockTransport};
 
 /// MAC address the mock device exposes through its config window.
@@ -145,6 +147,21 @@ fn arp_frame() -> Vec<u8> {
     f
 }
 
+/// Ring geometry for the tests: four slots, each wide enough to let
+/// a deliberately over-MTU frame *into* the ring so the driver-side
+/// drop policy is what the test exercises.
+fn test_geometry() -> RingGeometry {
+    RingGeometry::new(4, 2048).expect("test geometry")
+}
+
+fn rings_region() -> Vec<u8> {
+    vec![0u8; test_geometry().region_len()]
+}
+
+fn bind_rings(region: &mut [u8], class: BufferClass) -> FrameRings<'_> {
+    FrameRings::bind(region, test_geometry(), class).expect("bind rings")
+}
+
 #[test]
 fn open_reports_device_facts() {
     let (t, _, _) = build_device();
@@ -159,100 +176,119 @@ fn open_reports_device_facts() {
 }
 
 #[test]
-fn transmit_records_frame_on_peer() {
+fn service_transmits_queued_frames_to_the_peer() {
     let (t, tx_log, _) = build_device();
     let mut net = open_net(t);
+    let mut region = rings_region();
+    let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
     let frame = arp_frame();
-    net.transmit(&frame).expect("transmit");
+    rings.tx.push(&frame).expect("queue");
+    let report = net.service(&mut rings).expect("service");
+    assert_eq!(report.transmitted, 1);
     let log = tx_log.borrow();
     assert_eq!(log.len(), 1);
     assert_eq!(log[0], frame);
 }
 
 #[test]
-fn receive_returns_queued_frame() {
+fn service_delivers_a_queued_frame_into_the_rx_ring() {
     let (t, _, rx_queue) = build_device();
     let mut net = open_net(t);
     let payload = arp_frame();
     rx_queue.borrow_mut().push_back(payload.clone());
-    let mut buf = vec![0u8; 1500];
-    let n = net.receive(&mut buf).expect("receive");
+    let mut region = rings_region();
+    let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
+    // Nothing queued for transmit: the call parks once on the device
+    // event (the auto-drain host delivers there) and harvests.
+    let report = net.service(&mut rings).expect("service");
+    assert_eq!(report.received, 1);
+    let mut buf = vec![0u8; 2048];
+    let n = rings.rx.pop(&mut buf).expect("pop").expect("frame");
     assert_eq!(n, payload.len());
     assert_eq!(&buf[..n], payload.as_slice());
 }
 
 #[test]
-fn receive_with_no_pending_frame_returns_zero() {
+fn idle_service_reports_nothing_moved() {
     let (t, _, _) = build_device();
     let mut net = open_net(t);
-    let mut buf = vec![0u8; 1500];
-    let n = net.receive(&mut buf).expect("receive");
-    assert_eq!(n, 0);
+    let mut region = rings_region();
+    let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
+    let report = net.service(&mut rings).expect("service");
+    assert_eq!(report, ServiceReport::default());
 }
 
 #[test]
-fn transmit_rejects_undersized_frame() {
-    let (t, _, _) = build_device();
+fn runt_and_oversize_tx_frames_are_dropped_without_wedging() {
+    let (t, tx_log, _) = build_device();
     let mut net = open_net(t);
-    let too_small = vec![0u8; 8];
-    assert_eq!(net.transmit(&too_small), Err(DriverError::BufferTooSmall));
+    let mut region = rings_region();
+    let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
+    // A runt, an over-MTU frame (fits the 2048-byte slot, exceeds
+    // the 1514-byte device maximum), then a good frame.
+    rings.tx.push(&[0u8; 8]).expect("queue runt");
+    rings.tx.push(&[0u8; 2000]).expect("queue oversize");
+    let good = arp_frame();
+    rings.tx.push(&good).expect("queue good");
+    let report = net.service(&mut rings).expect("service");
+    assert_eq!(report.transmitted, 1);
+    let log = tx_log.borrow();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0], good);
 }
 
 #[test]
-fn transmit_rejects_oversized_frame() {
-    let (t, _, _) = build_device();
-    let mut net = open_net(t);
-    let too_big = vec![0u8; 9000];
-    assert_eq!(net.transmit(&too_big), Err(DriverError::LengthOutOfRange));
-}
-
-#[test]
-fn receive_rejects_empty_buffer() {
-    let (t, _, _) = build_device();
-    let mut net = open_net(t);
-    let mut empty: Vec<u8> = Vec::new();
-    assert_eq!(net.receive(&mut empty), Err(DriverError::BufferTooSmall));
-}
-
-#[test]
-fn sensitive_class_round_trip() {
-    // End-to-end: transmit a sensitive frame, then receive a
-    // sensitive frame the peer has queued; both calls succeed and
-    // the device round-trips the payload (`BounceBuffer`'s drop
-    // impl scrubs staging — covered directly in the transport
-    // crate's tests).
+fn sensitive_class_round_trip_scrubs_staging() {
+    // End-to-end: transmit and receive over Sensitive-class rings;
+    // the payload round-trips and the persistent staging is zeroed
+    // once the frames have moved.
     let (t, tx_log, rx_queue) = build_device();
     let mut net = open_net(t);
+    let mut region = rings_region();
+    let mut rings = bind_rings(&mut region, BufferClass::Sensitive);
     let tx_frame = arp_frame();
-    net.transmit_with_class(&tx_frame, BufferClass::Sensitive)
-        .expect("tx");
+    rings.tx.push(&tx_frame).expect("queue");
+    let report = net.service(&mut rings).expect("service tx");
+    assert_eq!(report.transmitted, 1);
     assert_eq!(tx_log.borrow()[0], tx_frame);
     let rx_frame = arp_frame();
     rx_queue.borrow_mut().push_back(rx_frame.clone());
-    let mut buf = vec![0u8; 1500];
-    let n = net
-        .receive_with_class(&mut buf, BufferClass::Sensitive)
-        .expect("rx");
+    let report = net.service(&mut rings).expect("service rx");
+    assert_eq!(report.received, 1);
+    let mut buf = vec![0u8; 2048];
+    let n = rings.rx.pop(&mut buf).expect("pop").expect("frame");
     assert_eq!(&buf[..n], rx_frame.as_slice());
 }
 
 #[test]
 fn steady_state_traffic_allocates_no_new_dma() {
-    // The staging buffers are carved once at open; idle polls,
+    // The staging buffers are carved once at open; idle services,
     // delivered frames, and transmits must all reuse them — the
-    // per-poll `dma_alloc`/`dma_free` churn (and its audit-log spam)
+    // per-call `dma_alloc`/`dma_free` churn (and its audit-log spam)
     // is exactly the defect this driver must not reintroduce.
     let (t, tx_log, rx_queue) = build_device();
     let (mut net, host) = open_net_with_host(t);
     let after_open = host.bytes_allocated();
     let frame = arp_frame();
-    let mut buf = vec![0u8; 1500];
+    let mut region = rings_region();
+    let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
+    let mut buf = vec![0u8; 2048];
+    assert_eq!(
+        net.service(&mut rings).expect("idle service"),
+        ServiceReport::default()
+    );
     for _ in 0..8 {
-        assert_eq!(net.receive(&mut buf).expect("idle receive"), 0);
         rx_queue.borrow_mut().push_back(frame.clone());
-        let n = net.receive(&mut buf).expect("receive");
-        assert_eq!(n, frame.len());
-        net.transmit(&frame).expect("transmit");
+        rings.tx.push(&frame).expect("queue");
+        let mut report = net.service(&mut rings).expect("service");
+        assert_eq!(report.transmitted, 1);
+        // The delivery may land on this call (the TX kick drained
+        // the peer) or the next parked one; drain what arrived.
+        if report.received == 0 {
+            report = net.service(&mut rings).expect("service rx");
+            assert_eq!(report.received, 1);
+        }
+        while rings.rx.pop(&mut buf).expect("pop").is_some() {}
     }
     assert_eq!(tx_log.borrow().len(), 8);
     assert_eq!(
@@ -263,20 +299,25 @@ fn steady_state_traffic_allocates_no_new_dma() {
 }
 
 #[test]
-fn receive_rearms_the_chain_after_buffer_too_small() {
-    // A frame larger than the caller's buffer is refused, but the
-    // receive chain must be re-posted so the next frame still lands.
-    let (t, _, rx_queue) = build_device();
+fn corrupt_tx_slot_is_consumed_and_flow_continues() {
+    let (t, tx_log, _) = build_device();
     let mut net = open_net(t);
-    rx_queue.borrow_mut().push_back(vec![0xAB; 200]);
-    let mut small = vec![0u8; 16];
-    assert_eq!(net.receive(&mut small), Err(DriverError::BufferTooSmall));
-    let frame = arp_frame();
-    rx_queue.borrow_mut().push_back(frame.clone());
-    let mut buf = vec![0u8; 1500];
-    let n = net.receive(&mut buf).expect("receive after refusal");
-    assert_eq!(n, frame.len());
-    assert_eq!(&buf[..n], frame.as_slice());
+    let mut region = rings_region();
+    // Queue a good frame after a slot whose length prefix is
+    // corrupted beyond the slot capacity.
+    {
+        let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
+        rings.tx.push(&[0u8; 60]).expect("queue victim");
+        rings.tx.push(&arp_frame()).expect("queue good");
+    }
+    // The TX ring is the second half of the region; its first slot's
+    // length prefix sits right after the 8-byte ring header.
+    let tx_ring_base = test_geometry().ring_len();
+    region[tx_ring_base + 8..tx_ring_base + 12].copy_from_slice(&8000u32.to_le_bytes());
+    let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
+    let report = net.service(&mut rings).expect("service");
+    assert_eq!(report.transmitted, 1);
+    assert_eq!(tx_log.borrow().len(), 1);
 }
 
 #[test]

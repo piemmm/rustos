@@ -443,11 +443,15 @@ Buffer sizes must be a positive integer multiple of
 
 `trait Net`. Methods:
 
-| Method               | Capability gate                  |
-|----------------------|----------------------------------|
-| `mac_address()`      | Driver handle.                   |
-| `transmit(&)`        | `CAP_NET_RAW` (plus handle).     |
-| `receive(&mut)`      | `CAP_NET_RAW` (plus handle).     |
+| Method                | Capability gate                  |
+|-----------------------|----------------------------------|
+| `device_facts()`      | Driver handle.                   |
+| `service(&mut rings)` | `CAP_NET_RAW` (plus handle).     |
+
+Frame I/O is the shared-memory frame-ring transport
+(`rustos_abi::driver::net_ring`): `service` drains the stack-owned TX
+ring into the device and harvests delivered frames into the RX ring
+(see [Network drivers](../drivers/network.md)).
 
 ## Input
 

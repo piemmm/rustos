@@ -15559,12 +15559,14 @@ mod tests {
             &[CapabilityId::SYSINFO_INTROSPECT],
             &[CapabilityId::SEAT_ADMIN],
             &[CapabilityId::SPAWN_AS_USER, CapabilityId::USERS_READ],
+            &[CapabilityId::NET_RAW],
         ];
         let accounts: &[(u32, &[CapabilityId])] = &[
             (rustos_users::DEVMGR_UID.0, rustos_users::DEVMGR_CEILING),
             (rustos_users::SYSINFOD_UID.0, rustos_users::SYSINFOD_CEILING),
             (rustos_users::SEATMGR_UID.0, rustos_users::SEATMGR_CEILING),
             (rustos_users::LOGIN_UID.0, rustos_users::LOGIN_CEILING),
+            (rustos_users::NETSTACK_UID.0, rustos_users::NETSTACK_CEILING),
         ];
 
         for (index, (uid, ceiling)) in accounts.iter().enumerate() {

@@ -48,6 +48,10 @@ mod program {
 
     use alloc::vec::Vec;
 
+    use rustos_abi::net_ipc::{
+        decode_page_reply, NetInterfaceFactsRecord, NetInterfaceStateRecord, NetstackRequest,
+        NETSTACK_ENDPOINT, NETSTACK_LIST_LIMIT_MAX, NETSTACK_MAX_REPLY,
+    };
     use rustos_abi::sysinfo::{
         encode_reply_err, encode_reply_ok, CpuLoadRecord, CpuTimeRecord, IntrospectDomain,
         KernelMemoryStats, LoadAverage, MemoryPressureStats, MountRecord, ProcessRecord,
@@ -246,6 +250,20 @@ mod program {
             Ok(records)
         }
 
+        fn net_interface_facts(
+            &self,
+            _caller: &Caller,
+        ) -> Result<Vec<NetInterfaceFactsRecord>, Errno> {
+            page_netstack(NetstackFactsPage)
+        }
+
+        fn net_interface_state(
+            &self,
+            _caller: &Caller,
+        ) -> Result<Vec<NetInterfaceStateRecord>, Errno> {
+            page_netstack(NetstackStatePage)
+        }
+
         fn resource_limits(
             &self,
             caller: &Caller,
@@ -276,6 +294,71 @@ mod program {
                 )?;
             }
             Ok(out)
+        }
+    }
+
+    /// One paged `netstack` broker read: which request a page issues and
+    /// how its record bytes decode.
+    trait NetstackPage {
+        /// The decoded record type.
+        type Record;
+        /// The record's fixed wire length.
+        const RECORD_LEN: usize;
+        /// Build the request frame for one page window.
+        fn request(offset: u32, limit: u16) -> NetstackRequest;
+        /// Decode one record, failing closed on malformed bytes.
+        fn decode(chunk: &[u8]) -> Result<Self::Record, Errno>;
+    }
+
+    /// The interface-facts page.
+    struct NetstackFactsPage;
+    impl NetstackPage for NetstackFactsPage {
+        type Record = NetInterfaceFactsRecord;
+        const RECORD_LEN: usize = NetInterfaceFactsRecord::WIRE_LEN;
+        fn request(offset: u32, limit: u16) -> NetstackRequest {
+            NetstackRequest::InterfaceFacts { offset, limit }
+        }
+        fn decode(chunk: &[u8]) -> Result<Self::Record, Errno> {
+            NetInterfaceFactsRecord::from_bytes(chunk)
+        }
+    }
+
+    /// The interface-state page.
+    struct NetstackStatePage;
+    impl NetstackPage for NetstackStatePage {
+        type Record = NetInterfaceStateRecord;
+        const RECORD_LEN: usize = NetInterfaceStateRecord::WIRE_LEN;
+        fn request(offset: u32, limit: u16) -> NetstackRequest {
+            NetstackRequest::InterfaceState { offset, limit }
+        }
+        fn decode(chunk: &[u8]) -> Result<Self::Record, Errno> {
+            NetInterfaceStateRecord::from_bytes(chunk)
+        }
+    }
+
+    /// Page one `netstack` broker read to completion over the reserved
+    /// endpoint. The service gates these reads on the caller's
+    /// `CAP_SYSINFO_INTROSPECT` — this broker's own privileged grant —
+    /// and the per-client `CAP_SYSINFO_HW`/`CAP_SYSINFO_GLOBAL`
+    /// narrowing already happened in the dispatcher before this runs. A
+    /// system without a running `netstack` fails closed with the
+    /// transport's typed error, never a fabricated empty table.
+    fn page_netstack<P: NetstackPage>(_page: P) -> Result<Vec<P::Record>, Errno> {
+        let mut records = Vec::new();
+        let mut reply = [0u8; NETSTACK_MAX_REPLY];
+        let mut offset: u32 = 0;
+        loop {
+            let request = P::request(offset, NETSTACK_LIST_LIMIT_MAX);
+            let n = rustos_rt::ipc_call(NETSTACK_ENDPOINT, &request.to_le_bytes(), &mut reply)
+                .map_err(errno_from)?;
+            let (count, body) = decode_page_reply(&reply[..n], P::RECORD_LEN)?;
+            for chunk in body.chunks_exact(P::RECORD_LEN) {
+                records.push(P::decode(chunk)?);
+            }
+            if count < NETSTACK_LIST_LIMIT_MAX {
+                return Ok(records);
+            }
+            offset = offset.saturating_add(u32::from(count));
         }
     }
 

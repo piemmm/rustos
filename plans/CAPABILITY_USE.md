@@ -251,7 +251,7 @@ part of an *interactive* account ceiling: they belong to the specific system
 program whose manifest requests them — and, through that service's own
 no-login account (`plans/USERS.md`), to its dedicated per-service ceiling
 (`rustos_users::{DEVMGR_CEILING, SYSINFOD_CEILING, SEATMGR_CEILING,
-LOGIN_CEILING}`), which holds exactly that one service's needs so the
+LOGIN_CEILING, NETSTACK_CEILING}`), which holds exactly that one service's needs so the
 ceiling∩manifest intersection does real work. An administrator administers
 the system; they do not impersonate its services.
 

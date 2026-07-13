@@ -12,6 +12,7 @@
 
 use alloc::vec::Vec;
 
+use rustos_abi::net_ipc::{NetInterfaceFactsRecord, NetInterfaceStateRecord};
 use rustos_abi::sysinfo::{
     CpuLoadRecord, CpuTimeRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats, MountRecord,
     ProcessRecord, RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SeatRecord,
@@ -217,4 +218,26 @@ pub trait SysinfoSource {
     /// [`crate::serve`] applies the `offset`/`limit` paging; ordering must
     /// be stable across paged calls.
     fn seats(&self, caller: &Caller) -> Result<Vec<SeatRecord>, Errno>;
+
+    /// Return every managed network interface's static facts, in the
+    /// stack's stable table order (`plans/NETWORK.md` §5).
+    ///
+    /// Reached only after the `CAP_SYSINFO_HW` gate has passed: the
+    /// record carries the device's MAC address — stable hardware
+    /// identity, like [`hardware_tree`](Self::hardware_tree). On a
+    /// running system the source forwards to the `netstack` service's
+    /// broker read; the owned list is returned whole and
+    /// [`crate::serve`] applies the `offset`/`limit` paging.
+    fn net_interface_facts(&self, caller: &Caller) -> Result<Vec<NetInterfaceFactsRecord>, Errno>;
+
+    /// Return every managed network interface's live link/address
+    /// state, in the stack's stable table order (`plans/NETWORK.md`
+    /// §5).
+    ///
+    /// Reached only after the `CAP_SYSINFO_GLOBAL` gate has passed: the
+    /// address book is system-wide network state, not a self-scoped
+    /// observer. On a running system the source forwards to the
+    /// `netstack` service's broker read; the owned list is returned
+    /// whole and [`crate::serve`] applies the `offset`/`limit` paging.
+    fn net_interface_state(&self, caller: &Caller) -> Result<Vec<NetInterfaceStateRecord>, Errno>;
 }

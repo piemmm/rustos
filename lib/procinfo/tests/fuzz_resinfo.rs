@@ -304,7 +304,9 @@ fn exercise(input: &str, broker: &HostileBroker) {
     assert_eq!(response.producer, Producer::Sysinfod);
     assert!(response.query().len() <= MAX_QUERY_LEN);
     match &response.payload {
-        ResponsePayload::Info(v) => assert!(v.value().len() <= MAX_INFO_VALUE_LEN),
+        ResponsePayload::Info(v) | ResponsePayload::State(v) => {
+            assert!(v.value().len() <= MAX_INFO_VALUE_LEN);
+        }
         ResponsePayload::Metric(m) => assert!(m.name().len() <= MAX_METRIC_NAME_LEN),
     }
 }

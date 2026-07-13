@@ -1,0 +1,55 @@
+[package]
+name = "rustos-netstack"
+description = "RustOS network-stack service: the capability-checked dispatcher and interface engine that serve the `netstack-v1` IPC surface (`plans/NETWORK.md` N3b)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The `Run` binary's freestanding userland runtime (`rustos-rt`) is an
+# optional, on-by-default build feature, mirroring `rustos-sysinfod`. `cargo
+# build -p rustos-netstack` builds the service program with it; host tooling
+# builds only the engine *library* (`Netstack` + `serve`), so the host test
+# build never pulls the userland runtime's `_start` / `#[global_allocator]` /
+# `panic_impl`.
+[features]
+default = ["program"]
+program = ["dep:rustos-rt"]
+
+# The package is both the `rustos-netstack` engine library (above) and the
+# `Run` entry-point binary of the network-stack service installed at
+# `/System/Services/netstack.app/Run` (`AGENTS.md` §16.2; `plans/NETWORK.md`
+# §2.2) — the long-running user-space service PID 1 `init` launches to own
+# the network interfaces and serve the `netstack-v1` admin/broker IPC. The
+# binary is a freestanding pure-Rust program on the native Tier-1 targets and
+# an inert host stub elsewhere (see `src/run.rs`).
+[[bin]]
+name = "rustos-netstack-run"
+path = "src/run.rs"
+
+[dependencies]
+# The `netstack-v1` wire surface, the frame-ring transport, the `Errno`
+# table, and the `CapabilityId` registry the dispatcher gates on.
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# §19.4 structured audit log: every admin mutation and every capability
+# denial is recorded through a `rustos_log::Sink`.
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The pure dual-stack protocol engine (`plans/NETWORK.md` §2.1) this
+# service is the thin glue around: one `Stack` per managed interface.
+rustos-net = { path = "../../../lib/net", version = "=0.0.0" }
+
+# The `Run` binary's freestanding userland runtime (`AGENTS.md` §1):
+# `rustos-rt` provides `_start`, the stack canary, the panic handler, the
+# `#[global_allocator]`, and the syscall wrappers (`call_create`/`call_recv`/
+# `call_reply`/`call_peer_origin`/`waitset_*`/`clock_get`), plus the
+# `CapabilitySet` primitive the endpoint bind names. Both are pulled in only
+# for the bare-metal targets the program is actually built for; on the host
+# the binary is an inert stub and neither is linked.
+[target.'cfg(target_os = "none")'.dependencies]
+rustos-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }

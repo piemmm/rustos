@@ -99,6 +99,9 @@ pub const SESSION_BASELINE: &[CapabilityId] = &[
 ///   operator-diagnostics power the monitoring and load-generation tools
 ///   request in their manifests, grantable only through a ceiling that
 ///   carries it.
+/// * `CAP_NET_ADMIN` — administer the network stack: interface, address,
+///   and route mutation through the `netstack` admin surface
+///   (`plans/NETWORK.md` §3).
 pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::USER_ADMIN,
     CapabilityId::FS_MOUNT,
@@ -110,6 +113,7 @@ pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::TIME_SET,
     CapabilityId::TIME_HIRES,
     CapabilityId::MEM_PIN,
+    CapabilityId::NET_ADMIN,
 ];
 
 /// The `devmgr` service account's grant ceiling: read the hardware tree
@@ -125,6 +129,16 @@ pub const DEVMGR_CEILING: &[CapabilityId] = &[
 pub const SYSINFOD_CEILING: &[CapabilityId] = &[
     CapabilityId::SYSINFO_INTROSPECT,
     CapabilityId::SYSINFO_HW,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::LOG_EMIT,
+];
+
+/// The `netstack` service account's grant ceiling: drive the NIC frame
+/// rings and serve the privileged network endpoint. It deliberately
+/// does **not** carry `CAP_NET_ADMIN` — the service *enforces* that
+/// capability against its callers; it never needs to hold it.
+pub const NETSTACK_CEILING: &[CapabilityId] = &[
+    CapabilityId::NET_RAW,
     CapabilityId::IPC_BIND_PRIVILEGED,
     CapabilityId::LOG_EMIT,
 ];
@@ -218,7 +232,7 @@ mod tests {
     #[test]
     fn administrator_ceiling_is_pinned() {
         let set = administrator_ceiling();
-        assert_eq!(set.len(), 17);
+        assert_eq!(set.len(), 18);
         for cap in SESSION_BASELINE {
             assert!(set.contains(*cap), "{cap:?} missing from the ceiling");
         }
@@ -233,6 +247,7 @@ mod tests {
             CapabilityId::TIME_SET,
             CapabilityId::TIME_HIRES,
             CapabilityId::MEM_PIN,
+            CapabilityId::NET_ADMIN,
         ] {
             assert!(set.contains(cap), "{cap:?} missing from the ceiling");
         }
@@ -245,29 +260,35 @@ mod tests {
     fn service_ceilings_are_pinned_and_disjoint_in_authority() {
         assert_eq!(DEVMGR_CEILING.len(), 3);
         assert_eq!(SYSINFOD_CEILING.len(), 4);
+        assert_eq!(NETSTACK_CEILING.len(), 3);
         assert_eq!(SEATMGR_CEILING.len(), 3);
         assert_eq!(LOGIN_CEILING.len(), 9);
         let devmgr = capability_set(DEVMGR_CEILING);
         let sysinfod = capability_set(SYSINFOD_CEILING);
+        let netstack = capability_set(NETSTACK_CEILING);
         let seatmgr = capability_set(SEATMGR_CEILING);
         let login = capability_set(LOGIN_CEILING);
         // The capability that defines each service stays that service's
         // alone.
         assert!(devmgr.contains(CapabilityId::DRV_LOAD));
-        for other in [&sysinfod, &seatmgr, &login] {
+        for other in [&sysinfod, &netstack, &seatmgr, &login] {
             assert!(!other.contains(CapabilityId::DRV_LOAD));
         }
         assert!(sysinfod.contains(CapabilityId::SYSINFO_INTROSPECT));
-        for other in [&devmgr, &seatmgr, &login] {
+        for other in [&devmgr, &netstack, &seatmgr, &login] {
             assert!(!other.contains(CapabilityId::SYSINFO_INTROSPECT));
         }
+        assert!(netstack.contains(CapabilityId::NET_RAW));
+        for other in [&devmgr, &sysinfod, &seatmgr, &login] {
+            assert!(!other.contains(CapabilityId::NET_RAW));
+        }
         assert!(seatmgr.contains(CapabilityId::SEAT_ADMIN));
-        for other in [&devmgr, &sysinfod, &login] {
+        for other in [&devmgr, &sysinfod, &netstack, &login] {
             assert!(!other.contains(CapabilityId::SEAT_ADMIN));
         }
         assert!(login.contains(CapabilityId::SPAWN_AS_USER));
         assert!(login.contains(CapabilityId::USERS_READ));
-        for other in [&devmgr, &sysinfod, &seatmgr] {
+        for other in [&devmgr, &sysinfod, &netstack, &seatmgr] {
             assert!(!other.contains(CapabilityId::SPAWN_AS_USER));
             assert!(!other.contains(CapabilityId::USERS_READ));
         }

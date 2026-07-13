@@ -28,6 +28,8 @@ use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use rustos_abi::driver::input::{Input, InputEvent, InputEventKind};
 use rustos_abi::driver::net::Net;
+use rustos_abi::driver::net_ring::{FrameRings, RingGeometry};
+use rustos_abi::driver::BufferClass;
 use rustos_abi::{CapabilityId, DriverHandle, Errno};
 use rustos_caps::CapabilitySet;
 use rustos_crypto::Ed25519PublicKey;
@@ -538,12 +540,26 @@ pub fn virtio_net_ping<Tr: Transport>(
     let mac = facts.mac;
     env.log("virtio-qemu: virtio-net online");
 
+    // The shared-memory frame-ring pair the stack side owns: two
+    // slots per direction, each holding one full Ethernet frame
+    // (MTU + 14-byte header) — ample for the one-in-flight ARP and
+    // echo exchanges this tail drives.
+    const RING_GEOMETRY: RingGeometry = match RingGeometry::new(2, 1514) {
+        Ok(g) => g,
+        Err(_) => panic!("valid ring geometry"),
+    };
+    let mut region = [0u8; RING_GEOMETRY.region_len()];
+    let mut rings = FrameRings::bind(&mut region, RING_GEOMETRY, BufferClass::NonSensitive)
+        .map_err(|_| "bind frame rings")?;
+
     let client = Client::new(mac, GUEST_IP);
     let mut rx = [0u8; 2048];
     let mut tx = [0u8; 2048];
 
     let peer = client
-        .resolve(&mut net, GATEWAY_IP, &mut rx, &mut tx, MAX_POLLS)
+        .resolve(
+            &mut net, &mut rings, GATEWAY_IP, &mut rx, &mut tx, MAX_POLLS,
+        )
         .map_err(|_| "ARP resolve error")?
         .ok_or("ARP: no reply from gateway")?;
     env.log("virtio-qemu: gateway ARP resolved");
@@ -551,6 +567,7 @@ pub fn virtio_net_ping<Tr: Transport>(
     let replied = client
         .ping(
             &mut net,
+            &mut rings,
             peer,
             GATEWAY_IP,
             ECHO_ID,

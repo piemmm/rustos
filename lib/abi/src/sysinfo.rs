@@ -178,6 +178,28 @@ impl SysinfoQueryId {
     /// utilisation split every user may see.
     pub const CPU_LOAD: Self = Self(16);
 
+    /// List every managed network interface's static facts: one
+    /// [`NetInterfaceFactsRecord`](crate::net_ipc::NetInterfaceFactsRecord)
+    /// per interface (alias, kind, MAC, MTU, negotiated offloads,
+    /// receive-queue count), paged by a [`NetInterfaceListRequest`].
+    ///
+    /// Requires `CAP_SYSINFO_HW` and is audited: the record carries the
+    /// device's MAC address — stable hardware identity, the same class of
+    /// surface topology as [`Self::HARDWARE_TREE`] (`plans/NETWORK.md`
+    /// §5: `info:net` sits behind hardware-identity policy review).
+    pub const NET_INTERFACE_FACTS: Self = Self(17);
+
+    /// List every managed network interface's live link/address state:
+    /// one
+    /// [`NetInterfaceStateRecord`](crate::net_ipc::NetInterfaceStateRecord)
+    /// per interface (link, bound v4/v6 addresses with their SLAAC/DAD
+    /// state), paged by a [`NetInterfaceListRequest`].
+    ///
+    /// Requires `CAP_SYSINFO_GLOBAL` and is audited: the address book is
+    /// system-wide, cross-principal network state, not a self-scoped
+    /// observer (`plans/NETWORK.md` §5: `state:net`).
+    pub const NET_INTERFACE_STATE: Self = Self(18);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -442,6 +464,18 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
         id: SysinfoQueryId::CPU_LOAD,
         name: "cpu_load",
         required_capability: Some(CapabilityId::SYSINFO_KERNEL),
+        audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::NET_INTERFACE_FACTS,
+        name: "net_interface_facts",
+        required_capability: Some(CapabilityId::SYSINFO_HW),
+        audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::NET_INTERFACE_STATE,
+        name: "net_interface_state",
+        required_capability: Some(CapabilityId::SYSINFO_GLOBAL),
         audit: true,
     },
 ];
@@ -1864,6 +1898,55 @@ impl MountListRequest {
     }
 }
 
+/// Request payload for [`SysinfoQueryId::NET_INTERFACE_FACTS`] and
+/// [`SysinfoQueryId::NET_INTERFACE_STATE`]: the record window to
+/// return, in the stack's stable interface-table order.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NetInterfaceListRequest {
+    /// Index of the first interface to return.
+    pub offset: u32,
+    /// Maximum number of records the caller will accept.
+    pub limit: u16,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub flags: u16,
+}
+
+impl NetInterfaceListRequest {
+    /// Encoded size of a [`NetInterfaceListRequest`] on the wire.
+    pub const WIRE_LEN: usize = 8;
+
+    /// Encode `self` into its little-endian wire representation.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.offset);
+        put_u16(&mut out, 4, self.limit);
+        put_u16(&mut out, 6, self.flags);
+        out
+    }
+
+    /// Decode `bytes` into a [`NetInterfaceListRequest`].
+    ///
+    /// Returns:
+    /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
+    /// * [`Errno::BadMagic`] if the reserved `flags` field is non-zero
+    ///   (reserved-must-be-zero violations are wire corruption).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let flags = read_u16(bytes, 6);
+        if flags != 0 {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            offset: read_u32(bytes, 0),
+            limit: read_u16(bytes, 4),
+            flags,
+        })
+    }
+}
+
 /// One entry in the system mount table, returned by
 /// [`SysinfoQueryId::MOUNT_LIST`].
 ///
@@ -2804,6 +2887,8 @@ mod tests {
         assert_eq!(SysinfoQueryId::RECLAIM_STATS.as_u16(), 14);
         assert_eq!(SysinfoQueryId::RAMZIP_STATS.as_u16(), 15);
         assert_eq!(SysinfoQueryId::CPU_LOAD.as_u16(), 16);
+        assert_eq!(SysinfoQueryId::NET_INTERFACE_FACTS.as_u16(), 17);
+        assert_eq!(SysinfoQueryId::NET_INTERFACE_STATE.as_u16(), 18);
         assert_eq!(SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1);
     }
 
