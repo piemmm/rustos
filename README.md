@@ -53,8 +53,11 @@ Neighbour Discovery, ICMP/ICMPv6 echo + errors, fragment reassembly,
 routing, and UDP with multicast — over a capability-gated shared-memory
 frame-ring seam, plus the datagram socket ABI. A discovered NIC's driver
 runs as its own user process and its frame channel is autobound into the
-running stack by the device manager (`plans/NETWORK.md` N4d). TCP is the
-next stage, hence still `◐`.
+running stack by the device manager (`plans/NETWORK.md` N4d) — proven
+end-to-end in a two-process live boot on aarch64, where the production
+boot autoloads the virtio-net driver, the stack auto-configures the
+interface's IPv6 link-local, and it answers a host peer's echo (N4e-β).
+TCP is the next stage, hence still `◐`.
 
 ## Filesystem feature support
 

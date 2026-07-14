@@ -30,14 +30,16 @@ use rustos_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverH
 
 pub use rustos_virtio_net::VirtioNet;
 
+/// The virtio device id of a network device (virtio 1.1 §5.1 — `virtio-net`
+/// is device type 1), re-exported from `lib/virtio_net` (its single
+/// definition, shared with the kernel's bootstrap-floor discovery, §2.2).
+/// This driver's [`BIND_KEYS`] match key is built from it, so a discovered
+/// virtio node whose probed device id is 1 binds this driver and nothing
+/// else.
+pub use rustos_virtio_net::VIRTIO_NET_DEVICE_ID;
+
 /// Per-driver `DriverHandle` marker returned by [`register`].
 const REGISTER_HANDLE_MARKER: u64 = 0x564E_4554_0000_0001; // "VNET"
-
-/// The virtio device id of a network device (virtio 1.1 §5.1 — `virtio-net`
-/// is device type 1). This driver's [`BIND_KEYS`] match key is built from
-/// it, so a discovered virtio node whose probed device id is 1 binds this
-/// driver and nothing else.
-pub const VIRTIO_NET_DEVICE_ID: u32 = 1;
 
 /// The bind priority [`BIND_KEYS`] carries.
 ///

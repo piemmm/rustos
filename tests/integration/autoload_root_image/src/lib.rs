@@ -1,12 +1,14 @@
 //! Whole-disk encrypted-root image fixture carrying kernel-signed driver
 //! bundles in `/System/Drivers/` — the virtio-input keyboard driver
-//! (`plans/PI.md` P10 5d-2-ii(b-2-iii)) and the framebuffer display
-//! service (`plans/DISPLAY.md` D7d) — for the `-M virt`
+//! (`plans/PI.md` P10 5d-2-ii(b-2-iii)), the framebuffer display
+//! service (`plans/DISPLAY.md` D7d), and the virtio-net link-layer driver
+//! (`plans/NETWORK.md` N4e-β) — for the `-M virt`
 //! driver-loading-by-discovery autoload verticals.
 //!
 //! [`build_image`] is [`rustos_test_encrypted_root_image::build_image`] with
 //! one addition: the signed driver bundles `build.rs` produced
-//! ([`VIRTIO_KBD_BUNDLE`], [`FRAMEBUFFER_BUNDLE`]) are planted into the
+//! ([`VIRTIO_KBD_BUNDLE`], [`FRAMEBUFFER_BUNDLE`], [`VIRTIO_NET_BUNDLE`]) are
+//! planted into the
 //! **read-only `/System` volume**'s `Drivers/` store at
 //! [`STORE_PATH`] / [`FRAMEBUFFER_STORE_PATH`] (design B — the store lives
 //! on a volume reachable *before* the encrypted-root passphrase). The booted
@@ -58,6 +60,11 @@ pub const STORE_PATH: &[&[u8]] = &[b"Drivers", b"input", b"virtio_kbd", b"Run"];
 /// `display`, the vendor-neutral `framebuffer` leaf.
 pub const FRAMEBUFFER_STORE_PATH: &[&[u8]] = &[b"Drivers", b"display", b"framebuffer", b"Run"];
 
+/// Path of the planted virtio-net driver bundle's leaf file under the
+/// `/System` volume's root: `Drivers/network/virtio_net/Run` — class
+/// `network`, the vendor-neutral `virtio_net` leaf.
+pub const NETWORK_STORE_PATH: &[&[u8]] = &[b"Drivers", b"network", b"virtio_net", b"Run"];
+
 /// Build the whole-disk encrypted-root image with the signed `virtio_kbd`
 /// and framebuffer display-service bundles planted in its
 /// `/System/Drivers/` store and the signed application bundles `apps`
@@ -77,6 +84,7 @@ pub fn build_image(apps: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>, DriverError> {
         &[
             (STORE_PATH, VIRTIO_KBD_BUNDLE),
             (FRAMEBUFFER_STORE_PATH, FRAMEBUFFER_BUNDLE),
+            (NETWORK_STORE_PATH, VIRTIO_NET_BUNDLE),
         ],
         apps,
         PASSPHRASE,
@@ -93,6 +101,7 @@ mod tests {
 
     use rustos_abi::{DriverManifest, HwMatchKey, DRIVER_MANIFEST_MAGIC};
     use rustos_devmatch::{resolve, MatchResolution};
+    use rustos_drv_network_virtio_net::VIRTIO_NET_DEVICE_ID;
     use rustos_drvhost::store::scan_store;
     use rustos_drvhost::{ImageSource, Sink};
     use rustos_log::Event;
@@ -104,6 +113,8 @@ mod tests {
     const STORE_PATH_STR: &str = "/Drivers/input/virtio_kbd/Run";
     /// [`STORE_PATH_STR`]'s display-service sibling.
     const FRAMEBUFFER_STORE_PATH_STR: &str = "/Drivers/display/framebuffer/Run";
+    /// [`STORE_PATH_STR`]'s virtio-net driver sibling.
+    const NETWORK_STORE_PATH_STR: &str = "/Drivers/network/virtio_net/Run";
 
     /// In-memory [`ImageSource`] returning each embedded bundle for its path.
     struct BundleSource;
@@ -113,6 +124,7 @@ mod tests {
             let bytes = match path {
                 STORE_PATH_STR => VIRTIO_KBD_BUNDLE,
                 FRAMEBUFFER_STORE_PATH_STR => FRAMEBUFFER_BUNDLE,
+                NETWORK_STORE_PATH_STR => VIRTIO_NET_BUNDLE,
                 _ => return Err(rustos_abi::Errno::NotFound),
             };
             buf.extend_from_slice(bytes);
@@ -128,19 +140,24 @@ mod tests {
         fn write_event(&self, _event: &Event<'_>) {}
     }
 
-    /// The scanned two-bundle store every match test resolves against, with
-    /// the candidate indices pinned by planting order.
+    /// The scanned three-bundle store every match test resolves against, with
+    /// the candidate indices pinned by planting order (input 0, display 1,
+    /// network 2).
     fn scanned_store() -> rustos_drvhost::DriverStore {
         scan_store(
             &BundleSource,
-            &[STORE_PATH_STR, FRAMEBUFFER_STORE_PATH_STR],
+            &[
+                STORE_PATH_STR,
+                FRAMEBUFFER_STORE_PATH_STR,
+                NETWORK_STORE_PATH_STR,
+            ],
             &DiscardSink,
         )
     }
 
     #[test]
     fn each_embedded_bundle_is_a_signed_userspace_driver_manifest() {
-        for bundle in [VIRTIO_KBD_BUNDLE, FRAMEBUFFER_BUNDLE] {
+        for bundle in [VIRTIO_KBD_BUNDLE, FRAMEBUFFER_BUNDLE, VIRTIO_NET_BUNDLE] {
             // Each bundle `build.rs` produced parses as a well-formed
             // `kind = UserSpace` manifest with a non-zero signature, so it is
             // a genuine signed bundle, not an inert stub.
@@ -170,7 +187,11 @@ mod tests {
         // the mounted root, with no cross-binding.
         let store = scanned_store();
         let candidates = store.candidates();
-        assert_eq!(candidates.len(), 2, "both signed bundles are candidates");
+        assert_eq!(
+            candidates.len(),
+            3,
+            "all three signed bundles are candidates"
+        );
 
         let input_keys = [HwMatchKey::virtio(VIRTIO_INPUT_DEVICE_ID)];
         match resolve(&input_keys, &candidates) {
@@ -183,6 +204,12 @@ mod tests {
         match resolve(&display_keys, &candidates) {
             MatchResolution::Winner { candidate, .. } => assert_eq!(candidate, 1),
             other => panic!("the boot display node must bind the display bundle, got {other:?}"),
+        }
+
+        let network_keys = [HwMatchKey::virtio(VIRTIO_NET_DEVICE_ID)];
+        match resolve(&network_keys, &candidates) {
+            MatchResolution::Winner { candidate, .. } => assert_eq!(candidate, 2),
+            other => panic!("the virtio-net node must bind the network bundle, got {other:?}"),
         }
     }
 

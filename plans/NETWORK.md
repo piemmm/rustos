@@ -601,44 +601,53 @@ empty interface table and ready to be handed NIC device channels.
 - Until a NIC is bound the interface table is empty, the deadline is
   unarmed, and the loop parks solely on its endpoints — no work, no CPU.
 
-### N4e-β — two-process QEMU vertical (aarch64 first) `[ ]`
+### N4e-β — two-process QEMU vertical (aarch64 first) `[x]`
 
-The three `netstack_*` QEMU verticals still run the in-kernel single-process
-`register` scaffold (`rustos-test-virtio-qemu-support`'s `netstack_ping` over
-an in-process `LocalFrameService`, parking on `VirtioNet::wait_for_device_event`).
-That scaffold is the §18.5 transitional defect to remove. The replacement is
-the **two-process production-boot** vertical, built **aarch64 first** (the only
-arch with a driver-autoload-into-user-process QEMU precedent —
-`autoload_input_qemu_aarch64`, `driver_spawn_qemu_aarch64`; riscv64/x86_64 have
-`spawn_session` but no driver-process autoload vertical yet, so those two and
-the scaffold deletion are the follow-up increments below).
+The aarch64 two-process production-boot vertical
+(`tests/integration/netstack_autoload_qemu_aarch64`) proves the whole
+network stack ↔ driver path across **two user processes** on a live guest.
+It boots the production `boot_aarch64::boot` pipeline against the shared
+`AutoloadRootDisk` fixture — now planting the signed `virtio_net_driver`
+bundle at `Drivers/network/virtio_net/Run` beside the input + display
+bundles — as a `ramfb` display world with a virtio-net-device-mmio attached
+and the `netpeer` host link-peer (v6-link-local-only campaign) on the QEMU
+dgram netdev. `devmgr` autoloads the driver into its own process, the driver
+publishes its `netchan` node, `devmgr` calls `netstack` `BindDriver`,
+netstack provisions the channel and auto-configures the interface's EUI-64
+IPv6 link-local (no IPv4), and answers the peer's link-local echo. Guest
+PASS keys on three witnesses observed on the kernel **log** sink (all
+userland `log_emit` records): `devmgr` `NETSTACK_BOUND`, `netstack`
+`DRIVER_BOUND`, and `netstack` `INBOUND_ECHO_SERVED` (the last gating exit so
+a frame has provably crossed the boundary and been answered); the harness
+also requires the peer's own v6 echo verdict, so neither side passes alone.
 
-**aarch64 vertical (this increment).** A new `netstack_autoload_qemu_aarch64`
-crate boots the production `boot_aarch64::boot` pipeline against the
-`AutoloadRootDisk` fixture (extended to also plant the signed
-`virtio_net_driver` bundle at `Drivers/network/virtio_net/Run`) with a
-virtio-net-device-mmio attached and the `netstack_peer` host link-peer on the
-QEMU dgram netdev. The two-process wiring is exercised end to end (the
-`DEFAULT_CONFIG` netstack launch landed in N4e-α):
-
-- `devmgr` autoloads the driver into its own process (its `BIND_KEYS` now
-  resolves the discovered virtio-net node), the driver publishes the `netchan`
-  node, `devmgr` calls `netstack` `BindDriver`, netstack provisions the channel
-  and brings the interface up. The autoloaded driver binds its reserved
-  device-channel endpoint under `CAP_IPC_BIND_PRIVILEGED` exactly as the
-  autoloaded framebuffer display service binds `DISPLAY_ENDPOINT` today (the
-  precedent that de-risks the reserved-endpoint autoload path).
-- **Proof is IPv6 link-local**: `bind_driver` auto-configures the link-local
-  v6 address (EUI-64) but assigns **no IPv4** (no DHCP/admin client in boot),
-  so the host peer campaigns over v6 link-local only; the peer's echo verdict
-  is the authoritative on-wire proof. Guest PASS keys on the audit witnesses:
-  the driver's `netchan`-published beacon (`NET_DRV_READY`), the `devmgr`
-  `NETSTACK_BOUND` event, the `netstack` `DRIVER_BOUND` event, and a new
-  netstack "inbound echo served" audit (emitted from `run.rs::deliver` on an
-  `EchoRequestServed` engine event) — the latter gating exit so the guest
-  stays alive until a frame has crossed the two-process boundary and been
-  answered, avoiding a race with the peer verdict. The existing `netpeer` gains
-  a v6-link-local-only campaign mode (the guest has no v4).
+Load-bearing facts this milestone established (each a general production
+improvement, not test scaffolding):
+- **aarch64 bootstrap-floor discovery now enumerates virtio-net nodes.**
+  `root_storage::observe_virtio_mmio_input_devices` and the new
+  `observe_virtio_mmio_network_devices` share one
+  `observe_virtio_mmio_interrupt_devices(device_id, class, node_base_id)`
+  core (§2.2); `boot_aarch64` calls the network probe beside the input one.
+  `VIRTIO_NET_DEVICE_ID` moved to `lib/virtio_net` (re-exported by the driver
+  crate) so the kernel names it without a kernel→driver dependency (§17.4).
+- **An endpoint's owner may advertise the endpoint it created.**
+  `call_create` mints the per-endpoint owner grant for *any* restricted-sender
+  endpoint (binding one already requires `CAP_IPC_BIND_PRIVILEGED`), not only
+  `CAP_IPC_ENDPOINT`-restricted ones — so the `netchan`-owning driver's
+  `hw_emit_node` coverage check passes for the `CAP_NET_RAW`-restricted
+  endpoint. `ipc_call` still couples the grant to the *call* only for
+  `CAP_IPC_ENDPOINT` endpoints, so no sender-authorisation changed.
+- **The netchan shm region tolerates page-rounding.** The kernel maps whole
+  pages, so the driver's `attach` accepts `mapped_len >= geometry.region_len()`
+  (binding the ring view over the first `region_len` bytes, unmapping the full
+  `mapped_len`) instead of demanding exact equality.
+- netstack's `DRIVER_BIND_FAILED` audit now carries the failing step's errno
+  (fail-loud); the "inbound echo served" audit is `INBOUND_ECHO_SERVED`
+  (`EventId(16_012)`), emitted from `run.rs::deliver` on the engine's
+  `EchoRequestServed` event. `netpeer` gained a `PeerCampaign::V6LinkLocalOnly`
+  mode targeting the guest's EUI-64 link-local from the pinned
+  `rustos_test_netstack_wire::GUEST_MAC`; the QEMU `NetDevice` gained a
+  `mac` field threaded through the shared `net_device_arg` on all three arches.
 
 **Follow-up increments (not this change).**
 - **N4e-riscv64 / N4e-x86_64**: build the driver-autoload-into-user-process

@@ -1127,6 +1127,30 @@ fn audit_root_storage_binding(
                 crate::aarch64::root_unlock::device_spi(&fdt, slot_base)
             },
             &mut sink,
+            log_sink,
+        );
+        // Bootstrap-floor virtio-MMIO network discovery (`plans/NETWORK.md`
+        // N4e-β): the exact sibling of the input probe above — probe each
+        // slot's `DeviceID` for a virtio-net device and emit a
+        // user-space-autoloadable `Network` node carrying its register
+        // window, DMA constraint, and discovered GICv2 interrupt line, so
+        // the autoload path spawns the matching user-space virtio-net driver
+        // process (which then serves the `netchan` channel to `netstack`).
+        // The IRQ line is resolved by the same per-slot `device_spi` decode
+        // (a discovered value, never a board constant); a sequential
+        // immutable read of `bus`, a no-op on the Pi tree, and fail-closed on
+        // any enumeration error, exactly like the input probe.
+        let _ = crate::root_storage::observe_virtio_mmio_network_devices(
+            &bus,
+            &|slot_base| {
+                // SAFETY: as the input probe's closure above — `dtb` bounds
+                // the firmware blob validated at boot, identity-mapped and
+                // immutable for the kernel's life, MMU on.
+                let fdt = unsafe { Fdt::from_ptr(dtb as *const u8) }.ok()?;
+                crate::aarch64::root_unlock::device_spi(&fdt, slot_base)
+            },
+            &mut sink,
+            log_sink,
         );
     }
 

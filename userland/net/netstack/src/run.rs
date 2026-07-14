@@ -59,7 +59,7 @@ mod program {
     use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
     use rustos_abi::{CapabilityId, Duration64, Errno, Origin, RandomFlags, ORIGIN_WIRE_LEN};
     use rustos_caps::CapabilitySet;
-    use rustos_log::{log, Event, EventId, Level};
+    use rustos_log::{log, Event, EventId, Field, FieldValue, Level};
     use rustos_net::iface::eui64_interface_id;
     use rustos_net::stack::StackEvent;
     use rustos_netstack::{
@@ -396,10 +396,14 @@ mod program {
                 Ok(())
             }
             Err(err) => {
-                audit(
+                // Report the exact provisioning step's errno so a failed
+                // bind is diagnosable rather than opaque (fail loud); the
+                // interface stays unbound regardless.
+                audit_errno(
                     events::DRIVER_BIND_FAILED,
                     Level::Warn,
                     "netstack bind driver failed: provisioning refused (interface left unbound)",
+                    err,
                 );
                 Err(err)
             }
@@ -492,6 +496,24 @@ mod program {
                 id,
                 message,
                 fields: &[],
+            },
+        );
+    }
+
+    /// Emit an audit record carrying the `errno` of the decision it reports,
+    /// so a provisioning failure states its cause (fail loud) rather than
+    /// leaving an opaque "refused".
+    fn audit_errno(id: EventId, level: Level, message: &'static str, err: Errno) {
+        log(
+            &LogSink,
+            &Event {
+                level,
+                id,
+                message,
+                fields: &[Field {
+                    key: "errno",
+                    value: FieldValue::SignedInt(i64::from(err.as_i32())),
+                }],
             },
         );
     }
@@ -691,8 +713,21 @@ mod program {
 
     /// Route each engine event to the sockets that should receive it and
     /// deliver the encoded datagram to each socket's async delivery port.
+    ///
+    /// An inbound echo request that the engine answered is additionally
+    /// recorded through the audit log (`EventId` `INBOUND_ECHO_SERVED`):
+    /// the reply is already queued on the interface, so the record is the
+    /// witness that a frame crossed the stack ↔ driver boundary and was
+    /// handled end to end.
     fn deliver(sockets: &SocketService, events: &[StackEvent]) {
         for event in events {
+            if matches!(event, StackEvent::EchoRequestServed { .. }) {
+                audit(
+                    events::INBOUND_ECHO_SERVED,
+                    Level::Info,
+                    "netstack: inbound echo request served (reply queued)",
+                );
+            }
             for delivery in sockets.deliver(event) {
                 let _ = rustos_rt::ipc_send(delivery.deliver_port, &delivery.datagram);
             }

@@ -34,7 +34,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
-use crate::{netdev_dgram_arg, Spec};
+use crate::{net_device_arg, netdev_dgram_arg, Spec};
 
 /// Default guest RAM size in mebibytes for an x86_64 QEMU integration
 /// test.
@@ -144,6 +144,16 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
         argv.push(format!("virtio-blk-pci,drive=blk{i},disable-legacy=on").into());
     }
 
+    // Suppress QEMU's implicit default NIC for a network-free vertical (see
+    // the aarch64 builder): the `q35`/`pc` machine auto-creates a default
+    // network device when no networking option is given, a phantom
+    // interface a guest's discovery would enumerate. Added only when no
+    // explicit `-netdev` is attached below (which already overrides it).
+    if spec.net_devices.is_empty() {
+        argv.push("-net".into());
+        argv.push("none".into());
+    }
+
     // Attach each network interface as a modern virtio-net-pci function
     // behind a `dgram` unix-datagram backend: QEMU binds the device's
     // `qemu_sock` and forwards every guest frame as one raw Ethernet
@@ -158,7 +168,12 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
         argv.push("-netdev".into());
         argv.push(netdev_dgram_arg(i, dev));
         argv.push("-device".into());
-        argv.push(format!("virtio-net-pci,netdev=net{i},disable-legacy=on").into());
+        argv.push(net_device_arg(
+            "virtio-net-pci",
+            i,
+            dev,
+            ",disable-legacy=on",
+        ));
         if let Some(pcap) = &dev.pcap {
             argv.push("-object".into());
             let mut filter = OsString::from(format!("filter-dump,id=dump{i},netdev=net{i},file="));
@@ -385,11 +400,13 @@ mod tests {
                 qemu_sock: PathBuf::from("/tmp/net0.qemu.sock"),
                 peer_sock: PathBuf::from("/tmp/net0.peer.sock"),
                 pcap: None,
+                mac: None,
             },
             crate::NetDevice {
                 qemu_sock: PathBuf::from("/tmp/net1.qemu.sock"),
                 peer_sock: PathBuf::from("/tmp/net1.peer.sock"),
                 pcap: Some(PathBuf::from("/tmp/cap1.pcap")),
+                mac: None,
             },
         ];
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));

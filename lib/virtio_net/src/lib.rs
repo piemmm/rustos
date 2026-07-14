@@ -93,6 +93,16 @@ use rustos_virtio::{
     VirtioHost,
 };
 
+/// The virtio device id of a network device (virtio 1.1 §5.1 —
+/// `virtio-net` is device type 1). The single definition both the driver
+/// crate's bind table and the kernel's bootstrap-floor virtio-MMIO
+/// discovery key a virtio-net node on, so a probed slot whose `DeviceID`
+/// register is this value resolves to the virtio-net driver and nothing
+/// else. Lives here in `lib/*` (not the `drivers/*` crate) so the
+/// arch-neutral kernel discovery can name it without a
+/// kernel→driver dependency (the `lib/virtio_input` precedent).
+pub const VIRTIO_NET_DEVICE_ID: u32 = 1;
+
 /// Bounded parks per in-flight transmission. The host's device event is
 /// shared by every queue, so receive traffic can wake the transmit wait
 /// before the chain is consumed; each such wake parks again rather than

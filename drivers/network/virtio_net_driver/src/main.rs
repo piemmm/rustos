@@ -202,13 +202,18 @@ mod program {
         u32::try_from(emit).ok()
     }
 
-    /// The stack's mapping of one shared frame region: the base and length of
-    /// this driver's own [`shm_map`](rustos_rt::shm_map) of the region the
-    /// stack granted in `Attach`, plus the exclusive slice over it the
-    /// `Service` doorbell binds a ring view across.
+    /// This driver's mapping of one shared frame region granted by the stack
+    /// in `Attach`.
     struct Region {
+        /// Base virtual address of the [`shm_map`](rustos_rt::shm_map)ping.
         base: u64,
+        /// Full mapped byte length — page-rounded by the kernel, so possibly
+        /// larger than the ring geometry — released verbatim by the matching
+        /// `shm_unmap`.
         len: usize,
+        /// The exclusive ring view: the first `geometry.region_len()` bytes of
+        /// the mapping (a subset of `len`), which the `Service` doorbell binds
+        /// the frame rings across.
         bytes: &'static mut [u8],
     }
 
@@ -397,35 +402,46 @@ mod program {
             return encode_status_reply(Err(errno_from(mapped)));
         }
         // A non-negative result is the base virtual address of the mapping;
-        // `len_out` is the kernel's own record of the region's byte length.
-        let (Ok(base), Ok(addr)) = (u64::try_from(mapped), usize::try_from(mapped)) else {
+        // `len_out` is the kernel's own record of the mapped byte length.
+        // The kernel maps whole pages, so a region whose agreed geometry is
+        // not a page multiple is mapped rounded *up* — `map_len` is that
+        // actual mapped length (used for the exact `shm_unmap`), which must
+        // be at least the geometry needs.
+        let (Ok(base), Ok(addr), Ok(map_len)) = (
+            u64::try_from(mapped),
+            usize::try_from(mapped),
+            usize::try_from(len_out),
+        ) else {
             return encode_status_reply(Err(Errno::DeviceFault));
         };
         let expected = params.geometry.region_len();
-        if len_out != expected as u64 {
-            if let Ok(actual) = usize::try_from(len_out) {
-                let _ = rustos_rt::shm_unmap(base, actual);
-            }
+        if map_len < expected {
+            let _ = rustos_rt::shm_unmap(base, map_len);
             return encode_status_reply(Err(Errno::BufferTooSmall));
         }
-        let len = expected;
-        // SAFETY: `shm_map` mapped exactly `len` bytes of zeroed, cacheable,
-        // RW (non-executable) memory into this process at `addr`, and the
-        // kernel-reported length was verified above to equal the agreed
-        // geometry's region length. The region is owned by this process until
-        // the matching `shm_unmap` (on detach, a re-attach, or a rejected
-        // attach below), and nothing else in this address space aliases it, so
-        // a single exclusive `&mut [u8]` over exactly `len` bytes is sound. The
-        // stack maps the same frames through its own grant and never touches
-        // ring bytes across a `Service` doorbell.
-        let bytes = unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, len) };
+        // SAFETY: `shm_map` mapped `map_len` bytes (>= `expected`, verified
+        // above) of zeroed, cacheable, RW (non-executable) memory into this
+        // process at `addr`. The ring view binds only the first `expected`
+        // bytes — exactly the agreed geometry — so the exclusive `&mut [u8]`
+        // over `expected` bytes is a sound subset of the mapping (any
+        // page-rounding tail beyond it is left untouched). The region is
+        // owned by this process until the matching `shm_unmap` (on detach, a
+        // re-attach, or a rejected attach below) releases the full `map_len`,
+        // and nothing else in this address space aliases it. The stack maps
+        // the same frames through its own grant and never touches ring bytes
+        // across a `Service` doorbell.
+        let bytes = unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, expected) };
         let status = server.attach(params);
         if server.is_attached() {
-            *region = Some(Region { base, len, bytes });
+            *region = Some(Region {
+                base,
+                len: map_len,
+                bytes,
+            });
         } else {
             // The server refused (geometry too small for the device); drop the
             // mapping it will never use.
-            let _ = rustos_rt::shm_unmap(base, len);
+            let _ = rustos_rt::shm_unmap(base, map_len);
         }
         status
     }

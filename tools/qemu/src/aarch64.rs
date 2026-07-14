@@ -34,7 +34,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
-use crate::{netdev_dgram_arg, Outcome, SessionKind, Spec};
+use crate::{net_device_arg, netdev_dgram_arg, Outcome, SessionKind, Spec};
 
 /// Default guest RAM size in mebibytes for an aarch64 QEMU integration
 /// test. Matches the x86_64 and riscv64 defaults so all three ports
@@ -141,6 +141,19 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
         argv.push(format!("virtio-blk-device,drive=blk{i}").into());
     }
 
+    // Suppress QEMU's implicit default NIC for a vertical that attaches no
+    // network device of its own. Without this the `virt` board auto-creates
+    // a default virtio-net device whenever no networking option is given,
+    // which the guest's bootstrap-floor discovery then enumerates and
+    // autoloads a driver for — a phantom interface no vertical asked for,
+    // whose driver/stack churn starves an otherwise network-free guest. A
+    // vertical that *does* attach an explicit `-netdev` below already
+    // overrides the default, so `-net none` is added only when there is none.
+    if spec.net_devices.is_empty() {
+        argv.push("-net".into());
+        argv.push("none".into());
+    }
+
     // Attach each network interface as a virtio-mmio net device behind a
     // `dgram` unix-datagram backend (the harness is the guest's link
     // peer), with an optional pcap mirror.
@@ -148,7 +161,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
         argv.push("-netdev".into());
         argv.push(netdev_dgram_arg(i, dev));
         argv.push("-device".into());
-        argv.push(format!("virtio-net-device,netdev=net{i}").into());
+        argv.push(net_device_arg("virtio-net-device", i, dev, ""));
         if let Some(pcap) = &dev.pcap {
             argv.push("-object".into());
             let mut filter = OsString::from(format!("filter-dump,id=dump{i},netdev=net{i},file="));
@@ -350,6 +363,7 @@ mod tests {
             qemu_sock: PathBuf::from("/tmp/net0.qemu.sock"),
             peer_sock: PathBuf::from("/tmp/net0.peer.sock"),
             pcap: Some(PathBuf::from("/tmp/cap0.pcap")),
+            mac: None,
         }];
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         assert!(argv.iter().any(|a| a == "virtio-blk-device,drive=blk0"));

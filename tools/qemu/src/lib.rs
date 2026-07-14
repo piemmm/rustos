@@ -174,6 +174,11 @@ pub struct NetDevice {
     /// Optional host path for a `pcap` capture of all traffic on this
     /// interface. `None` attaches no capture.
     pub pcap: Option<PathBuf>,
+    /// Optional fixed MAC address for the device (`"aa:bb:cc:dd:ee:ff"`).
+    /// `None` lets QEMU assign its default. A vertical whose guest derives
+    /// its IPv6 link-local address from the device MAC (EUI-64) pins this
+    /// so the host peer can address the guest deterministically.
+    pub mac: Option<String>,
 }
 
 /// Render the `-netdev dgram,…` argument for net device `i` — the one
@@ -185,6 +190,21 @@ pub(crate) fn netdev_dgram_arg(i: usize, dev: &NetDevice) -> OsString {
     arg.push(",remote.type=unix,remote.path=");
     arg.push(dev.peer_sock.as_os_str());
     arg
+}
+
+/// Render a `-device <driver>,netdev=net{i}[,mac=…][,<extra>]` argument —
+/// the one definition every per-arch argv builder shares, so the device
+/// MAC (from which a guest may derive its EUI-64 link-local address) is
+/// pinned identically across transports (`virtio-net-device` on the mmio
+/// boards, `virtio-net-pci` on x86_64).
+pub(crate) fn net_device_arg(driver: &str, i: usize, dev: &NetDevice, extra: &str) -> OsString {
+    let mut arg = format!("{driver},netdev=net{i}");
+    if let Some(mac) = &dev.mac {
+        arg.push_str(",mac=");
+        arg.push_str(mac);
+    }
+    arg.push_str(extra);
+    OsString::from(arg)
 }
 
 /// A deterministic key-injection request for an input vertical.
@@ -634,6 +654,28 @@ impl Spec {
             qemu_sock: qemu_sock.into(),
             peer_sock: peer_sock.into(),
             pcap: Some(pcap.into()),
+            mac: None,
+        });
+        self
+    }
+
+    /// Like [`Self::with_virtio_net_dgram`] but pins the device's MAC
+    /// address, so a guest that forms its IPv6 link-local address from the
+    /// device MAC (EUI-64) is reachable at a MAC the host peer knows ahead
+    /// of the run. `mac` is a QEMU MAC string (`"aa:bb:cc:dd:ee:ff"`).
+    #[must_use]
+    pub fn with_virtio_net_dgram_mac(
+        mut self,
+        qemu_sock: impl Into<PathBuf>,
+        peer_sock: impl Into<PathBuf>,
+        pcap: impl Into<PathBuf>,
+        mac: impl Into<String>,
+    ) -> Self {
+        self.net_devices.push(NetDevice {
+            qemu_sock: qemu_sock.into(),
+            peer_sock: peer_sock.into(),
+            pcap: Some(pcap.into()),
+            mac: Some(mac.into()),
         });
         self
     }
@@ -1990,6 +2032,7 @@ mod tests {
             qemu_sock: PathBuf::from("/tmp/net7.qemu.sock"),
             peer_sock: PathBuf::from("/tmp/net7.peer.sock"),
             pcap: None,
+            mac: None,
         };
         assert_eq!(
             netdev_dgram_arg(7, &dev),
@@ -1998,6 +2041,42 @@ mod tests {
                  remote.type=unix,remote.path=/tmp/net7.peer.sock"
             )
         );
+    }
+
+    #[test]
+    fn net_device_arg_renders_driver_mac_and_extra() {
+        let base = NetDevice {
+            qemu_sock: PathBuf::from("/tmp/n.qemu.sock"),
+            peer_sock: PathBuf::from("/tmp/n.peer.sock"),
+            pcap: None,
+            mac: None,
+        };
+        // No MAC: just the driver and netdev id (plus any extra suffix).
+        assert_eq!(
+            net_device_arg("virtio-net-pci", 0, &base, ",disable-legacy=on"),
+            OsString::from("virtio-net-pci,netdev=net0,disable-legacy=on")
+        );
+        // A pinned MAC is threaded verbatim, before the extra suffix.
+        let mac = NetDevice {
+            mac: Some("52:54:00:00:00:15".into()),
+            ..base
+        };
+        assert_eq!(
+            net_device_arg("virtio-net-device", 1, &mac, ""),
+            OsString::from("virtio-net-device,netdev=net1,mac=52:54:00:00:00:15")
+        );
+    }
+
+    #[test]
+    fn with_virtio_net_dgram_mac_pins_the_device_mac() {
+        let s = Spec::for_riscv64_kernel("/tmp/k").with_virtio_net_dgram_mac(
+            "/tmp/a.qemu.sock",
+            "/tmp/a.peer.sock",
+            "/tmp/a.pcap",
+            "52:54:00:00:00:15",
+        );
+        assert_eq!(s.net_devices.len(), 1);
+        assert_eq!(s.net_devices[0].mac.as_deref(), Some("52:54:00:00:00:15"));
     }
 
     #[test]

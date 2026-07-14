@@ -1343,6 +1343,7 @@ dependencies = [
  "rustos-users",
  "rustos-util",
  "rustos-virtio-input",
+ "rustos-virtio-net",
  "rustos-vt",
  "zeroize",
 ]
@@ -1985,6 +1986,7 @@ dependencies = [
  "rustos-devmatch",
  "rustos-drv-display-framebuffer",
  "rustos-drv-input-virtio-input",
+ "rustos-drv-network-virtio-net",
  "rustos-drvhost",
  "rustos-itest-harness",
  "rustos-kernel-syscall",
@@ -2714,6 +2716,20 @@ dependencies = [
  "rustos-kernel-syscall",
  "rustos-log",
  "rustos-util",
+]
+
+[[package]]
+name = "rustos-test-netstack-autoload-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-aarch64",
+ "rustos-devmgr",
+ "rustos-itest-harness",
+ "rustos-kalloc",
+ "rustos-kernel",
+ "rustos-kernel-core",
+ "rustos-log",
+ "rustos-netstack",
 ]
 
 [[package]]

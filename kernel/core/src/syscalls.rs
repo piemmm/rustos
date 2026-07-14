@@ -5295,11 +5295,18 @@ where
         let send_set = CapabilitySet::from_le_bytes(&send_buf)?;
         let recv_set = CapabilitySet::from_le_bytes(&recv_buf)?;
 
-        // A grant-restricted endpoint declares its authority by requiring the
-        // generic per-endpoint capability `CAP_IPC_ENDPOINT` of its senders:
-        // holding the class is necessary but not sufficient — only a task the
-        // kernel also grants the matching per-endpoint resource may call it.
-        let grant_restricted = send_set.contains(rustos_abi::CapabilityId::IPC_ENDPOINT);
+        // Whether this endpoint restricts *who* may post at all: any non-empty
+        // required-sender set. Binding such an endpoint already demanded
+        // `CAP_IPC_BIND_PRIVILEGED` (`CallEndpoint::create` enforces it), so
+        // its owner is a privileged service — and the owner of a
+        // restricted-sender endpoint is entitled to advertise the endpoint it
+        // *itself* created into the hardware tree (below). A subset of these —
+        // the endpoints that additionally require `CAP_IPC_ENDPOINT` of their
+        // senders — couple that per-endpoint grant to the *call* too, so only
+        // a task also granted the endpoint may post (`ipc_call` enforces that
+        // coupling); a `CAP_NET_RAW`-style restriction gates the post on the
+        // class capability alone and uses the grant only for advertisement.
+        let restricted_sender = !send_set.is_empty();
         let endpoint_id = endpoint;
 
         // Build the endpoint owned by the calling task. `CallEndpoint::create`
@@ -5355,15 +5362,26 @@ where
         // decision) and the freshly built endpoint is dropped.
         crate::callreg::register(alloc::sync::Arc::new(endpoint), self.audit)?;
 
-        // Mint the creator the per-endpoint grant for a grant-restricted
-        // endpoint — mirroring `msi_alloc`'s grant for an allocated IRQ line.
-        // The server gains a grant only for an endpoint it itself owns (no
+        // Mint the creator the per-endpoint grant for the endpoint it just
+        // bound — mirroring `msi_alloc`'s grant for an allocated IRQ line.
+        // The owner gains a grant only for an endpoint it itself owns (no
         // ambient authority), so it may forward the endpoint onto a device
         // node it publishes (`hw_emit_node`'s coverage check tests against
-        // exactly this grant) and the autoloaded class driver inherits it as
-        // its sole reach. Minted only after the endpoint is registered, so a
-        // clashing id leaves no orphan grant behind.
-        if grant_restricted {
+        // exactly this grant): a bus/host driver forwards it onto the child
+        // node it enumerates so the autoloaded class driver inherits it as
+        // its sole reach (`CAP_IPC_ENDPOINT` endpoints, `ipc_call` couples the
+        // grant to the call), and a device-server driver advertises its own
+        // service endpoint on the `netchan`-style node the device manager
+        // brokers to the client (a `CAP_NET_RAW`-restricted endpoint, where
+        // the client posts under its class capability and the grant governs
+        // only the owner's right to *advertise* what it owns). Either way the
+        // grant is the owner's forwardable token for its own endpoint, so it
+        // is minted for any restricted-sender endpoint (the owner is
+        // privileged by construction — the bind required
+        // `CAP_IPC_BIND_PRIVILEGED`) and never for an unrestricted rendezvous
+        // any task may post to. Minted only after the endpoint is registered,
+        // so a clashing id leaves no orphan grant behind.
+        if restricted_sender {
             let _ = self
                 .aspaces
                 .write()

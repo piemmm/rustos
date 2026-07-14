@@ -57,6 +57,19 @@ pub const PEER_IID: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 0x02];
 /// device's own report).
 pub const PEER_MAC: [u8; 6] = [0x02, 0x52, 0x4F, 0x53, 0x00, 0x02];
 
+/// Fixed MAC pinned on the two-process autoload vertical's QEMU
+/// virtio-net device (`plans/NETWORK.md` N4e-β). That vertical's guest
+/// forms its IPv6 link-local address from the *device* MAC (modified
+/// EUI-64), with no admin-assigned IPv4, so the host peer must know the
+/// MAC ahead of the run to address the guest. The single-process wire
+/// verticals instead configure the guest from [`GUEST_IID`] and ignore
+/// the device MAC, so this constant is used only by the two-process
+/// vertical.
+pub const GUEST_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x00, 0x00, 0x15];
+
+/// [`GUEST_MAC`] rendered as the QEMU `mac=` device-string value.
+pub const GUEST_MAC_STR: &str = "52:54:00:00:00:15";
+
 /// Echo identifier of the peer's inbound campaign; the guest keys its
 /// "peer campaign answered" observation on it.
 pub const PEER_ECHO_ID: u16 = 0x5EED;
@@ -111,5 +124,20 @@ mod tests {
     fn identifiers_are_distinct_so_the_phases_cannot_alias() {
         assert_ne!(PEER_ECHO_ID, GUEST_ECHO_ID);
         assert_ne!(GUEST_IID, PEER_IID);
+    }
+
+    #[test]
+    fn guest_mac_string_matches_the_octets() {
+        // Parse the QEMU `mac=` string back into octets with core-only
+        // arithmetic (the crate is `no_std`, no `alloc`) and confirm it
+        // reproduces `GUEST_MAC`, so the two forms cannot drift.
+        let mut parsed = [0u8; 6];
+        let mut count = 0usize;
+        for (slot, field) in parsed.iter_mut().zip(GUEST_MAC_STR.split(':')) {
+            *slot = u8::from_str_radix(field, 16).expect("hex octet");
+            count += 1;
+        }
+        assert_eq!(count, 6, "the string has six colon-separated octets");
+        assert_eq!(parsed, GUEST_MAC);
     }
 }

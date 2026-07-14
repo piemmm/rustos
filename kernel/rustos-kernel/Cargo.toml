@@ -163,6 +163,15 @@ rustos-drv-storage-emmc2 = { path = "../../drivers/storage/emmc2", version = "=0
 # §2.2 / §18.3). A `lib/*` crate, arch-neutral, so its host tests run on
 # the CI host.
 rustos-virtio-input = { path = "../../lib/virtio_input", version = "=0.0.0" }
+# The canonical virtio-net device id (`VIRTIO_NET_DEVICE_ID = 1`) the
+# bootstrap-floor discovery walk (`root_storage::observe_virtio_mmio_network_devices`)
+# matches a probed `virtio,mmio` slot's `DeviceID` against to emit a
+# user-space-autoloadable network node — the single source of truth the
+# `drivers/network/virtio_net` bind table is also built from (`AGENTS.md`
+# §2.2 / §18.3). A `lib/*` device-logic crate (the `lib/virtio_input`
+# precedent), arch-neutral, so its host tests run on the CI host; the kernel
+# names it without a kernel→driver dependency (§17.4).
+rustos-virtio-net = { path = "../../lib/virtio_net", version = "=0.0.0" }
 # Zero-on-drop for the passphrase-derived `VolumeKey` on the boot stack
 # (`AGENTS.md` §4 — secret hygiene). The same audited crate `kernel/mem`
 # delegates its sensitive-region zeroing to (`AGENTS.md` §6 / §2.12 — no

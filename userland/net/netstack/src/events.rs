@@ -61,13 +61,19 @@ pub const DRIVER_BIND_DENIED: EventId = EventId(16_010);
 /// `Warn` so a provisioning failure surfaces and the interface stays
 /// unbound (fail closed).
 pub const DRIVER_BIND_FAILED: EventId = EventId(16_011);
+/// An inbound ICMP/`ICMPv6` echo request addressed to one of this
+/// stack's interfaces was answered — the engine served it and the reply
+/// is queued on the same interface. Recorded at `Info`: it is the
+/// witness that a frame crossed the stack ↔ driver boundary and was
+/// handled end to end (the two-process live-boot vertical gates on it).
+pub const INBOUND_ECHO_SERVED: EventId = EventId(16_012);
 
 #[cfg(test)]
 mod tests {
     use super::{
         ADMIN_APPLIED, ADMIN_REFUSED, DRIVER_BIND_DENIED, DRIVER_BIND_FAILED, DRIVER_BOUND,
-        NETSTACK_RANGE_END, NETSTACK_RANGE_START, REQUEST_DENIED, REQUEST_MALFORMED, SOCKET_DENIED,
-        SOCKET_MALFORMED, SOCKET_OPENED, SOCKET_REFUSED,
+        INBOUND_ECHO_SERVED, NETSTACK_RANGE_END, NETSTACK_RANGE_START, REQUEST_DENIED,
+        REQUEST_MALFORMED, SOCKET_DENIED, SOCKET_MALFORMED, SOCKET_OPENED, SOCKET_REFUSED,
     };
 
     #[test]
@@ -84,6 +90,7 @@ mod tests {
             DRIVER_BOUND,
             DRIVER_BIND_DENIED,
             DRIVER_BIND_FAILED,
+            INBOUND_ECHO_SERVED,
         ] {
             assert!(id.0 >= NETSTACK_RANGE_START && id.0 < NETSTACK_RANGE_END);
         }
@@ -103,6 +110,7 @@ mod tests {
             DRIVER_BOUND.0,
             DRIVER_BIND_DENIED.0,
             DRIVER_BIND_FAILED.0,
+            INBOUND_ECHO_SERVED.0,
         ];
         ids.sort_unstable();
         for w in ids.windows(2) {

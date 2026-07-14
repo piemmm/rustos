@@ -103,6 +103,30 @@ const PLANTED: &[PlantedDriver] = &[
         const_name: "FRAMEBUFFER_BUNDLE",
         describe: "framebuffer display service",
     },
+    PlantedDriver {
+        package: "rustos-drv-network-virtio-net-driver",
+        crate_rel: "drivers/network/virtio_net_driver",
+        // Exactly the set the driver's `driver_caps()` re-checks up front:
+        // the register window (`MMIO_MAP`), the DMA carve (`MEM_DMA`), the
+        // device interrupt line the serve loop parks on (`IRQ_BIND`), the
+        // shared frame region (`SHM`), and the authority to claim and bind
+        // the reserved device-channel endpoint (`IPC_ENDPOINT`,
+        // `IPC_BIND_PRIVILEGED`), publish the `netchan` node (`HW_EMIT`),
+        // and emit its readiness beacon (`LOG_EMIT`).
+        caps: &[
+            CapabilityId::MMIO_MAP,
+            CapabilityId::MEM_DMA,
+            CapabilityId::IRQ_BIND,
+            CapabilityId::SHM,
+            CapabilityId::IPC_ENDPOINT,
+            CapabilityId::IPC_BIND_PRIVILEGED,
+            CapabilityId::HW_EMIT,
+            CapabilityId::LOG_EMIT,
+        ],
+        bind_keys: rustos_drv_network_virtio_net::BIND_KEYS,
+        const_name: "VIRTIO_NET_BUNDLE",
+        describe: "virtio-net link-layer driver",
+    },
 ];
 
 fn main() {

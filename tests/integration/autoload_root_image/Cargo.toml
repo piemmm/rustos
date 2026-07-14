@@ -35,6 +35,8 @@ rustos-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0"
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 # The single-source virtio-input device id the discovered node is keyed by.
 rustos-virtio-input = { path = "../../../lib/virtio_input", version = "=0.0.0" }
+# The single-source virtio-net device id the discovered network node is keyed by.
+rustos-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
 
 [build-dependencies]
 # The build script converts the PIE driver ELF to an `rxe` and assembles +
@@ -50,3 +52,4 @@ rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # authored from so the on-disk bundle and the driver cannot drift.
 rustos-drv-input-virtio-input = { path = "../../../drivers/input/virtio_input", version = "=0.0.0" }
 rustos-drv-display-framebuffer = { path = "../../../drivers/display/framebuffer", version = "=0.0.0" }
+rustos-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }

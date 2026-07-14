@@ -1,0 +1,42 @@
+[package]
+name = "rustos-test-netstack-autoload-qemu-aarch64"
+description = "plans/NETWORK.md N4e-β QEMU integration test: boot the production aarch64 rustos-kernel pipeline (boot_aarch64::boot) on the virt board against the shared autoload-root disk (whose read-only /System store now carries the kernel-signed virtio-net driver bundle) with a virtio-net-device attached and the harness-side netstack_peer link peer on the QEMU dgram netdev. Proves the full two-process network path: devmgr autoloads the virtio-net driver into its own user process (it publishes a netchan node), the user-space devmgr service calls netstack BindDriver, netstack provisions the channel and auto-configures the interface's EUI-64 IPv6 link-local (no IPv4), and answers the host peer's link-local echo campaign end to end through both user processes. PASS once the audit sink has seen devmgr NETSTACK_BOUND, netstack DRIVER_BOUND, and netstack INBOUND_ECHO_SERVED — the last gating exit so the guest stays alive until a frame has crossed the two-process boundary and been answered; the peer's own v6 echo verdict is required too, so neither side can pass alone."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "rustos-test-netstack-autoload-qemu-aarch64"
+path = "src/main.rs"
+
+# Freestanding "boot the production aarch64 kernel pipeline against the shared
+# autoload-root disk carrying the signed virtio-net driver bundle, and prove
+# the two-process live-boot network path end to end" integration test. It
+# reuses the entire production aarch64 boot pipeline through `rustos-kernel`'s
+# library half (`boot_aarch64::boot`) and only swaps the audit sink to report
+# PASS on the three shared network witnesses (`AGENTS.md` §2.2 — no
+# duplication). Keeping the QEMU-exit shortcut in a dedicated bin (not a Cargo
+# feature on a production crate) prevents feature unification from leaking it
+# into any production build (`AGENTS.md` §5.4 — fail closed).
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
+rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The devmgr and netstack audit vocabularies: the `NETSTACK_BOUND`,
+# `DRIVER_BOUND`, and `INBOUND_ECHO_SERVED` event ids the witnesses key on —
+# the shared definitions, never magic numbers (`AGENTS.md` §2.2). netstack is
+# pulled `default-features = false` so its `program` feature (the `rustos-rt`
+# freestanding runtime) never enters this bin's graph.
+rustos-devmgr = { path = "../../../userland/system/devmgr", version = "=0.0.0" }
+rustos-netstack = { path = "../../../userland/net/netstack", version = "=0.0.0", default-features = false }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
