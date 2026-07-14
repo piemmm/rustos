@@ -18,8 +18,14 @@ use rustos_abi::net_ipc::{
     NetInterfaceFactsRecord, NetInterfaceStateRecord, IF_NAME_LEN, NET_IF_MAX_ADDRS,
 };
 use rustos_abi::{Duration64, Errno};
-use rustos_net::addr::{Ipv4Addr, Ipv6Addr};
-use rustos_net::stack::{Stack, StackConfig, StackEvent};
+use rustos_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
+use rustos_net::stack::{SendError, Stack, StackConfig, StackEvent};
+
+/// Frames produced for one or more interfaces, each batch tagged by the
+/// interface alias that emitted it, for the caller to queue onto that
+/// interface's TX ring. The one definition every egress helper
+/// ([`Netstack::originate`], the multicast join/leave paths) returns.
+pub type FrameBatch = Vec<([u8; IF_NAME_LEN], Vec<Vec<u8>>)>;
 
 /// One managed interface: its admin-chosen alias, link kind, and the
 /// per-interface dual-stack protocol engine.
@@ -209,6 +215,132 @@ impl Netstack {
             reassembly_expired: c.reassembly_expired,
             pending_dropped: c.pending_dropped,
         })
+    }
+
+    /// Originate a UDP datagram from every interface that can carry it,
+    /// returning the frames each produced tagged by interface alias so the
+    /// caller can queue them onto that interface's TX ring.
+    ///
+    /// Egress selection is deterministic and per-link: interfaces are
+    /// tried in table order. A **unicast** destination is sent out the
+    /// first interface whose engine accepts it (one link reaches the
+    /// destination); a **multicast** group is a per-link concept, so it is
+    /// sent out *every* interface that accepts it. An interface's engine
+    /// parks the datagram on neighbour resolution when needed, emitting the
+    /// resolution frames now and the datagram once the neighbour answers —
+    /// exactly the unicast echo behaviour.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::MessageTooLarge`] — the datagram cannot fit the path
+    ///   (v6) or the length field, on an interface that otherwise matched.
+    /// * [`Errno::NetworkUnreachable`] — no interface has a route to the
+    ///   destination, a usable source address, or an up link.
+    /// * [`Errno::OutOfRange`] — the destination is not a legal datagram
+    ///   destination (broadcast / unspecified).
+    pub fn originate(
+        &mut self,
+        dest: IpAddr,
+        source_port: u16,
+        destination_port: u16,
+        payload: &[u8],
+        now: Duration64,
+    ) -> Result<FrameBatch, Errno> {
+        let multicast = match dest {
+            IpAddr::V4(v4) => v4.is_multicast(),
+            IpAddr::V6(v6) => v6.is_multicast(),
+        };
+        let mut batches: FrameBatch = Vec::new();
+        // Remember the most specific refusal so a genuine "too large"
+        // (actionable) is surfaced rather than masked as "unreachable".
+        let mut deferred: Option<Errno> = None;
+        for iface in &mut self.interfaces {
+            match iface
+                .stack
+                .send_datagram(dest, source_port, destination_port, payload, now)
+            {
+                Ok(out) => {
+                    batches.push((iface.name, out.frames));
+                    if !multicast {
+                        // One link carries a unicast datagram; stop.
+                        break;
+                    }
+                }
+                Err(SendError::TooLarge) => deferred = Some(Errno::MessageTooLarge),
+                Err(SendError::NotUnicast) => return Err(Errno::OutOfRange),
+                // No route / no source / link down on this interface: try
+                // the next one, remembering the fail-closed default.
+                Err(_) => deferred = deferred.or(Some(Errno::NetworkUnreachable)),
+            }
+        }
+        if batches.is_empty() {
+            return Err(deferred.unwrap_or(Errno::NetworkUnreachable));
+        }
+        Ok(batches)
+    }
+
+    /// Whether any managed interface owns the local address `addr` of
+    /// `family` — the check a socket `bind` to a *specific* local address
+    /// makes before accepting it (fail closed: an address no interface
+    /// holds could never source a datagram).
+    #[must_use]
+    pub fn has_local_address(&self, family: NetAddrFamily, addr: [u8; 16]) -> bool {
+        self.interfaces.iter().any(|iface| match family {
+            NetAddrFamily::V4 => iface
+                .stack
+                .iface()
+                .ipv4()
+                .is_some_and(|(a, _)| a == v4_of(addr)),
+            NetAddrFamily::V6 => iface
+                .stack
+                .iface()
+                .ipv6_addresses()
+                .iter()
+                .any(|info| info.addr == Ipv6Addr::from(addr)),
+        })
+    }
+
+    /// Join multicast `group` on every managed interface (multicast
+    /// membership is a per-link property), returning the frames each
+    /// interface emitted (the IGMP/MLD report) tagged by alias.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::OutOfRange`] — `group` is not a multicast group.
+    /// * [`Errno::LimitExceeded`] — an interface's bounded membership
+    ///   table is full (fail closed).
+    pub fn join_multicast_all(
+        &mut self,
+        group: IpAddr,
+        now: Duration64,
+    ) -> Result<FrameBatch, Errno> {
+        let mut batches = FrameBatch::new();
+        for iface in &mut self.interfaces {
+            match iface.stack.join_multicast(group, now) {
+                // A fresh join emits a membership report to announce it.
+                Ok(true) => batches.push((iface.name, iface.stack.advance(now).frames)),
+                // Already a member (a prior reference): no new report.
+                Ok(false) => {}
+                Err(rustos_net::stack::McastError::NotMulticast) => return Err(Errno::OutOfRange),
+                Err(rustos_net::stack::McastError::CapacityExhausted) => {
+                    return Err(Errno::LimitExceeded)
+                }
+            }
+        }
+        Ok(batches)
+    }
+
+    /// Leave multicast `group` on every managed interface, returning the
+    /// frames each interface emitted (an IGMP Leave when the last
+    /// reference dropped) tagged by alias.
+    pub fn leave_multicast_all(&mut self, group: IpAddr, now: Duration64) -> FrameBatch {
+        let mut batches = FrameBatch::new();
+        for iface in &mut self.interfaces {
+            if iface.stack.leave_multicast(group, now) {
+                batches.push((iface.name, iface.stack.advance(now).frames));
+            }
+        }
+        batches
     }
 
     /// The whole table's static facts, one record per interface, from

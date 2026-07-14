@@ -34,11 +34,25 @@ pub const REQUEST_MALFORMED: EventId = EventId(16_003);
 /// the engine refused the new configuration (bad prefix, table full).
 pub const ADMIN_REFUSED: EventId = EventId(16_004);
 
+/// A socket-service request was refused before dispatch: the frame failed
+/// to decode.
+pub const SOCKET_MALFORMED: EventId = EventId(16_005);
+/// A socket-service request was denied because the caller lacks `CAP_NET`.
+///
+/// A denial is a security-relevant decision recorded at `Warn`.
+pub const SOCKET_DENIED: EventId = EventId(16_006);
+/// A socket was opened for a principal (recorded at `Info`).
+pub const SOCKET_OPENED: EventId = EventId(16_007);
+/// A socket-service operation was refused after the capability check
+/// (a bounded limit reached, an address in use, no route): recorded at
+/// `Warn` so exhaustion and misuse surface.
+pub const SOCKET_REFUSED: EventId = EventId(16_008);
+
 #[cfg(test)]
 mod tests {
     use super::{
         ADMIN_APPLIED, ADMIN_REFUSED, NETSTACK_RANGE_END, NETSTACK_RANGE_START, REQUEST_DENIED,
-        REQUEST_MALFORMED,
+        REQUEST_MALFORMED, SOCKET_DENIED, SOCKET_MALFORMED, SOCKET_OPENED, SOCKET_REFUSED,
     };
 
     #[test]
@@ -48,6 +62,10 @@ mod tests {
             REQUEST_DENIED,
             REQUEST_MALFORMED,
             ADMIN_REFUSED,
+            SOCKET_MALFORMED,
+            SOCKET_DENIED,
+            SOCKET_OPENED,
+            SOCKET_REFUSED,
         ] {
             assert!(id.0 >= NETSTACK_RANGE_START && id.0 < NETSTACK_RANGE_END);
         }
@@ -60,6 +78,10 @@ mod tests {
             REQUEST_DENIED.0,
             REQUEST_MALFORMED.0,
             ADMIN_REFUSED.0,
+            SOCKET_MALFORMED.0,
+            SOCKET_DENIED.0,
+            SOCKET_OPENED.0,
+            SOCKET_REFUSED.0,
         ];
         ids.sort_unstable();
         for w in ids.windows(2) {

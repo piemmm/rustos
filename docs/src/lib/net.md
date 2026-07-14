@@ -224,7 +224,12 @@ shadowed paths. The checksum discipline differs by family deliberately:
 IPv4 accepts a zero (uncomputed) checksum but always emits one; IPv6
 requires it (RFC 8200 §8.1). Emit substitutes `0xFFFF` for a computed
 zero so it is never read as "no checksum". Every decode is total,
-bounded, and fail-closed.
+bounded, and fail-closed. `Stack::send_datagram` originates a datagram
+to a **unicast** peer (resolving the next hop, parking on ARP/ND, IPv4
+fragmenting on emit) or a **multicast** group (straight to the group
+MAC with a link-local scope — TTL/hop-limit 1 — needing no route and no
+membership); the limited broadcast and the unspecified address are
+refused (`SendError::NotUnicast`).
 
 ### `igmp`, `mld` — multicast group-membership message codecs
 
@@ -258,7 +263,6 @@ group, and filters the receive path by membership; `join_multicast` /
 
 ## What lands next
 
-The remaining `plans/NETWORK.md` increments evolve this crate in place:
-the socket ABI's multicast join/leave and multicast datagram *transmit*
-built on `mcast`, and `tcp`. Each is added with its callers, tests, and
-fuzz harnesses per increment.
+The remaining `plans/NETWORK.md` increments evolve this crate in place —
+chiefly `tcp` (the RFC 9293 state machine, congestion control, SACK).
+Each is added with its callers, tests, and fuzz harnesses per increment.

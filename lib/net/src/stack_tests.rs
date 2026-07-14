@@ -627,18 +627,14 @@ fn send_datagram_refusals_are_typed() {
         Err(SendError::NoSourceAddress)
     );
     a.set_ipv4_config(V4_A, 24, None).expect("configure");
-    // Multicast and broadcast destinations are refused this increment
-    // (group-membership transmit is a later increment); fail closed.
+    // The limited broadcast and the unspecified address are refused:
+    // neither is a meaningful datagram destination; fail closed.
     assert_eq!(
         a.send_datagram(IpAddr::V4(Ipv4Addr::BROADCAST), 1, 2, b"x", t(0)),
         Err(SendError::NotUnicast)
     );
     assert_eq!(
-        a.send_datagram(IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1)), 1, 2, b"x", t(0)),
-        Err(SendError::NotUnicast)
-    );
-    assert_eq!(
-        a.send_datagram(IpAddr::V6(ALL_NODES), 1, 2, b"x", t(0)),
+        a.send_datagram(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 1, 2, b"x", t(0)),
         Err(SendError::NotUnicast)
     );
     // Off-subnet unicast with no gateway.
@@ -716,6 +712,9 @@ fn frames_for_other_hosts_are_dropped() {
 // ---- Multicast membership (IGMPv2 / MLDv2) --------------------------
 
 const GROUP_V4: Ipv4Addr = Ipv4Addr::new(239, 1, 2, 3);
+
+/// A link-local-scope IPv6 multicast group used by the transmit tests.
+const GROUP_V6: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0x1234);
 
 /// A UDP datagram from `V4_B` to the IPv4 multicast group `GROUP_V4`,
 /// addressed to the group's multicast MAC.
@@ -903,4 +902,71 @@ fn ipv6_address_reports_its_solicited_node_group_via_mld() {
     assert_eq!(payload[2], 5, "Router Alert option type");
     // The ICMPv6 message after the 8-byte Hop-by-Hop header is a report.
     assert_eq!(payload[HBH_ROUTER_ALERT_LEN], TYPE_MLDV2_REPORT);
+}
+
+#[test]
+fn ipv4_multicast_datagram_transmit_reaches_a_member() {
+    let mut a = stack(MAC_A, IID_A);
+    let mut b = stack(MAC_B, IID_B);
+    a.set_ipv4_config(V4_A, 24, None).expect("configure A");
+    b.set_ipv4_config(V4_B, 24, None).expect("configure B");
+    // The receiver must be a member; the sender need not be, and needs
+    // no route to the group.
+    b.join_multicast(IpAddr::V4(GROUP_V4), t(0)).expect("join");
+    let out = a
+        .send_datagram(IpAddr::V4(GROUP_V4), 5000, 7000, b"mcast4", t(0))
+        .expect("send");
+    assert_eq!(out.frames.len(), 1, "one unfragmented multicast frame");
+    let eth = EthernetFrame::parse(&out.frames[0]).expect("eth");
+    assert_eq!(eth.destination, ipv4_multicast_mac(&GROUP_V4));
+    let (header, _opts, _payload) = Ipv4Header::parse(eth.payload).expect("ipv4");
+    assert_eq!(header.destination, GROUP_V4);
+    assert_eq!(header.ttl, 1, "multicast data stays on the local link");
+    // The member delivers it as a verbatim datagram event.
+    let mut events = Vec::new();
+    for frame in &out.frames {
+        events.extend(b.on_frame(frame, t(0)).events);
+    }
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StackEvent::UdpDatagram {
+            destination: IpAddr::V4(d),
+            source_port: 5000,
+            destination_port: 7000,
+            payload,
+            ..
+        } if *d == GROUP_V4 && payload == b"mcast4"
+    )));
+}
+
+#[test]
+fn ipv6_multicast_datagram_transmit_reaches_a_member() {
+    let mut a = stack(MAC_A, IID_A);
+    let mut b = stack(MAC_B, IID_B);
+    bring_up(&mut a, &mut b);
+    b.join_multicast(IpAddr::V6(GROUP_V6), t(3)).expect("join");
+    let out = a
+        .send_datagram(IpAddr::V6(GROUP_V6), 6000, 9000, b"mcast6", t(3))
+        .expect("send");
+    assert_eq!(out.frames.len(), 1, "one multicast frame, no resolution");
+    let eth = EthernetFrame::parse(&out.frames[0]).expect("eth");
+    assert_eq!(eth.destination, ipv6_multicast_mac(&GROUP_V6));
+    let (header, _payload) = Ipv6Header::parse(eth.payload).expect("ipv6");
+    assert_eq!(header.destination, GROUP_V6);
+    assert_eq!(
+        header.hop_limit, 1,
+        "multicast data stays on the local link"
+    );
+    let mut events = Vec::new();
+    for frame in &out.frames {
+        events.extend(b.on_frame(frame, t(3)).events);
+    }
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StackEvent::UdpDatagram {
+            destination: IpAddr::V6(d),
+            payload,
+            ..
+        } if *d == GROUP_V6 && payload == b"mcast6"
+    )));
 }

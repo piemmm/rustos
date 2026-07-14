@@ -244,7 +244,7 @@ drivers/network/<nic>                 — link-layer only: frames in/out,
 
 | Capability | Guards | Introduced with |
 |---|---|---|
-| `CAP_NET` (new) | originating transport flows + high-port binds — the whole class of ordinary network use | N4b (socket service), enforcement in `netstack` socket dispatch |
+| `CAP_NET` (live) | originating transport flows + high-port binds — the whole class of ordinary network use | N4b (socket service): `CapabilityId::NET` (36), in `SESSION_BASELINE`, enforced in the `netstack` socket dispatcher |
 | `CAP_NET_BIND_PRIVILEGED` (new) | binding listeners below port 1024, v4 and v6 alike | N6 (TCP listen), enforcement at `bind`/`listen` |
 | `CAP_NET_RAW` (exists) | raw frame/packet sockets and the NIC frame rings | already live; `netstack` is its principal holder |
 | `CAP_NET_ADMIN` (new) | interface/address/route mutation, offload toggling, stack-wide counters reset | N3 (interface bring-up), enforcement in the admin surface |
@@ -458,25 +458,40 @@ docs, and the full gate) because the whole was too large for one change:
   `CAP_NET` is **not** introduced here — a capability lands only with a
   live enforcement point and holder (§5.2), which is N4b. Docs:
   `docs/src/abi/net-sockets.md`.
-- **N4b — the socket service + client + multicast transmit `[ ]`
-  (remaining).** `CAP_NET` introduced + enforced in the `netstack`
-  socket dispatcher (its live holder is the client manifest); the socket
-  table keyed to the caller's attested origin with CSPRNG-drawn ephemeral
-  ports and per-principal/global bounded accounting failing closed with
-  `LimitExceeded` (§24.3); UDP unicast **and** multicast datagram
-  transmit (the engine `Stack::send_datagram` gains a multicast path over
-  the landed `mcast` engine — today it refuses multicast as `NotUnicast`);
-  inbound demux from `StackEvent::UdpDatagram` to the owning socket's
-  delivery port via `ipc_send`; the `Run` binary binding the second
-  endpoint and pumping it in the wait-set loop; `lib/rt` socket wrappers
-  (`socket`/`bind`/`connect`/`send`/`recv`/`close` over the contract).
-- N4b tests: two-process QEMU vertical (UDP echo v4+v6, multicast
-  join + receive), `fuzz_net_sockabi` (the netstack serve path),
-  limit-exhaustion tests failing closed. (`fuzz_net_udp`/`fuzz_net_igmp`/
-  `fuzz_net_mld` landed; membership + Router-Alert paths covered by
-  `lib/net` unit/e2e tests; the ABI decoders covered by the `lib/abi`
-  harness.) Docs: `docs/src/lib/net.md` refreshed for
-  `udp`/`igmp`/`mld`/`mcast`.
+- **N4b — the socket service + client + multicast transmit `[~]`.**
+  Landed:
+  - `CAP_NET` (`CapabilityId::NET` = 36) in `SESSION_BASELINE`, enforced
+    in the `netstack` socket dispatcher before any state is touched;
+  - `rustos_netstack::SocketService`: the origin (`ProcId`)-keyed socket
+    table, CSPRNG-drawn ephemeral ports (kernel `random_get`, injected as
+    an entropy closure so the engine stays pure), globally-unique port
+    binding, per-principal + global bounded accounting failing closed with
+    `LimitExceeded`, and inbound demux from `StackEvent::UdpDatagram` to
+    the owning socket's delivery port (peer-filtered, membership-gated) as
+    an encoded `SocketDatagram`;
+  - UDP unicast **and** multicast datagram transmit —
+    `Stack::send_datagram` gained the multicast path (group MAC, link-local
+    scope, no route/membership needed), and `Netstack::originate` selects
+    egress per link;
+  - the `Run` binary binds the second endpoint (`NETSTACK_SOCKET_ENDPOINT`)
+    and serves it in the same event-driven wait-set loop;
+  - `rustos_rt::net` client wrappers (`socket`/`bind`/`connect`/`send`/
+    `recv`/`close`/`join`/`leave`), `recv` returning the sender `Origin`
+    for fail-closed authentication; and the `random_get` rt wrapper.
+  - Tests: the `SocketService` host suite (cap gate, origin scoping,
+    ephemeral/explicit bind + port reuse, quota exhaustion, unicast send,
+    peer-filtered + multicast-gated delivery), `lib/net` multicast-transmit
+    round-trips (v4+v6), `fuzz_net_sockabi` (the serve path), and the
+    `random_get` marshal tests. Docs: `docs/src/lib/net.md` and
+    `docs/src/abi/net-sockets.md`.
+  - **Remaining:** the *live* end-to-end data path through the running
+    service, which needs a NIC bound into the `netstack` process (NIC
+    autobind / driver-channel handoff) — a distinct increment the plan
+    defers. Until it lands the socket control plane is fully served and a
+    live `send` fails closed (`NetworkUnreachable`, empty interface table);
+    the datagram data path is proven by the engine tests over the same
+    `SocketService` + `Stack` the live service runs. The two-process QEMU
+    vertical (UDP echo v4+v6, multicast) lands with that autobind work.
 
 ### N5 — TCP core: the RFC 9293 state machine, retransmission, flow control `[ ]`
 - Connection establishment/teardown (full state machine, simultaneous

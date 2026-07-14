@@ -1628,6 +1628,7 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-caps",
+ "rustos-fuzzseed",
  "rustos-log",
  "rustos-net",
  "rustos-rt",

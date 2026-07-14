@@ -59,6 +59,15 @@ use rustos_caps::CapabilitySet;
 ///   administrative act; on a headless build there is no seat to acquire
 ///   and the grants are inert.
 ///
+/// * `CAP_NET` — ordinary network use: opening datagram sockets and
+///   originating/receiving transport traffic through the `netstack`
+///   socket surface (`plans/NETWORK.md` §0). Baseline because using the
+///   network is an ordinary part of an interactive session, not an
+///   administrative act; the coarser `CAP_NET_ADMIN` (reconfiguring
+///   interfaces) and `CAP_NET_RAW` (unmediated raw frames) are not
+///   baseline. A program still only receives it if its own manifest
+///   requests it, intersected with this ceiling.
+///
 /// Nothing else is baseline: self-scoped `sysinfo` queries, `stream_*` on
 /// inherited descriptors, lowering one's own resource limits, and
 /// `fs_getcwd` already require no capability. A sandboxed process still
@@ -77,6 +86,7 @@ pub const SESSION_BASELINE: &[CapabilityId] = &[
     CapabilityId::DISPLAY,
     CapabilityId::INPUT_READ,
     CapabilityId::SHM,
+    CapabilityId::NET,
 ];
 
 /// The administrative set: the grants an administrator account carries on
@@ -215,7 +225,7 @@ mod tests {
     #[test]
     fn session_baseline_is_pinned() {
         let set = session_baseline();
-        assert_eq!(set.len(), 7);
+        assert_eq!(set.len(), 8);
         for cap in [
             CapabilityId::FS_ACCESS,
             CapabilityId::PROC_SPAWN,
@@ -224,6 +234,7 @@ mod tests {
             CapabilityId::DISPLAY,
             CapabilityId::INPUT_READ,
             CapabilityId::SHM,
+            CapabilityId::NET,
         ] {
             assert!(set.contains(cap), "{cap:?} missing from the baseline");
         }
@@ -232,7 +243,7 @@ mod tests {
     #[test]
     fn administrator_ceiling_is_pinned() {
         let set = administrator_ceiling();
-        assert_eq!(set.len(), 18);
+        assert_eq!(set.len(), 19);
         for cap in SESSION_BASELINE {
             assert!(set.contains(*cap), "{cap:?} missing from the ceiling");
         }

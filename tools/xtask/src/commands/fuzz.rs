@@ -109,6 +109,11 @@ pub const TARGETS: &[Target] = &[
         description: "lib/net MLDv2 query decode + report encode (floating max-response, bounds)",
     },
     Target {
+        package: "rustos-netstack",
+        test: "fuzz_net_sockabi",
+        description: "netstack socket serve path (decode + CAP_NET gate + dispatch, accounting)",
+    },
+    Target {
         package: "rustos-kernel-ipc",
         test: "fuzz_port",
         description: "IPC port send dispatch (capability + size + capacity)",
