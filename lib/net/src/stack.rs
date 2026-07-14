@@ -45,8 +45,8 @@ use crate::addr::{
 };
 use crate::arp::{ArpPacket, OP_REPLY, OP_REQUEST};
 use crate::eth::{
-    ipv6_multicast_mac, is_group_mac, write_header, EthernetFrame, BROADCAST, ETHERNET_HEADER_LEN,
-    ETHERTYPE_ARP, ETHERTYPE_IPV4, ETHERTYPE_IPV6,
+    ipv4_multicast_mac, ipv6_multicast_mac, is_group_mac, write_header, EthernetFrame, BROADCAST,
+    ETHERNET_HEADER_LEN, ETHERTYPE_ARP, ETHERTYPE_IPV4, ETHERTYPE_IPV6,
 };
 use crate::frag::{FragKey, PushOutcome, Reassembler, ReassemblyConfig};
 use crate::icmp::{
@@ -54,10 +54,16 @@ use crate::icmp::{
     IcmpMessage,
 };
 use crate::iface::{Iface, IfaceAction, IfaceConfig};
+use crate::igmp::{IgmpMessage, PROTOCOL_IGMP};
 use crate::ipv4::{Ipv4Header, IPV4_HEADER_LEN, PROTOCOL_ICMP};
 use crate::ipv6::{
-    walk, Ipv6Header, WalkOutcome, WalkRejection, IPV6_HEADER_LEN, IPV6_MIN_MTU,
-    NEXT_HEADER_ICMPV6, PARAM_PROBLEM_NEXT_HEADER,
+    hop_by_hop_router_alert, walk, Ipv6Header, WalkOutcome, WalkRejection, HBH_ROUTER_ALERT_LEN,
+    IPV6_HEADER_LEN, IPV6_MIN_MTU, NEXT_HEADER_HOP_BY_HOP, NEXT_HEADER_ICMPV6,
+    PARAM_PROBLEM_NEXT_HEADER,
+};
+use crate::mcast::{Igmp, JoinError, Membership, MembershipReport, Mld, ReportReason};
+use crate::mld::{
+    self, MldQuery, RecordType, ALL_MLDV2_ROUTERS, TYPE_MLDV2_REPORT, TYPE_MULTICAST_LISTENER_QUERY,
 };
 use crate::nd::{apply_redirect, NdMessage, ND_HOP_LIMIT};
 use crate::neigh::{LookupResult, NeighborAction, NeighborConfig, NeighborTable};
@@ -80,6 +86,23 @@ pub const MAX_REDIRECT_ROUTES: usize = 32;
 /// ICMP Destination Unreachable code 2: protocol unreachable
 /// (RFC 792).
 const V4_CODE_PROTOCOL_UNREACHABLE: u8 = 2;
+
+/// The all-systems IPv4 multicast group (`224.0.0.1`): every
+/// multicast-capable host joins it, and General IGMP Queries are sent
+/// to it. Joined for reception but never reported (RFC 1112).
+const ALL_SYSTEMS_V4: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 1);
+
+/// The all-routers IPv4 multicast group (`224.0.0.2`): the destination
+/// of an IGMPv2 Leave Group message (RFC 2236 §2.14).
+const ALL_ROUTERS_V4: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 2);
+
+/// Hop limit / TTL of an emitted IGMP or MLD membership message: these
+/// are single-link protocols and must never be forwarded (RFC 2236
+/// §2, RFC 3810 §5).
+const MEMBERSHIP_HOP_LIMIT: u8 = 1;
+
+/// Default per-interface multicast-group membership bound.
+pub const MULTICAST_CAPACITY: usize = 32;
 
 /// How a route entered the table (carried as route metadata).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -226,6 +249,15 @@ pub enum StackError {
     BadDeviceFacts,
 }
 
+/// Typed refusal of a multicast join/leave request.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum McastError {
+    /// The address is not a multicast group address.
+    NotMulticast,
+    /// The bounded membership table is full (fail closed).
+    CapacityExhausted,
+}
+
 /// Configuration of one [`Stack`].
 #[derive(Clone, Copy, Debug)]
 pub struct StackConfig {
@@ -254,6 +286,8 @@ pub struct StackConfig {
     /// CSPRNG by the service so the sequence start is unpredictable
     /// (RFC 6864 §5.1), then incremented per datagram.
     pub ipv4_ident_seed: u16,
+    /// Per-interface multicast-group membership bound (per family).
+    pub multicast_capacity: usize,
 }
 
 impl StackConfig {
@@ -275,6 +309,7 @@ impl StackConfig {
             error_burst: 10,
             error_rate: 10,
             ipv4_ident_seed,
+            multicast_capacity: MULTICAST_CAPACITY,
         }
     }
 }
@@ -312,6 +347,10 @@ pub struct Stack {
     ra_routes: usize,
     redirect_routes: usize,
     next_ident: u16,
+    /// IPv4 (IGMPv2) group membership.
+    membership_v4: Membership<Igmp>,
+    /// IPv6 (MLDv2) group membership.
+    membership_v6: Membership<Mld>,
     counters: StackCounters,
 }
 
@@ -347,6 +386,8 @@ impl Stack {
             ra_routes: 0,
             redirect_routes: 0,
             next_ident: config.ipv4_ident_seed,
+            membership_v4: Membership::new(config.multicast_capacity, mac_seed(config.facts.mac)),
+            membership_v6: Membership::new(config.multicast_capacity, mac_seed(config.facts.mac)),
             counters: StackCounters::default(),
         })
     }
@@ -401,6 +442,10 @@ impl Stack {
         self.iface.set_ipv4(addr, prefix_len)?;
         self.routes_v4 = RoutingTable::new();
         self.routes_v4.insert(connected, None, RouteKind::Connected);
+        // Every multicast-capable host is a member of the all-systems
+        // group (RFC 1112): joined for reception, never reported. The
+        // time is irrelevant for a non-reported group.
+        let _ = self.membership_v4.join(ALL_SYSTEMS_V4, Duration64::ZERO);
         if let Some(gw) = gateway {
             let default = Prefix::new(Ipv4Addr::UNSPECIFIED, 0)
                 .ok_or(crate::iface::AddrError::BadPrefixLen)?;
@@ -525,7 +570,7 @@ impl Stack {
             self.counters.rx_dropped += 1;
             return;
         };
-        if header.destination != our_v4 {
+        if header.destination != our_v4 && !self.accepts_v4_multicast(header.destination) {
             self.counters.rx_dropped += 1;
             return;
         }
@@ -571,6 +616,10 @@ impl Stack {
     ) {
         if header.protocol == PROTOCOL_ICMP {
             self.on_icmp_v4(out, header, payload, now);
+            return;
+        }
+        if header.protocol == PROTOCOL_IGMP {
+            self.on_igmp(payload, now);
             return;
         }
         if header.protocol == PROTOCOL_UDP {
@@ -694,7 +743,8 @@ impl Stack {
         let for_us = self.iface.is_assigned(dest)
             || self.iface.is_tentative(dest)
             || dest == ALL_NODES
-            || self.is_our_solicited_node(dest);
+            || self.is_our_solicited_node(dest)
+            || self.membership_v6.is_member(dest);
         if !for_us {
             self.counters.rx_dropped += 1;
             return;
@@ -877,6 +927,10 @@ impl Stack {
                 };
                 self.on_nd(out, header, &nd, now);
             }
+            TYPE_MULTICAST_LISTENER_QUERY => self.on_mld_query(message.body, now),
+            // MLDv2 has no report suppression, so a host ignores every
+            // report/done it hears (a router's concern, not ours).
+            mld::TYPE_MLDV1_REPORT | mld::TYPE_MLDV1_DONE | TYPE_MLDV2_REPORT => {}
             crate::icmp::TYPE_V6_ECHO_REQUEST | crate::icmp::TYPE_V6_ECHO_REPLY => {
                 let Some(echo) = IcmpEcho::parse(context, payload) else {
                     self.counters.rx_dropped += 1;
@@ -1433,12 +1487,53 @@ impl Stack {
         hop_limit: u8,
         now: Duration64,
     ) {
+        self.send_ipv6_packet_opt(
+            out,
+            source,
+            dest,
+            next_header,
+            upper_message,
+            hop_limit,
+            false,
+            now,
+        );
+    }
+
+    /// [`Self::send_ipv6_packet`], optionally prepending a Hop-by-Hop
+    /// Router Alert header (RFC 2711). MLD membership reports set
+    /// `router_alert`; every other emit path leaves it clear.
+    #[allow(clippy::too_many_arguments)]
+    fn send_ipv6_packet_opt(
+        &mut self,
+        out: &mut StackOutput,
+        source: Ipv6Addr,
+        dest: Ipv6Addr,
+        next_header: u8,
+        upper_message: &[u8],
+        hop_limit: u8,
+        router_alert: bool,
+        now: Duration64,
+    ) {
         if !self.link_up {
             return;
         }
-        let mut header = Ipv6Header::new(source, dest, next_header);
-        header.hop_limit = hop_limit;
-        let Some(packet) = ipv6_packet(&header, upper_message) else {
+        // Without a Router Alert the upper message is the IPv6 payload
+        // directly (no copy on this hot path). With one, the Hop-by-Hop
+        // header — which itself names the upper protocol — is prepended.
+        let packet = if router_alert {
+            let hbh = hop_by_hop_router_alert(next_header);
+            let mut payload = Vec::with_capacity(HBH_ROUTER_ALERT_LEN + upper_message.len());
+            payload.extend_from_slice(&hbh);
+            payload.extend_from_slice(upper_message);
+            let mut header = Ipv6Header::new(source, dest, NEXT_HEADER_HOP_BY_HOP);
+            header.hop_limit = hop_limit;
+            ipv6_packet(&header, &payload)
+        } else {
+            let mut header = Ipv6Header::new(source, dest, next_header);
+            header.hop_limit = hop_limit;
+            ipv6_packet(&header, upper_message)
+        };
+        let Some(packet) = packet else {
             return;
         };
         if dest.is_multicast() {
@@ -1712,12 +1807,22 @@ impl Stack {
                     self.send_router_solicitation(&mut out, source);
                 }
                 IfaceAction::AddressPreferred { addr } => {
+                    // A now-usable address announces membership in its
+                    // solicited-node group so routers deliver its
+                    // Neighbour Solicitations (RFC 4862 §5.4.2).
+                    let _ = self
+                        .membership_v6
+                        .join(solicited_node_multicast(&addr), now);
                     out.events.push(StackEvent::AddressPreferred { addr });
                 }
                 IfaceAction::AddressInvalidated { addr } => {
+                    self.membership_v6
+                        .leave(solicited_node_multicast(&addr), now);
                     out.events.push(StackEvent::AddressInvalidated { addr });
                 }
                 IfaceAction::DadFailed { addr } => {
+                    self.membership_v6
+                        .leave(solicited_node_multicast(&addr), now);
                     out.events.push(StackEvent::DadFailed { addr });
                 }
             }
@@ -1732,6 +1837,12 @@ impl Stack {
                 source: expired.key.source,
             });
         }
+        for report in self.membership_v4.advance(now) {
+            self.emit_igmp_report(&mut out, report, now);
+        }
+        for report in self.membership_v6.advance(now) {
+            self.emit_mld_report(&mut out, report, now);
+        }
         out
     }
 
@@ -1745,10 +1856,203 @@ impl Stack {
             self.routers.next_deadline(),
             self.pmtu.next_deadline(),
             self.reassembler.next_deadline(),
+            self.membership_v4.next_deadline(),
+            self.membership_v6.next_deadline(),
         ]
         .into_iter()
         .flatten()
         .min_by_key(|deadline| (deadline.secs(), deadline.subsec_nanos()))
+    }
+}
+
+impl Stack {
+    /// Join a multicast `group` at time `now`, so the host both receives
+    /// its traffic and (for a reportable group) announces membership
+    /// (IGMPv2 / MLDv2). Idempotent per reference: joining twice requires
+    /// two leaves.
+    ///
+    /// # Errors
+    ///
+    /// * [`McastError::NotMulticast`] — `group` is not a multicast group.
+    /// * [`McastError::CapacityExhausted`] — the bounded membership table
+    ///   is full (fail closed).
+    pub fn join_multicast(&mut self, group: IpAddr, now: Duration64) -> Result<bool, McastError> {
+        match group {
+            IpAddr::V4(g) if g.is_multicast() => self
+                .membership_v4
+                .join(g, now)
+                .map_err(|JoinError::CapacityExhausted| McastError::CapacityExhausted),
+            IpAddr::V6(g) if g.is_multicast() => self
+                .membership_v6
+                .join(g, now)
+                .map_err(|JoinError::CapacityExhausted| McastError::CapacityExhausted),
+            _ => Err(McastError::NotMulticast),
+        }
+    }
+
+    /// Leave a multicast `group` at time `now`. Returns `true` when the
+    /// last reference was dropped (the host has left the group).
+    pub fn leave_multicast(&mut self, group: IpAddr, now: Duration64) -> bool {
+        match group {
+            IpAddr::V4(g) => self.membership_v4.leave(g, now),
+            IpAddr::V6(g) => self.membership_v6.leave(g, now),
+        }
+    }
+
+    /// True when a received IPv4 multicast destination is a group this
+    /// host is a member of.
+    fn accepts_v4_multicast(&self, dest: Ipv4Addr) -> bool {
+        self.membership_v4.is_member(dest)
+    }
+
+    /// IGMP receive (RFC 2236): a query schedules our responses; another
+    /// host's report suppresses ours; a leave is a router's concern.
+    fn on_igmp(&mut self, payload: &[u8], now: Duration64) {
+        let Some(message) = IgmpMessage::parse(payload) else {
+            self.counters.rx_dropped += 1;
+            return;
+        };
+        match message {
+            IgmpMessage::MembershipQuery {
+                max_resp_deciseconds,
+                group,
+            } => {
+                let target = if group.is_unspecified() {
+                    None
+                } else {
+                    Some(group)
+                };
+                let max = Duration64::from_nanos(u64::from(max_resp_deciseconds) * 100_000_000);
+                self.membership_v4.on_query(target, max, now);
+            }
+            IgmpMessage::V2Report { group } | IgmpMessage::V1Report { group } => {
+                self.membership_v4.on_report_seen(group);
+            }
+            // A host neither acts on nor forwards another node's Leave.
+            IgmpMessage::LeaveGroup { .. } => {}
+        }
+    }
+
+    /// MLD receive (RFC 3810): a query schedules our responses. MLDv2
+    /// has no report suppression, so another host's report is ignored.
+    fn on_mld_query(&mut self, body: &[u8], now: Duration64) {
+        let Some(query) = MldQuery::parse(body) else {
+            self.counters.rx_dropped += 1;
+            return;
+        };
+        let target = if query.is_general() {
+            None
+        } else {
+            Some(query.multicast_address)
+        };
+        let max = Duration64::from_nanos(u64::from(query.max_response_millis) * 1_000_000);
+        self.membership_v6.on_query(target, max, now);
+    }
+
+    /// Turn one IPv4 membership report into an IGMP message and send it
+    /// (a report to the group, a leave to the all-routers group).
+    fn emit_igmp_report(
+        &mut self,
+        out: &mut StackOutput,
+        report: MembershipReport<Ipv4Addr>,
+        now: Duration64,
+    ) {
+        let _ = now;
+        let Some((our_v4, _)) = self.iface.ipv4() else {
+            return;
+        };
+        let (message, dest) = match report.reason {
+            ReportReason::JoinGroup | ReportReason::QueryResponse => (
+                IgmpMessage::V2Report {
+                    group: report.group,
+                },
+                report.group,
+            ),
+            ReportReason::LeaveGroup => (
+                IgmpMessage::LeaveGroup {
+                    group: report.group,
+                },
+                ALL_ROUTERS_V4,
+            ),
+        };
+        let mut body = [0u8; crate::igmp::IGMP_MESSAGE_LEN];
+        if message.write(&mut body).is_none() {
+            return;
+        }
+        self.send_igmp(out, our_v4, dest, &body);
+    }
+
+    /// Emit an IGMP message to `dest`: TTL 1, Router Alert, straight to
+    /// the destination's multicast MAC (no neighbour resolution).
+    fn send_igmp(&mut self, out: &mut StackOutput, source: Ipv4Addr, dest: Ipv4Addr, body: &[u8]) {
+        if !self.link_up {
+            return;
+        }
+        let mut header = Ipv4Header::new(source, dest, PROTOCOL_IGMP);
+        header.ttl = MEMBERSHIP_HOP_LIMIT;
+        header.identification = self.next_ident;
+        self.next_ident = self.next_ident.wrapping_add(1);
+        // The Router Alert option makes the header 24 bytes (IHL = 6).
+        let header_len = IPV4_HEADER_LEN + 4;
+        let mut packet = vec![0u8; header_len + body.len()];
+        if header
+            .write_with_router_alert(&mut packet, body.len())
+            .is_none()
+        {
+            return;
+        }
+        packet[header_len..].copy_from_slice(body);
+        self.counters.tx_frames += 1;
+        self.push_frame(out, ipv4_multicast_mac(&dest), ETHERTYPE_IPV4, &packet);
+    }
+
+    /// Turn one IPv6 membership report into an MLDv2 report and send it
+    /// to the all-MLDv2-routers group with a Hop-by-Hop Router Alert.
+    fn emit_mld_report(
+        &mut self,
+        out: &mut StackOutput,
+        report: MembershipReport<Ipv6Addr>,
+        now: Duration64,
+    ) {
+        // A link-local source is required for MLD (RFC 3810 §5.2.13);
+        // `source_for_v6` selects one for the link-local report group.
+        let Some(source) = self.source_for_v6(ALL_MLDV2_ROUTERS) else {
+            return;
+        };
+        let record_type = match report.reason {
+            ReportReason::JoinGroup => RecordType::ChangeToExclude,
+            ReportReason::LeaveGroup => RecordType::ChangeToInclude,
+            ReportReason::QueryResponse => RecordType::ModeIsExclude,
+        };
+        let records = [(record_type, report.group)];
+        let mut body = vec![0u8; mld::v2_report_len(records.len())];
+        if mld::write_v2_report(&records, &mut body).is_none() {
+            return;
+        }
+        let icmp = IcmpMessage {
+            message_type: TYPE_MLDV2_REPORT,
+            code: 0,
+            body: &body,
+        };
+        let context = IcmpContext::V6 {
+            source,
+            destination: ALL_MLDV2_ROUTERS,
+        };
+        let mut message = vec![0u8; crate::icmp::ICMP_FIXED_HEADER_LEN + body.len()];
+        if icmp.write(context, &mut message).is_none() {
+            return;
+        }
+        self.counters.tx_frames += 1;
+        self.send_ipv6_packet_opt(
+            out,
+            source,
+            ALL_MLDV2_ROUTERS,
+            NEXT_HEADER_ICMPV6,
+            &message,
+            MEMBERSHIP_HOP_LIMIT,
+            true,
+            now,
+        );
     }
 }
 
@@ -1782,6 +2086,14 @@ fn ipv6_packet(header: &Ipv6Header, payload: &[u8]) -> Option<Vec<u8>> {
 /// §3.2.2: unspecified, multicast, or limited broadcast).
 fn v4_source_ambiguous(source: Ipv4Addr) -> bool {
     source.is_unspecified() || source.is_multicast() || source.is_broadcast()
+}
+
+/// Seed the membership report-jitter generator from the interface MAC,
+/// so two hosts on a link pick different report delays (see
+/// [`crate::mcast`]).
+fn mac_seed(mac: MacAddress) -> u64 {
+    let o = mac.as_octets();
+    u64::from_be_bytes([0, 0, o[0], o[1], o[2], o[3], o[4], o[5]])
 }
 
 #[cfg(test)]

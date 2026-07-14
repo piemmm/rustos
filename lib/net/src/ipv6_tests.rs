@@ -284,3 +284,16 @@ fn walk_rejects_option_length_overrun() {
         Err(WalkRejection::Drop)
     );
 }
+
+#[test]
+fn hop_by_hop_router_alert_is_one_padded_unit() {
+    // RFC 2711: an 8-octet Hop-by-Hop header naming the upper protocol,
+    // carrying the Router Alert option (type 5, len 2, value 0 = MLD),
+    // padded with a PadN to the 8-octet unit.
+    let hbh = hop_by_hop_router_alert(NEXT_HEADER_ICMPV6);
+    assert_eq!(hbh.len(), HBH_ROUTER_ALERT_LEN);
+    assert_eq!(hbh[0], NEXT_HEADER_ICMPV6, "next header");
+    assert_eq!(hbh[1], 0, "one 8-octet unit beyond the first");
+    assert_eq!(&hbh[2..6], &[5, 2, 0, 0], "Router Alert option");
+    assert_eq!(&hbh[6..8], &[1, 0], "PadN option");
+}

@@ -712,3 +712,195 @@ fn frames_for_other_hosts_are_dropped() {
     assert!(out.frames.is_empty() && out.events.is_empty());
     assert_eq!(a.counters().rx_dropped, 1);
 }
+
+// ---- Multicast membership (IGMPv2 / MLDv2) --------------------------
+
+const GROUP_V4: Ipv4Addr = Ipv4Addr::new(239, 1, 2, 3);
+
+/// A UDP datagram from `V4_B` to the IPv4 multicast group `GROUP_V4`,
+/// addressed to the group's multicast MAC.
+fn v4_group_udp_frame(payload: &[u8]) -> Vec<u8> {
+    let mut udp_msg = vec![0u8; udp::UDP_HEADER_LEN + payload.len()];
+    udp::write(
+        udp::Pseudo::V4 {
+            source: V4_B,
+            destination: GROUP_V4,
+        },
+        5000,
+        7000,
+        payload,
+        &mut udp_msg,
+    )
+    .expect("write");
+    let header = Ipv4Header::new(V4_B, GROUP_V4, PROTOCOL_UDP);
+    let mut packet = vec![0u8; IPV4_HEADER_LEN + udp_msg.len()];
+    header.write(&mut packet, udp_msg.len()).expect("fits");
+    packet[IPV4_HEADER_LEN..].copy_from_slice(&udp_msg);
+    let mut frame = vec![0u8; ETHERNET_HEADER_LEN + packet.len()];
+    write_header(
+        &mut frame,
+        ipv4_multicast_mac(&GROUP_V4),
+        MAC_B,
+        ETHERTYPE_IPV4,
+    )
+    .expect("fits");
+    frame[ETHERNET_HEADER_LEN..].copy_from_slice(&packet);
+    frame
+}
+
+/// An IGMP General Query from `V4_B` to the all-systems group.
+fn igmp_general_query_frame(max_resp_deciseconds: u8) -> Vec<u8> {
+    let all_systems = Ipv4Addr::new(224, 0, 0, 1);
+    let message = IgmpMessage::MembershipQuery {
+        max_resp_deciseconds,
+        group: Ipv4Addr::UNSPECIFIED,
+    };
+    let mut body = [0u8; crate::igmp::IGMP_MESSAGE_LEN];
+    message.write(&mut body).expect("write");
+    let mut header = Ipv4Header::new(V4_B, all_systems, PROTOCOL_IGMP);
+    header.ttl = 1;
+    let mut packet = vec![0u8; IPV4_HEADER_LEN + body.len()];
+    header.write(&mut packet, body.len()).expect("fits");
+    packet[IPV4_HEADER_LEN..].copy_from_slice(&body);
+    let mut frame = vec![0u8; ETHERNET_HEADER_LEN + packet.len()];
+    write_header(
+        &mut frame,
+        ipv4_multicast_mac(&all_systems),
+        MAC_B,
+        ETHERTYPE_IPV4,
+    )
+    .expect("fits");
+    frame[ETHERNET_HEADER_LEN..].copy_from_slice(&packet);
+    frame
+}
+
+/// The first IGMP message in `frames`, with its Ethernet destination,
+/// TTL, and IPv4 options length.
+fn first_igmp(frames: &[Vec<u8>]) -> Option<(MacAddress, u8, usize, IgmpMessage)> {
+    for f in frames {
+        let Some(eth) = EthernetFrame::parse(f) else {
+            continue;
+        };
+        if eth.ethertype != ETHERTYPE_IPV4 {
+            continue;
+        }
+        let Some((header, options, payload)) = Ipv4Header::parse(eth.payload) else {
+            continue;
+        };
+        if header.protocol != PROTOCOL_IGMP {
+            continue;
+        }
+        let Some(message) = IgmpMessage::parse(payload) else {
+            continue;
+        };
+        return Some((eth.destination, header.ttl, options.len(), message));
+    }
+    None
+}
+
+#[test]
+fn joining_v4_group_emits_igmp_report_with_router_alert() {
+    let mut a = stack(MAC_A, IID_A);
+    a.set_ipv4_config(V4_A, 24, None).expect("configure");
+    assert!(a.join_multicast(IpAddr::V4(GROUP_V4), t(0)).expect("join"));
+    let out = a.advance(t(0));
+    let (dest_mac, ttl, options_len, message) = first_igmp(&out.frames).expect("igmp report");
+    assert_eq!(message, IgmpMessage::V2Report { group: GROUP_V4 });
+    assert_eq!(ttl, 1, "membership messages never leave the link");
+    assert_eq!(options_len, 4, "Router Alert option present (IHL = 6)");
+    assert_eq!(dest_mac, ipv4_multicast_mac(&GROUP_V4));
+}
+
+#[test]
+fn joined_group_receives_udp_and_others_are_dropped() {
+    let mut a = stack(MAC_A, IID_A);
+    a.set_ipv4_config(V4_A, 24, None).expect("configure");
+    // Not a member yet: the multicast datagram is dropped.
+    let out = a.on_frame(&v4_group_udp_frame(b"hi"), t(0));
+    assert!(out.events.is_empty());
+    assert!(a.counters().rx_dropped >= 1);
+    // After joining, the same datagram is delivered.
+    a.join_multicast(IpAddr::V4(GROUP_V4), t(0)).expect("join");
+    let out = a.on_frame(&v4_group_udp_frame(b"hi"), t(0));
+    assert!(out.events.iter().any(|event| matches!(
+        event,
+        StackEvent::UdpDatagram { destination: IpAddr::V4(d), payload, .. }
+            if *d == GROUP_V4 && payload == b"hi"
+    )));
+}
+
+#[test]
+fn igmp_general_query_triggers_a_delayed_response() {
+    let mut a = stack(MAC_A, IID_A);
+    a.set_ipv4_config(V4_A, 24, None).expect("configure");
+    a.join_multicast(IpAddr::V4(GROUP_V4), t(0)).expect("join");
+    // Drain the unsolicited join reports.
+    for s in 0..40 {
+        let _ = a.advance(t(s));
+    }
+    // A General Query schedules — but does not immediately send — a report.
+    let out = a.on_frame(&igmp_general_query_frame(20), t(100));
+    assert!(first_igmp(&out.frames).is_none(), "response is delayed");
+    assert!(a.next_deadline().is_some());
+    // Past the 2-second window the response is emitted.
+    let out = a.advance(t(103));
+    let (_mac, _ttl, _opts, message) = first_igmp(&out.frames).expect("query response");
+    assert_eq!(message, IgmpMessage::V2Report { group: GROUP_V4 });
+}
+
+#[test]
+fn leaving_v4_group_emits_leave_to_all_routers() {
+    let mut a = stack(MAC_A, IID_A);
+    a.set_ipv4_config(V4_A, 24, None).expect("configure");
+    a.join_multicast(IpAddr::V4(GROUP_V4), t(0)).expect("join");
+    for s in 0..40 {
+        let _ = a.advance(t(s));
+    }
+    assert!(a.leave_multicast(IpAddr::V4(GROUP_V4), t(40)));
+    let out = a.advance(t(40));
+    let (dest_mac, _ttl, _opts, message) = first_igmp(&out.frames).expect("leave");
+    assert_eq!(message, IgmpMessage::LeaveGroup { group: GROUP_V4 });
+    assert_eq!(dest_mac, ipv4_multicast_mac(&Ipv4Addr::new(224, 0, 0, 2)));
+}
+
+#[test]
+fn joining_a_non_multicast_group_fails_closed() {
+    let mut a = stack(MAC_A, IID_A);
+    a.set_ipv4_config(V4_A, 24, None).expect("configure");
+    assert_eq!(
+        a.join_multicast(IpAddr::V4(V4_B), t(0)),
+        Err(McastError::NotMulticast)
+    );
+    assert_eq!(
+        a.join_multicast(IpAddr::V6(link_local(IID_B)), t(0)),
+        Err(McastError::NotMulticast)
+    );
+}
+
+#[test]
+fn ipv6_address_reports_its_solicited_node_group_via_mld() {
+    let mut a = stack(MAC_A, IID_A);
+    let _ = a.advance(t(0)); // link-local DAD solicitation
+    let out = a.advance(t(1)); // preferred -> join solicited-node -> MLD report
+    let frame = out
+        .frames
+        .iter()
+        .find(|f| {
+            EthernetFrame::parse(f).is_some_and(|eth| {
+                eth.ethertype == ETHERTYPE_IPV6
+                    && Ipv6Header::parse(eth.payload)
+                        .is_some_and(|(h, _)| h.next_header == NEXT_HEADER_HOP_BY_HOP)
+            })
+        })
+        .expect("mld report frame");
+    let eth = EthernetFrame::parse(frame).expect("eth");
+    assert_eq!(eth.destination, ipv6_multicast_mac(&ALL_MLDV2_ROUTERS));
+    let (header, payload) = Ipv6Header::parse(eth.payload).expect("ipv6");
+    assert_eq!(header.destination, ALL_MLDV2_ROUTERS);
+    assert_eq!(header.hop_limit, 1);
+    // Hop-by-Hop header: names ICMPv6 and carries the Router Alert option.
+    assert_eq!(payload[0], NEXT_HEADER_ICMPV6);
+    assert_eq!(payload[2], 5, "Router Alert option type");
+    // The ICMPv6 message after the 8-byte Hop-by-Hop header is a report.
+    assert_eq!(payload[HBH_ROUTER_ALERT_LEN], TYPE_MLDV2_REPORT);
+}

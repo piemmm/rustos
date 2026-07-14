@@ -216,11 +216,49 @@ in either family are answered (reported as
 inbound direction without a second decode path); `send_echo_request`
 and `StackEvent::EchoReply` support the diagnostic path.
 
+### `udp` — the dual-stack UDP codec
+
+One parse/emit core (RFC 768) folding the family-appropriate
+pseudo-header checksum through `checksum`, so IPv4 and IPv6 are not two
+shadowed paths. The checksum discipline differs by family deliberately:
+IPv4 accepts a zero (uncomputed) checksum but always emits one; IPv6
+requires it (RFC 8200 §8.1). Emit substitutes `0xFFFF` for a computed
+zero so it is never read as "no checksum". Every decode is total,
+bounded, and fail-closed.
+
+### `igmp`, `mld` — multicast group-membership message codecs
+
+The IPv4 (IGMPv2, RFC 2236) and IPv6 (MLDv2, RFC 3810) membership
+message framings. `igmp` is the eight-byte query/report/leave message
+carried in IP protocol 2, checksum-sealed and total (an over-length
+IGMPv3 query is read through its v2 fields, as a v2 host must). `mld`
+decodes Multicast Listener Queries (both MLDv1 and MLDv2 lengths, with
+the RFC 3810 §5.1.3 floating Maximum Response Code) and encodes Version
+2 Multicast Listener Reports; it carries no report *decoder*, because
+MLDv2 has no report suppression and a host never acts on another's
+report.
+
+### `mcast` — the host membership engine
+
+One family-generic join/leave/query state machine (`Membership<P>`)
+driven by two `McastProtocol` providers (`Igmp`, `Mld`) — the same
+"one core, two providers" shape as `neigh`. It reference-counts joins,
+retransmits unsolicited state-change reports `ROBUSTNESS` times, answers
+queries after a jittered delay (seeded from the interface MAC so hosts
+desynchronise — non-security jitter, not a CSPRNG draw), suppresses a
+pending response on hearing another host's report where the protocol
+does (IGMPv2, not MLDv2), and never reports the all-hosts control
+groups. The table is bounded and joins fail closed at capacity. It
+emits family-neutral `MembershipReport`s; the `stack` maps each to the
+family's wire message and sends it with a Router Alert (IPv4 option /
+IPv6 Hop-by-Hop, TTL/hop-limit 1). The `stack` joins each address's
+solicited-node group (formalising ND's listening) and the all-systems
+group, and filters the receive path by membership; `join_multicast` /
+`leave_multicast` expose explicit application membership.
+
 ## What lands next
 
-Later increments of `plans/NETWORK.md` evolve this crate in place:
-`igmp`/`mld`, `udp`, and `tcp`, alongside the `netstack` service
-(N3b/N3c) that wires these engines to real interfaces and deletes the
-interim `userland/net/icmp` responder. None of that surface exists
-yet; it is added with its callers, tests, and fuzz harnesses per
-increment.
+The remaining `plans/NETWORK.md` increments evolve this crate in place:
+the socket ABI's multicast join/leave and multicast datagram *transmit*
+built on `mcast`, and `tcp`. Each is added with its callers, tests, and
+fuzz harnesses per increment.

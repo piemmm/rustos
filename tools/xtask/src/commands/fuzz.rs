@@ -99,6 +99,16 @@ pub const TARGETS: &[Target] = &[
         description: "lib/net dual-stack UDP codec (pseudo-header checksum, length bounds)",
     },
     Target {
+        package: "rustos-net",
+        test: "fuzz_net_igmp",
+        description: "lib/net IGMPv2 multicast-membership codec (checksum, type, length bounds)",
+    },
+    Target {
+        package: "rustos-net",
+        test: "fuzz_net_mld",
+        description: "lib/net MLDv2 query decode + report encode (floating max-response, bounds)",
+    },
+    Target {
         package: "rustos-kernel-ipc",
         test: "fuzz_port",
         description: "IPC port send dispatch (capability + size + capacity)",

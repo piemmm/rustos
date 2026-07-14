@@ -36,6 +36,7 @@ pub mod log_ingress;
 pub mod mailbox_ipc;
 pub mod manifest;
 pub mod memory;
+pub mod net;
 pub mod net_ipc;
 pub mod origin;
 pub mod process;
@@ -120,6 +121,12 @@ pub use manifest::{
     decode_capability_ids, ManifestHeader, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES,
 };
 pub use memory::MapFlags;
+pub use net::{
+    decode_bind_reply, decode_socket_reply, encode_bind_reply, encode_socket_reply, SocketAddr,
+    SocketDatagram, SocketId, SocketRequest, SocketType, NETSTACK_SOCKET_ENDPOINT,
+    SOCKET_BIND_REPLY_LEN, SOCKET_DATAGRAM_MAGIC, SOCKET_MAX_DATAGRAM, SOCKET_MAX_REPLY,
+    SOCKET_OPEN_REPLY_LEN, SOCKET_REQUEST_MAGIC, SOCKET_VERSION_V1,
+};
 pub use origin::{
     CapabilitySummary, Origin, ProcId, TrustDomain, CAPABILITY_SUMMARY_LEN, ORIGIN_CONSOLE_NONE,
     ORIGIN_WIRE_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN,

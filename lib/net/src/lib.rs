@@ -46,10 +46,16 @@
 //! - [`udp`] — the dual-stack UDP codec (RFC 768): one parse/emit core
 //!   folding the family-appropriate pseudo-header checksum, with the
 //!   IPv4-optional / IPv6-mandatory checksum discipline.
+//! - [`igmp`] — the IGMPv2 codec (RFC 2236) and [`mld`] the MLDv2 codec
+//!   (RFC 3810): the IPv4 and IPv6 multicast group-membership message
+//!   framings.
+//! - [`mcast`] — the family-generic host multicast-membership engine:
+//!   one join/leave/query state machine (RFC 2236 §3 / RFC 3810 §6)
+//!   driven by two protocol providers, exactly as [`neigh`] is one
+//!   cache driven by ARP and Neighbour Discovery.
 //!
-//! Later increments extend this crate in place with `igmp`/`mld` and
-//! `tcp` (`plans/NETWORK.md` §2.1); none of that surface is speculated
-//! here.
+//! Later increments extend this crate in place with `tcp`
+//! (`plans/NETWORK.md` §2.1); none of that surface is speculated here.
 //!
 //! # Security
 //!
@@ -73,12 +79,16 @@ pub mod eth;
 pub mod frag;
 pub mod icmp;
 pub mod iface;
+pub mod igmp;
 pub mod ipv4;
 pub mod ipv6;
+pub mod mcast;
+pub mod mld;
 pub mod nd;
 pub mod neigh;
 pub mod route;
 pub mod stack;
+mod timeutil;
 pub mod udp;
 
 pub use addr::{IpAddr, Ipv4Addr, Ipv6Addr};

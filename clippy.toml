@@ -58,4 +58,11 @@ doc-valid-idents = [
     "riscv64",
     "wasm32",
     "no_std",
+    "IGMP",
+    "IGMPv2",
+    "IGMPv3",
+    "MLD",
+    "MLDv1",
+    "MLDv2",
+    "SLAAC",
 ]

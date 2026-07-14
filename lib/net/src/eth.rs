@@ -76,6 +76,14 @@ pub fn ipv6_multicast_mac(group: &crate::addr::Ipv6Addr) -> MacAddress {
     MacAddress([0x33, 0x33, octets[12], octets[13], octets[14], octets[15]])
 }
 
+/// The Ethernet multicast address an IPv4 group maps to
+/// (`01:00:5e` + the low 23 bits of the group, RFC 1112 §6.4).
+#[must_use]
+pub fn ipv4_multicast_mac(group: &crate::addr::Ipv4Addr) -> MacAddress {
+    let o = group.octets();
+    MacAddress([0x01, 0x00, 0x5E, o[1] & 0x7F, o[2], o[3]])
+}
+
 /// True when `mac` is a group (multicast or broadcast) address: the
 /// I/G bit of the first octet is set (IEEE 802).
 #[must_use]

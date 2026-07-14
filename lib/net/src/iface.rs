@@ -46,6 +46,7 @@ use rustos_abi::time::Duration64;
 use crate::addr::{Ipv4Addr, Ipv6Addr};
 use crate::nd::PrefixInformation;
 use crate::route::CandidateAddr;
+use crate::timeutil::{from_nanos, nanos, NEVER};
 
 /// Maximum IPv6 addresses on one interface (link-local + static +
 /// SLAAC). A fixed validation bound: a hostile router advertising many
@@ -63,9 +64,6 @@ const TWO_HOURS_NANOS: u128 = 7_200 * NANOS_PER_SEC_U128;
 
 /// Nanoseconds per second, widened for deadline arithmetic.
 const NANOS_PER_SEC_U128: u128 = 1_000_000_000;
-
-/// "No deadline" sentinel for internal nanosecond deadlines.
-const NEVER: u128 = u128::MAX;
 
 /// Static configuration of one interface's address engine.
 #[derive(Clone, Copy, Debug)]
@@ -669,17 +667,6 @@ fn lifetime_deadline(now: u128, lifetime_secs: u32) -> u128 {
         return NEVER;
     }
     now.saturating_add(u128::from(lifetime_secs) * NANOS_PER_SEC_U128)
-}
-
-/// Widen a [`Duration64`] to nanoseconds for deadline arithmetic.
-fn nanos(d: Duration64) -> u128 {
-    let secs = u128::try_from(d.secs()).unwrap_or(0);
-    secs * NANOS_PER_SEC_U128 + u128::from(d.subsec_nanos())
-}
-
-/// Narrow an internal nanosecond deadline back to a [`Duration64`].
-fn from_nanos(deadline: u128) -> Duration64 {
-    Duration64::from_nanos(u64::try_from(deadline).unwrap_or(u64::MAX))
 }
 
 #[cfg(test)]

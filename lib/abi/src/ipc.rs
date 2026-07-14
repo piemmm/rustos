@@ -49,6 +49,7 @@ pub const fn is_reserved_endpoint(id: u64) -> bool {
         || id == crate::display_ipc::DISPLAY_ENDPOINT
         || id == crate::window_ipc::WINDOW_ENDPOINT
         || id == crate::net_ipc::NETSTACK_ENDPOINT
+        || id == crate::net::NETSTACK_SOCKET_ENDPOINT
     {
         return true;
     }
@@ -420,6 +421,7 @@ mod tests {
         assert!(is_reserved_endpoint(crate::display_ipc::DISPLAY_ENDPOINT));
         assert!(is_reserved_endpoint(crate::window_ipc::WINDOW_ENDPOINT));
         assert!(is_reserved_endpoint(crate::net_ipc::NETSTACK_ENDPOINT));
+        assert!(is_reserved_endpoint(crate::net::NETSTACK_SOCKET_ENDPOINT));
         let base = crate::elevate::ELEVATE_ENDPOINT_BASE;
         let max = u64::from(crate::process::CONSOLE_INDEX_MAX);
         assert!(is_reserved_endpoint(base));

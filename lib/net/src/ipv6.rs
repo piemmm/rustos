@@ -44,6 +44,32 @@ pub const NEXT_HEADER_DEST_OPTS: u8 = 60;
 /// Default hop limit for emitted datagrams.
 pub const DEFAULT_HOP_LIMIT: u8 = 64;
 
+/// Length of a Hop-by-Hop Options header carrying one Router Alert
+/// option (RFC 2711): the two-byte header, the four-byte option, and a
+/// two-byte `PadN` — exactly one 8-octet unit.
+pub const HBH_ROUTER_ALERT_LEN: usize = 8;
+
+/// Build a Hop-by-Hop Options extension header carrying the IPv6 Router
+/// Alert option (RFC 2711), announcing that `next_header` (an MLD
+/// `ICMPv6` message) follows and that routers must examine the datagram.
+///
+/// The option value is 0, "datagram contains a Multicast Listener
+/// Discovery message" (RFC 2711 §2.1); a trailing `PadN` rounds the
+/// header to its 8-octet unit.
+#[must_use]
+pub fn hop_by_hop_router_alert(next_header: u8) -> [u8; HBH_ROUTER_ALERT_LEN] {
+    [
+        next_header, // Next Header
+        0,           // Hdr Ext Len: one 8-octet unit beyond the first = 0
+        5,
+        2,
+        0,
+        0, // Router Alert option: type 5, length 2, value 0 (MLD)
+        1,
+        0, // PadN option: type 1, length 0
+    ]
+}
+
 /// A parsed or to-be-emitted fixed IPv6 header.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Ipv6Header {

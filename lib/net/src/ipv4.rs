@@ -143,7 +143,35 @@ impl Ipv4Header {
     /// 16-bit offset always fits the 13-bit unit field).
     #[must_use]
     pub fn write(&self, out: &mut [u8], payload_len: usize) -> Option<usize> {
-        let total_length = u16::try_from(IPV4_HEADER_LEN.checked_add(payload_len)?).ok()?;
+        self.write_with_options(&[], out, payload_len)
+    }
+
+    /// Write a header carrying the Router Alert option (RFC 2113): a
+    /// four-byte option flagging routers to examine the datagram, as
+    /// IGMP membership messages require (RFC 2236 §2). The header grows
+    /// to 24 bytes (`IHL = 6`).
+    ///
+    /// Returns `None` under the same conditions as [`Self::write`].
+    #[must_use]
+    pub fn write_with_router_alert(&self, out: &mut [u8], payload_len: usize) -> Option<usize> {
+        self.write_with_options(&ROUTER_ALERT_OPTION, out, payload_len)
+    }
+
+    /// Write a header carrying `options` (a whole number of 32-bit
+    /// words, at most the 40 the IHL field allows), filling in the
+    /// length and checksum. The one emit core [`Self::write`] and
+    /// [`Self::write_with_router_alert`] share.
+    fn write_with_options(
+        &self,
+        options: &[u8],
+        out: &mut [u8],
+        payload_len: usize,
+    ) -> Option<usize> {
+        if options.len() % 4 != 0 || options.len() > IPV4_MAX_HEADER_LEN - IPV4_HEADER_LEN {
+            return None;
+        }
+        let header_len = IPV4_HEADER_LEN + options.len();
+        let total_length = u16::try_from(header_len.checked_add(payload_len)?).ok()?;
         if self.fragment_offset % 8 != 0 {
             return None;
         }
@@ -154,8 +182,9 @@ impl Ipv4Header {
         if self.more_fragments {
             flags_offset |= FLAG_MORE_FRAGMENTS;
         }
-        let header = out.get_mut(..IPV4_HEADER_LEN)?;
-        header[0] = 0x45;
+        let header = out.get_mut(..header_len)?;
+        // IHL counts 32-bit words; header_len is always a multiple of 4.
+        header[0] = 0x40 | u8::try_from(header_len / 4).ok()?;
         header[1] = 0;
         header[2..4].copy_from_slice(&total_length.to_be_bytes());
         header[4..6].copy_from_slice(&self.identification.to_be_bytes());
@@ -165,11 +194,16 @@ impl Ipv4Header {
         header[10..12].copy_from_slice(&0u16.to_be_bytes());
         header[12..16].copy_from_slice(&self.source.octets());
         header[16..20].copy_from_slice(&self.destination.octets());
+        header[IPV4_HEADER_LEN..header_len].copy_from_slice(options);
         let checksum = internet_checksum(header);
         header[10..12].copy_from_slice(&checksum.to_be_bytes());
-        Some(IPV4_HEADER_LEN)
+        Some(header_len)
     }
 }
+
+/// The IPv4 Router Alert option (RFC 2113): option type 148, length 4,
+/// value 0 ("router shall examine this packet").
+const ROUTER_ALERT_OPTION: [u8; 4] = [0x94, 0x04, 0x00, 0x00];
 
 /// One piece of a fragmented emit: the payload byte range to carry and
 /// the header it travels under.

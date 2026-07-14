@@ -28,6 +28,7 @@ use rustos_abi::display_ipc::{decode_mode_reply, DisplayRequest};
 use rustos_abi::elevate::{ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN};
 use rustos_abi::fs::{DirEntries, DirEntry, FileKind, FileStat, OpenFlags, FS_NAME_MAX};
 use rustos_abi::input::{KeyInput, PointerInput};
+use rustos_abi::net::{decode_bind_reply, decode_socket_reply, SocketDatagram, SocketRequest};
 use rustos_abi::process::{ProcessStart, ProcessStartHeader, StringSlot};
 use rustos_abi::reply::decode_status_reply;
 use rustos_abi::rlimit::ResourceLimit;
@@ -188,6 +189,34 @@ fn exercise_sysinfo_records(bytes: &[u8]) {
     }
 }
 
+/// Drive the datagram-socket ABI decoders on `bytes` (one arm of
+/// [`exercise`]): an accepted socket request or delivered datagram must
+/// round-trip through its encoder, and the two reply decoders — untrusted
+/// service output a client parses — must refuse a corrupt frame cleanly,
+/// never panic.
+fn exercise_net_socket(bytes: &[u8]) {
+    if let Ok(request) = SocketRequest::from_bytes(bytes) {
+        let mut buf = vec![0u8; SocketRequest::MAX_WIRE_LEN];
+        let len = request
+            .encode(&mut buf)
+            .expect("round-trip encode of an accepted socket request must succeed");
+        let redecoded = SocketRequest::from_bytes(&buf[..len])
+            .expect("round-trip of an accepted socket request must succeed");
+        assert_eq!(request, redecoded);
+    }
+    if let Ok(datagram) = SocketDatagram::parse(bytes) {
+        let mut buf = vec![0u8; SocketDatagram::MAX_WIRE_LEN];
+        let len = datagram
+            .encode(&mut buf)
+            .expect("round-trip encode of an accepted datagram must succeed");
+        let reparsed = SocketDatagram::parse(&buf[..len])
+            .expect("round-trip of an accepted datagram must succeed");
+        assert_eq!(datagram, reparsed);
+    }
+    let _ = decode_socket_reply(bytes);
+    let _ = decode_bind_reply(bytes);
+}
+
 /// Drive the seat-manager protocol decoders on `bytes` (one arm of
 /// [`exercise`]): an accepted seat-administration request must round-trip
 /// through its encoder, and the shared status-reply decoder must refuse a
@@ -266,6 +295,7 @@ fn exercise(bytes: &[u8]) {
     exercise_seatmgr(bytes);
     exercise_display_ipc(bytes);
     exercise_window_ipc(bytes);
+    exercise_net_socket(bytes);
     exercise_elevate(bytes);
     if let Ok(time) = Time64::from_bytes(bytes) {
         let redecoded = Time64::from_bytes(&time.to_le_bytes())

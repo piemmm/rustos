@@ -279,6 +279,41 @@ pub enum Errno {
     /// could return to user space. It exists on the ABI so the decode
     /// table is total and diagnostics stay honest.
     Interrupted = 33,
+    /// A local address or port is already in use by another socket.
+    ///
+    /// The RustOS equivalent of POSIX `EADDRINUSE`. Emitted by the socket
+    /// service when a `bind` names a local port already held by another
+    /// socket of the same principal, or an ephemeral-port draw cannot find a
+    /// free port. Fail-closed: the existing binding is never displaced.
+    AddressInUse = 34,
+    /// A requested local address is not held by any interface.
+    ///
+    /// The RustOS equivalent of POSIX `EADDRNOTAVAIL`. Emitted by the socket
+    /// service when a `bind` names a specific local address that no managed
+    /// interface owns, so no source address could ever be chosen for it.
+    AddressUnavailable = 35,
+    /// No route exists to the requested destination.
+    ///
+    /// The RustOS equivalent of POSIX `ENETUNREACH`. Emitted by the socket
+    /// service when a datagram's destination has no matching route (no
+    /// on-link prefix and no default router), or no usable source address of
+    /// the destination's family is configured.
+    NetworkUnreachable = 36,
+    /// A send omitted a destination on a socket with no connected peer.
+    ///
+    /// The RustOS equivalent of POSIX `EDESTADDRREQ`/`ENOTCONN`. Emitted by
+    /// the socket service when a `send` supplies no destination and the
+    /// socket has never been `connect`ed to a default peer.
+    NotConnected = 37,
+    /// A bounded, per-principal resource limit has been reached.
+    ///
+    /// Emitted when a caller's share of a bounded resource is exhausted —
+    /// the socket service refusing to open another socket once the
+    /// principal's socket quota is full. Distinct from
+    /// [`OutOfMemory`](Self::OutOfMemory) (a genuine allocation failure): the
+    /// system is healthy, this principal has simply reached its accounted
+    /// ceiling and must release before it may allocate more (fail closed).
+    LimitExceeded = 38,
 }
 
 impl Errno {
@@ -347,6 +382,11 @@ impl Errno {
             31 => Some(Self::NoData),
             32 => Some(Self::NotSupported),
             33 => Some(Self::Interrupted),
+            34 => Some(Self::AddressInUse),
+            35 => Some(Self::AddressUnavailable),
+            36 => Some(Self::NetworkUnreachable),
+            37 => Some(Self::NotConnected),
+            38 => Some(Self::LimitExceeded),
             _ => None,
         }
     }
@@ -388,6 +428,11 @@ impl fmt::Display for Errno {
             Self::NoData => "no such attribute",
             Self::NotSupported => "not supported by the backing",
             Self::Interrupted => "wait interrupted by pending termination",
+            Self::AddressInUse => "address already in use",
+            Self::AddressUnavailable => "address not available",
+            Self::NetworkUnreachable => "network unreachable",
+            Self::NotConnected => "socket not connected",
+            Self::LimitExceeded => "resource limit exceeded",
         };
         f.write_str(message)
     }
@@ -433,6 +478,11 @@ mod tests {
         assert_eq!(Errno::NoData.as_i32(), 31);
         assert_eq!(Errno::NotSupported.as_i32(), 32);
         assert_eq!(Errno::Interrupted.as_i32(), 33);
+        assert_eq!(Errno::AddressInUse.as_i32(), 34);
+        assert_eq!(Errno::AddressUnavailable.as_i32(), 35);
+        assert_eq!(Errno::NetworkUnreachable.as_i32(), 36);
+        assert_eq!(Errno::NotConnected.as_i32(), 37);
+        assert_eq!(Errno::LimitExceeded.as_i32(), 38);
     }
 
     #[test]
@@ -473,11 +523,16 @@ mod tests {
             Errno::NoData,
             Errno::NotSupported,
             Errno::Interrupted,
+            Errno::AddressInUse,
+            Errno::AddressUnavailable,
+            Errno::NetworkUnreachable,
+            Errno::NotConnected,
+            Errno::LimitExceeded,
         ] {
             assert_eq!(Errno::from_i32(errno.as_i32()), Some(errno));
         }
         assert_eq!(Errno::from_i32(0), None);
-        assert_eq!(Errno::from_i32(34), None);
+        assert_eq!(Errno::from_i32(39), None);
         assert_eq!(Errno::from_i32(-1), None);
     }
 
