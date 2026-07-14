@@ -641,8 +641,11 @@ impl SecondaryBringup for Aarch64Arch {
                         return Err(SmpError::InvalidCpu);
                     };
                     // SAFETY: as above; `release` is the firmware's own
-                    // declared release word for this CPU's spin loop.
-                    unsafe { crate::smp::start_secondary_spintable(cpu, release) }
+                    // declared release word for this CPU's spin loop, and
+                    // `mpidr` is this core's masked affinity — the value
+                    // the park loop gate compares against so only this
+                    // core (not every parked secondary) proceeds.
+                    unsafe { crate::smp::start_secondary_spintable(cpu, release, mpidr) }
                 }
             };
             match started {

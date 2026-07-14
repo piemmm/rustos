@@ -70,8 +70,12 @@ On current firmware all four cores are released to the kernel entry unless an
 `armstub8.bin` spin-table stub is supplied; the boot stub therefore parks
 secondaries (`MPIDR_EL1` affinity ≠ 0) polling the kernel's own spin-table
 release word (`SECONDARY_KERNEL_RELEASE`) until SMP bring-up releases them
-deliberately (P1/P5); cores a firmware stub keeps parked instead are released
-through their DTB `cpu-release-addr` words — the same trampoline serves both.
+deliberately (P1/P5). Because that word is shared, one `sev` wakes every
+parked core, so the release also publishes the target core's affinity
+(`SECONDARY_KERNEL_RELEASE_TARGET`) and a woken core proceeds only when it
+matches — bring-up is strictly one core at a time (no concurrent adopt/GIC
+race). Cores a firmware stub keeps parked instead are released through their
+DTB `cpu-release-addr` words — the same trampoline serves both.
 
 `config.txt` knobs the bring-up relies on:
 
@@ -2343,8 +2347,17 @@ address of the argument-free `smp.s` trampoline
 the firmware's declared `cpu-release-addr` word (for a core parked in
 the firmware stub) and the kernel's own `SECONDARY_KERNEL_RELEASE` word
 (for a core the firmware released straight into `boot.s`'s `_start`,
-whose park loop polls it) — sweeps both to the point of coherency, and
-signals `sev`. The released core may arrive at EL2 (the Pi firmware
+whose park loop polls it) — publishes the released core's masked
+affinity in `SECONDARY_KERNEL_RELEASE_TARGET`, sweeps all three to the
+point of coherency, and signals `sev`. The kernel release word is
+*shared*, so one `sev` wakes every core parked in `_start`; the target
+word is the gate that lets only the single core being released proceed
+while the rest re-park, so secondaries come up **strictly one at a
+time**. This is a correctness requirement: waking every secondary at
+once would race them through the concurrent MMU-adopt / GIC-init path,
+which on a real Pi 4 intermittently faulted the last-released core
+mid-bring-up so it never checked in (present in the topology, zero
+context switches). The released core may arrive at EL2 (the Pi firmware
 hand-off): the trampoline drops through the same
 `_el2_establish_and_drop` routine the boot core uses (every UNKNOWN EL2
 control register written whole, per core), establishes the known

@@ -132,3 +132,15 @@ fn kernel_release_word_starts_parked() {
     // (keep parking) until a spin-table release publishes an entry.
     assert_eq!(SECONDARY_KERNEL_RELEASE.load(Ordering::Acquire), 0);
 }
+
+#[test]
+fn kernel_release_target_starts_gated_shut() {
+    // The park loop lets a woken core proceed only when this word equals
+    // its own masked affinity. The all-ones initial value is above the
+    // affinity mask, so it matches no real core — the gate is shut until
+    // a deliberate release names exactly one core, keeping bring-up one
+    // core at a time (never a concurrent MMU-adopt / GIC-init race).
+    let initial = SECONDARY_KERNEL_RELEASE_TARGET.load(Ordering::Acquire);
+    assert_eq!(initial, u64::MAX);
+    assert!(initial > MPIDR_AFFINITY_MASK);
+}

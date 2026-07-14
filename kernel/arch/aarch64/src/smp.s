@@ -111,10 +111,16 @@ _start_secondary_aarch64:
 //   2. A core whose affinity is not in the published table parks in a
 //      `wfe` loop (fail closed): an undescribed core must never select
 //      a stack slice or enter Rust.
-//   3. The release word may wake every parked core at once (the kernel
-//      release word is shared); each core matches its own affinity, so
-//      no two cores resolve the same dense id (the dense map is
-//      duplicate-free by construction) and no stack slice is shared.
+//   3. Bring-up is serialised to one core per release: the `boot.s`
+//      park loop only branches the core whose affinity matches the
+//      published release target, and the firmware `cpu-release-addr`
+//      channel is per-core, so exactly one core enters this trampoline
+//      per release. The affinity-table scan here still recovers that
+//      core's dense id (the release carries no context register), and an
+//      affinity absent from the table parks (fail closed) — so even if a
+//      stray core ever reached here it would resolve its own unique
+//      dense id and never share a stack slice (the dense map is
+//      duplicate-free by construction).
 .global _start_secondary_spintable_aarch64
 _start_secondary_spintable_aarch64:
     // Mask all interrupts until the common path installs vectors.

@@ -30,10 +30,15 @@
 // the kernel spin-table release word (`smp::SECONDARY_KERNEL_RELEASE`):
 // it stays parked while the word is zero and branches to the address
 // written there when the SMP bring-up (`plans/PI.md` P5) releases it
-// deliberately (`smp::start_secondary_spintable`). This fails closed
-// (`AGENTS.md` §2.1 — never race the secondaries onto a shared stack):
-// nothing is released until the boot CPU has published the secondary
-// stacks, entry, and affinity table.
+// deliberately (`smp::start_secondary_spintable`). The release word is
+// *shared*, so one `sev` wakes every parked core; a second word,
+// `SECONDARY_KERNEL_RELEASE_TARGET`, names the single core being brought
+// up now, and a woken core proceeds only when that target equals its own
+// affinity — the rest re-park. Bring-up is therefore strictly one core
+// at a time (never a concurrent MMU-adopt / GIC-init race). This fails
+// closed (`AGENTS.md` §2.1 — never race the secondaries onto a shared
+// stack): nothing is released until the boot CPU has published the
+// secondary stacks, entry, and affinity table.
 //
 // SAFETY-INVARIANTs (audited per AGENTS.md §10):
 //   1. The body below `_start` runs exactly once, on the boot CPU
@@ -76,14 +81,16 @@ _start:
     // P5) by writing the spin-table trampoline's address into
     // `SECONDARY_KERNEL_RELEASE` (`smp::start_secondary_spintable`) —
     // the kernel's own release word, polled exactly like a firmware
-    // spin-table mailbox. The word lives in `.bss`, which the boot CPU
-    // zeroes below; a parked core reading a mid-clear value sees only
-    // zero (keep parking) or, much later, the published entry — never a
-    // torn in-between (the store is a single aligned doubleword). This
-    // runs before the shared boot stack or `.bss` is touched by *this*
-    // core, so a released-at-reset Pi secondary cannot race the boot
-    // CPU. Scratch registers x4..x7 are used so x19 (the DTB) is left
-    // untouched.
+    // spin-table mailbox — and only when the published release target
+    // matches this core's affinity (the one-core-at-a-time gate below).
+    // The release word lives in `.bss`, which the boot CPU zeroes below;
+    // a parked core reading a mid-clear value sees only zero (keep
+    // parking) or, much later, the published entry — never a torn
+    // in-between (the store is a single aligned doubleword). This runs
+    // before the shared boot stack or `.bss` is touched by *this* core,
+    // so a released-at-reset Pi secondary cannot race the boot CPU.
+    // Scratch registers x4..x8 are used so x19 (the DTB) is left
+    // untouched (x8 holds this core's affinity across the park loop).
     mrs     x4, mpidr_el1
     mov     x5, #0xffff             // Aff0 [7:0] | Aff1 [15:8]
     movk    x5, #0xff, lsl #16      // | Aff2 [23:16]  => x5 = 0x00FF_FFFF
@@ -91,12 +98,31 @@ _start:
     ubfx    x7, x4, #32, #8         // Aff3 [39:32]
     orr     x6, x6, x7
     cbz     x6, .Lboot_cpu
+    // This core's own masked affinity (Aff0-2, `smp::MPIDR_AFFINITY_MASK`
+    // = 0x00FF_FFFF) — the value the boot CPU publishes as the release
+    // target for exactly one core at a time. Kept in x8 across the park
+    // loop (a firmware `sev` cannot clobber a register).
+    and     x8, x4, x5
 .Lpark_secondary:
+    // Wait for an event, then re-check *both* release words each pass.
+    // The kernel release word is shared by every parked core, so one
+    // `sev` wakes them all; the release-target word names the single
+    // core the boot CPU is bringing up now, so only that core branches
+    // and the rest re-park. This serialises secondary bring-up: releasing
+    // one core never races the others through the concurrent MMU-adopt /
+    // GIC-init path (a coherency hazard that intermittently faulted the
+    // last-released core on a real Pi 4). x8 holds this core's affinity;
+    // x4/x5 are scratch.
     wfe
     adrp    x4, SECONDARY_KERNEL_RELEASE
     add     x4, x4, :lo12:SECONDARY_KERNEL_RELEASE
     ldr     x4, [x4]
-    cbz     x4, .Lpark_secondary
+    cbz     x4, .Lpark_secondary            // gate closed: keep parking
+    adrp    x5, SECONDARY_KERNEL_RELEASE_TARGET
+    add     x5, x5, :lo12:SECONDARY_KERNEL_RELEASE_TARGET
+    ldr     x5, [x5]
+    cmp     x5, x8
+    b.ne    .Lpark_secondary                // not this core's turn: re-park
     br      x4
 
 .Lboot_cpu:

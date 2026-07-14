@@ -46,13 +46,18 @@
 //!   release word (for a core parked in the firmware stub) and the
 //!   kernel's own `SECONDARY_KERNEL_RELEASE` word (for a core the
 //!   firmware released straight into `boot.s`'s `_start`, which parks
-//!   it polling that word) — sweeps both to the point of coherency, and
-//!   signals `sev`. A spin-table release carries no context register,
-//!   so the released core recovers its dense id by matching its own
-//!   `MPIDR_EL1` affinity against the table published by
-//!   `register_secondary_affinities`; entry may be at EL2 (the Pi
-//!   firmware hand-off), which the trampoline drops exactly as `_start`
-//!   does (the shared `_el2_establish_and_drop` routine).
+//!   it polling that word) — publishes the released core's affinity in
+//!   `SECONDARY_KERNEL_RELEASE_TARGET`, sweeps all three to the point of
+//!   coherency, and signals `sev`. The kernel word is *shared*, so one
+//!   `sev` wakes every core parked in `_start`; the target affinity is
+//!   the gate that lets only the one core being released proceed while
+//!   the rest re-park, so secondaries are brought up strictly one at a
+//!   time (never a concurrent MMU-adopt / GIC-init race). A spin-table
+//!   release carries no context register, so the released core recovers
+//!   its dense id by matching its own `MPIDR_EL1` affinity against the
+//!   table published by `register_secondary_affinities`; entry may be at
+//!   EL2 (the Pi firmware hand-off), which the trampoline drops exactly
+//!   as `_start` does (the shared `_el2_establish_and_drop` routine).
 //!
 //! A tree that declares neither mechanism leaves the handle without a
 //! start method and every start fails closed rather than guessing.
@@ -291,11 +296,35 @@ static SECONDARY_AFFINITY_COUNT: AtomicU64 = AtomicU64::new(0);
 /// The kernel's own spin-table release word, polled MMU-off by the
 /// `wfe` park loop in `boot.s`'s `_start` (the park every non-boot core
 /// enters when firmware releases all cores straight to the kernel).
-/// `0` parks; a non-zero value is the physical entry address the parked
+/// `0` parks; a non-zero value is the physical entry address a *released*
 /// core branches to. Written only by `start_secondary_spintable`.
+///
+/// This word gates *whether* a release is in progress; it does not name
+/// *which* core — [`SECONDARY_KERNEL_RELEASE_TARGET`] does. Both cores
+/// parked here poll both words: a woken core branches only when the
+/// release word is non-zero **and** the target affinity is its own.
 #[no_mangle]
 #[used]
 static SECONDARY_KERNEL_RELEASE: AtomicU64 = AtomicU64::new(0);
+
+/// The `MPIDR_EL1` affinity (`Aff0`–`Aff2`, [`MPIDR_AFFINITY_MASK`]) of
+/// the single secondary the boot CPU is releasing *right now*, polled
+/// MMU-off alongside [`SECONDARY_KERNEL_RELEASE`] by the `boot.s` park
+/// loop. Written only by `start_secondary_spintable`, immediately before
+/// the release word, and swept to the point of coherency before the
+/// `sev`.
+///
+/// This is what makes the kernel-park-loop release channel serialise:
+/// one shared `sev` wakes every parked core, but only the core whose
+/// affinity equals this word proceeds — the rest re-park. Without it a
+/// single release would race *all* secondaries through the concurrent
+/// MMU-adopt / GIC-init path at once (observed on a Raspberry Pi 4 as
+/// the last-released core intermittently faulting mid-bring-up and never
+/// checking in). The all-ones initial value matches no real masked
+/// affinity, so the gate is closed until a deliberate release opens it.
+#[no_mangle]
+#[used]
+static SECONDARY_KERNEL_RELEASE_TARGET: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// Set-once guard for [`register_secondary_affinities`].
 static SECONDARY_AFFINITIES_REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -533,24 +562,35 @@ pub unsafe fn start_secondary(
     }
 }
 
-/// Release the parked secondary core `cpu` through the Devicetree
-/// spin-table protocol: write the spin-table trampoline's physical
-/// address to the firmware-declared release word `release_addr` *and*
-/// to the kernel's own `SECONDARY_KERNEL_RELEASE` park word, sweep both
-/// to the point of coherency, and signal `sev`.
+/// Release the **single** parked secondary core `cpu` (whose masked
+/// `MPIDR_EL1` affinity is `target_affinity`) through the Devicetree
+/// spin-table protocol: publish `target_affinity` as the released
+/// target, write the spin-table trampoline's physical address to the
+/// firmware-declared release word `release_addr` *and* to the kernel's
+/// own `SECONDARY_KERNEL_RELEASE` park word, sweep all three to the
+/// point of coherency, and signal `sev`.
 ///
-/// Two channels because the parked core's location depends on the
-/// firmware: a core still spinning in the firmware stub polls
-/// `release_addr`, while a core the firmware released straight into the
-/// kernel image polls the kernel word in `boot.s`'s `_start` park loop.
-/// Whichever loop the core is in, it branches to the same trampoline,
-/// which recovers its dense id from the published affinity table.
+/// Two release channels because the parked core's location depends on
+/// the firmware: a core still spinning in the firmware stub polls its
+/// own per-core `release_addr`, while a core the firmware released
+/// straight into the kernel image polls the shared kernel word in
+/// `boot.s`'s `_start` park loop. Whichever loop the core is in, it
+/// branches to the same trampoline, which recovers its dense id from the
+/// published affinity table.
 ///
-/// The kernel word is shared by every parked core, so the first release
-/// wakes them all; each core that finds its affinity in the published
-/// table joins the kernel (its stack slice is its own), and a core not
-/// described there parks again (fail closed). Repeat releases store the
-/// same address and are harmless.
+/// **The release is one core at a time.** The firmware `release_addr` is
+/// already per-core, but the kernel park word is *shared* — a single
+/// `sev` wakes every core parked in `_start`. So the boot CPU also
+/// publishes `target_affinity` into [`SECONDARY_KERNEL_RELEASE_TARGET`],
+/// and the park loop only lets the core whose affinity matches proceed;
+/// the rest re-park. This is a correctness requirement, not a nicety:
+/// waking all secondaries at once would race them through the concurrent
+/// MMU-adopt / GIC-init path simultaneously, which on a Raspberry Pi 4
+/// intermittently faults the last-released core mid-bring-up so it never
+/// checks in. The target is stored *before* the release word and swept
+/// ahead of the `sev`, so a woken core that observes the open gate also
+/// observes the correct target. A core not described in the affinity
+/// table parks again in the trampoline (fail closed).
 ///
 /// Validates the id against the stack pool and confirms the entry and
 /// the affinity table are installed **before** any write, so a released
@@ -570,12 +610,15 @@ pub unsafe fn start_secondary(
 /// and affinity table are installed. `release_addr` must be the
 /// firmware-declared `cpu-release-addr` word for `cpu` — an
 /// identity-mapped, writable physical word the kernel image does not
-/// occupy — and `cpu` must be the dense id the rest of the kernel uses
-/// for the core parked on it.
+/// occupy — `cpu` must be the dense id the rest of the kernel uses for
+/// the core parked on it, and `target_affinity` must be that core's
+/// masked ([`MPIDR_AFFINITY_MASK`]) `MPIDR_EL1` affinity (the value the
+/// park loop compares its own affinity against).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub unsafe fn start_secondary_spintable(
     cpu: CpuId,
     release_addr: u64,
+    target_affinity: u64,
 ) -> Result<(), StartCpuError> {
     if !is_valid_cpu(cpu) {
         return Err(StartCpuError::CpuIdOutOfRange);
@@ -587,6 +630,11 @@ pub unsafe fn start_secondary_spintable(
         return Err(StartCpuError::NoAffinityTable);
     }
     let entry = spintable_trampoline_addr() as u64;
+    // Name the core being released *before* opening the gate, so a core
+    // that wakes on the `sev` and sees the release word non-zero also
+    // sees the affinity it must match. Only the matching core proceeds;
+    // the rest re-park (the park loop polls both words each iteration).
+    SECONDARY_KERNEL_RELEASE_TARGET.store(target_affinity, Ordering::Release);
     // SAFETY: the caller's contract guarantees `release_addr` is the
     // firmware's declared release word — identity-mapped RAM outside
     // the kernel image — so the volatile store writes only the word the
@@ -595,9 +643,14 @@ pub unsafe fn start_secondary_spintable(
         core::ptr::write_volatile(release_addr as *mut u64, entry);
     }
     SECONDARY_KERNEL_RELEASE.store(entry, Ordering::Release);
-    // The parked cores poll with their MMU (and cache) off: push both
-    // release words to the point of coherency, then wake the `wfe`
-    // loops. The sweep's own `dsb sy` orders the stores ahead of `sev`.
+    // The parked cores poll with their MMU (and cache) off: push the
+    // target, the firmware release word, and the kernel release word to
+    // the point of coherency, then wake the `wfe` loops. The last
+    // sweep's own `dsb sy` orders every store ahead of `sev`.
+    crate::paging::clean_invalidate_range_to_poc(
+        core::ptr::addr_of!(SECONDARY_KERNEL_RELEASE_TARGET) as u64,
+        core::mem::size_of::<AtomicU64>() as u64,
+    );
     crate::paging::clean_invalidate_range_to_poc(release_addr, core::mem::size_of::<u64>() as u64);
     crate::paging::clean_invalidate_range_to_poc(
         core::ptr::addr_of!(SECONDARY_KERNEL_RELEASE) as u64,

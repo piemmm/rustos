@@ -524,7 +524,9 @@ this landed): `smp::start_secondary_spintable` writes the argument-free
 `_start_secondary_spintable_aarch64` trampoline address to both the
 firmware `cpu-release-addr` word and the kernel's own
 `SECONDARY_KERNEL_RELEASE` word (the `_start` park loop now polls it —
-formerly an unreleasable `wfe` loop), sweeps both to PoC, and `sev`s;
+formerly an unreleasable `wfe` loop), publishes the released core's
+masked affinity in `SECONDARY_KERNEL_RELEASE_TARGET`, sweeps all three
+to PoC, and `sev`s;
 the trampoline drops from EL2 via the shared `_el2_establish_and_drop`
 (factored out of `_start`, §2.2), recovers its dense id from the
 published affinity table (`smp::register_secondary_affinities`, swept
@@ -553,9 +555,24 @@ hardware: the last-released core must finish bring-up before the boot CPU
 mutates shared kernel state, or it faults mid-adopt (a cache/coherency
 hazard cacheless QEMU never shows, seen on metal as the highest dense id
 deterministically never coming online — present in the topology, zero
-context switches). Confirmed on Pi 4 hardware: with the barrier in
-place all four cores come online and the previously-dead highest dense
-id (core 3) now schedules work (non-zero context switches).
+context switches).
+
+The barrier only serialises the boot CPU *against* the secondaries; it
+does **not** by itself serialise the secondaries against **each other**,
+because the kernel release word is *shared* — one `sev` wakes every core
+parked in `_start` at once. That gap re-surfaced the same failure
+intermittently: all secondaries woke on the first release and raced
+through the concurrent MMU-adopt / GIC-init path together, and the
+highest dense id (core 3) sometimes lost the race and timed out with
+`no_online_ack`. The completing fix is a **per-core release gate**:
+`start_secondary_spintable` publishes the released core's affinity in
+`SECONDARY_KERNEL_RELEASE_TARGET`, and the `_start` park loop lets a
+woken core proceed only when that target equals its own affinity (the
+rest re-park). Combined with the barrier, exactly one secondary is ever
+in bring-up at a time — no concurrent adopt/GIC race. On-metal
+acceptance item (no `-M raspi4b` in the pinned QEMU): success is all
+four `SecondaryCpuOnline` lines with core 3 scheduling; a still-dead
+core still audits `no_online_ack` loudly rather than silently missing.
 
 ### P6 — Spawn `init` into EL0 on the Pi `[x]`
 
