@@ -9,12 +9,13 @@ driver class.
 
 ## Class trait
 
-`Net` exposes two methods:
+`Net` exposes three methods:
 
-| Method         | Purpose                                              | Capability gate                |
-|----------------|------------------------------------------------------|--------------------------------|
-| `device_facts` | typed device report (MAC, MTU, link, offloads, queues) | `DriverHandle` ownership     |
-| `service`      | pump the shared-memory frame rings once              | `CAP_NET_RAW` at dispatch site |
+| Method          | Purpose                                              | Capability gate                |
+|-----------------|------------------------------------------------------|--------------------------------|
+| `device_facts`  | typed device report (MAC, MTU, link, offloads, queues) | `DriverHandle` ownership     |
+| `service`       | pump the shared-memory frame rings once (non-blocking) | `CAP_NET_RAW` at dispatch site |
+| `ack_interrupt` | deassert the device's interrupt line after an IRQ    | `DriverHandle` ownership       |
 
 `device_facts` returns a `DeviceFacts` the consumer validates whole
 (`validate()`, fail closed): the MTU must sit inside the
@@ -28,12 +29,12 @@ Frame I/O is the shared-memory frame-ring transport
 (`rustos_abi::driver::net_ring`): the stack owns a `FrameRings` pair —
 queued transmits in `tx`, delivered frames in `rx` — and hands it to
 `service`, the single doorbell that moves frames both ways. The rings
-are mutated only *inside* the blocking `service` call, so the call
-boundary is the synchronisation and the whole transport is safe Rust;
-no frame bytes cross the IPC when the region is shared between
-processes. Ring state read back from the region is untrusted: corrupt
-counters or slot lengths are refused (`BadMagic`), and a corrupt slot
-is consumed so it cannot wedge the queue behind it.
+are mutated only *inside* the `service` call, so the call boundary is
+the synchronisation and the whole transport is safe Rust; no frame
+bytes cross the IPC when the region is shared between processes. Ring
+state read back from the region is untrusted: corrupt counters or slot
+lengths are refused (`BadMagic`), and a corrupt slot is consumed so it
+cannot wedge the queue behind it.
 
 `service` semantics:
 
@@ -43,9 +44,13 @@ is consumed so it cannot wedge the queue behind it.
 - Delivered frames move into `rx` until the device is drained or the
   ring is full (`ServiceReport::rx_ring_full` — nothing is dropped;
   the stack drains and calls again).
-- When nothing moved at all, the driver parks once on its host's
-  device-event waiter and re-checks, so a caller looping on `service`
-  is event-driven, never a spin.
+- `service` is **non-blocking**: it drains whatever is ready and
+  returns (an empty `ServiceReport` means "nothing yet", not "spin").
+  Waiting for the *next* device event is the caller's job — a driver
+  process parks on the device IRQ and `ack_interrupt`s it, then rings
+  the stack's notify port; a single-address-space caller parks on the
+  device event itself between doorbells. A blocking doorbell would
+  wedge a cross-process `Service` reply, so the wait never lives here.
 
 ## Cross-process channel handoff (`net_channel`)
 
@@ -93,8 +98,19 @@ region itself; that remains the stack's responsibility.
 |---------------------------|---------------------------------|---------------------|----------------------------------------------------|
 | [virtio-net](./virtio.md) | `rustos-drv-network-virtio-net` | virtio (PCI / MMIO) | ring transport + facts; no offloads negotiated yet |
 
+The virtio-net device engine (`VirtioNet`) lives in `lib/virtio_net`
+so a user-space **driver process** can link it without depending on a
+`drivers/*` crate: `drivers/network/virtio_net_driver` is that process
+— it brings the device up, claims a reserved device-channel endpoint,
+emits the `netchan` hardware-tree node the device manager binds to the
+stack, and serves the `netchan-v1` contract over a wait-set loop on
+`{call endpoint, device IRQ}`. The device manager autobinds a
+discovered `netchan` node to `netstack` (`plans/NETWORK.md` N4d).
+
 The netstack QEMU verticals (`tests/integration/netstack_*`) drive a
-live emulated device end to end through the ring transport: the
+live emulated device end to end through the ring transport — the
 `rustos-netstack` engine answers the harness peer's ARP/NS resolution
 and v4+v6 echo campaign, then resolves and pings the peer over both
-families (`plans/NETWORK.md` N3c).
+families. They currently run the single-process in-kernel scaffold;
+their rewrite into the two-process form is staged as N4e
+(`plans/NETWORK.md`).

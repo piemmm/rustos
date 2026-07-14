@@ -277,6 +277,21 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         &mut self.transport
     }
 
+    /// Park on the device's event until the device next signals a queue
+    /// completion.
+    ///
+    /// The [`service`](Net::service) doorbell is non-blocking (it drains
+    /// whatever is ready and returns), so a caller driving the device in
+    /// its **own** address space must park between doorbells itself. A
+    /// driver *process* parks on the device IRQ through the kernel
+    /// (`irq_wait`) and never calls this; this is the in-process wait a
+    /// single-address-space host (a test scaffold that owns both the stack
+    /// and the device) uses instead of spinning. The device event is
+    /// shared across queues, so the wait wakes on any completion.
+    pub fn wait_for_device_event(&self) {
+        self.host.notify_wait(self.rx_queue.index());
+    }
+
     fn build_header() -> [u8; wire::HEADER_LEN] {
         // Stage 4 negotiates no offloads, so every field is zero.
         [0u8; wire::HEADER_LEN]
@@ -473,13 +488,14 @@ impl<T: Transport> Net for VirtioNet<'_, T> {
         let mut report = ServiceReport::default();
         self.drain_tx(rings, &mut report)?;
         self.harvest_rx(rings, &mut report)?;
-        if report == ServiceReport::default() {
-            // Nothing moved: park once on the device event so a
-            // caller looping on `service` waits instead of spinning,
-            // then re-check for a completion the wake announced.
-            self.host.notify_wait(self.rx_queue.index());
-            self.harvest_rx(rings, &mut report)?;
-        }
+        // The doorbell never parks: it drains what is ready and returns.
+        // A `Service` doorbell may cross a process boundary (the driver
+        // process serving the stack's `NetChannelRequest::Service`), where
+        // parking here would block the reply and defeat the wait-set the
+        // stack and driver each run. Waiting for the *next* receive event is
+        // the caller's job — the driver parks on the device interrupt and
+        // rings the stack's notify port, and an empty report simply means
+        // "nothing to do yet", not "spin".
         Ok(report)
     }
 

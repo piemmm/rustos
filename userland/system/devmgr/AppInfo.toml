@@ -4,11 +4,13 @@
 # /System/Services/. The capability list is the bundle's request:
 # CAP_SYSINFO_HW for the privileged hardware-tree view, CAP_DRV_LOAD for
 # the restricted driver-store endpoint (the kernel re-checks it at the
-# load gate), and CAP_LOG_EMIT for its diagnostics. No console pair: it
-# writes no standard stream, and a loaded driver's grants are minted from
-# its matched node, never from this caller.
+# load gate), CAP_NET_ADMIN to hand a bound NIC driver's device channel to
+# the network stack (the BindDriver admin call the stack gates on it), and
+# CAP_LOG_EMIT for its diagnostics. No console pair: it writes no standard
+# stream, and a loaded driver's grants are minted from its matched node,
+# never from this caller.
 id = "os.rustos.devmgr"
 name = "devmgr"
 version = "0.1.0"
 kind = "service"
-capabilities = ["CAP_SYSINFO_HW", "CAP_DRV_LOAD", "CAP_LOG_EMIT"]
+capabilities = ["CAP_SYSINFO_HW", "CAP_DRV_LOAD", "CAP_NET_ADMIN", "CAP_LOG_EMIT"]

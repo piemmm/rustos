@@ -48,6 +48,7 @@ extern crate alloc;
 pub mod autoload;
 pub mod events;
 pub mod manager;
+pub mod netbind;
 pub mod observe;
 pub mod service;
 pub mod store;
@@ -57,6 +58,7 @@ pub use autoload::{
     ReportedNodes,
 };
 pub use manager::{AutoloadReport, DeviceManager, DriverLoader, NodeBinding};
+pub use netbind::{bind_new_channels, netchan_endpoint, NetBindState, NetstackBind};
 pub use service::{run, HwTreeService};
 pub use store::{fetch_catalogue, load_driver, unload_driver, CatalogueDriver, DriverStoreCall};
 // The deterministic match policy is the shared `lib/devmatch` definition: re-exported here so existing consumers and the

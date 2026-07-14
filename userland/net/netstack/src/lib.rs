@@ -35,7 +35,7 @@ mod service;
 mod socket;
 
 pub use channel::{FrameService, LocalFrameService, NetChannelClient, NetChannelTransport};
-pub use iface::{FrameBatch, Interface, Netstack};
+pub use iface::{queue_tx, FrameBatch, Interface, Netstack};
 pub use service::{serve, Caller};
 pub use socket::{
     Delivery, SocketReply, SocketService, MAX_GROUPS_PER_SOCKET, MAX_SOCKETS_PER_PRINCIPAL,

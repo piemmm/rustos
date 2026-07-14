@@ -23,9 +23,20 @@ service account (uid 14).
 - **Event-driven only.** The `Run` binary binds the reserved
   `NETSTACK_ENDPOINT` (requires `CAP_IPC_BIND_PRIVILEGED`) and parks
   on a wait set; the engines' earliest `next_deadline` arms the
-  one-shot wait timeout. There is no polling loop. NIC frame-ring
-  channels join the wait set as network drivers are bound to the
-  service; the QEMU vertical wiring is the plan's N3c increment.
+  one-shot wait timeout. There is no polling loop. Each bound NIC's
+  notify port joins the wait set, so a received-frame wake pumps just
+  that interface.
+- **Live NIC binding.** `BindDriver` (below) makes the stack the
+  `netchan-v1` *client* of a NIC driver process: it sizes the shared
+  frame region from the driver's `DeviceFacts`, `shm_create`s and
+  grants it, `port_bind`s a per-interface notify port
+  (`net_channel::notify_endpoint_for`), `NetChannelClient::attach`es,
+  and derives the interface's IPv6 identity (modified EUI-64 of the
+  device MAC, `rustos_net::iface::eui64_interface_id`) and a CSPRNG
+  IPv4 identification seed. The one generic
+  `Netstack::service_interface` pump drives both an in-process device
+  (`LocalFrameService`) and a channel-backed one (`NetChannelClient`)
+  identically (`docs/src/drivers/network.md`).
 
 ## The `netstack-v1` IPC surface
 
@@ -41,6 +52,7 @@ structured audit record (event range `16000..17000`).
 | `AddrAdd` / `RouteAdd` | `CAP_NET_ADMIN` | status frame |
 | `Counters` | `CAP_NET_ADMIN` | the interface's monotonic stack counters |
 | `InterfaceFacts` / `InterfaceState` | `CAP_SYSINFO_INTROSPECT` | paged facts / link+address records |
+| `BindDriver` | `CAP_NET_ADMIN` | status frame (the device manager hands the stack a discovered NIC driver's device-channel endpoint under a `netN` alias) |
 
 The facts/state reads are the *broker* surface: `netstack` answers
 whole-system interface state only to the System Information service,
@@ -60,12 +72,15 @@ text scraping (`plans/NETWORK.md` §5). Addresses render canonically
 
 ## Capabilities
 
-The bundle requests `CAP_NET_RAW` (the NIC frame rings),
+The bundle requests `CAP_NET_RAW` (the NIC frame rings, and to call a
+driver's restricted-sender device channel), `CAP_SHM` (create and
+grant the shared frame-ring region each channel client owns),
 `CAP_IPC_BIND_PRIVILEGED` (the reserved endpoint), and `CAP_LOG_EMIT`
 (audit records); the service account's ceiling
 (`rustos_users::NETSTACK_CEILING`) carries exactly those. The service
 *enforces* `CAP_NET_ADMIN` against its callers and never holds it;
-the administrator account ceiling carries it.
+the administrator account ceiling — and the device manager, which
+makes the `BindDriver` call — carries it.
 
 ## Crash containment
 

@@ -366,3 +366,19 @@ fn next_deadline_tracks_earliest_pending_work() {
     iface.advance(t(0));
     assert_eq!(iface.next_deadline(), Some(t(1)));
 }
+
+#[test]
+fn eui64_splits_the_oui_and_inverts_the_universal_local_bit() {
+    // A locally-administered example MAC: the u/l bit (0x02) of the first
+    // octet flips, FF:FE fills the middle, and the low 24 bits pass
+    // through — the RFC 4291 Appendix A construction.
+    assert_eq!(
+        eui64_interface_id([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]),
+        [0x50, 0x54, 0x00, 0xFF, 0xFE, 0x12, 0x34, 0x56],
+    );
+    // A globally-unique MAC (u/l bit clear) gains the bit.
+    assert_eq!(
+        eui64_interface_id([0x00, 0x0C, 0x29, 0xAB, 0xCD, 0xEF]),
+        [0x02, 0x0C, 0x29, 0xFF, 0xFE, 0xAB, 0xCD, 0xEF],
+    );
+}

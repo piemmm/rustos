@@ -25,6 +25,7 @@ use rustos_log::{log as log_event, Event, Level, Sink};
 
 use crate::autoload::{match_and_load, unload_vanished, AutoloadState};
 use crate::events;
+use crate::netbind::{bind_new_channels, NetBindState, NetstackBind};
 use crate::observe::for_each_node;
 use crate::store::{fetch_catalogue, CatalogueDriver, DriverStoreCall};
 
@@ -120,9 +121,12 @@ fn read_tree_growing<T: HwTreeService>(tree: &mut T, buf: &mut Vec<u8>) -> Resul
 /// fail-closed [`for_each_node`] decode; on any error no header is reported
 /// and no node is loaded. A catalogue-fetch failure is
 /// **not** propagated — it is fail-soft (logged, retried).
+#[allow(clippy::too_many_arguments)]
 fn react_once<T: HwTreeService, C: DriverStoreCall>(
     tree: &mut T,
     store: &mut C,
+    netstack: &mut dyn NetstackBind,
+    netbind: &mut NetBindState,
     catalogue: &mut Option<Vec<CatalogueDriver>>,
     state: &mut AutoloadState,
     tree_buf: &mut Vec<u8>,
@@ -165,6 +169,10 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
     let candidates: Vec<DriverCandidate<'_>> =
         drivers.iter().map(CatalogueDriver::candidate).collect();
     match_and_load(&nodes, drivers, &candidates, store, reply_buf, state, sink);
+    // Hand each newly-discovered NIC device channel (a `netchan` node a bound
+    // NIC driver emitted) to the network stack, idempotently (each endpoint
+    // once) and fail-soft (a stack not yet up is retried next bump).
+    bind_new_channels(&nodes, netbind, netstack, sink);
     // Hot-removal reaction: a bound node missing from this snapshot means its
     // device is gone, so tear its driver down. The same generation-bump path
     // that loads a newly-appeared node's driver unloads a vanished one's
@@ -203,14 +211,20 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
 /// snapshot decode failure; the loop is fail-closed and
 /// never silently continues past such an error. A catalogue-fetch failure is
 /// fail-soft, not propagated.
+#[allow(clippy::too_many_arguments)]
 pub fn run<T: HwTreeService, C: DriverStoreCall>(
     tree: &mut T,
     store: &mut C,
+    netstack: &mut dyn NetstackBind,
     sink: &dyn Sink,
     reply_buf: &mut [u8],
     budget: Option<u32>,
 ) -> Result<(), Errno> {
     let mut catalogue: Option<Vec<CatalogueDriver>> = None;
+    // The memory of which NIC device channels have been handed to the
+    // network stack: each `netchan` endpoint is bound exactly once across
+    // every generation bump.
+    let mut netbind = NetBindState::new();
     // The loaded-bundle cache plus the per-node decision memory: a
     // re-evaluation of a settled tree re-emits no audit line. The device manager re-matches the whole snapshot on every
     // generation advance, and without the decision memory each pass would
@@ -226,6 +240,8 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
     let mut last_generation = react_once(
         tree,
         store,
+        netstack,
+        &mut netbind,
         &mut catalogue,
         &mut state,
         &mut tree_buf,
@@ -241,6 +257,8 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
         last_generation = react_once(
             tree,
             store,
+            netstack,
+            &mut netbind,
             &mut catalogue,
             &mut state,
             &mut tree_buf,
@@ -397,6 +415,20 @@ mod tests {
         }
     }
 
+    /// A no-op [`NetstackBind`] for the loop tests, whose hardware trees
+    /// carry no `netchan` node — so `bind_new_channels` never calls it. The
+    /// netchan hand-off policy itself is tested directly in `crate::netbind`.
+    struct NoNetstack;
+    impl NetstackBind for NoNetstack {
+        fn bind_driver(
+            &mut self,
+            _endpoint_id: u64,
+            _iface: &[u8; rustos_abi::net_ipc::IF_NAME_LEN],
+        ) -> Result<(), Errno> {
+            Ok(())
+        }
+    }
+
     fn bind(priority: u16, key: HwMatchKey) -> DriverBindKey {
         DriverBindKey::new(priority, key)
     }
@@ -420,7 +452,15 @@ mod tests {
         let sink = RecordingSink::new();
         let mut reply_buf = [0u8; 4096];
 
-        run(&mut tree, &mut store, &sink, &mut reply_buf, Some(0)).expect("the initial cycle runs");
+        run(
+            &mut tree,
+            &mut store,
+            &mut NoNetstack,
+            &sink,
+            &mut reply_buf,
+            Some(0),
+        )
+        .expect("the initial cycle runs");
 
         // Node 2 matched bundle 7 and was loaded for that node id.
         assert_eq!(store.loads.borrow().as_slice(), &[(7, 2)]);
@@ -452,7 +492,15 @@ mod tests {
         let sink = RecordingSink::new();
         let mut reply_buf = [0u8; 4096];
 
-        run(&mut tree, &mut store, &sink, &mut reply_buf, Some(0)).expect("the initial cycle runs");
+        run(
+            &mut tree,
+            &mut store,
+            &mut NoNetstack,
+            &sink,
+            &mut reply_buf,
+            Some(0),
+        )
+        .expect("the initial cycle runs");
 
         assert!(store.loads.borrow().is_empty(), "no node matched");
         assert!(sink.ids().contains(&events::NODE_UNBOUND.0));
@@ -486,7 +534,15 @@ mod tests {
         let sink = RecordingSink::new();
         let mut reply_buf = [0u8; 4096];
 
-        run(&mut tree, &mut store, &sink, &mut reply_buf, Some(0)).expect("the initial cycle runs");
+        run(
+            &mut tree,
+            &mut store,
+            &mut NoNetstack,
+            &sink,
+            &mut reply_buf,
+            Some(0),
+        )
+        .expect("the initial cycle runs");
 
         // The regression for the QEMU virtio keyboard+mouse pair: bundle 4
         // is loaded once per matched node — the kernel grants each spawned
@@ -534,7 +590,15 @@ mod tests {
         let sink = RecordingSink::new();
         let mut reply_buf = [0u8; 4096];
 
-        run(&mut tree, &mut store, &sink, &mut reply_buf, Some(1)).expect("one reaction");
+        run(
+            &mut tree,
+            &mut store,
+            &mut NoNetstack,
+            &sink,
+            &mut reply_buf,
+            Some(1),
+        )
+        .expect("one reaction");
 
         // The keyboard (bundle 7) is loaded only once across both cycles;
         // the appeared network node loads bundle 8 on the reaction.
@@ -566,7 +630,15 @@ mod tests {
         let sink = RecordingSink::new();
         let mut reply_buf = [0u8; 4096];
 
-        run(&mut tree, &mut store, &sink, &mut reply_buf, Some(1)).expect("one reaction");
+        run(
+            &mut tree,
+            &mut store,
+            &mut NoNetstack,
+            &sink,
+            &mut reply_buf,
+            Some(1),
+        )
+        .expect("one reaction");
 
         // Bundle 7 loaded with the first sequential handle (`0x1001`) on the
         // first cycle, and that exact handle is unloaded when its node
@@ -597,7 +669,15 @@ mod tests {
         let sink = RecordingSink::new();
         let mut reply_buf = [0u8; 4096];
 
-        run(&mut tree, &mut store, &sink, &mut reply_buf, Some(1)).expect("one reaction");
+        run(
+            &mut tree,
+            &mut store,
+            &mut NoNetstack,
+            &sink,
+            &mut reply_buf,
+            Some(1),
+        )
+        .expect("one reaction");
 
         // The keyboard stays bound across both cycles; nothing is unloaded.
         assert_eq!(store.loads.borrow().as_slice(), &[(7, 2)]);
@@ -635,7 +715,15 @@ mod tests {
         let sink = RecordingSink::new();
         let mut reply_buf = [0u8; 4096];
 
-        run(&mut tree, &mut store, &sink, &mut reply_buf, Some(2)).expect("two reactions");
+        run(
+            &mut tree,
+            &mut store,
+            &mut NoNetstack,
+            &sink,
+            &mut reply_buf,
+            Some(2),
+        )
+        .expect("two reactions");
 
         // Loaded on cycle 1, unloaded on cycle 2 (node gone), loaded again on
         // cycle 3 (node re-appeared) — the binding was dropped on the unload
@@ -676,7 +764,15 @@ mod tests {
         let sink = RecordingSink::new();
         let mut reply_buf = [0u8; 4096];
 
-        run(&mut tree, &mut store, &sink, &mut reply_buf, Some(1)).expect("one reaction");
+        run(
+            &mut tree,
+            &mut store,
+            &mut NoNetstack,
+            &sink,
+            &mut reply_buf,
+            Some(1),
+        )
+        .expect("one reaction");
 
         // Node 2 is unbound in both evaluations, but the unbound decision is
         // logged exactly once — a re-evaluation of a settled tree must not
@@ -708,8 +804,15 @@ mod tests {
         let sink = RecordingSink::new();
         let mut reply_buf = [0u8; 4096];
 
-        run(&mut tree, &mut store, &sink, &mut reply_buf, Some(0))
-            .expect("a failed catalogue fetch does not abort the loop");
+        run(
+            &mut tree,
+            &mut store,
+            &mut NoNetstack,
+            &sink,
+            &mut reply_buf,
+            Some(0),
+        )
+        .expect("a failed catalogue fetch does not abort the loop");
 
         // The store-unavailable event is logged and the node is observed and
         // (with an empty catalogue) left unbound — never an error.
@@ -729,7 +832,14 @@ mod tests {
         let sink = RecordingSink::new();
         let mut reply_buf = [0u8; 4096];
         assert_eq!(
-            run(&mut tree, &mut store, &sink, &mut reply_buf, None),
+            run(
+                &mut tree,
+                &mut store,
+                &mut NoNetstack,
+                &sink,
+                &mut reply_buf,
+                None
+            ),
             Err(Errno::NotFound)
         );
         assert!(tree.waited_on.is_empty());
@@ -748,7 +858,14 @@ mod tests {
         let sink = RecordingSink::new();
         let mut reply_buf = [0u8; 4096];
         assert_eq!(
-            run(&mut tree, &mut store, &sink, &mut reply_buf, None),
+            run(
+                &mut tree,
+                &mut store,
+                &mut NoNetstack,
+                &sink,
+                &mut reply_buf,
+                None
+            ),
             Err(Errno::NotImplemented)
         );
     }
@@ -862,8 +979,15 @@ mod tests {
         // production reply-buffer size without a large-stack-array lint.
         let mut reply_buf = vec![0u8; 64 * 1024];
 
-        run(&mut tree, &mut store, &sink, &mut reply_buf, Some(0))
-            .expect("the cycle runs after the buffer grows to fit the tree");
+        run(
+            &mut tree,
+            &mut store,
+            &mut NoNetstack,
+            &sink,
+            &mut reply_buf,
+            Some(0),
+        )
+        .expect("the cycle runs after the buffer grows to fit the tree");
 
         // The one matching node (900) loaded bundle 7; the grow happened.
         assert_eq!(store.loads.borrow().as_slice(), &[(7, 900)]);

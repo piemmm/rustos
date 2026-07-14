@@ -46,8 +46,10 @@
 mod program {
     use rustos_abi::driver_store::DRIVER_STORE_ENDPOINT;
     use rustos_abi::hwtree::HwDeviceClass;
+    use rustos_abi::net_ipc::{NetstackRequest, IF_NAME_LEN, NETSTACK_ENDPOINT};
+    use rustos_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
     use rustos_abi::{Errno, HwNode, HwTreeHeader};
-    use rustos_devmgr::{events, DriverStoreCall, HwTreeService};
+    use rustos_devmgr::{events, DriverStoreCall, HwTreeService, NetstackBind};
     use rustos_log::{log, Event, Field, Level};
     use rustos_rt::LogSink;
     use rustos_util::fmt::{format_hex_u64, format_usize};
@@ -209,6 +211,33 @@ mod program {
         }
     }
 
+    /// The production [`NetstackBind`] backing: hands a discovered NIC
+    /// device channel to the network stack with one `ipc_call` to the
+    /// reserved [`NETSTACK_ENDPOINT`] carrying a
+    /// [`NetstackRequest::BindDriver`]. The kernel gates the call on the
+    /// device manager's `CAP_NET_ADMIN`; this client adds no authority, and
+    /// the protocol logic (which channels to bind, once each, fail-soft on
+    /// refusal) is host-tested in `rustos_devmgr::netbind`.
+    struct RtNetstackBind;
+
+    impl NetstackBind for RtNetstackBind {
+        fn bind_driver(
+            &mut self,
+            endpoint_id: u64,
+            iface: &[u8; IF_NAME_LEN],
+        ) -> Result<(), Errno> {
+            let request = NetstackRequest::BindDriver {
+                endpoint_id,
+                iface: *iface,
+            }
+            .to_le_bytes();
+            let mut reply = [0u8; STATUS_REPLY_LEN];
+            let len =
+                rustos_rt::ipc_call(NETSTACK_ENDPOINT, &request, &mut reply).map_err(errno_from)?;
+            decode_status_reply(&reply[..len])
+        }
+    }
+
     /// Program entry point. Runs the reactive match-and-load loop for the
     /// life of the service (`budget = None`): fetch the catalogue once, then
     /// read the discovered tree, load a driver for every matched node, and
@@ -227,6 +256,7 @@ mod program {
         match rustos_devmgr::run(
             &mut RtTreeService,
             &mut RtStoreCall,
+            &mut RtNetstackBind,
             &LogSink,
             &mut reply_buf,
             None,

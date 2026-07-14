@@ -48,11 +48,26 @@ pub const SOCKET_OPENED: EventId = EventId(16_007);
 /// `Warn` so exhaustion and misuse surface.
 pub const SOCKET_REFUSED: EventId = EventId(16_008);
 
+/// A NIC driver's device channel was bound to a managed interface
+/// (the `BindDriver` admin op provisioned the shared frame region,
+/// attached the driver, and added the interface): recorded at `Info`.
+pub const DRIVER_BOUND: EventId = EventId(16_009);
+/// A `BindDriver` request was denied because the caller lacks
+/// `CAP_NET_ADMIN`: a security-relevant decision recorded at `Warn`.
+pub const DRIVER_BIND_DENIED: EventId = EventId(16_010);
+/// A `BindDriver` request passed the capability check but could not be
+/// carried out (no free channel slot, the driver refused `Facts`/
+/// `Attach`, a shared-memory or wait-set operation failed): recorded at
+/// `Warn` so a provisioning failure surfaces and the interface stays
+/// unbound (fail closed).
+pub const DRIVER_BIND_FAILED: EventId = EventId(16_011);
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ADMIN_APPLIED, ADMIN_REFUSED, NETSTACK_RANGE_END, NETSTACK_RANGE_START, REQUEST_DENIED,
-        REQUEST_MALFORMED, SOCKET_DENIED, SOCKET_MALFORMED, SOCKET_OPENED, SOCKET_REFUSED,
+        ADMIN_APPLIED, ADMIN_REFUSED, DRIVER_BIND_DENIED, DRIVER_BIND_FAILED, DRIVER_BOUND,
+        NETSTACK_RANGE_END, NETSTACK_RANGE_START, REQUEST_DENIED, REQUEST_MALFORMED, SOCKET_DENIED,
+        SOCKET_MALFORMED, SOCKET_OPENED, SOCKET_REFUSED,
     };
 
     #[test]
@@ -66,6 +81,9 @@ mod tests {
             SOCKET_DENIED,
             SOCKET_OPENED,
             SOCKET_REFUSED,
+            DRIVER_BOUND,
+            DRIVER_BIND_DENIED,
+            DRIVER_BIND_FAILED,
         ] {
             assert!(id.0 >= NETSTACK_RANGE_START && id.0 < NETSTACK_RANGE_END);
         }
@@ -82,6 +100,9 @@ mod tests {
             SOCKET_DENIED.0,
             SOCKET_OPENED.0,
             SOCKET_REFUSED.0,
+            DRIVER_BOUND.0,
+            DRIVER_BIND_DENIED.0,
+            DRIVER_BIND_FAILED.0,
         ];
         ids.sort_unstable();
         for w in ids.windows(2) {

@@ -90,7 +90,9 @@ pub const LOGIN_MANIFEST: &[CapabilityId] = &[
 /// The device-manager service's manifest: `CAP_SYSINFO_HW` for the
 /// privileged hardware-tree view (`hw_tree_read`/`hw_tree_wait`),
 /// `CAP_DRV_LOAD` for the restricted driver-store `ipc_call` endpoint (the
-/// kernel re-checks it at the load gate), and `CAP_LOG_EMIT` for its
+/// kernel re-checks it at the load gate), `CAP_NET_ADMIN` to hand a bound
+/// NIC driver's device channel to the network stack (the `BindDriver`
+/// admin call the stack gates on it), and `CAP_LOG_EMIT` for its
 /// structured diagnostics. It writes no standard stream (no console pair)
 /// and holds no resource capability: the kernel mints a loaded driver's
 /// grants from its matched node, never from this caller.
@@ -98,6 +100,7 @@ pub const LOGIN_MANIFEST: &[CapabilityId] = &[
 pub const DEVMGR_MANIFEST: &[CapabilityId] = &[
     CapabilityId::SYSINFO_HW,
     CapabilityId::DRV_LOAD,
+    CapabilityId::NET_ADMIN,
     CapabilityId::LOG_EMIT,
 ];
 
@@ -413,6 +416,7 @@ mod tests {
             set(&[
                 CapabilityId::SYSINFO_HW,
                 CapabilityId::DRV_LOAD,
+                CapabilityId::NET_ADMIN,
                 CapabilityId::LOG_EMIT,
             ])
         );
@@ -819,14 +823,18 @@ mod tests {
     ];
 
     // The `netstack` service (plans/NETWORK.md §3): `CAP_NET_RAW` for the
-    // NIC frame rings it alone drives, `CAP_IPC_BIND_PRIVILEGED` for the
-    // reserved `NETSTACK_ENDPOINT` rendezvous, and `CAP_LOG_EMIT` for its
-    // audit records. It deliberately does not request `CAP_NET_ADMIN` — the
-    // service *enforces* that capability against its callers; it never holds
-    // it. A discovered on-disk service bundle, never an embedded spawn-floor
-    // program, so the list lives only in this pin.
+    // NIC frame rings it alone drives (and to call a driver's
+    // restricted-sender device channel), `CAP_SHM` to create and grant the
+    // shared frame-ring region each channel client owns,
+    // `CAP_IPC_BIND_PRIVILEGED` for the reserved `NETSTACK_ENDPOINT`
+    // rendezvous, and `CAP_LOG_EMIT` for its audit records. It deliberately
+    // does not request `CAP_NET_ADMIN` — the service *enforces* that
+    // capability against its callers; it never holds it. A discovered
+    // on-disk service bundle, never an embedded spawn-floor program, so the
+    // list lives only in this pin.
     const NETSTACK_MANIFEST: &[CapabilityId] = &[
         CapabilityId::NET_RAW,
+        CapabilityId::SHM,
         CapabilityId::IPC_BIND_PRIVILEGED,
         CapabilityId::LOG_EMIT,
     ];

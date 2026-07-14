@@ -49,10 +49,12 @@ for filesystems, the feature section below.
 
 Networking is the virtio-net link-layer driver plus the user-space
 `netstack` service: a dual-stack (IPv4 + IPv6) network layer — ARP,
-Neighbour Discovery, ICMP/ICMPv6 echo + errors, fragment reassembly, and
-routing — driven over a capability-gated shared-memory frame-ring seam and
-exercised end to end in QEMU. Transport (TCP/UDP) and the socket ABI are
-the next stage, hence still `◐`.
+Neighbour Discovery, ICMP/ICMPv6 echo + errors, fragment reassembly,
+routing, and UDP with multicast — over a capability-gated shared-memory
+frame-ring seam, plus the datagram socket ABI. A discovered NIC's driver
+runs as its own user process and its frame channel is autobound into the
+running stack by the device manager (`plans/NETWORK.md` N4d). TCP is the
+next stage, hence still `◐`.
 
 ## Filesystem feature support
 

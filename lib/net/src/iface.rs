@@ -103,6 +103,29 @@ impl IfaceConfig {
     }
 }
 
+/// Derive the modified EUI-64 interface identifier from a 48-bit Ethernet
+/// MAC address (RFC 4291 Appendix A / RFC 2464 §4).
+///
+/// The 24-bit OUI and 24-bit NIC-specific parts are split by the fixed
+/// `FF:FE` fill, and the universal/local bit (bit 1 of the first octet) is
+/// inverted, yielding the 64-bit identifier SLAAC and the link-local
+/// address are formed from. It is the deterministic default an Ethernet
+/// interface uses when no RFC 7217 stable-privacy secret is configured
+/// (that derivation is a separate, keyed concern the service layer owns).
+#[must_use]
+pub fn eui64_interface_id(mac: [u8; 6]) -> [u8; 8] {
+    [
+        mac[0] ^ 0x02,
+        mac[1],
+        mac[2],
+        0xFF,
+        0xFE,
+        mac[3],
+        mac[4],
+        mac[5],
+    ]
+}
+
 /// How an IPv6 address came to exist on the interface.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum AddrOrigin {

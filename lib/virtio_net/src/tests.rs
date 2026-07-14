@@ -189,6 +189,16 @@ fn bind_rings(region: &mut [u8], class: BufferClass) -> FrameRings<'_> {
     FrameRings::bind(region, test_geometry(), class).expect("bind rings")
 }
 
+/// Simulate the device completing the driver's posted receive chain and
+/// raising its interrupt: drain the RX virtqueue so the completion lands in
+/// the used ring for the next `service` to harvest. In the live system the
+/// device does this and the driver's IRQ handler wakes the stack; the
+/// non-blocking `service` doorbell never waits for a receive event itself,
+/// so a test must post the completion the same way the hardware would.
+fn deliver_rx(net: &mut VirtioNet<'static, MockTransport>) {
+    let _ = net.transport_mut().drain_queue(wire::RX_QUEUE);
+}
+
 #[test]
 fn open_reports_device_facts() {
     let (t, _, _) = build_device();
@@ -249,8 +259,9 @@ fn service_delivers_a_queued_frame_into_the_rx_ring() {
     rx_queue.borrow_mut().push_back(payload.clone());
     let mut region = rings_region();
     let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
-    // Nothing queued for transmit: the call parks once on the device
-    // event (the auto-drain host delivers there) and harvests.
+    // The device completes the posted receive chain and raises its IRQ;
+    // only then does the non-blocking `service` doorbell harvest it.
+    deliver_rx(&mut net);
     let report = net.service(&mut rings).expect("service");
     assert_eq!(report.received, 1);
     let mut buf = vec![0u8; 2048];
@@ -304,6 +315,7 @@ fn sensitive_class_round_trip_scrubs_staging() {
     assert_eq!(tx_log.borrow()[0], tx_frame);
     let rx_frame = arp_frame();
     rx_queue.borrow_mut().push_back(rx_frame.clone());
+    deliver_rx(&mut net);
     let report = net.service(&mut rings).expect("service rx");
     assert_eq!(report.received, 1);
     let mut buf = vec![0u8; 2048];
@@ -331,14 +343,14 @@ fn steady_state_traffic_allocates_no_new_dma() {
     for _ in 0..8 {
         rx_queue.borrow_mut().push_back(frame.clone());
         rings.tx.push(&frame).expect("queue");
-        let mut report = net.service(&mut rings).expect("service");
+        let report = net.service(&mut rings).expect("service");
         assert_eq!(report.transmitted, 1);
-        // The delivery may land on this call (the TX kick drained
-        // the peer) or the next parked one; drain what arrived.
-        if report.received == 0 {
-            report = net.service(&mut rings).expect("service rx");
-            assert_eq!(report.received, 1);
-        }
+        // The device completes the receive chain and raises its IRQ; the
+        // next doorbell harvests it (the non-blocking `service` never
+        // waits for the delivery itself).
+        deliver_rx(&mut net);
+        let report = net.service(&mut rings).expect("service rx");
+        assert_eq!(report.received, 1);
         while rings.rx.pop(&mut buf).expect("pop").is_some() {}
     }
     assert_eq!(tx_log.borrow().len(), 8);

@@ -518,6 +518,28 @@ fn queue_frames(rings: &mut FrameRings<'_>, frames: &[Vec<u8>]) {
     }
 }
 
+/// Pre-queue an outbound frame batch onto a frame service's TX ring.
+///
+/// A socket `send`, multicast `join`/`leave`, or `close` returns the frames
+/// the engine produced for a named interface (a [`FrameBatch`] entry); the
+/// service layer stages them here so the next
+/// [`service_interface`](Netstack::service_interface) doorbell transmits
+/// them alongside the engine's timer-due output — one pump, one doorbell.
+/// Overflow is dropped (the engine retransmits); the ring is never
+/// wedged.
+///
+/// # Errors
+///
+/// [`Errno::BadMagic`] if the service's region does not hold a valid ring
+/// header for its declared geometry.
+pub fn queue_tx<F: FrameService>(fs: &mut F, frames: &[Vec<u8>]) -> Result<(), Errno> {
+    let geometry = fs.geometry();
+    let class = fs.class();
+    let mut rings = FrameRings::bind(fs.region_mut(), geometry, class)?;
+    queue_frames(&mut rings, frames);
+    Ok(())
+}
+
 fn v4_of(bytes: [u8; 16]) -> Ipv4Addr {
     Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3])
 }

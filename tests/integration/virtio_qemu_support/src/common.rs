@@ -674,6 +674,11 @@ pub fn netstack_ping<Tr: Transport>(
         let events = stack
             .service_interface(name, &mut fs, pump_now(tick))
             .map_err(pump_error)?;
+        // The `service` doorbell no longer parks internally, so this
+        // single-address-space scaffold (stack + device in one loop) owns
+        // the wait: when a pump moved nothing, park on the device event
+        // until the peer's next frame arrives rather than spinning.
+        let idle = events.is_empty();
         for event in events {
             if let StackEvent::EchoRequestServed {
                 source, identifier, ..
@@ -687,6 +692,9 @@ pub fn netstack_ping<Tr: Transport>(
                     }
                 }
             }
+        }
+        if idle && !(served_v4 && served_v6) {
+            fs.net().wait_for_device_event();
         }
     }
     env.log("virtio-qemu: netstack answered the peer's v4+v6 pings");
@@ -730,6 +738,10 @@ pub fn netstack_ping<Tr: Transport>(
         let events = stack
             .service_interface(name, &mut fs, pump_now(tick))
             .map_err(pump_error)?;
+        // A pump that moved nothing parks on the device event (see phase 1)
+        // rather than spinning through the resend budget; a real reply or
+        // the retransmit deadline wakes it.
+        let idle = events.is_empty();
         for event in events {
             if let StackEvent::EchoReply {
                 source,
@@ -748,6 +760,9 @@ pub fn netstack_ping<Tr: Transport>(
                     }
                 }
             }
+        }
+        if idle && !(reply_v4 && reply_v6) {
+            fs.net().wait_for_device_event();
         }
     }
     env.log("virtio-qemu: netstack v4+v6 echo round-trips verified");

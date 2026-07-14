@@ -526,86 +526,70 @@ the [`net_ring`] frame region across that boundary:
   `shm_grant`/`shm_map`, endpoint, and `irq_wait` primitives. Docs:
   `docs/src/drivers/network.md`.
 
-### N4d — live driver-process wiring + two-process QEMU vertical `[ ]`
+### N4d — live driver-process wiring `[x]`
 
-Wire the N4c contract end to end so a real NIC's frames reach the running
-`netstack` process (the increment N4b's control plane waits on). This is a
-**coupled** increment — the crate restructure, the driver process, the
-netstack client, and the QEMU verticals land together — so it is one change,
-not a chain of independently-shippable slices.
+The N4c device-channel contract is wired end to end so a real NIC's frames
+reach the running `netstack` process. Done:
 
-**Status.** The device-side pieces are built and verified host/build green:
-the user-space driver **process** crate `drivers/network/virtio_net_driver`
-(the freestanding `Run` binary — bring-up, reserved device-channel endpoint
-claim bound restricted-sender `{CAP_NET_RAW}`, `netchan` node emission, and the
-wait-set serve loop over `{call endpoint, device IRQ}` driving the pure
-`NetChannelServer`), and the `Net::ack_interrupt` seam (a user-space NIC
-driver deasserts its device IRQ through the `Net` trait; `VirtioNet` clears the
-virtio interrupt-status register) so an RX interrupt never storms. **Remaining
-(coupled, activates the live path):** netstack `run.rs` `RtNetChannelTransport`
-+ `BindDriver` provisioning glue and wait-set token map; `devmgr` autobind of
-the emitted `netchan` node; the netstack + `devmgr` manifest capability
-requests (`CAP_SHM` / `CAP_NET_ADMIN`); removing `VirtioNet::service`'s
-`notify_wait` self-park (a single-process convenience that would block a
-cross-process `Service` doorbell — the doorbell must be non-blocking, parking
-belongs to each process's own wait loop); and rewriting the three `netstack_*`
-QEMU verticals from the in-kernel `register` scaffold into the two-process form
-(netstack process + driver process + host peer), which the `notify_wait`
-removal requires. These land together in the next increment.
+- **The driver process** `drivers/network/virtio_net_driver` (freestanding
+  `Run` binary + inert host stub): `RtDriverHost::from_grants_query` +
+  `sole_register_window` + `MmioTransport::new` + `VirtioNet::open` bring-up,
+  claims the first free reserved device-channel endpoint bound
+  restricted-sender `{CAP_NET_RAW}`, emits the `netchan` hardware-tree node
+  carrying that endpoint, and runs a wait-set loop over `{call endpoint,
+  device IRQ}` driving the pure `NetChannelServer`. On an RX IRQ it
+  `ack_interrupt`s and `ipc_send`s one `NetChannelNotify` to the stack's
+  notify port; never busy-polls. Depends only on `lib/*` (the `virtio_kbd` ↔
+  `lib/virtio_input` layering precedent — the `Net` device logic lives in
+  `lib/virtio_net`, not `drivers/*`).
+- **`VirtioNet::service` is a non-blocking doorbell**: it drains what is ready
+  and returns (no internal RX park), so a cross-process `Service` never blocks
+  the reply. Parking belongs to each process's own wait loop — the driver
+  parks on the device IRQ; the stack parks on the notify port. The
+  single-address-space in-process caller parks with
+  `VirtioNet::wait_for_device_event` between doorbells.
+- **netstack `run.rs` live glue**: `RtNetChannelTransport` (an `ipc_call`
+  `NetChannelTransport`), a bounded channel-client table, and the
+  `BindDriver` admin op — capability-checked (`CAP_NET_ADMIN`), audited,
+  fail-closed — provisioning a channel (query facts → size ring geometry from
+  `DeviceFacts::mtu` → `shm_create` + `shm_grant` → `port_bind` a
+  non-reserved per-`(pid, slot)` notify port `net_channel::notify_endpoint_for`
+  → `NetChannelClient::attach` → derive the IPv6 iid `eui64_interface_id` +
+  a CSPRNG IPv4 ident seed → `add_interface`). The wait loop pumps a channel
+  on its notify wake, all channels on the engine deadline lapse, and the
+  socket-TX batch after a `send`/`join`/`leave`/`close` (`queue_tx` then the
+  one `service_interface` pump), delivering received datagrams to their
+  sockets' async ports. The engine pump is the single generic
+  `Netstack::service_interface<F: FrameService>` — one definition for both
+  the in-process `LocalFrameService` and the remote `NetChannelClient`.
+- **`devmgr` autobind** (`netbind` module, host-tested): recognises the
+  emitted `netchan` node (`compatible = "rustos,netchan"`), reads its endpoint
+  resource, and hands it to `netstack` `BindDriver` under a derived `netN`
+  alias — each endpoint bound exactly once across generation bumps, fail-soft
+  retry if the stack is not yet up.
+- **Capabilities**: `netstack` += `CAP_SHM` (owns/grants the frame region),
+  `devmgr` += `CAP_NET_ADMIN` (calls `BindDriver`) — in both the account
+  ceilings and the manifest requests (effective = ceiling ∩ manifest); the
+  stack still never holds `CAP_NET_ADMIN`, it *enforces* it. No new syscall.
 
-**Crate layout / layering (the load-bearing decision).** The driver
-**process** is a *new, separate* binary crate (the `drivers/input/virtio_kbd`
-↔ `lib/virtio_input` precedent): the kernel/test-kernel must not pull the
-userland `rustos-rt` `_start`/allocator into its graph, and §17.4 forbids a
-process crate depending on any `drivers/*` crate. Therefore the `VirtioNet`
-`Net` impl (today in the `drivers/network/virtio_net` **lib**, consumed only
-by the in-kernel-scaffold test verticals) must move to a `lib/*` device-logic
-crate — `lib/virtio_net`, the transport-vs-device split mirroring
-`lib/virtio` (transport) ↔ `lib/virtio_input` (device). The process crate
-then depends only on `lib/*` (`rustos-abi`, `rustos-caps`, `rustos-virtio`,
-`lib/virtio_net`, `rustos-drvrt`, `rustos-rt`). The in-kernel `register`
-scaffold in the `netstack_*` QEMU verticals is the §18.5 transitional defect
-this increment **removes**, replacing it with the two-process form.
+### N4e — two-process QEMU vertical + §18.5 scaffold removal `[ ]`
 
-- **The driver process** (`main.rs`, freestanding-only + inert host stub;
-  build.rs sets the `freestanding` cfg off `target_os = "none"`, the
-  `virtio_kbd` pattern): `RtDriverHost::from_grants_query` +
-  `sole_register_window` + `MmioTransport::new` + `VirtioNet::open` for
-  bring-up, then bind its device *call* endpoint (`call_create`) and run a
-  wait-set loop over **two** sources — the call endpoint (the stack's
-  `Facts`/`Attach`/`Service`/`Detach` doorbells) and, after `Attach`, the
-  device IRQ (`irq_bind`/`irq_wait`). On an IRQ wake it `ipc_send`s a
-  `NetChannelNotify` to the stored `notify_port`; it never busy-polls. The
-  pure per-request handling is a host-testable `NetChannelServer` in
-  `lib/virtio_net`: `Facts` → `encode_facts_reply(net.device_facts())`;
-  `Attach` → validate + store `{geometry, class, notify_port}` (the caller
-  `shm_map`s `region_grant` and holds the mapped slice); `Service` →
-  `FrameRings::bind` over the held region + `net.service` →
-  `encode_service_reply`; `Detach` → clear + `shm_unmap`. Not-attached
-  `Service` fails closed (`encode_service_reply(Err(NotConnected))`).
-- **netstack** grows a live `NetChannel` **client** (host-testable over an
-  injected `ipc_call` seam so it stays pure): `shm_create` a region sized to
-  `RingGeometry::region_len` (geometry derived from the `Facts`
-  `DeviceFacts::mtu`), `shm_grant` it to the driver endpoint, `Attach`, then
-  add both the driver reply-endpoint and the `notify_port` to the service
-  wait set and pump `Service` on TX-ready / engine timer / notify. The engine
-  pump must **not** be duplicated: factor a `FrameService` seam
-  (`fn service(&mut self, rings) -> Result<ServiceReport, Errno>`) that both
-  an in-process `N: Net` and the remote `NetChannelClient` implement, and make
-  `Netstack::service_interface` generic over it (the one pump, §2.2). The
-  channel-backed interface's region is owned by the client and its
-  `FrameRings` view bound over it; `run.rs` adds the notify port to the
-  wait-set token map alongside the existing admin/socket endpoints.
-- **`devmgr` autobind**: on a matched network hardware-tree node, spawn the
-  driver process, then hand `netstack` the driver's endpoint through the
-  admin surface (capability-gated under `CAP_DRV_LOAD`/`CAP_NET_ADMIN`,
-  fail-closed, audited with a stable event id).
-- **Tests**: host tests of the `NetChannelServer` (dispatch + region bind +
-  fail-closed not-attached) and of the `NetChannelClient` ↔ server in-process
-  round-trip (a real frame crossing the ring + engine); the two-process QEMU
-  vertical (netstack process + virtio_net driver process + host peer) — UDP
-  echo v4+v6 and multicast join + receive — across the three arch verticals,
-  replacing the in-kernel `register` scaffold.
+The three `netstack_*` QEMU verticals still run the in-kernel single-process
+`register` scaffold (`rustos-test-virtio-qemu-support`'s `netstack_ping` over
+an in-process `LocalFrameService`), adapted to the non-blocking doorbell (its
+pump parks on `VirtioNet::wait_for_device_event`). That scaffold is the §18.5
+transitional defect to remove: rewrite the three verticals (aarch64-mmio,
+riscv64-mmio, x86_64-pci) into the **two-process** form — the production boot
+pipeline (the `autoload_input_qemu_aarch64` precedent: a planted disk carrying
+the signed `virtio_net_driver` + `netstack` bundles, `devmgr` autoload of the
+driver into its own user process, `netstack` running as its own process) with
+a virtio-net device attached and a **host-side UDP peer** over the QEMU netdev
+driving UDP echo v4+v6 and multicast join + receive. PASS witnesses: the
+driver's `netchan` node published, the `devmgr` `NETSTACK_BOUND` audit event,
+the `netstack` `DRIVER_BOUND` audit event, and the host peer observing the
+echo/multicast round-trips. Removing the scaffold deletes the `register` shell
+in `drivers/network/virtio_net`, `FixedSpawner`/`netstack_ping` in the support
+crate, and `VirtioNet::wait_for_device_event` (its only consumer).
 
 ### N5 — TCP core: the RFC 9293 state machine, retransmission, flow control `[ ]`
 - Connection establishment/teardown (full state machine, simultaneous

@@ -92,6 +92,33 @@ pub const fn is_net_channel_endpoint(id: u64) -> bool {
     id >= NET_CHANNEL_ENDPOINT_BASE && id < NET_CHANNEL_ENDPOINT_BASE + NET_CHANNEL_ENDPOINT_COUNT
 }
 
+/// High tag of a stack-owned device-channel notify-port id (see
+/// [`notify_endpoint_for`]).
+const NET_NOTIFY_ENDPOINT_TAG: u64 = 0x4E4E_0000_0000_0000;
+
+/// The notify-mailbox endpoint id the network stack binds for one managed
+/// channel-backed interface and passes to the driver in
+/// [`AttachParams::notify_endpoint`].
+///
+/// It packs the stack's own kernel task id `pid` (never reused while the
+/// stack lives) and the per-interface slot `index` under a fixed high tag,
+/// mirroring the window client's `event_endpoint_for`: a distinct,
+/// collision-free, **non-reserved** id, so the stack `port_bind`s it
+/// without [`CapabilityId::IPC_BIND_PRIVILEGED`](crate::CapabilityId::IPC_BIND_PRIVILEGED)
+/// and two interfaces (or two stacks) can never disagree about the id
+/// space. The mailbox is owner-only to receive, so the driver only needs
+/// the number — it cannot receive the wakes it sends, and a bystander
+/// cannot steal them; a spurious notify at worst costs one extra
+/// [`NetChannelRequest::Service`] doorbell.
+///
+/// `index` is bounded by [`NET_CHANNEL_ENDPOINT_COUNT`] (the most channels
+/// the stack serves at once) and occupies the low byte; `pid` occupies the
+/// next 48 bits, well within a task id's range.
+#[must_use]
+pub const fn notify_endpoint_for(pid: u64, index: u64) -> u64 {
+    NET_NOTIFY_ENDPOINT_TAG | ((pid & 0xFFFF_FFFF_FFFF) << 8) | (index & 0xFF)
+}
+
 /// Operation discriminants (the request's fifth byte).
 mod op {
     pub const FACTS: u8 = 1;

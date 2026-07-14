@@ -57,12 +57,23 @@ pub const NODE_UNLOADED: EventId = EventId(13_008);
 /// `init` supervises the relaunch. A silent exit would hide which seam
 /// refused — every abnormal exit states its reason.
 pub const TREE_SEAM_FAILED: EventId = EventId(13_009);
+/// A discovered NIC device-channel node (`compatible = "rustos,netchan"`,
+/// emitted by a bound NIC driver process) was handed to the network stack:
+/// the device manager `ipc_call`ed `netstack` `BindDriver` with the node's
+/// endpoint and a derived interface alias, and the stack accepted it.
+pub const NETSTACK_BOUND: EventId = EventId(13_010);
+/// A NIC device-channel node was observed but could not be handed to the
+/// network stack (the stack refused the bind, or its endpoint was
+/// unreachable). The channel stays unbound and the hand-off is retried on
+/// the next generation bump — never an error (fail-soft, like the driver
+/// store being unavailable).
+pub const NETSTACK_BIND_FAILED: EventId = EventId(13_011);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ALL: [EventId; 9] = [
+    const ALL: [EventId; 11] = [
         NODE_BOUND,
         NODE_UNBOUND,
         NODE_TIE_REJECTED,
@@ -72,6 +83,8 @@ mod tests {
         NODE_OBSERVED,
         NODE_UNLOADED,
         TREE_SEAM_FAILED,
+        NETSTACK_BOUND,
+        NETSTACK_BIND_FAILED,
     ];
 
     #[test]

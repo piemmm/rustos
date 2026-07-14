@@ -2,7 +2,9 @@
 # service (a service is an app, AGENTS.md §16.2; plans/NETWORK.md §2.2).
 # Discovered by the build's app-bundle composer and planted under
 # /System/Services/. The capability list is the bundle's request:
-# CAP_NET_RAW for the NIC frame rings it alone drives,
+# CAP_NET_RAW for the NIC frame rings it alone drives (and to call a
+# driver's restricted-sender device channel), CAP_SHM to create and grant
+# the shared frame-ring region each channel client owns,
 # CAP_IPC_BIND_PRIVILEGED for the reserved well-known endpoint, and
 # CAP_LOG_EMIT for its audit records. It deliberately does NOT request
 # CAP_NET_ADMIN — the service *enforces* that capability against its
@@ -11,4 +13,4 @@ id = "os.rustos.netstack"
 name = "netstack"
 version = "0.1.0"
 kind = "service"
-capabilities = ["CAP_NET_RAW", "CAP_IPC_BIND_PRIVILEGED", "CAP_LOG_EMIT"]
+capabilities = ["CAP_NET_RAW", "CAP_SHM", "CAP_IPC_BIND_PRIVILEGED", "CAP_LOG_EMIT"]
