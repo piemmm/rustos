@@ -643,6 +643,21 @@ task and its next syscall faults the core closed. Every wait loop
 therefore parks through one shared helper that reads the live CPU on each
 call, so a mid-wait migration is always handled.
 
+The **same live-CPU rule binds the syscall completion path**, not only
+the park loop. The dispatch hook reads the caller's CPU once at entry to
+identify the caller (correct — the task is running on that CPU then), but
+a blocking handler parks and can resume (work-stolen) on a **different**
+CPU. When the handler returns, the completion path hands a CPU to the
+port's `reschedule_current` — which runs on the core the task is on
+*now*. It must therefore re-read the live CPU after the handler returns,
+never reuse the entry CPU: passing the stale entry CPU drives
+`reschedule_current` against a different core's resume handle, switching
+that core through another task's saved context and corrupting both — a
+wild fault that kills an unrelated task. The re-read is safe because the
+kernel is non-preemptible and nothing between it and the
+`reschedule_current` call parks, so the task cannot migrate again in that
+window.
+
 ## Invariants
 
 These hold at every API boundary:
