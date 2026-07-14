@@ -47,6 +47,37 @@ is consumed so it cannot wedge the queue behind it.
   device-event waiter and re-checks, so a caller looping on `service`
   is event-driven, never a spin.
 
+## Cross-process channel handoff (`net_channel`)
+
+When the driver and the stack are separate processes — the true
+microkernel shape — the `service` doorbell and the `FrameRings` region
+are bridged by the versioned IPC control-plane contract
+`rustos_abi::driver::net_channel` (`netchan-v1`). The driver owns the
+device and serves a call endpoint; the stack is the client that owns the
+region. This is the display service's `shm_grant` handoff with the roles
+inverted and frames flowing both ways:
+
+1. The stack asks `Facts` for the device's `DeviceFacts` and sizes a
+   `RingGeometry` from the MTU.
+2. It `shm_create`s the region, `shm_grant`s it to the driver's endpoint
+   (the recipient is resolved kernel-side from the endpoint, never a
+   recyclable PID), and sends `Attach { geometry, region_grant, class,
+   notify_port }`; the driver `shm_map`s exactly that region
+   (owner-checked — no ambient authority).
+3. `Service` is the doorbell: the driver services the mapped rings once
+   and replies a `ServiceReport`. Between doorbells the driver parks on
+   its device IRQ and `ipc_send`s a `NetChannelNotify` to `notify_port`
+   when receive frames arrive; the stack, parked on that port, issues the
+   next `Service`. Neither side busy-polls.
+4. `Detach` releases the channel.
+
+Every frame in the contract decodes total and fail-closed (magic,
+version, reserved-must-be-zero, geometry/class bounds,
+`DeviceFacts::validate`) and is covered by the shared `lib/abi`
+never-panic fuzz harness. The contract adds no capability and no syscall:
+it is built on the existing `shm_create`/`shm_grant`/`shm_map`, endpoint,
+and `irq_wait` primitives.
+
 ## `BufferClass` and zero-on-free
 
 `FrameRings::class` declares the traffic's sensitivity for the whole

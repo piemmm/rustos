@@ -25,6 +25,9 @@
 //! random one, so it does not draw a seed.
 
 use rustos_abi::display_ipc::{decode_mode_reply, DisplayRequest};
+use rustos_abi::driver::net_channel::{
+    decode_facts_reply, decode_service_reply, NetChannelNotify, NetChannelRequest,
+};
 use rustos_abi::elevate::{ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN};
 use rustos_abi::fs::{DirEntries, DirEntry, FileKind, FileStat, OpenFlags, FS_NAME_MAX};
 use rustos_abi::input::{KeyInput, PointerInput};
@@ -217,6 +220,30 @@ fn exercise_net_socket(bytes: &[u8]) {
     let _ = decode_bind_reply(bytes);
 }
 
+/// Drive the cross-process NIC device-channel decoders on `bytes` (one arm
+/// of [`exercise`]): an accepted control request or receive-notify must
+/// round-trip through its encoder, and the two reply decoders — untrusted
+/// driver output the stack parses — must refuse a corrupt frame cleanly,
+/// never panic.
+fn exercise_net_channel(bytes: &[u8]) {
+    if let Ok(request) = NetChannelRequest::decode(bytes) {
+        let mut buf = vec![0u8; NetChannelRequest::MAX_WIRE_LEN];
+        let len = request
+            .encode(&mut buf)
+            .expect("round-trip encode of an accepted channel request must succeed");
+        let redecoded = NetChannelRequest::decode(&buf[..len])
+            .expect("round-trip of an accepted channel request must succeed");
+        assert_eq!(request, redecoded);
+    }
+    if let Ok(notify) = NetChannelNotify::decode(bytes) {
+        let redecoded = NetChannelNotify::decode(&NetChannelNotify::encode())
+            .expect("round-trip of the notify frame must succeed");
+        assert_eq!(notify, redecoded);
+    }
+    let _ = decode_facts_reply(bytes);
+    let _ = decode_service_reply(bytes);
+}
+
 /// Drive the seat-manager protocol decoders on `bytes` (one arm of
 /// [`exercise`]): an accepted seat-administration request must round-trip
 /// through its encoder, and the shared status-reply decoder must refuse a
@@ -296,6 +323,7 @@ fn exercise(bytes: &[u8]) {
     exercise_display_ipc(bytes);
     exercise_window_ipc(bytes);
     exercise_net_socket(bytes);
+    exercise_net_channel(bytes);
     exercise_elevate(bytes);
     if let Ok(time) = Time64::from_bytes(bytes) {
         let redecoded = Time64::from_bytes(&time.to_le_bytes())

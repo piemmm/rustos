@@ -1,0 +1,600 @@
+//! The cross-process device-channel handoff between the user-space
+//! network stack and a link-layer network driver process
+//! (`plans/NETWORK.md` §2.3, N4c).
+//!
+//! [`net_ring`](super::net_ring) defines the *in-region* frame transport;
+//! this module defines the *IPC control plane* that establishes and drives
+//! that region when the driver and the stack are **separate processes**
+//! (the true microkernel shape, `AGENTS.md` §4): the driver owns the
+//! device (MMIO/DMA/IRQ) and serves a call endpoint; the stack is the
+//! client that owns the shared frame-ring region.
+//!
+//! # Roles (the display D7a `shm_grant` pattern, inverted)
+//!
+//! The display service is the endpoint *server* and the session is the
+//! *client* that `shm_create`s a frame region and `shm_grant`s it to the
+//! service's endpoint. A NIC works the same way with the data flowing both
+//! ways: the **driver** serves its device endpoint and the **stack** is the
+//! client. The stack sizes a [`RingGeometry`]
+//! from the device MTU, `shm_create`s the region, `shm_grant`s it to the
+//! driver's endpoint, and forwards the unforgeable grant handle in the
+//! [`NetChannelRequest::Attach`] message; the driver `shm_map`s exactly that
+//! one region (`SHM_MAP` is owner-checked, so the handle is useless to a
+//! bystander — no ambient authority).
+//!
+//! # Operations
+//!
+//! * [`NetChannelRequest::Facts`] — the stack asks for the device's
+//!   [`DeviceFacts`] so it can size the ring geometry before attaching.
+//! * [`NetChannelRequest::Attach`] — the stack hands over the granted
+//!   region, the agreed geometry, the traffic [`BufferClass`], and the
+//!   port name the driver notifies when receive frames arrive.
+//! * [`NetChannelRequest::Service`] — the doorbell: the driver services the
+//!   mapped rings once (drains TX into the device, delivers device frames
+//!   into RX) and replies a [`ServiceReport`].
+//! * [`NetChannelRequest::Detach`] — the stack releases the channel; the
+//!   driver unmaps the region and forgets the notify port.
+//!
+//! Between doorbells the driver parks on its device IRQ; when frames arrive
+//! it wakes the stack with a [`NetChannelNotify`] `ipc_send` to the attach
+//! port, and the stack — parked on that port in its wait set — issues the
+//! next [`NetChannelRequest::Service`]. Neither side ever busy-polls
+//! (`AGENTS.md` §2.23).
+//!
+//! # Fail closed
+//!
+//! Every decode is total and validates whole: an unknown magic, version,
+//! operation byte, a dirty reserved field, an out-of-range geometry, or an
+//! over-length frame refuses with one typed [`Errno`] rather than guessing.
+
+use super::net::{DeviceFacts, LinkState, MacAddress, NetOffloads, MAC_ADDRESS_LEN};
+use super::net_ring::{RingGeometry, ServiceReport};
+use super::BufferClass;
+use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
+use crate::{Errno, PortName};
+
+/// Magic number identifying a device-channel request (`"NCHR"`).
+pub const NET_CHANNEL_REQUEST_MAGIC: u32 = u32::from_le_bytes(*b"NCHR");
+
+/// Magic number identifying a receive-frames notify (`"NCHN"`).
+pub const NET_CHANNEL_NOTIFY_MAGIC: u32 = u32::from_le_bytes(*b"NCHN");
+
+/// The `netchan-v1` protocol version.
+pub const NET_CHANNEL_VERSION_V1: u16 = 1;
+
+/// Operation discriminants (the request's fifth byte).
+mod op {
+    pub const FACTS: u8 = 1;
+    pub const ATTACH: u8 = 2;
+    pub const SERVICE: u8 = 3;
+    pub const DETACH: u8 = 4;
+}
+
+/// Fixed request header: magic (4) + version (2) + op (1) + reserved (1).
+const HEADER_LEN: usize = 8;
+
+/// Wire length of the [`NetChannelRequest::Attach`] body that follows the
+/// header: geometry `slots` (4) + `slot_capacity` (4) + grant handle (8) +
+/// class (1) + reserved (3) + notify port name ([`PortName::WIRE_LEN`]).
+const ATTACH_BODY_LEN: usize = 4 + 4 + 8 + 1 + 3 + PortName::WIRE_LEN;
+
+/// Largest device-channel request frame: the header plus the (largest)
+/// [`NetChannelRequest::Attach`] body. A fixed validation bound sizing the
+/// buffer both sides pin for the control endpoint.
+pub const NET_CHANNEL_MAX_REQUEST: usize = HEADER_LEN + ATTACH_BODY_LEN;
+
+/// Wire length of a [`NetChannelNotify`] frame: magic (4) + version (2) +
+/// reserved (2).
+pub const NET_CHANNEL_NOTIFY_LEN: usize = 8;
+
+/// A device-channel control request the stack issues to the driver's
+/// endpoint (`plans/NETWORK.md` N4c). Decoded fail-closed from an untrusted
+/// frame; the driver acts only on a fully-validated value.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum NetChannelRequest {
+    /// Report the device's [`DeviceFacts`] so the stack can size the ring
+    /// geometry before attaching.
+    Facts,
+    /// Hand over the granted frame-ring region and start frame flow.
+    Attach(AttachParams),
+    /// The doorbell: service the mapped rings once and report what moved.
+    Service,
+    /// Release the channel: unmap the region and forget the notify port.
+    Detach,
+}
+
+/// The parameters of a [`NetChannelRequest::Attach`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct AttachParams {
+    /// The ring geometry both sides agree on (the stack derives it from
+    /// [`DeviceFacts::mtu`] and sized the region to
+    /// [`RingGeometry::region_len`]).
+    pub geometry: RingGeometry,
+    /// The unforgeable `shm_grant` handle the stack minted for the
+    /// driver's endpoint; the driver `shm_map`s exactly this region.
+    pub region_grant: u64,
+    /// Sensitivity class the driver honours for its internal staging.
+    pub class: BufferClass,
+    /// The port the driver `ipc_send`s a [`NetChannelNotify`] to when
+    /// receive frames have arrived and the stack should issue the next
+    /// [`NetChannelRequest::Service`].
+    pub notify_port: PortName,
+}
+
+impl NetChannelRequest {
+    /// Largest encoded request frame.
+    pub const MAX_WIRE_LEN: usize = NET_CHANNEL_MAX_REQUEST;
+
+    /// The operation's wire discriminant byte.
+    const fn op_byte(&self) -> u8 {
+        match self {
+            Self::Facts => op::FACTS,
+            Self::Attach(_) => op::ATTACH,
+            Self::Service => op::SERVICE,
+            Self::Detach => op::DETACH,
+        }
+    }
+
+    /// Encode `self` into `out`, returning the number of bytes written.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] if `out` cannot hold the encoded frame.
+    pub fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
+        let len = match self {
+            Self::Facts | Self::Service | Self::Detach => HEADER_LEN,
+            Self::Attach(_) => HEADER_LEN + ATTACH_BODY_LEN,
+        };
+        if out.len() < len {
+            return Err(Errno::BufferTooSmall);
+        }
+        for byte in &mut out[..len] {
+            *byte = 0;
+        }
+        put_u32(out, 0, NET_CHANNEL_REQUEST_MAGIC);
+        put_u16(out, 4, NET_CHANNEL_VERSION_V1);
+        out[6] = self.op_byte();
+        // out[7] reserved, left zero.
+        if let Self::Attach(params) = self {
+            put_u32(out, HEADER_LEN, params.geometry.slots());
+            put_u32(out, HEADER_LEN + 4, params.geometry.slot_capacity());
+            put_u64(out, HEADER_LEN + 8, params.region_grant);
+            out[HEADER_LEN + 16] = params.class.as_u8();
+            // out[HEADER_LEN + 17..HEADER_LEN + 20] reserved, left zero.
+            let port = params.notify_port.to_le_bytes();
+            out[HEADER_LEN + 20..HEADER_LEN + 20 + PortName::WIRE_LEN].copy_from_slice(&port);
+        }
+        Ok(len)
+    }
+
+    /// Decode a request frame, fail-closed.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] — shorter than the operation requires.
+    /// * [`Errno::BadMagic`] — wrong magic or a dirty reserved byte.
+    /// * [`Errno::AbiVersionUnsupported`] — not [`NET_CHANNEL_VERSION_V1`].
+    /// * [`Errno::OutOfRange`] — an unknown operation byte or an
+    ///   out-of-range geometry / class.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < HEADER_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        if read_u32(bytes, 0) != NET_CHANNEL_REQUEST_MAGIC {
+            return Err(Errno::BadMagic);
+        }
+        if read_u16(bytes, 4) != NET_CHANNEL_VERSION_V1 {
+            return Err(Errno::AbiVersionUnsupported);
+        }
+        if bytes[7] != 0 {
+            return Err(Errno::BadMagic);
+        }
+        match bytes[6] {
+            op::FACTS => Ok(Self::Facts),
+            op::SERVICE => Ok(Self::Service),
+            op::DETACH => Ok(Self::Detach),
+            op::ATTACH => Self::decode_attach(bytes),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    fn decode_attach(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < HEADER_LEN + ATTACH_BODY_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let slots = read_u32(bytes, HEADER_LEN);
+        let slot_capacity = read_u32(bytes, HEADER_LEN + 4);
+        let geometry = RingGeometry::new(slots, slot_capacity)?;
+        let region_grant = read_u64(bytes, HEADER_LEN + 8);
+        let class = BufferClass::from_u8(bytes[HEADER_LEN + 16]).map_err(|_| Errno::OutOfRange)?;
+        for &pad in &bytes[HEADER_LEN + 17..HEADER_LEN + 20] {
+            if pad != 0 {
+                return Err(Errno::BadMagic);
+            }
+        }
+        let notify_port =
+            PortName::from_bytes(&bytes[HEADER_LEN + 20..HEADER_LEN + 20 + PortName::WIRE_LEN])?;
+        Ok(Self::Attach(AttachParams {
+            geometry,
+            region_grant,
+            class,
+            notify_port,
+        }))
+    }
+}
+
+/// The driver → stack receive-frames wake (`plans/NETWORK.md` N4c).
+///
+/// The driver `ipc_send`s this fixed frame to the [`AttachParams::notify_port`]
+/// when its device IRQ reports frames it could not immediately hand over; the
+/// stack, parked on that port, issues the next [`NetChannelRequest::Service`].
+/// It carries no payload — *which* channel woke is the port it arrived on.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NetChannelNotify;
+
+impl NetChannelNotify {
+    /// Encoded length of the notify frame.
+    pub const WIRE_LEN: usize = NET_CHANNEL_NOTIFY_LEN;
+
+    /// Encode the notify frame.
+    #[must_use]
+    pub fn encode() -> [u8; NET_CHANNEL_NOTIFY_LEN] {
+        let mut out = [0u8; NET_CHANNEL_NOTIFY_LEN];
+        put_u32(&mut out, 0, NET_CHANNEL_NOTIFY_MAGIC);
+        put_u16(&mut out, 4, NET_CHANNEL_VERSION_V1);
+        out
+    }
+
+    /// Decode a notify frame, fail-closed.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] — shorter than [`NET_CHANNEL_NOTIFY_LEN`].
+    /// * [`Errno::BadMagic`] — wrong magic or a dirty reserved field.
+    /// * [`Errno::AbiVersionUnsupported`] — not [`NET_CHANNEL_VERSION_V1`].
+    pub fn decode(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < NET_CHANNEL_NOTIFY_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        if read_u32(bytes, 0) != NET_CHANNEL_NOTIFY_MAGIC {
+            return Err(Errno::BadMagic);
+        }
+        if read_u16(bytes, 4) != NET_CHANNEL_VERSION_V1 {
+            return Err(Errno::AbiVersionUnsupported);
+        }
+        if read_u16(bytes, 6) != 0 {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self)
+    }
+}
+
+// --- DeviceFacts wire codec (the Facts reply payload) -------------------
+
+/// Wire length of a [`DeviceFacts`] payload: mac (6) + mtu (4) + offloads
+/// (4) + `rx_queues` (2) + link (1) + reserved (1).
+const FACTS_PAYLOAD_LEN: usize = MAC_ADDRESS_LEN + 4 + 4 + 2 + 1 + 1;
+
+/// Wire length of the Facts reply: a status word then the payload (zeroed
+/// on refusal).
+pub const NET_CHANNEL_FACTS_REPLY_LEN: usize = 4 + FACTS_PAYLOAD_LEN;
+
+/// Wire byte for [`LinkState::Up`].
+const LINK_UP: u8 = 1;
+/// Wire byte for [`LinkState::Down`].
+const LINK_DOWN: u8 = 0;
+
+/// Encode the driver's reply to [`NetChannelRequest::Facts`]: `0` status
+/// and the validated facts, or a `-errno` status and a zeroed payload.
+#[must_use]
+pub fn encode_facts_reply(result: Result<DeviceFacts, Errno>) -> [u8; NET_CHANNEL_FACTS_REPLY_LEN] {
+    let mut out = [0u8; NET_CHANNEL_FACTS_REPLY_LEN];
+    match result {
+        Ok(facts) => {
+            // status stays 0.
+            let body = &mut out[4..];
+            body[..MAC_ADDRESS_LEN].copy_from_slice(facts.mac.as_octets());
+            put_u32(body, MAC_ADDRESS_LEN, facts.mtu);
+            put_u32(body, MAC_ADDRESS_LEN + 4, facts.offloads.bits());
+            put_u16(body, MAC_ADDRESS_LEN + 8, facts.rx_queues);
+            body[MAC_ADDRESS_LEN + 10] = match facts.link {
+                LinkState::Up => LINK_UP,
+                LinkState::Down => LINK_DOWN,
+            };
+        }
+        Err(err) => {
+            let status = (-err.as_i32()).to_le_bytes();
+            out[..4].copy_from_slice(&status);
+        }
+    }
+    out
+}
+
+/// Decode a Facts reply, fail-closed.
+///
+/// # Errors
+///
+/// * [`Errno::BufferTooSmall`] — shorter than [`NET_CHANNEL_FACTS_REPLY_LEN`].
+/// * The decoded [`Errno`] — the driver refused the query.
+/// * [`Errno::OutOfRange`] — a corrupt status, link byte, reserved byte, or
+///   offload/facts value that fails validation.
+pub fn decode_facts_reply(bytes: &[u8]) -> Result<DeviceFacts, Errno> {
+    if bytes.len() < NET_CHANNEL_FACTS_REPLY_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    let mut status = [0u8; 4];
+    status.copy_from_slice(&bytes[..4]);
+    let status = i32::from_le_bytes(status);
+    if status != 0 {
+        let errno = status
+            .checked_neg()
+            .and_then(Errno::from_i32)
+            .ok_or(Errno::OutOfRange)?;
+        return Err(errno);
+    }
+    let body = &bytes[4..];
+    let mut mac = [0u8; MAC_ADDRESS_LEN];
+    mac.copy_from_slice(&body[..MAC_ADDRESS_LEN]);
+    let mtu = read_u32(body, MAC_ADDRESS_LEN);
+    let offloads = NetOffloads::from_bits(read_u32(body, MAC_ADDRESS_LEN + 4))?;
+    let rx_queues = read_u16(body, MAC_ADDRESS_LEN + 8);
+    let link = match body[MAC_ADDRESS_LEN + 10] {
+        LINK_UP => LinkState::Up,
+        LINK_DOWN => LinkState::Down,
+        _ => return Err(Errno::OutOfRange),
+    };
+    if body[MAC_ADDRESS_LEN + 11] != 0 {
+        return Err(Errno::OutOfRange);
+    }
+    let facts = DeviceFacts {
+        mac: MacAddress::new(mac),
+        mtu,
+        link,
+        offloads,
+        rx_queues,
+    };
+    facts.validate()?;
+    Ok(facts)
+}
+
+// --- ServiceReport wire codec (the Service reply payload) ---------------
+
+/// Wire length of a [`ServiceReport`] payload: transmitted (4) + received
+/// (4) + `rx_ring_full` flag (1).
+const SERVICE_PAYLOAD_LEN: usize = 4 + 4 + 1;
+
+/// Wire length of the Service reply: a status word then the payload (zeroed
+/// on refusal).
+pub const NET_CHANNEL_SERVICE_REPLY_LEN: usize = 4 + SERVICE_PAYLOAD_LEN;
+
+/// Encode the driver's reply to [`NetChannelRequest::Service`]: `0` status
+/// and the report, or a `-errno` status and a zeroed payload.
+#[must_use]
+pub fn encode_service_reply(
+    result: Result<ServiceReport, Errno>,
+) -> [u8; NET_CHANNEL_SERVICE_REPLY_LEN] {
+    let mut out = [0u8; NET_CHANNEL_SERVICE_REPLY_LEN];
+    match result {
+        Ok(report) => {
+            let body = &mut out[4..];
+            put_u32(body, 0, report.transmitted);
+            put_u32(body, 4, report.received);
+            body[8] = u8::from(report.rx_ring_full);
+        }
+        Err(err) => {
+            let status = (-err.as_i32()).to_le_bytes();
+            out[..4].copy_from_slice(&status);
+        }
+    }
+    out
+}
+
+/// Decode a Service reply, fail-closed.
+///
+/// # Errors
+///
+/// * [`Errno::BufferTooSmall`] — shorter than [`NET_CHANNEL_SERVICE_REPLY_LEN`].
+/// * The decoded [`Errno`] — the driver refused the doorbell.
+/// * [`Errno::OutOfRange`] — a corrupt status or a flag byte that is not
+///   `0` or `1`.
+pub fn decode_service_reply(bytes: &[u8]) -> Result<ServiceReport, Errno> {
+    if bytes.len() < NET_CHANNEL_SERVICE_REPLY_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    let mut status = [0u8; 4];
+    status.copy_from_slice(&bytes[..4]);
+    let status = i32::from_le_bytes(status);
+    if status != 0 {
+        let errno = status
+            .checked_neg()
+            .and_then(Errno::from_i32)
+            .ok_or(Errno::OutOfRange)?;
+        return Err(errno);
+    }
+    let body = &bytes[4..];
+    let transmitted = read_u32(body, 0);
+    let received = read_u32(body, 4);
+    let rx_ring_full = match body[8] {
+        0 => false,
+        1 => true,
+        _ => return Err(Errno::OutOfRange),
+    };
+    Ok(ServiceReport {
+        transmitted,
+        received,
+        rx_ring_full,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn geometry() -> RingGeometry {
+        RingGeometry::new(256, 1514).expect("valid geometry")
+    }
+
+    fn attach() -> NetChannelRequest {
+        NetChannelRequest::Attach(AttachParams {
+            geometry: geometry(),
+            region_grant: 0xDEAD_BEEF_0BAD_F00D,
+            class: BufferClass::Sensitive,
+            notify_port: PortName::from_ascii(b"netstack.nic0").expect("valid port"),
+        })
+    }
+
+    fn facts() -> DeviceFacts {
+        DeviceFacts {
+            mac: MacAddress::new([0x02, 0x11, 0x22, 0x33, 0x44, 0x55]),
+            mtu: 1500,
+            link: LinkState::Up,
+            offloads: NetOffloads::from_bits(NetOffloads::TX_CSUM_UDP.bits())
+                .expect("defined bits"),
+            rx_queues: 2,
+        }
+    }
+
+    #[test]
+    fn request_round_trips_every_operation() {
+        for req in [
+            NetChannelRequest::Facts,
+            NetChannelRequest::Service,
+            NetChannelRequest::Detach,
+            attach(),
+        ] {
+            let mut buf = [0u8; NetChannelRequest::MAX_WIRE_LEN];
+            let len = req.encode(&mut buf).expect("encode");
+            assert_eq!(NetChannelRequest::decode(&buf[..len]), Ok(req));
+        }
+    }
+
+    #[test]
+    fn encode_into_short_buffer_fails_closed() {
+        let mut small = [0u8; HEADER_LEN - 1];
+        assert_eq!(
+            NetChannelRequest::Facts.encode(&mut small),
+            Err(Errno::BufferTooSmall)
+        );
+        let mut header_only = [0u8; HEADER_LEN];
+        assert_eq!(
+            attach().encode(&mut header_only),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn decode_rejects_bad_magic_version_reserved_and_op() {
+        let mut buf = [0u8; NetChannelRequest::MAX_WIRE_LEN];
+        let len = NetChannelRequest::Facts.encode(&mut buf).expect("encode");
+        // Good baseline.
+        assert!(NetChannelRequest::decode(&buf[..len]).is_ok());
+        // Bad magic.
+        let mut bad = buf;
+        bad[0] ^= 0xFF;
+        assert_eq!(NetChannelRequest::decode(&bad[..len]), Err(Errno::BadMagic));
+        // Bad version.
+        let mut bad = buf;
+        bad[4] = 0xFF;
+        assert_eq!(
+            NetChannelRequest::decode(&bad[..len]),
+            Err(Errno::AbiVersionUnsupported)
+        );
+        // Dirty reserved byte.
+        let mut bad = buf;
+        bad[7] = 1;
+        assert_eq!(NetChannelRequest::decode(&bad[..len]), Err(Errno::BadMagic));
+        // Unknown op.
+        let mut bad = buf;
+        bad[6] = 0xEE;
+        assert_eq!(
+            NetChannelRequest::decode(&bad[..len]),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn decode_attach_rejects_bad_geometry_class_reserved() {
+        let mut buf = [0u8; NetChannelRequest::MAX_WIRE_LEN];
+        let len = attach().encode(&mut buf).expect("encode");
+        // Zero slots -> out of range geometry.
+        let mut bad = buf;
+        put_u32(&mut bad, HEADER_LEN, 0);
+        assert_eq!(
+            NetChannelRequest::decode(&bad[..len]),
+            Err(Errno::OutOfRange)
+        );
+        // Unknown buffer class byte.
+        let mut bad = buf;
+        bad[HEADER_LEN + 16] = 0x7F;
+        assert_eq!(
+            NetChannelRequest::decode(&bad[..len]),
+            Err(Errno::OutOfRange)
+        );
+        // Dirty reserved byte in the attach body.
+        let mut bad = buf;
+        bad[HEADER_LEN + 17] = 1;
+        assert_eq!(NetChannelRequest::decode(&bad[..len]), Err(Errno::BadMagic));
+        // Truncated attach body.
+        assert_eq!(
+            NetChannelRequest::decode(&buf[..=HEADER_LEN]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn notify_round_trips_and_fails_closed() {
+        let frame = NetChannelNotify::encode();
+        assert_eq!(NetChannelNotify::decode(&frame), Ok(NetChannelNotify));
+        let mut bad = frame;
+        bad[0] ^= 0xFF;
+        assert_eq!(NetChannelNotify::decode(&bad), Err(Errno::BadMagic));
+        let mut bad = frame;
+        bad[6] = 1;
+        assert_eq!(NetChannelNotify::decode(&bad), Err(Errno::BadMagic));
+        assert_eq!(
+            NetChannelNotify::decode(&frame[..7]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn facts_reply_round_trips_and_carries_errors() {
+        let ok = encode_facts_reply(Ok(facts()));
+        assert_eq!(decode_facts_reply(&ok), Ok(facts()));
+        let err = encode_facts_reply(Err(Errno::DeviceFault));
+        assert_eq!(decode_facts_reply(&err), Err(Errno::DeviceFault));
+    }
+
+    #[test]
+    fn facts_reply_rejects_corrupt_payload() {
+        let mut ok = encode_facts_reply(Ok(facts()));
+        // Corrupt the link byte.
+        ok[4 + MAC_ADDRESS_LEN + 10] = 0x55;
+        assert_eq!(decode_facts_reply(&ok), Err(Errno::OutOfRange));
+        // A runt MTU fails DeviceFacts::validate.
+        let mut ok = encode_facts_reply(Ok(facts()));
+        put_u32(&mut ok, 4 + MAC_ADDRESS_LEN, 1);
+        assert_eq!(decode_facts_reply(&ok), Err(Errno::OutOfRange));
+        // A dirty reserved byte.
+        let mut ok = encode_facts_reply(Ok(facts()));
+        ok[4 + MAC_ADDRESS_LEN + 11] = 1;
+        assert_eq!(decode_facts_reply(&ok), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn service_reply_round_trips_and_carries_errors() {
+        let report = ServiceReport {
+            transmitted: 3,
+            received: 7,
+            rx_ring_full: true,
+        };
+        let ok = encode_service_reply(Ok(report));
+        assert_eq!(decode_service_reply(&ok), Ok(report));
+        let err = encode_service_reply(Err(Errno::BadMagic));
+        assert_eq!(decode_service_reply(&err), Err(Errno::BadMagic));
+        // A flag byte that is neither 0 nor 1 is refused.
+        let mut bad = encode_service_reply(Ok(report));
+        bad[4 + 8] = 2;
+        assert_eq!(decode_service_reply(&bad), Err(Errno::OutOfRange));
+    }
+}

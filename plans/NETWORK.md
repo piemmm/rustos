@@ -484,14 +484,72 @@ docs, and the full gate) because the whole was too large for one change:
     round-trips (v4+v6), `fuzz_net_sockabi` (the serve path), and the
     `random_get` marshal tests. Docs: `docs/src/lib/net.md` and
     `docs/src/abi/net-sockets.md`.
-  - **Remaining:** the *live* end-to-end data path through the running
-    service, which needs a NIC bound into the `netstack` process (NIC
-    autobind / driver-channel handoff) — a distinct increment the plan
-    defers. Until it lands the socket control plane is fully served and a
-    live `send` fails closed (`NetworkUnreachable`, empty interface table);
-    the datagram data path is proven by the engine tests over the same
-    `SocketService` + `Stack` the live service runs. The two-process QEMU
-    vertical (UDP echo v4+v6, multicast) lands with that autobind work.
+  - The socket control plane is fully served; a live `send` fails closed
+    (`NetworkUnreachable`, empty interface table) until a NIC is bound
+    into the running process by N4d. The datagram data path is proven by
+    the engine tests over the same `SocketService` + `Stack` the live
+    service runs.
+
+### N4c — the cross-process NIC device-channel handoff contract `[x]`
+
+The stack and a NIC driver run as **separate processes** (the true
+microkernel shape, §2/§4). `lib/abi::driver::net_channel`
+(`rustos_abi::driver::net_channel`, `netchan-v1`) is the versioned,
+pure, fail-closed IPC control-plane contract that establishes and drives
+the [`net_ring`] frame region across that boundary:
+
+- The **driver** owns the device (MMIO/DMA/IRQ) and serves a call
+  endpoint; the **stack** is the client that owns the frame-ring region.
+  This is the display D7a `shm_grant` pattern with the roles inverted and
+  the data flowing both ways: the stack sizes a `RingGeometry` from the
+  device MTU, `shm_create`s the region, `shm_grant`s it to the driver's
+  endpoint (recipient resolved kernel-side from the endpoint — never a
+  recyclable PID), and forwards the unforgeable handle in `Attach`; the
+  driver `shm_map`s exactly that region (owner-checked — no ambient
+  authority).
+- Operations (`NetChannelRequest`): `Facts` (get `DeviceFacts` to size
+  geometry), `Attach { geometry, region_grant, class, notify_port }`,
+  `Service` (the doorbell — the driver services the mapped rings once and
+  replies a `ServiceReport`), `Detach`. Between doorbells the driver
+  parks on its device IRQ and wakes the stack with a `NetChannelNotify`
+  `ipc_send` to `notify_port` when receive frames arrive; the stack,
+  parked on that port in its wait set, issues the next `Service`. Neither
+  side ever busy-polls (§2.23).
+- Wire codecs for `DeviceFacts` (the `Facts` reply) and `ServiceReport`
+  (the `Service` reply) were added beside their types (evolved in place,
+  §2.13). Every decode is total, validates whole (magic, version,
+  reserved-must-be-zero, geometry/class bounds, `DeviceFacts::validate`),
+  and fails closed with one typed `Errno`.
+- Tests: host round-trip + fail-closed suites for every request, the
+  notify frame, and both reply frames; the shared `lib/abi` `fuzz_decode`
+  never-panic harness gained a `net_channel` arm. No new capability and
+  no new syscall — it is built entirely on the existing `shm_create`/
+  `shm_grant`/`shm_map`, endpoint, and `irq_wait` primitives. Docs:
+  `docs/src/drivers/network.md`.
+
+### N4d — live driver-process wiring + two-process QEMU vertical `[ ]`
+
+Wire the N4c contract end to end so a real NIC's frames reach the running
+`netstack` process (the increment N4b's control plane waits on):
+
+- A standalone `virtio_net` **driver process** (`main.rs`, the framebuffer
+  driver-process precedent): `RtDriverHost::from_grants_query` for its
+  device resources, bind its device endpoint, and serve the N4c
+  `NetChannelRequest` loop — `shm_map` the granted region on `Attach`,
+  drive the existing `Net::service` on `Service`, `irq_wait` + emit
+  `NetChannelNotify` on receive. The device logic stays in the driver's
+  `lib` (`Net` impl); the process is thin glue.
+- `netstack`: an interface entry backed by a live `NetChannel` client —
+  `shm_create` the region, `Facts`→geometry→`Attach`, add the driver
+  endpoint reply-port and the `notify_port` to the wait set, pump
+  `Service` on TX-ready / timer / notify. Engine unchanged.
+- `devmgr` autobind: on a matched network node, spawn the driver process
+  and hand `netstack` the driver's endpoint (capability-gated,
+  fail-closed, audited).
+- Tests: the two-process QEMU vertical (netstack process + virtio_net
+  driver process + host peer) — UDP echo v4+v6 and multicast join +
+  receive — across the three arch verticals; host tests of the netstack
+  channel client + driver serve loop over an in-process seam fake.
 
 ### N5 — TCP core: the RFC 9293 state machine, retransmission, flow control `[ ]`
 - Connection establishment/teardown (full state machine, simultaneous

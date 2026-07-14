@@ -55,6 +55,7 @@ pub mod mailbox;
 pub mod mmio;
 pub mod msix;
 pub mod net;
+pub mod net_channel;
 pub mod net_ring;
 pub mod pci;
 pub mod port_io;
