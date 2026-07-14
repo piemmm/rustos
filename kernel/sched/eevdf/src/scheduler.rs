@@ -658,6 +658,14 @@ impl<A: SchedulerArch> Scheduler<A> {
                 None => TaskAction::Exit,
             }
         };
+
+        // The body has returned: clear the current slot *before* settling
+        // the run into `busy_ticks`/`run_ticks`. `cpu_busy_ticks` /
+        // `cpu_ticks_of` add the in-flight span of whatever the current
+        // slot points at, so clearing first means the span this dispatch
+        // just completed is counted by `settle_run_accounting` and never
+        // also as in-flight — one span, one place.
+        self.clear_current(cpu);
         self.settle_run_accounting(cpu, &task, tick);
 
         // The task received one unit of service while it was active;
@@ -681,7 +689,6 @@ impl<A: SchedulerArch> Scheduler<A> {
             effective = TaskAction::Yield;
         }
 
-        self.clear_current(cpu);
         match effective {
             TaskAction::Exit => {
                 let prev = task.swap_state(TaskState::Exited);
@@ -747,15 +754,54 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// Cumulative ticks `id` has spent running, in
     /// [`SchedulerArch::ticks_now`] units.
     ///
+    /// Includes the in-flight span of a run that has started but not yet
+    /// returned to the dispatch loop (the task is still the current task
+    /// on its home CPU): a CPU-bound task that never yields is correctly
+    /// left unpreempted with its one-shot disarmed, so without this its
+    /// reported time would freeze between dispatch returns and appear to
+    /// jump only when it finally yielded.
+    ///
     /// # Errors
     /// * [`SchedError::NoSuchTask`] if the id is unknown (including an
     ///   exited task whose record has been drained).
     pub fn cpu_ticks_of(&self, id: TaskId) -> SchedResult<u64> {
-        self.tasks
-            .read()
-            .get(&id)
-            .map(|t| t.run_ticks.load(Ordering::Acquire))
-            .ok_or(SchedError::NoSuchTask)
+        let tasks = self.tasks.read();
+        let task = tasks.get(&id).ok_or(SchedError::NoSuchTask)?;
+        let settled = task.run_ticks.load(Ordering::Acquire);
+        let home = task.home_cpu.load(Ordering::Acquire);
+        let in_flight = if self.current_task(home) == Some(id) {
+            self.arch
+                .ticks_now()
+                .saturating_sub(task.last_started.load(Ordering::Acquire))
+        } else {
+            0
+        };
+        Ok(settled.saturating_add(in_flight))
+    }
+
+    /// Ticks the task currently dispatching on `cpu` has been running
+    /// since its last dispatch but has not yet settled into `busy_ticks`,
+    /// or `0` when the CPU is idle.
+    ///
+    /// A tickless, sole CPU-bound task runs without returning to the
+    /// dispatch loop (its one-shot is disarmed — nothing preempts it), so
+    /// it would otherwise contribute nothing to its CPU's busy total
+    /// until it finally yielded, making a fully-busy core read as idle
+    /// between dispatch returns. The current slot is cleared before
+    /// `settle_run_accounting` credits the completed span, so a span is
+    /// never counted both here and there.
+    fn in_flight_ticks(&self, cpu: CpuId) -> u64 {
+        let Some(id) = self.current_task(cpu) else {
+            return 0;
+        };
+        let started = {
+            let tasks = self.tasks.read();
+            let Some(task) = tasks.get(&id) else {
+                return 0;
+            };
+            task.last_started.load(Ordering::Acquire)
+        };
+        self.arch.ticks_now().saturating_sub(started)
     }
 
     /// Cumulative ticks `cpu` has spent inside task bodies, in
@@ -764,10 +810,12 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// # Errors
     /// * [`SchedError::NoSuchCpu`] if `cpu` is out of range.
     pub fn cpu_busy_ticks(&self, cpu: CpuId) -> SchedResult<u64> {
-        self.cpus
+        let settled = self
+            .cpus
             .get(cpu as usize)
             .map(|state| state.busy_ticks.load(Ordering::Acquire))
-            .ok_or(SchedError::NoSuchCpu)
+            .ok_or(SchedError::NoSuchCpu)?;
+        Ok(settled.saturating_add(self.in_flight_ticks(cpu)))
     }
 
     /// Task dispatches (context switches into a task body) on `cpu`,
@@ -1322,6 +1370,52 @@ mod tests {
         assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)));
         assert_eq!(sched.cpu_ticks_of(id), Ok(14));
         assert_eq!(sched.cpu_ticks_of(9999), Err(SchedError::NoSuchTask));
+    }
+
+    /// A task that is still running — its body has not yet returned to
+    /// the dispatch loop — has its elapsed run counted live, both in its
+    /// CPU's busy total and in its own CPU-time. This is what keeps a
+    /// tickless, never-yielding CPU-bound task from reading as 0% between
+    /// dispatch returns (and then spiking) instead of a steady 100%. The
+    /// span is settled exactly once, so the mid-run and post-run figures
+    /// agree rather than doubling.
+    #[test]
+    fn a_running_task_reports_in_flight_time_before_it_yields() {
+        let arch = Arc::new(TestArch::new(1).expect("arch"));
+        let sched =
+            Arc::new(Scheduler::new(SchedulerConfig::defaults_for(1), arch.clone()).unwrap());
+        let a2 = arch.clone();
+        let s2 = sched.clone();
+        let seen_cpu = Arc::new(AtomicU64::new(0));
+        let seen_task = Arc::new(AtomicU64::new(0));
+        let seen_cpu2 = seen_cpu.clone();
+        let seen_task2 = seen_task.clone();
+        let id = sched
+            .spawn(0, Priority::Normal, move |ctx| {
+                // Simulate 50 ticks of work, then observe *before* the
+                // body returns (while the task is still current).
+                a2.advance_ticks(50);
+                seen_cpu2.store(s2.cpu_busy_ticks(ctx.cpu).unwrap(), Ordering::Release);
+                seen_task2.store(s2.cpu_ticks_of(ctx.task_id).unwrap(), Ordering::Release);
+                TaskAction::Yield
+            })
+            .expect("spawn");
+        arch.set_current_cpu(0);
+        assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)));
+        assert_eq!(
+            seen_cpu.load(Ordering::Acquire),
+            50,
+            "per-CPU busy must count the in-flight run"
+        );
+        assert_eq!(
+            seen_task.load(Ordering::Acquire),
+            50,
+            "per-task CPU time must count the in-flight run"
+        );
+        // Settled exactly once after the body returned: no double count,
+        // and the current slot no longer contributes in-flight.
+        assert_eq!(sched.cpu_busy_ticks(0), Ok(50));
+        assert_eq!(sched.cpu_ticks_of(id), Ok(50));
     }
 
     #[test]

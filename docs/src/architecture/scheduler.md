@@ -589,16 +589,31 @@ clocks can never diverge. A drained (reaped) task reports
 implement the same contract and the shared conformance suite pins it
 (`cpu_time_is_accounted_per_dispatch`).
 
+The span of a run that has **started but not yet returned** to the
+dispatch loop is included live: the reported figure adds the elapsed
+time since the current run's `last_started` whenever the task is still
+the current task on its home CPU. Without this a tickless, CPU-bound
+task that never yields — correctly left unpreempted with its one-shot
+disarmed (a sole runnable task takes no timer interrupts) — would
+contribute nothing to the accounting until it finally yielded, so a
+utilisation sample would read it as idle between dispatch returns and
+then spike when the whole span settled at once. The current-task slot
+is cleared *before* `settle_run_accounting` credits the completed span,
+so a span is counted either as in-flight or as settled, never both.
+
 The same dispatch bracket also accumulates the span on the dispatching
 CPU (`busy_ticks`), exposed read-only through
 `SchedulerPolicy::cpu_busy_ticks(cpu)`. The per-CPU total survives task
 exit — a reaped task's time stays in its CPU's total — so it is the
 truthful cumulative "busy" half of the System Information busy/idle
 utilisation split (`CPU_TIME_STATS`); the introspect reader derives idle
-as the remainder of the same monotonic sample. An out-of-range CPU
-reports `SchedError::NoSuchCpu`, never a fabricated zero; the same
-conformance case pins that the CPU total equals the sum of the work
-dispatched on it.
+as the remainder of the same monotonic sample. It too includes the
+in-flight span of the task currently dispatching on the CPU, so a core
+running a sole never-yielding task reads as busy moment to moment rather
+than idle-then-spiking. An out-of-range CPU reports
+`SchedError::NoSuchCpu`, never a fabricated zero; the same conformance
+case pins that the CPU total equals the sum of the work dispatched on
+it.
 
 The same bracket counts one context switch per dispatched body, exposed
 read-only through `SchedulerPolicy::cpu_switches(cpu)`, and

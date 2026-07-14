@@ -148,8 +148,12 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     /// Accounted on the dispatch path: each dispatch brackets the task's
     /// run with two tick reads and accumulates the span, so the figure
     /// advances as work happens (tickless — no periodic sampling) and a
-    /// task that never ran reports zero. The unit is the port's tick;
-    /// the consumer converts to nanoseconds at read time so the hot path
+    /// task that never ran reports zero. The span of a run that has
+    /// *started but not yet returned* to the dispatch loop is included
+    /// live, so a CPU-bound task that never yields (correctly left
+    /// unpreempted with its one-shot disarmed) does not read as frozen
+    /// between dispatch returns. The unit is the port's tick; the
+    /// consumer converts to nanoseconds at read time so the hot path
     /// pays no division. A read-only observation for the System
     /// Information introspection feed.
     ///
@@ -164,10 +168,13 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     /// Accounted on the same dispatch bracket that credits the running
     /// task (`cpu_ticks_of`), so the per-CPU total advances as work
     /// happens (tickless — no periodic sampling) and survives task exit:
-    /// a reaped task's time stays in its CPU's total. The unit is the
-    /// port's tick; the consumer converts to nanoseconds at read time.
-    /// A read-only observation for the System Information introspection
-    /// feed's busy/idle utilisation split.
+    /// a reaped task's time stays in its CPU's total. The in-flight span
+    /// of the task currently dispatching on `cpu` is included live, so a
+    /// fully-busy core running a sole never-yielding task reads as busy
+    /// moment to moment rather than idle between dispatch returns. The
+    /// unit is the port's tick; the consumer converts to nanoseconds at
+    /// read time. A read-only observation for the System Information
+    /// introspection feed's busy/idle utilisation split.
     ///
     /// # Errors
     /// * [`crate::SchedError::NoSuchCpu`] if `cpu` is out of range.
