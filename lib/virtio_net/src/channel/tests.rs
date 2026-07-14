@@ -13,7 +13,10 @@ use rustos_abi::driver::net_ring::{FrameRings, RingGeometry, ServiceReport};
 use rustos_abi::driver::BufferClass;
 use rustos_abi::reply::decode_status_reply;
 use rustos_abi::DriverError;
-use rustos_abi::{Errno, PortName};
+use rustos_abi::Errno;
+
+/// A representative notify endpoint id (any non-reserved value).
+const NOTIFY_ENDPOINT: u64 = 0x4E45_5453_5430_3030;
 
 /// The mock device's MTU (standard Ethernet).
 const MTU: u32 = 1500;
@@ -80,7 +83,7 @@ fn attach_params(geometry: RingGeometry) -> AttachParams {
         geometry,
         region_grant: 0x1234,
         class: BufferClass::NonSensitive,
-        notify_port: PortName::from_ascii(b"netstack.nic0").expect("port"),
+        notify_endpoint: NOTIFY_ENDPOINT,
     }
 }
 
@@ -121,10 +124,7 @@ fn attach_stores_state_and_service_round_trips_a_frame() {
     assert!(decode_status_reply(&server.attach(attach_params(geom))).is_ok());
     assert!(server.is_attached());
     assert_eq!(server.geometry(), Some(geom));
-    assert_eq!(
-        server.notify_port(),
-        Some(PortName::from_ascii(b"netstack.nic0").expect("port"))
-    );
+    assert_eq!(server.notify_endpoint(), Some(NOTIFY_ENDPOINT));
 
     // Queue a frame in TX from the stack side, then doorbell.
     let mut region = alloc::vec![0u8; geom.region_len()];
@@ -176,6 +176,6 @@ fn detach_returns_to_the_detached_state() {
     assert!(server.is_attached());
     assert!(decode_status_reply(&server.detach()).is_ok());
     assert!(!server.is_attached());
-    assert_eq!(server.notify_port(), None);
+    assert_eq!(server.notify_endpoint(), None);
     assert_eq!(server.geometry(), None);
 }

@@ -1164,8 +1164,10 @@ fn local_group(addr: Ipv4Addr) -> SocketAddr {
 use crate::channel::NetChannelClient;
 use alloc::rc::Rc;
 use rustos_abi::driver::net_channel::NetChannelRequest;
-use rustos_abi::PortName;
 use rustos_virtio_net::NetChannelServer;
+
+/// A representative notify endpoint id the stack would `port_bind`.
+const NOTIFY_ENDPOINT: u64 = 0x4E45_5453_5430_3030;
 
 /// An echo device: every frame the stack queues on TX is handed straight
 /// back on RX, so one service call round-trips a raw frame through the
@@ -1260,14 +1262,13 @@ fn net_channel_client_round_trips_a_frame_through_the_server() {
     let facts = NetChannelClient::query_facts(&mut transport).expect("facts");
     assert_eq!(facts.mtu, 1500);
     let mut view = rings_region();
-    let notify = PortName::from_ascii(b"netstack.nic0").expect("port");
     let mut client = NetChannelClient::attach(
         transport,
         &mut view,
         GEOMETRY,
         BufferClass::NonSensitive,
         0xC0FE,
-        notify,
+        NOTIFY_ENDPOINT,
     )
     .expect("attach");
 
@@ -1307,7 +1308,6 @@ fn net_channel_client_attach_rejects_a_short_region() {
     // A stack view a byte short of the agreed geometry is refused before
     // any request is sent.
     let mut short = vec![0u8; GEOMETRY.region_len() - 1];
-    let notify = PortName::from_ascii(b"netstack.nic0").expect("port");
     assert_eq!(
         NetChannelClient::attach(
             transport,
@@ -1315,7 +1315,7 @@ fn net_channel_client_attach_rejects_a_short_region() {
             GEOMETRY,
             BufferClass::NonSensitive,
             0xC0FE,
-            notify,
+            NOTIFY_ENDPOINT,
         )
         .err(),
         Some(Errno::BufferTooSmall)

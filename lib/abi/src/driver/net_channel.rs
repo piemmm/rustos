@@ -51,7 +51,7 @@ use super::net::{DeviceFacts, LinkState, MacAddress, NetOffloads, MAC_ADDRESS_LE
 use super::net_ring::{RingGeometry, ServiceReport};
 use super::BufferClass;
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
-use crate::{Errno, PortName};
+use crate::Errno;
 
 /// Magic number identifying a device-channel request (`"NCHR"`).
 pub const NET_CHANNEL_REQUEST_MAGIC: u32 = u32::from_le_bytes(*b"NCHR");
@@ -61,6 +61,36 @@ pub const NET_CHANNEL_NOTIFY_MAGIC: u32 = u32::from_le_bytes(*b"NCHN");
 
 /// The `netchan-v1` protocol version.
 pub const NET_CHANNEL_VERSION_V1: u16 = 1;
+
+/// Base of the reserved device-channel call-endpoint id block
+/// (`"NCHAN\0\0\0"` little-endian). Each NIC driver process claims the
+/// first free id in `NET_CHANNEL_ENDPOINT_BASE ..
+/// NET_CHANNEL_ENDPOINT_BASE + NET_CHANNEL_ENDPOINT_COUNT` by binding it
+/// (the `drivers/bus/usb/xhci` block-claim precedent), so two NIC drivers
+/// never collide on an id without a central allocator.
+///
+/// The block is a reserved rendezvous
+/// ([`crate::ipc::is_reserved_endpoint`]): binding any id in it requires
+/// [`CapabilityId::IPC_BIND_PRIVILEGED`](crate::CapabilityId::IPC_BIND_PRIVILEGED),
+/// so an unprivileged squatter cannot bind one first and impersonate the
+/// driver to the stack. The driver additionally binds it **restricted
+/// sender**, requiring the caller to hold
+/// [`CapabilityId::NET_RAW`](crate::CapabilityId::NET_RAW) (driving a NIC's
+/// raw frame rings *is* raw network access), so the kernel refuses at
+/// dispatch every caller but the network stack — the receiver never
+/// re-checks.
+pub const NET_CHANNEL_ENDPOINT_BASE: u64 = u64::from_le_bytes(*b"NCHAN\0\0\0");
+
+/// Number of concurrently-bindable device-channel endpoint ids: the most
+/// NIC driver processes the stack serves at once. A fixed validation bound
+/// on the reserved block, not an interface-count capacity.
+pub const NET_CHANNEL_ENDPOINT_COUNT: u64 = 16;
+
+/// Whether `id` is one of the reserved device-channel endpoint ids.
+#[must_use]
+pub const fn is_net_channel_endpoint(id: u64) -> bool {
+    id >= NET_CHANNEL_ENDPOINT_BASE && id < NET_CHANNEL_ENDPOINT_BASE + NET_CHANNEL_ENDPOINT_COUNT
+}
 
 /// Operation discriminants (the request's fifth byte).
 mod op {
@@ -75,8 +105,8 @@ const HEADER_LEN: usize = 8;
 
 /// Wire length of the [`NetChannelRequest::Attach`] body that follows the
 /// header: geometry `slots` (4) + `slot_capacity` (4) + grant handle (8) +
-/// class (1) + reserved (3) + notify port name ([`PortName::WIRE_LEN`]).
-const ATTACH_BODY_LEN: usize = 4 + 4 + 8 + 1 + 3 + PortName::WIRE_LEN;
+/// class (1) + reserved (3) + notify endpoint id (8).
+const ATTACH_BODY_LEN: usize = 4 + 4 + 8 + 1 + 3 + 8;
 
 /// Largest device-channel request frame: the header plus the (largest)
 /// [`NetChannelRequest::Attach`] body. A fixed validation bound sizing the
@@ -115,10 +145,13 @@ pub struct AttachParams {
     pub region_grant: u64,
     /// Sensitivity class the driver honours for its internal staging.
     pub class: BufferClass,
-    /// The port the driver `ipc_send`s a [`NetChannelNotify`] to when
-    /// receive frames have arrived and the stack should issue the next
-    /// [`NetChannelRequest::Service`].
-    pub notify_port: PortName,
+    /// The numeric IPC endpoint the driver `ipc_send`s a
+    /// [`NetChannelNotify`] to when receive frames have arrived and the
+    /// stack should issue the next [`NetChannelRequest::Service`]. The
+    /// stack chose it, `port_bind`ed it, and parks on it in its wait set;
+    /// the driver only sends to the number (a bystander cannot forge the
+    /// wake because the stack owns the receive end).
+    pub notify_endpoint: u64,
 }
 
 impl NetChannelRequest {
@@ -161,8 +194,7 @@ impl NetChannelRequest {
             put_u64(out, HEADER_LEN + 8, params.region_grant);
             out[HEADER_LEN + 16] = params.class.as_u8();
             // out[HEADER_LEN + 17..HEADER_LEN + 20] reserved, left zero.
-            let port = params.notify_port.to_le_bytes();
-            out[HEADER_LEN + 20..HEADER_LEN + 20 + PortName::WIRE_LEN].copy_from_slice(&port);
+            put_u64(out, HEADER_LEN + 20, params.notify_endpoint);
         }
         Ok(len)
     }
@@ -212,23 +244,23 @@ impl NetChannelRequest {
                 return Err(Errno::BadMagic);
             }
         }
-        let notify_port =
-            PortName::from_bytes(&bytes[HEADER_LEN + 20..HEADER_LEN + 20 + PortName::WIRE_LEN])?;
+        let notify_endpoint = read_u64(bytes, HEADER_LEN + 20);
         Ok(Self::Attach(AttachParams {
             geometry,
             region_grant,
             class,
-            notify_port,
+            notify_endpoint,
         }))
     }
 }
 
 /// The driver → stack receive-frames wake (`plans/NETWORK.md` N4c).
 ///
-/// The driver `ipc_send`s this fixed frame to the [`AttachParams::notify_port`]
-/// when its device IRQ reports frames it could not immediately hand over; the
-/// stack, parked on that port, issues the next [`NetChannelRequest::Service`].
-/// It carries no payload — *which* channel woke is the port it arrived on.
+/// The driver `ipc_send`s this fixed frame to the
+/// [`AttachParams::notify_endpoint`] when its device IRQ reports frames it
+/// could not immediately hand over; the stack, parked on that port, issues
+/// the next [`NetChannelRequest::Service`]. It carries no payload — *which*
+/// channel woke is the port it arrived on.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct NetChannelNotify;
 
@@ -453,7 +485,7 @@ mod tests {
             geometry: geometry(),
             region_grant: 0xDEAD_BEEF_0BAD_F00D,
             class: BufferClass::Sensitive,
-            notify_port: PortName::from_ascii(b"netstack.nic0").expect("valid port"),
+            notify_endpoint: NET_CHANNEL_ENDPOINT_BASE,
         })
     }
 

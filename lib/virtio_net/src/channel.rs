@@ -43,7 +43,7 @@ use rustos_abi::driver::net_channel::{
 use rustos_abi::driver::net_ring::{FrameRings, RingGeometry, ServiceReport};
 use rustos_abi::driver::BufferClass;
 use rustos_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
-use rustos_abi::{Errno, PortName};
+use rustos_abi::Errno;
 
 /// The state a channel carries once the stack has attached its frame region.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -53,8 +53,9 @@ struct Attached {
     geometry: RingGeometry,
     /// Sensitivity class the device honours when scrubbing its staging.
     class: BufferClass,
-    /// Port the driver `ipc_send`s a receive-frames notify to.
-    notify_port: PortName,
+    /// Numeric IPC endpoint the driver `ipc_send`s a receive-frames notify
+    /// to (the stack bound and owns it).
+    notify_endpoint: u64,
 }
 
 /// The driver-side handler of one NIC device channel.
@@ -89,11 +90,11 @@ impl<N: Net> NetChannelServer<N> {
         self.attached.is_some()
     }
 
-    /// The port the driver notifies when receive frames arrive, or [`None`]
-    /// while detached.
+    /// The numeric IPC endpoint the driver notifies when receive frames
+    /// arrive, or [`None`] while detached.
     #[must_use]
-    pub fn notify_port(&self) -> Option<PortName> {
-        self.attached.as_ref().map(|a| a.notify_port)
+    pub fn notify_endpoint(&self) -> Option<u64> {
+        self.attached.as_ref().map(|a| a.notify_endpoint)
     }
 
     /// The agreed ring geometry, or [`None`] while detached. The process
@@ -142,7 +143,7 @@ impl<N: Net> NetChannelServer<N> {
         self.attached = Some(Attached {
             geometry: params.geometry,
             class: params.class,
-            notify_port: params.notify_port,
+            notify_endpoint: params.notify_endpoint,
         });
         Ok(())
     }

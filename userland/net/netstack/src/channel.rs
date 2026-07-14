@@ -28,7 +28,7 @@ use rustos_abi::driver::net_channel::{
 use rustos_abi::driver::net_ring::{FrameRings, RingGeometry, ServiceReport};
 use rustos_abi::driver::BufferClass;
 use rustos_abi::reply::decode_status_reply;
-use rustos_abi::{Errno, PortName};
+use rustos_abi::Errno;
 
 /// A link-layer frame service the interface pump drives.
 ///
@@ -179,7 +179,7 @@ impl<'r, T: NetChannelTransport> NetChannelClient<'r, T> {
     ///
     /// Sends [`NetChannelRequest::Attach`] with the agreed `geometry`, the
     /// `region_grant` handle the stack minted for the driver endpoint, the
-    /// traffic `class`, and the `notify_port` the driver wakes on. On the
+    /// traffic `class`, and the `notify_endpoint` the driver wakes on. On the
     /// driver's success reply the client owns the channel.
     ///
     /// # Errors
@@ -195,7 +195,7 @@ impl<'r, T: NetChannelTransport> NetChannelClient<'r, T> {
         geometry: RingGeometry,
         class: BufferClass,
         region_grant: u64,
-        notify_port: PortName,
+        notify_endpoint: u64,
     ) -> Result<Self, Errno> {
         if region.len() != geometry.region_len() {
             return Err(Errno::BufferTooSmall);
@@ -204,7 +204,7 @@ impl<'r, T: NetChannelTransport> NetChannelClient<'r, T> {
             geometry,
             region_grant,
             class,
-            notify_port,
+            notify_endpoint,
         };
         let mut request = [0u8; NetChannelRequest::MAX_WIRE_LEN];
         let len = NetChannelRequest::Attach(params).encode(&mut request)?;

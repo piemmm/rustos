@@ -26,9 +26,11 @@ pub const IPC_MESSAGE_MAX_PAYLOAD_LEN: u32 = 1 << 20;
 /// Information service ([`crate::sysinfo::SYSINFO_ENDPOINT`]), the seat
 /// manager ([`crate::seat::SEATMGR_ENDPOINT`]), the display service
 /// ([`crate::display_ipc::DISPLAY_ENDPOINT`]), the desktop session's
-/// window service ([`crate::window_ipc::WINDOW_ENDPOINT`]), and the
-/// per-console elevation supervisors
-/// ([`crate::elevate::ELEVATE_ENDPOINT_BASE`] through
+/// window service ([`crate::window_ipc::WINDOW_ENDPOINT`]), the per-NIC
+/// driver device channels
+/// ([`crate::driver::net_channel::NET_CHANNEL_ENDPOINT_BASE`] through
+/// `+ NET_CHANNEL_ENDPOINT_COUNT`), and the per-console elevation
+/// supervisors ([`crate::elevate::ELEVATE_ENDPOINT_BASE`] through
 /// `ELEVATE_ENDPOINT_BASE + CONSOLE_INDEX_MAX`).
 ///
 /// Binding a reserved id requires
@@ -51,6 +53,9 @@ pub const fn is_reserved_endpoint(id: u64) -> bool {
         || id == crate::net_ipc::NETSTACK_ENDPOINT
         || id == crate::net::NETSTACK_SOCKET_ENDPOINT
     {
+        return true;
+    }
+    if crate::driver::net_channel::is_net_channel_endpoint(id) {
         return true;
     }
     let elevate_base = crate::elevate::ELEVATE_ENDPOINT_BASE;

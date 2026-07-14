@@ -173,6 +173,27 @@ pub enum NetstackRequest {
         /// Most records to return (`1..=NETSTACK_LIST_LIMIT_MAX`).
         limit: u16,
     },
+    /// Bind a live NIC driver process's device channel to a new managed
+    /// interface (admin surface).
+    ///
+    /// The device manager sends this after it has spawned a NIC driver
+    /// process and observed the driver publish its device-channel
+    /// rendezvous: the stack becomes the [`crate::driver::net_channel`]
+    /// client of `endpoint_id`, sizes the frame region from the device's
+    /// facts, attaches, and manages the interface under the admin-chosen
+    /// alias `iface`. Every parameter the interface needs beyond these two
+    /// — the device MAC, MTU, and offloads — the stack learns from the
+    /// driver's `Facts` reply, and the IPv6 interface identifier and IPv4
+    /// identification seed it derives itself; the caller names only *which*
+    /// endpoint to bind and *what to call* the interface.
+    BindDriver {
+        /// The reserved device-channel call-endpoint id the NIC driver
+        /// process bound (a [`crate::driver::net_channel::NET_CHANNEL_ENDPOINT_BASE`]
+        /// block id); the stack `ipc_call`s it as the channel client.
+        endpoint_id: u64,
+        /// The interface's admin-chosen alias, NUL-padded.
+        iface: [u8; IF_NAME_LEN],
+    },
 }
 
 /// Wire operation discriminant of [`NetstackRequest::InterfaceList`].
@@ -187,6 +208,8 @@ const OP_COUNTERS: u16 = 4;
 const OP_IF_FACTS: u16 = 5;
 /// Wire operation discriminant of [`NetstackRequest::InterfaceState`].
 const OP_IF_STATE: u16 = 6;
+/// Wire operation discriminant of [`NetstackRequest::BindDriver`].
+const OP_BIND_DRIVER: u16 = 7;
 
 impl NetstackRequest {
     /// Encoded size on the wire: magic (4), version (2), op (2), and a
@@ -245,6 +268,11 @@ impl NetstackRequest {
                 put_u16(&mut out, 6, OP_IF_STATE);
                 put_u32(&mut out, 8, offset);
                 put_u16(&mut out, 12, limit);
+            }
+            Self::BindDriver { endpoint_id, iface } => {
+                put_u16(&mut out, 6, OP_BIND_DRIVER);
+                put_u64(&mut out, 8, endpoint_id);
+                out[16..32].copy_from_slice(&iface);
             }
         }
         out
@@ -340,6 +368,14 @@ impl NetstackRequest {
                 } else {
                     Self::InterfaceState { offset, limit }
                 })
+            }
+            OP_BIND_DRIVER => {
+                reserved_zero(bytes, 32)?;
+                let endpoint_id = read_u64(bytes, 8);
+                let mut iface = [0u8; IF_NAME_LEN];
+                iface.copy_from_slice(&bytes[16..32]);
+                validate_if_name(&iface)?;
+                Ok(Self::BindDriver { endpoint_id, iface })
             }
             _ => Err(Errno::OutOfRange),
         }

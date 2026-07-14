@@ -126,11 +126,15 @@ pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::NET_ADMIN,
 ];
 
-/// The `devmgr` service account's grant ceiling: read the hardware tree
-/// and load matched drivers, nothing else.
+/// The `devmgr` service account's grant ceiling: read the hardware tree,
+/// load matched drivers, and bind an autoloaded NIC driver's device
+/// channel into the network stack. `CAP_NET_ADMIN` is held only for that
+/// last act — the `BindDriver` admin call the stack gates on it — never to
+/// configure addresses or routes itself.
 pub const DEVMGR_CEILING: &[CapabilityId] = &[
     CapabilityId::SYSINFO_HW,
     CapabilityId::DRV_LOAD,
+    CapabilityId::NET_ADMIN,
     CapabilityId::LOG_EMIT,
 ];
 
@@ -144,11 +148,16 @@ pub const SYSINFOD_CEILING: &[CapabilityId] = &[
 ];
 
 /// The `netstack` service account's grant ceiling: drive the NIC frame
-/// rings and serve the privileged network endpoint. It deliberately
-/// does **not** carry `CAP_NET_ADMIN` — the service *enforces* that
-/// capability against its callers; it never needs to hold it.
+/// rings and serve the privileged network endpoint. `CAP_NET_RAW` also
+/// lets it call a NIC driver's restricted-sender device channel (the
+/// kernel gates that endpoint on `CAP_NET_RAW`); `CAP_SHM` lets it own the
+/// shared frame-ring region it creates and grants to the driver. It
+/// deliberately does **not** carry `CAP_NET_ADMIN` — the service
+/// *enforces* that capability against its callers; it never needs to hold
+/// it.
 pub const NETSTACK_CEILING: &[CapabilityId] = &[
     CapabilityId::NET_RAW,
+    CapabilityId::SHM,
     CapabilityId::IPC_BIND_PRIVILEGED,
     CapabilityId::LOG_EMIT,
 ];
@@ -269,9 +278,9 @@ mod tests {
     /// service ceiling contains a sibling's defining capability.
     #[test]
     fn service_ceilings_are_pinned_and_disjoint_in_authority() {
-        assert_eq!(DEVMGR_CEILING.len(), 3);
+        assert_eq!(DEVMGR_CEILING.len(), 4);
         assert_eq!(SYSINFOD_CEILING.len(), 4);
-        assert_eq!(NETSTACK_CEILING.len(), 3);
+        assert_eq!(NETSTACK_CEILING.len(), 4);
         assert_eq!(SEATMGR_CEILING.len(), 3);
         assert_eq!(LOGIN_CEILING.len(), 9);
         let devmgr = capability_set(DEVMGR_CEILING);

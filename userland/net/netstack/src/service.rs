@@ -155,6 +155,16 @@ pub fn serve(
                 .collect();
             encode_page_reply(&records, response)
         }
+        NetstackRequest::BindDriver { .. } => {
+            // Binding a NIC driver's device channel creates and grants a
+            // shared-memory region and issues IPC to the driver — I/O the
+            // pure engine dispatcher cannot perform. The freestanding
+            // transport loop intercepts `BindDriver` and carries it out over
+            // its live syscall seams before ever reaching this dispatcher;
+            // arriving here means it was routed to a path that cannot
+            // service it, so refuse fail-closed rather than pretend.
+            Err(Errno::NotSupported)
+        }
     }
 }
 
@@ -217,6 +227,7 @@ fn op_field(request: &NetstackRequest) -> Field<'static> {
         NetstackRequest::Counters { .. } => "counters",
         NetstackRequest::InterfaceFacts { .. } => "interface facts",
         NetstackRequest::InterfaceState { .. } => "interface state",
+        NetstackRequest::BindDriver { .. } => "bind driver",
     };
     Field {
         key: "op",
