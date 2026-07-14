@@ -1,9 +1,14 @@
 # `rustos-drv-network-virtio-net` — virtio-net link-layer driver
 
-Stage 4 deliverable. Implements `rustos_abi::driver::net::Net` on top
-of the cross-arch virtio transport in `drivers/bus/virtio`. As with
-`virtio_blk`, the driver is **bus-agnostic** — the same source
-compiles against the PCI (x86_64) and MMIO (aarch64, riscv64) backends.
+Stage 4 deliverable. The bus-agnostic device engine (bring-up +
+frame-ring `rustos_abi::driver::net::Net` service) lives in the
+`lib/virtio_net` crate and is **re-exported** here as `VirtioNet`; this
+crate is the driver-host registration shell (`register`) over it. The
+engine is hoisted into `lib/*` (not kept in this `drivers/*` crate) so a
+user-space driver *process* can link it directly — a process crate may
+depend on `lib/*` but never on another `drivers/*` crate (`AGENTS.md`
+§17.4). As with `virtio_blk`, the same engine source compiles against
+the PCI (x86_64) and MMIO (aarch64, riscv64) backends.
 
 ## Wire protocol
 
@@ -49,21 +54,12 @@ remains the caller's responsibility.
 
 ## Test surface
 
-`cargo test -p rustos-drv-network-virtio-net` exercises:
-
-- `open` reads MAC from the device-configuration window.
-- `transmit` round-trips an Ethernet frame through the in-process
-  peer.
-- `receive` returns a queued frame; idle queue returns `Ok(0)`.
-- Frame-size validation (undersize → `BufferTooSmall`, oversize →
-  `LengthOutOfRange`).
-- Empty receive buffer rejected.
-- `BufferClass::Sensitive` transmit + receive round-trip.
-- `register` capability gate.
-
-9/9 host-side tests pass; ARP + ICMP round-trip against
-`qemu user net` requires the userland networking stack documented as
-item 5 of `.junie/next-session-prompt.md`.
+`cargo test -p rustos-drv-network-virtio-net` exercises the driver-host
+`register` capability gate. The device-engine host tests (`open` reads
+the MAC, TX/RX frame-ring round-trips, runt/oversize/corrupt-slot
+handling, `BufferClass::Sensitive` scrubbing, and the no-per-packet-DMA
+steady-state invariant) live with the engine in `lib/virtio_net`
+(`cargo test -p rustos-virtio-net`).
 
 ## Public surface
 

@@ -370,23 +370,3 @@ fn corrupt_tx_slot_is_consumed_and_flow_continues() {
     assert_eq!(report.transmitted, 1);
     assert_eq!(tx_log.borrow().len(), 1);
 }
-
-#[test]
-fn register_requires_drv_load() {
-    struct H {
-        grant: bool,
-    }
-    impl DriverHost for H {
-        fn has_capability(&self, cap: CapabilityId) -> bool {
-            cap == CapabilityId::DRV_LOAD && self.grant
-        }
-        fn kind(&self) -> rustos_abi::driver::DriverKind {
-            rustos_abi::driver::DriverKind::UserSpace
-        }
-    }
-    assert_eq!(
-        register(&H { grant: false }),
-        Err(DriverError::PermissionDenied)
-    );
-    assert!(register(&H { grant: true }).is_ok());
-}

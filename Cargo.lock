@@ -980,7 +980,7 @@ name = "rustos-drv-network-virtio-net"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
- "rustos-virtio",
+ "rustos-virtio-net",
 ]
 
 [[package]]
@@ -3821,6 +3821,14 @@ dependencies = [
  "rustos-abi",
  "rustos-input",
  "rustos-keymap",
+ "rustos-virtio",
+]
+
+[[package]]
+name = "rustos-virtio-net"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
  "rustos-virtio",
 ]
 
