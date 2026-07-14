@@ -160,7 +160,10 @@ impl TransformClusterCache {
         sink: &'static (dyn Sink + Sync),
     ) -> Box<dyn ClusterCache> {
         let cache = Self::new(
-            CacheBudget::from_backing(rustos_kalloc::HEAP_BYTES),
+            // Budget from discovered physical RAM (the growable kernel heap's
+            // bootstrap size is no longer the memory to size a cache against);
+            // falls back to the bootstrap size before RAM is published.
+            CacheBudget::from_backing(rustos_kernel_core::memstats::cache_backing_bytes()),
             ReclaimOwner::FilesystemVolume { volume },
             pressure,
             sink,

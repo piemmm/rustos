@@ -11,13 +11,29 @@
 //!   [`AllocError::InvariantViolation`].
 //!
 //! - **Buddy free lists.** For every order `0..=MAX_ORDER` we keep a
-//!   `BTreeSet<usize>` of the starting frame indices of free blocks of
-//!   exactly that order. Splits push two half-blocks to `order - 1`;
-//!   merges pop a buddy at `order` and push the parent at `order + 1`.
-//!   The bitmap is consulted on every merge to refuse merging across
-//!   reserved boundaries (this is the "hybrid" part — reserved frames
-//!   look identical to allocated frames at the bitmap level, so the
-//!   buddy never reaches across them).
+//!   doubly-linked list of free blocks of exactly that order, threaded
+//!   through a per-frame `nodes` array indexed by starting frame. Splits
+//!   push two half-blocks to `order - 1`; merges pop a buddy at `order`
+//!   and push the parent at `order + 1`. The bitmap is consulted on
+//!   every merge to refuse merging across reserved boundaries (this is
+//!   the "hybrid" part — reserved frames look identical to allocated
+//!   frames at the bitmap level, so the buddy never reaches across them).
+//!
+//! # No dependency on the kernel heap
+//!
+//! The per-order free lists are **intrusive**: their links live in the
+//! `nodes`/`blk_order` arrays this allocator owns, both sized once from
+//! the frame count at construction. Allocation and freeing therefore
+//! touch no other allocator — critically, they never call the global
+//! kernel heap. This is what lets the kernel heap grow by drawing frames
+//! from here without re-entering itself (a heap that fed itself through
+//! a page allocator whose free lists allocated *from that heap* would
+//! deadlock under its own lock). The only heap use is the one-time
+//! `nodes`/`blk_order`/`bitmap` construction, before the heap is under
+//! load. Each free block occupies at most one node (its start frame),
+//! so the per-frame overhead is a fixed `2 * usize + 1` byte — far
+//! leaner than a per-frame descriptor, and proportional to the RAM the
+//! machine actually has.
 //!
 //! # Concurrency
 //!
@@ -31,7 +47,6 @@
 //! `alloc` / `alloc_order` return [`AllocError::OutOfMemory`]; the
 //! allocator never panics on resource exhaustion.
 
-use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
@@ -56,6 +71,15 @@ pub const PAGE_SHIFT: u32 = 12;
 /// huge-page or DMA-coherent allocation while keeping the per-order
 /// metadata fixed-size.
 pub const MAX_ORDER: u32 = 11;
+
+/// Fraction of usable RAM held back as a kernel reserve: `usable_frames /
+/// RESERVE_DIVISOR` frames a *user* commit may never draw into, so the
+/// kernel always retains headroom to make progress (grow its heap, build
+/// page tables, service a fault) even when userland is starving the
+/// machine. The one definition shared with the memory-pressure policy
+/// (`crate::pressure`), so the frame allocator's user-commit floor and the
+/// pressure band's critical floor can never diverge. ~1.6% of RAM.
+pub const RESERVE_DIVISOR: usize = 64;
 
 /// Type alias for "number of frames", used to keep call-site arithmetic
 /// distinct from frame-index arithmetic.
@@ -120,19 +144,85 @@ impl Frame {
 // State (private)
 // ---------------------------------------------------------------------------
 
+/// Sentinel for "no frame" in the intrusive free-list links and heads.
+///
+/// `usize::MAX` can never be a real frame index: valid indices are
+/// `0..total_frames`, and `total_frames` is derived from a physical
+/// address that fits `u64`, so the largest index is always strictly below
+/// `usize::MAX` on every Tier-1 (64-bit) port.
+const NIL: usize = usize::MAX;
+
+/// Sentinel for "this frame is not a registered free-block head" in
+/// [`FrameAllocatorState::blk_order`]. A real order is `0..=MAX_ORDER`
+/// (≤ 11), so `0xFF` never collides.
+const NOT_A_HEAD: u8 = 0xFF;
+
+/// One entry of the intrusive per-order free list, indexed by the free
+/// block's starting frame.
+///
+/// Only a block's *start* frame is ever a live node; the interior frames
+/// of a block carry stale link values that are never read (the block is
+/// found and unlinked by its start alone). Both links are [`NIL`] when
+/// the frame is not the head/tail of its order's list.
+#[derive(Clone, Copy)]
+struct FrameNode {
+    /// Next free block of the same order, or [`NIL`].
+    next: usize,
+    /// Previous free block of the same order, or [`NIL`].
+    prev: usize,
+}
+
+impl FrameNode {
+    const UNLINKED: Self = Self {
+        next: NIL,
+        prev: NIL,
+    };
+}
+
 /// Internal, lock-free state of the frame allocator.
 ///
 /// `FrameAllocatorState` is what the [`SpinLock`] in [`FrameAllocator`]
 /// guards. Splitting it out makes the locking discipline explicit and
 /// lets the unit tests exercise the algorithm without spinlock noise.
+///
+/// The per-order free lists are intrusive (see the module docs): a heap
+/// allocation never occurs on the allocate/free paths, only on the
+/// one-time construction of `bitmap`/`nodes`/`blk_order`.
 struct FrameAllocatorState {
-    /// `total_frames` = number of bit positions in the bitmap.
+    /// Address-space extent, in frames: the frame count from physical zero
+    /// to the highest mapped address. Reported by [`FrameAllocator::total_frames`]
+    /// as a diagnostic; it is **not** the size of any per-frame array — the
+    /// bitmap and the intrusive arrays are all sized to the *usable* span
+    /// (`span`) and indexed from `base_frame`.
     total_frames: usize,
-    /// Bit set = "frame is allocated, reserved, or non-existent."
+    /// Lowest usable frame index — the base every per-frame array
+    /// (`bitmap`, `nodes`, `blk_order`) is indexed from. A frame `f` maps to
+    /// slot `f - base_frame`. Sizing the arrays to the *usable* frame span
+    /// rather than to the whole address-space extent keeps the per-frame
+    /// bookkeeping proportional to the RAM the machine actually has, so a
+    /// map whose usable window sits at a very high physical address does not
+    /// cost arrays indexed from frame zero.
+    base_frame: usize,
+    /// Number of frames the base-relative arrays cover: `hi - base_frame`,
+    /// where `hi` is one past the highest usable frame. A frame outside
+    /// `[base_frame, base_frame + span)` is not represented and is treated
+    /// as "used" by [`Self::bit`] (it is reserved, a hole, or non-existent).
+    span: usize,
+    /// Bit set = "frame is allocated, reserved, or non-existent", one bit
+    /// per frame of the usable span (indexed by `frame - base_frame`).
     bitmap: Vec<u64>,
-    /// `free_lists[order]` = set of free block starts of that order.
-    free_lists: Vec<BTreeSet<usize>>,
-    /// Cached count of free frames (sum over `free_lists` of 2^order * len).
+    /// Intrusive free-list links, one per frame of the usable span (indexed
+    /// by `frame - base_frame`). Only a free block's start frame holds live
+    /// links.
+    nodes: Vec<FrameNode>,
+    /// The order a free block starting at this frame is registered at, or
+    /// [`NOT_A_HEAD`] (indexed by `frame - base_frame`). Lets an arbitrary
+    /// buddy be found and unlinked in O(1) without scanning.
+    blk_order: Vec<u8>,
+    /// `free_heads[order]` = starting frame of the first free block of
+    /// that order, or [`NIL`].
+    free_heads: [usize; MAX_ORDER as usize + 1],
+    /// Cached count of free frames (sum over the free lists of 2^order).
     free_frames: usize,
     /// Number of whole frames inside `Usable` boot-map regions — the RAM
     /// the allocator can ever hand out. Excludes reserved regions and
@@ -140,20 +230,47 @@ struct FrameAllocatorState {
     /// so `usable_frames - free_frames` is real allocation, fixed after
     /// construction.
     usable_frames: usize,
+    /// Kernel reserve floor, in frames (`usable_frames / RESERVE_DIVISOR`).
+    /// A *user* commit ([`FrameAllocator::alloc_user`] /
+    /// [`FrameAllocator::alloc_order_user`]) is refused when it would drop
+    /// `free_frames` to or below this, so the kernel always keeps headroom
+    /// to make progress (heap growth, page-table build, fault service).
+    /// Kernel-internal allocations draw the whole pool. Fixed after
+    /// construction.
+    reserve_frames: usize,
 }
 
 impl FrameAllocatorState {
+    /// The bitmap slot for `frame`, or `None` when `frame` lies outside the
+    /// represented usable span `[base_frame, base_frame + span)`.
+    #[inline]
+    fn bit_slot(&self, frame: usize) -> Option<usize> {
+        frame
+            .checked_sub(self.base_frame)
+            .filter(|&i| i < self.span)
+    }
+
+    /// Is `frame` marked used? A frame outside the usable span is not
+    /// represented in the bitmap and is treated as used (reserved, a
+    /// physical-address hole, or non-existent) — so a buddy probe that
+    /// walks off either end of the usable window never merges across it.
     fn bit(&self, frame: usize) -> bool {
-        let (w, b) = (frame / 64, frame % 64);
-        (self.bitmap[w] >> b) & 1 == 1
+        match self.bit_slot(frame) {
+            Some(i) => (self.bitmap[i / 64] >> (i % 64)) & 1 == 1,
+            None => true,
+        }
     }
+    /// Mark a usable-span frame used. Only ever called for a frame the
+    /// caller has already confirmed is inside the span (an allocated block).
     fn set_bit(&mut self, frame: usize) {
-        let (w, b) = (frame / 64, frame % 64);
-        self.bitmap[w] |= 1u64 << b;
+        let i = frame - self.base_frame;
+        self.bitmap[i / 64] |= 1u64 << (i % 64);
     }
+    /// Mark a usable-span frame free. Only ever called for a frame inside
+    /// the span (a usable run at construction, or a freed allocation).
     fn clear_bit(&mut self, frame: usize) {
-        let (w, b) = (frame / 64, frame % 64);
-        self.bitmap[w] &= !(1u64 << b);
+        let i = frame - self.base_frame;
+        self.bitmap[i / 64] &= !(1u64 << (i % 64));
     }
 
     /// Mark frames `[start, start + count)` as allocated/reserved.
@@ -164,9 +281,18 @@ impl FrameAllocatorState {
     }
 
     /// Are all frames in `[start, start + (1<<order))` free in the bitmap?
+    ///
+    /// A block that reaches outside the represented usable span is never
+    /// "free": those frames are not backed by the bitmap and are treated as
+    /// used, so a buddy merge can never fuse a usable block with a
+    /// reserved/hole region beyond the window (`bit` returns `true` for
+    /// them, but the span check short-circuits before indexing).
     fn block_is_free(&self, start: usize, order: u32) -> bool {
         let n = 1usize << order;
-        if start + n > self.total_frames {
+        let Some(rel) = start.checked_sub(self.base_frame) else {
+            return false;
+        };
+        if rel.checked_add(n).map_or(true, |e| e > self.span) {
             return false;
         }
         for i in start..start + n {
@@ -177,18 +303,67 @@ impl FrameAllocatorState {
         true
     }
 
+    /// The compact-array slot for `frame`: its offset from `base_frame`.
+    /// Every free-block start is a usable frame, so it is always
+    /// `>= base_frame` and in range.
+    #[inline]
+    fn slot(&self, frame: usize) -> usize {
+        frame - self.base_frame
+    }
+
     /// Insert a maximally-aligned free block into the buddy lists.
+    ///
+    /// `start` must be an off-list, aligned block start of `order`; it
+    /// becomes the new head of that order's intrusive list.
     fn add_free_block(&mut self, start: usize, order: u32) {
-        self.free_lists[order as usize].insert(start);
+        let head = self.free_heads[order as usize];
+        let s = self.slot(start);
+        self.nodes[s] = FrameNode {
+            next: head,
+            prev: NIL,
+        };
+        if head != NIL {
+            let h = self.slot(head);
+            self.nodes[h].prev = start;
+        }
+        self.free_heads[order as usize] = start;
+        // `order <= MAX_ORDER` (11) by construction, so it fits a `u8`.
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            self.blk_order[s] = order as u8;
+        }
         self.free_frames += 1usize << order;
     }
 
+    /// Unlink the free block starting at `start` from `order`'s list.
+    ///
+    /// Returns `false` (and changes nothing) when `start` is not a
+    /// registered free-block head of exactly `order` — the caller then
+    /// knows the buddy is split into smaller blocks and cannot merge.
     fn remove_free_block(&mut self, start: usize, order: u32) -> bool {
-        let removed = self.free_lists[order as usize].remove(&start);
-        if removed {
-            self.free_frames -= 1usize << order;
+        // `start` may be any frame the merge logic probes, including one
+        // below `base_frame`; resolve the slot fail-safe.
+        let Some(s) = start.checked_sub(self.base_frame) else {
+            return false;
+        };
+        if self.blk_order.get(s).copied().map(u32::from) != Some(order) {
+            return false;
         }
-        removed
+        let FrameNode { next, prev } = self.nodes[s];
+        if prev == NIL {
+            self.free_heads[order as usize] = next;
+        } else {
+            let p = self.slot(prev);
+            self.nodes[p].next = next;
+        }
+        if next != NIL {
+            let n = self.slot(next);
+            self.nodes[n].prev = prev;
+        }
+        self.nodes[s] = FrameNode::UNLINKED;
+        self.blk_order[s] = NOT_A_HEAD;
+        self.free_frames -= 1usize << order;
+        true
     }
 
     /// Greedy insertion of every free run discovered in `[start, end)`:
@@ -219,20 +394,19 @@ impl FrameAllocatorState {
         // Find lowest order ≥ `order` with a non-empty free list.
         let mut found: Option<u32> = None;
         for o in order..=MAX_ORDER {
-            if !self.free_lists[o as usize].is_empty() {
+            if self.free_heads[o as usize] != NIL {
                 found = Some(o);
                 break;
             }
         }
         let mut cur = found.ok_or(AllocError::OutOfMemory)?;
-        // Pop the lowest-indexed block at `cur` (deterministic for tests).
-        let start = *self.free_lists[cur as usize]
-            .iter()
-            .next()
-            .ok_or(AllocError::OutOfMemory)?;
-        let removed = self.free_lists[cur as usize].remove(&start);
+        // Pop the head block at `cur`. The intrusive list is LIFO, so the
+        // head is the most recently freed/split block of this order —
+        // deterministic, and O(1).
+        let start = self.free_heads[cur as usize];
+        debug_assert_ne!(start, NIL);
+        let removed = self.remove_free_block(start, cur);
         debug_assert!(removed);
-        self.free_frames -= 1usize << cur;
 
         // Split down to the requested order.
         while cur > order {
@@ -250,8 +424,14 @@ impl FrameAllocatorState {
             return Err(AllocError::SizeUnsupported);
         }
         let n = 1usize << order;
-        // Range checks.
-        if start.checked_add(n).map_or(true, |e| e > self.total_frames) {
+        // Range checks: a validly-freed block lies wholly inside the usable
+        // span, since it was handed out from a usable run. Checking against
+        // the span (not the address-space extent) keeps every subsequent
+        // `clear_bit` in bounds.
+        let Some(rel) = start.checked_sub(self.base_frame) else {
+            return Err(AllocError::OutOfRange);
+        };
+        if rel.checked_add(n).map_or(true, |e| e > self.span) {
             return Err(AllocError::OutOfRange);
         }
         if start & (n - 1) != 0 {
@@ -275,9 +455,13 @@ impl FrameAllocatorState {
         let mut cur_order = order;
         while cur_order < MAX_ORDER {
             let buddy = cur_start ^ (1usize << cur_order);
-            // Refuse to merge across an end-of-RAM boundary.
+            // Refuse to merge across the end of the usable window.
             let parent_start = cur_start & !(1usize << cur_order);
-            if parent_start + (1usize << (cur_order + 1)) > self.total_frames {
+            let past_end = parent_start
+                .checked_sub(self.base_frame)
+                .and_then(|p| p.checked_add(1usize << (cur_order + 1)))
+                .map_or(true, |e| e > self.span);
+            if past_end {
                 break;
             }
             // Refuse to merge if any frame in the buddy half is not
@@ -364,23 +548,13 @@ impl FrameAllocator {
             return Err(AllocError::OutOfMemory);
         }
 
-        // 2. Allocate bitmap and free lists. All "1" initially — any
-        //    frame not subsequently marked usable stays reserved.
-        let words = total_frames.div_ceil(64);
-        let bitmap = vec![u64::MAX; words];
-        let mut free_lists = Vec::with_capacity(MAX_ORDER as usize + 1);
-        for _ in 0..=MAX_ORDER {
-            free_lists.push(BTreeSet::new());
-        }
-        let mut state = FrameAllocatorState {
-            total_frames,
-            bitmap,
-            free_lists,
-            free_frames: 0,
-            usable_frames: 0,
-        };
+        // A `usize` frame count can never reach the `NIL` sentinel: valid
+        // frame indices are `0..total_frames`, so the largest possible index
+        // is `total_frames - 1 < usize::MAX == NIL`. `NIL` therefore never
+        // collides with a real index for any representable `total_frames`,
+        // and no explicit guard is needed here.
 
-        // 3. Detect overlaps by sorting by start and scanning.
+        // 2. Detect overlaps by sorting by start and scanning.
         let mut sorted: Vec<_> = map.regions().to_vec();
         sorted.sort_by_key(|r| r.start.as_u64());
         for win in sorted.windows(2) {
@@ -390,9 +564,15 @@ impl FrameAllocator {
             }
         }
 
-        // 4. Build per-frame state: only Usable regions clear bits.
-        //    Reserved regions remain marked "used".
-        let mut any_usable = false;
+        // 3. Pre-pass over the Usable regions: collect the inward-rounded
+        //    frame runs (the zero page excluded) and the `[lo, hi)` span of
+        //    usable frames. The intrusive free-list arrays are sized to that
+        //    span and indexed from `lo`, so a usable window at a very high
+        //    physical address costs an array proportional to the RAM it
+        //    covers, not one indexed from frame zero.
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        let mut lo = usize::MAX;
+        let mut hi = 0usize;
         for r in &sorted {
             if r.kind != RegionKind::Usable {
                 continue;
@@ -400,32 +580,77 @@ impl FrameAllocator {
             let Some(end) = r.end() else {
                 return Err(AllocError::InvariantViolation);
             };
-            // Inward rounding: first frame fully inside region,
-            // last frame fully inside region (exclusive upper bound).
+            // Inward rounding: first frame fully inside region, last frame
+            // fully inside region (exclusive upper bound).
             let first = usize::try_from(r.start.as_u64().div_ceil(PAGE_SIZE as u64))
-                .map_err(|_| AllocError::InvariantViolation)?;
-            // Never enroll the zero page: its identity translation is the
-            // null pointer, so a consumer that draws it must hand it back,
-            // and the lowest-first buddy pop would then re-issue it forever
-            // (the CI-only spawn wedge this guards against). Reserved, like
-            // firmware-reserved RAM.
-            let first = first.max(1);
+                .map_err(|_| AllocError::InvariantViolation)?
+                // Never enroll the zero page: its identity translation is
+                // the null pointer, so a consumer that draws it must hand it
+                // back, and a re-issue of it would wedge allocation forever
+                // (the CI-only spawn wedge this guards against). Reserved,
+                // like firmware-reserved RAM.
+                .max(1);
             let last_excl = usize::try_from(end.as_u64() / PAGE_SIZE as u64)
                 .map_err(|_| AllocError::InvariantViolation)?;
             if first >= last_excl {
                 continue;
             }
+            lo = lo.min(first);
+            hi = hi.max(last_excl);
+            runs.push((first, last_excl));
+        }
+        if runs.is_empty() {
+            return Err(AllocError::OutOfMemory);
+        }
+        let base_frame = lo;
+        let span = hi - lo;
+
+        // 4. Allocate the per-frame metadata, all sized to the *usable*
+        //    span and indexed from `base_frame`: the bitmap (all "1" — any
+        //    frame not subsequently marked usable stays reserved), the
+        //    intrusive free-list link array, and the per-block order tag.
+        //    Sizing every one to the usable span rather than the
+        //    address-space extent keeps the bookkeeping proportional to the
+        //    RAM the machine actually has, so a usable window at a very high
+        //    physical address (or a huge sparse map) costs metadata for the
+        //    RAM it covers, not for the address range it sits in. These are
+        //    the allocator's *only* heap use, taken once here at
+        //    construction; the allocate/free paths touch no allocator but
+        //    this one (see the module docs), so the kernel heap can later
+        //    grow by drawing frames from here without re-entering itself.
+        let words = span.div_ceil(64);
+        let bitmap = vec![u64::MAX; words];
+        let nodes = vec![FrameNode::UNLINKED; span];
+        let blk_order = vec![NOT_A_HEAD; span];
+        let mut state = FrameAllocatorState {
+            total_frames,
+            base_frame,
+            span,
+            bitmap,
+            nodes,
+            blk_order,
+            free_heads: [NIL; MAX_ORDER as usize + 1],
+            free_frames: 0,
+            usable_frames: 0,
+            reserve_frames: 0,
+        };
+
+        // 5. Build per-frame state from the collected runs: clear the
+        //    bitmap bit of every usable frame and insert the run as buddy
+        //    blocks. Reserved frames keep their "used" bit.
+        for &(first, last_excl) in &runs {
             for i in first..last_excl {
                 state.clear_bit(i);
             }
             state.usable_frames += last_excl - first;
-            any_usable = true;
-            // Insert as buddy blocks.
             state.populate_run(first, last_excl);
         }
-        if !any_usable {
-            return Err(AllocError::OutOfMemory);
-        }
+
+        // 6. Derive the kernel reserve floor from the discovered RAM (never
+        //    a fixed constant): a user commit may not draw the free pool to
+        //    or below it, so the kernel keeps headroom to make progress on a
+        //    machine a greedy userland is starving.
+        state.reserve_frames = state.usable_frames / RESERVE_DIVISOR;
 
         Ok(Self {
             inner: SpinLock::new(state),
@@ -443,6 +668,11 @@ impl FrameAllocator {
 
     /// Allocate `2^order` contiguous frames, aligned to that boundary.
     ///
+    /// This is the **kernel-internal** path: it draws the whole free pool,
+    /// including the reserve, so the kernel can always make progress (grow
+    /// its heap, build page tables, service a fault) even under user memory
+    /// pressure. A *user* commit must use [`Self::alloc_order_user`].
+    ///
     /// # Errors
     ///
     /// - [`AllocError::SizeUnsupported`] if `order > MAX_ORDER`.
@@ -450,6 +680,47 @@ impl FrameAllocator {
     ///   is available.
     pub fn alloc_order(&self, order: u32) -> Result<Frame, AllocError> {
         let mut g = self.inner.lock();
+        g.alloc_order(order).map(Frame)
+    }
+
+    /// Allocate a single frame on behalf of **userland** (reserve-gated).
+    ///
+    /// # Errors
+    ///
+    /// [`AllocError::OutOfMemory`] if satisfying it would drop the free
+    /// pool to or below the kernel reserve, or if no frame is available.
+    pub fn alloc_user(&self) -> Result<Frame, AllocError> {
+        self.alloc_order_user(0)
+    }
+
+    /// Allocate `2^order` contiguous frames on behalf of **userland**,
+    /// refusing when the draw would drop the free pool to or below the
+    /// kernel reserve ([`RESERVE_DIVISOR`]).
+    ///
+    /// A greedy user process therefore fails closed with
+    /// [`AllocError::OutOfMemory`] while the kernel still has reserved
+    /// headroom to grow its heap and make progress — rather than draining
+    /// physical RAM to zero and wedging the kernel. Kernel-internal callers
+    /// (including heap growth) use [`Self::alloc_order`] and may draw the
+    /// reserve.
+    ///
+    /// # Errors
+    ///
+    /// - [`AllocError::SizeUnsupported`] if `order > MAX_ORDER`.
+    /// - [`AllocError::OutOfMemory`] if the draw would breach the reserve,
+    ///   or if no block of any order ≥ `order` is available.
+    pub fn alloc_order_user(&self, order: u32) -> Result<Frame, AllocError> {
+        if order > MAX_ORDER {
+            return Err(AllocError::SizeUnsupported);
+        }
+        let n = 1usize << order;
+        let mut g = self.inner.lock();
+        // Reserve guard: refuse if the draw would leave the free pool at or
+        // below the reserve. Checked before the carve so a user commit
+        // never even transiently dips into kernel headroom.
+        if g.free_frames < n || g.free_frames - n <= g.reserve_frames {
+            return Err(AllocError::OutOfMemory);
+        }
         g.alloc_order(order).map(Frame)
     }
 
@@ -500,6 +771,15 @@ impl FrameAllocator {
     #[must_use]
     pub fn usable_frames(&self) -> FrameCount {
         self.inner.lock().usable_frames
+    }
+
+    /// The kernel reserve floor, in frames: the free-pool level a user
+    /// commit ([`Self::alloc_user`] / [`Self::alloc_order_user`]) may not
+    /// draw to or below. Derived from discovered RAM
+    /// (`usable_frames / RESERVE_DIVISOR`), fixed after construction.
+    #[must_use]
+    pub fn reserve_frames(&self) -> FrameCount {
+        self.inner.lock().reserve_frames
     }
 }
 
@@ -744,6 +1024,165 @@ mod tests {
         assert_eq!(a.free_frames(), 15);
         a.free(f).unwrap();
         assert_eq!(a.usable_frames(), 16);
+        assert_eq!(a.free_frames(), 16);
+    }
+
+    #[test]
+    fn usable_window_at_a_high_base_uses_span_sized_metadata() {
+        // Regression: the intrusive free-list arrays are indexed from the
+        // lowest usable frame, not from frame zero, so a usable window at a
+        // high physical base costs metadata proportional to the window, not
+        // to its address. A region of 32 frames based ~4 GiB up must build,
+        // allocate, split, merge, and account exactly like a low-based one —
+        // this exercises the `base_frame` offset (`slot`) on every path.
+        let base = 1_000_000usize; // ~3.8 GiB up, far from frame 0
+        let mut m = BootMemoryMap::new();
+        m.push(MemoryRegion {
+            start: PhysAddr::new((base * PAGE_SIZE) as u64),
+            length: (32 * PAGE_SIZE) as u64,
+            kind: RegionKind::Usable,
+        });
+        let a = FrameAllocator::new(&m).unwrap();
+        assert_eq!(a.usable_frames(), 32);
+        assert_eq!(a.free_frames(), 32);
+
+        // Order-2 blocks split from the population, then merge back.
+        let b0 = a.alloc_order(2).unwrap();
+        let b1 = a.alloc_order(2).unwrap();
+        assert!(
+            b0.0 >= base && b1.0 >= base,
+            "blocks lie in the high window"
+        );
+        assert_eq!(b0.0 & 3, 0, "order-2 block is 4-frame aligned");
+        a.free_order(b0, 2).unwrap();
+        a.free_order(b1, 2).unwrap();
+        assert_eq!(a.free_frames(), 32);
+
+        // Drain to single frames (exercises the slot offset per frame),
+        // then free them all back and coalesce to the largest block.
+        let mut held = Vec::new();
+        while let Ok(f) = a.alloc() {
+            assert!(f.0 >= base && f.0 < base + 32);
+            held.push(f);
+        }
+        assert_eq!(held.len(), 32);
+        for f in held {
+            a.free(f).unwrap();
+        }
+        assert_eq!(a.free_frames(), 32);
+        let big = a.alloc_order(5).unwrap(); // 32 frames
+        assert_eq!(big.0, base, "the whole window coalesced back");
+        a.free_order(big, 5).unwrap();
+        assert_eq!(a.free_frames(), 32);
+    }
+
+    #[test]
+    fn alloc_user_stops_at_reserve_but_kernel_may_draw_it() {
+        // Enough usable RAM for a non-zero reserve
+        // (`usable / RESERVE_DIVISOR`); `small_map` bases the window clear of
+        // the zero page, so all `usable` frames are usable.
+        let usable = 4 * RESERVE_DIVISOR;
+        let m = small_map(usable);
+        let a = FrameAllocator::new(&m).unwrap();
+        let reserve = a.reserve_frames();
+        assert_eq!(reserve, usable / RESERVE_DIVISOR);
+        assert!(reserve > 0, "test needs a non-zero reserve");
+
+        // User commits succeed until one more would drop the free pool to or
+        // below the reserve; the last success leaves exactly `reserve + 1`.
+        let mut held = Vec::new();
+        while let Ok(f) = a.alloc_user() {
+            held.push(f);
+        }
+        assert_eq!(a.free_frames(), reserve + 1);
+        assert_eq!(a.alloc_user().err(), Some(AllocError::OutOfMemory));
+
+        // The kernel-internal path may draw into the reserve, all the way to
+        // exhaustion — the kernel always keeps the ability to make progress.
+        while let Ok(f) = a.alloc() {
+            held.push(f);
+        }
+        assert_eq!(a.free_frames(), 0);
+
+        for f in held {
+            a.free(f).unwrap();
+        }
+        assert_eq!(a.free_frames(), usable);
+    }
+
+    #[test]
+    fn high_base_map_bitmap_is_proportional_to_ram_not_address() {
+        // Regression: the bitmap, like the intrusive arrays, is sized to the
+        // usable span and indexed from `base_frame`. A small usable window
+        // sitting ~128 TiB up (huge-address territory) must cost bitmap
+        // metadata proportional to the window (one word for 64 frames), not
+        // to the physical address it sits at — indexed from frame zero that
+        // bitmap alone would be ~4 GiB.
+        let base = 128usize * 1024 * 1024 * 1024 * 1024 / PAGE_SIZE; // 128 TiB
+        let frames = 64usize;
+        let mut m = BootMemoryMap::new();
+        m.push(MemoryRegion {
+            start: PhysAddr::new((base * PAGE_SIZE) as u64),
+            length: (frames * PAGE_SIZE) as u64,
+            kind: RegionKind::Usable,
+        });
+        let a = FrameAllocator::new(&m).unwrap();
+        assert_eq!(a.usable_frames(), frames);
+        assert_eq!(a.free_frames(), frames);
+
+        // Span-sized: 64 frames → one 64-bit word. Address-extent sizing
+        // would be hundreds of millions of words.
+        let words = a.inner.lock().bitmap.len();
+        assert_eq!(words, frames.div_ceil(64));
+
+        // `total_frames` still reports the address-space extent (a
+        // diagnostic), proving the small bitmap is not merely a small map.
+        assert!(a.total_frames() >= base);
+
+        // Alloc/free still works correctly in the high window.
+        let f = a.alloc().unwrap();
+        assert!(f.0 >= base && f.0 < base + frames);
+        a.free(f).unwrap();
+        assert_eq!(a.free_frames(), frames);
+        let big = a.alloc_order(6).unwrap(); // 64 frames
+        assert_eq!(big.0, base, "the whole window coalesced back");
+        a.free_order(big, 6).unwrap();
+        assert_eq!(a.free_frames(), frames);
+    }
+
+    #[test]
+    fn intrusive_list_unlinks_a_middle_block_on_merge() {
+        // Regression for the heap-independent intrusive free lists: a buddy
+        // merge must be able to unlink a free block that is *not* the head
+        // of its order's list (the doubly-linked `prev`/`next` splice). Set
+        // up three order-0 free blocks, then free a fourth whose buddy is
+        // the middle one, forcing a middle-of-list removal, and confirm the
+        // whole window merges back to a single largest block with no leak
+        // or double-count.
+        let m = small_map(16);
+        let a = FrameAllocator::new(&m).unwrap();
+        // Drain to individual frames so every order-0 block is on the list.
+        let mut frames = Vec::new();
+        while let Ok(f) = a.alloc() {
+            frames.push(f);
+        }
+        assert_eq!(frames.len(), 16);
+        // Free odd-indexed frames first, then even ones: when an even
+        // frame is later freed its odd buddy is already an interior list
+        // node, so the merge must splice it out of the middle of the
+        // order-0 list.
+        for f in frames.iter().filter(|f| f.0 % 2 == 1) {
+            a.free(*f).unwrap();
+        }
+        for f in frames.iter().filter(|f| f.0 % 2 == 0) {
+            a.free(*f).unwrap();
+        }
+        assert_eq!(a.free_frames(), 16);
+        // Fully coalesced: the largest single block the map allows is
+        // available again.
+        let big = a.alloc_order(4).unwrap();
+        assert_eq!(big.0 & 15, 0, "order-4 block is 16-frame aligned");
+        a.free_order(big, 4).unwrap();
         assert_eq!(a.free_frames(), 16);
     }
 

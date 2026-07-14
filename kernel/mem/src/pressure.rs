@@ -47,7 +47,7 @@
 
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
-use crate::frame::{FrameAllocator, PAGE_SIZE};
+use crate::frame::{FrameAllocator, PAGE_SIZE, RESERVE_DIVISOR};
 use crate::reclaim::{CacheBudget, ReclaimClass};
 
 /// The system memory-pressure band, shared with
@@ -159,10 +159,11 @@ const SEVERE_EXIT_NUMERATOR: usize = 2; // leave above 8% free
 const SEVERE_EXIT_DIVISOR: usize = 25;
 const CRITICAL_EXIT_DIVISOR: usize = 20; // leave above 5% free
 
-/// The reserve floor as a fraction of the backing: below this the
-/// system is critical regardless of band history, and no cache growth
-/// may dip into it.
-const RESERVE_DIVISOR: usize = 64; // ~1.6% of the backing
+// The reserve floor as a fraction of the backing (below this the system
+// is critical regardless of band history, and no cache growth may dip
+// into it) is the same fraction the frame allocator holds back from user
+// commits, so the two floors can never diverge: `RESERVE_DIVISOR` is
+// defined once in `crate::frame` and imported above.
 
 /// The per-band enter/exit watermarks and the reserve floor, in bytes,
 /// derived from the size of the backing resource — never free-standing

@@ -58,6 +58,20 @@ pub trait PhysMap {
     /// incoherent alias can exist. There is deliberately no default — a
     /// silently inherited no-op is how the defect above shipped.
     fn clean_invalidate(&self, phys: PhysAddr, len: usize);
+
+    /// Recover the [`PhysAddr`] a direct-map virtual address `virt` names,
+    /// or [`None`] when this map cannot invert the translation.
+    ///
+    /// This is the inverse of [`translate`](Self::translate) for the region
+    /// the map covers. The growable kernel heap uses it to hand a drained,
+    /// direct-mapped region back to the frame allocator: it knows only the
+    /// chunk's virtual base, and must recover the physical frame to free it.
+    /// The default is [`None`] (a map that is not a simple linear direct map
+    /// cannot invert), so a consumer that needs the inverse fails closed
+    /// rather than synthesising an address of its own.
+    fn reverse(&self, _virt: usize) -> Option<PhysAddr> {
+        None
+    }
 }
 
 /// The kernel's direct physical map: physical `p` is reachable at the
@@ -99,6 +113,18 @@ impl PhysMap for DirectPhysMap {
         let virt = base.checked_add(self.offset)?;
         let addr = usize::try_from(virt).ok()?;
         NonNull::new(addr as *mut u8)
+    }
+
+    fn reverse(&self, virt: usize) -> Option<PhysAddr> {
+        let virt = u64::try_from(virt).ok()?;
+        let phys = virt.checked_sub(self.offset)?;
+        // Only addresses inside the mapped window `[offset, offset + limit)`
+        // invert to a physical address this map covers; anything else fails
+        // closed rather than yielding a bogus frame.
+        if phys >= self.limit {
+            return None;
+        }
+        Some(PhysAddr::new(phys))
     }
 
     fn clean_invalidate(&self, _phys: PhysAddr, _len: usize) {
@@ -182,6 +208,18 @@ impl PhysMap for SimPhysMap {
         NonNull::new(ptr)
     }
 
+    fn reverse(&self, virt: usize) -> Option<PhysAddr> {
+        // Invert `translate`: a pointer into the simulator's backing `Vec`
+        // maps back to the physical address it stands for. Only pointers
+        // inside `[base, base + len)` invert; anything else fails closed.
+        let origin = self.storage.as_ptr().wrapping_add(self.align_pad) as usize;
+        let rel = virt.checked_sub(origin)?;
+        if rel >= self.len {
+            return None;
+        }
+        Some(PhysAddr::new(self.base + rel as u64))
+    }
+
     fn clean_invalidate(&self, _phys: PhysAddr, _len: usize) {
         // Deliberate no-op: the simulator's "physical RAM" is ordinary
         // host memory with no hardware cache alias to maintain.
@@ -225,6 +263,35 @@ mod tests {
         let map = DirectPhysMap::new(0x1_0000_0000, 0x2_0000_0000);
         let p = map.translate(PhysAddr::new(0x4000), 8).expect("mapped");
         assert_eq!(p.as_ptr() as u64, 0x1_0000_4000);
+    }
+
+    #[test]
+    fn direct_reverse_inverts_translate() {
+        // The growable heap hands a drained direct-mapped region back to the
+        // frame allocator by recovering its physical base from its virtual
+        // base: `reverse` must invert `translate` exactly, and fail closed
+        // outside the mapped window.
+        let map = DirectPhysMap::new(0x1_0000_0000, 0x2_0000_0000);
+        let phys = PhysAddr::new(0x4000);
+        let virt = map.translate(phys, 8).expect("mapped").as_ptr() as usize;
+        assert_eq!(map.reverse(virt), Some(phys));
+        // Below the offset and past the window both fail closed.
+        assert!(map.reverse(0xFFF).is_none());
+        assert!(map
+            .reverse(usize::try_from(0x1_0000_0000u64 + 0x2_0000_0000u64).unwrap())
+            .is_none());
+    }
+
+    #[test]
+    fn sim_reverse_round_trips_a_translated_pointer() {
+        let base = PhysAddr::new(PAGE_SIZE as u64 * 16);
+        let sim = SimPhysMap::new(base, 4 * PAGE_SIZE);
+        let target = PhysAddr::new(base.as_u64() + PAGE_SIZE as u64);
+        let ptr = sim.translate(target, 4).expect("mapped").as_ptr() as usize;
+        assert_eq!(sim.reverse(ptr), Some(target));
+        // A pointer one byte below the mapped base fails closed.
+        let base_ptr = sim.translate(base, 4).expect("mapped").as_ptr() as usize;
+        assert!(sim.reverse(base_ptr - 1).is_none());
     }
 
     #[test]

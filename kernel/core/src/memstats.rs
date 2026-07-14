@@ -22,12 +22,47 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use rustos_abi::sysinfo::RamzipStats;
 use rustos_kernel_mem::pressure::FreeMemorySource;
 use rustos_kernel_mem::reclaim::{CacheAccounting, ReclaimClass, ReclaimClassStats};
 use rustos_kernel_mem::MemoryPressure;
 use rustos_sync::RwLock;
+
+/// Discovered physical-RAM size, in bytes, published once at boot — the
+/// backing every reclaimable cache derives its byte budget from
+/// (`CacheBudget::from_backing`). `0` means "not yet published".
+///
+/// The kernel heap is now growable, so `rustos_kalloc::HEAP_BYTES` is only
+/// the *bootstrap* size, no longer the memory a cache should size itself
+/// against; a cache sized to the bootstrap slab would be a fixed ceiling
+/// that wastes RAM on a large machine and over-commits a small one. This
+/// value lets every cache scale its budget with the RAM the machine
+/// actually has (a proportional policy from one derivation), the
+/// growable-capacity discipline the charter requires.
+static CACHE_BACKING_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+/// Publish the discovered physical-RAM size the cache budgets scale
+/// against. Called once from the boot path after the frame allocator
+/// exists, with `usable_frames * PAGE_SIZE`.
+pub fn set_cache_backing_bytes(bytes: usize) {
+    CACHE_BACKING_BYTES.store(bytes, Ordering::Release);
+}
+
+/// The byte size a reclaimable cache derives its budget from
+/// (`CacheBudget::from_backing`): the discovered physical RAM once the
+/// boot path has published it, falling back to the bootstrap heap size
+/// before then (host tests, and the window before
+/// [`set_cache_backing_bytes`] runs) so a cache built early still gets a
+/// sane, non-zero budget.
+#[must_use]
+pub fn cache_backing_bytes() -> usize {
+    match CACHE_BACKING_BYTES.load(Ordering::Acquire) {
+        0 => rustos_kalloc::HEAP_BYTES,
+        bytes => bytes,
+    }
+}
 
 /// A live `ramzip` tier's stats feed.
 ///

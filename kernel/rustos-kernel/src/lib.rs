@@ -454,6 +454,12 @@ mod test_support;
 
 pub use kalloc::FreeListAllocator;
 
+/// Publish this binary's `#[global_allocator]` with the kernel core so the
+/// boot path can wire the frame-backed growth source into it (the growable
+/// kernel heap). Each arch bin's `kernel_main` calls this once with its
+/// `&'static FreeListAllocator` before entering `boot`.
+pub use rustos_kernel_core::kheap::register_global_heap;
+
 #[cfg(kernel_isa = "aarch64")]
 pub use aarch64::arch_wrapper::{Aarch64BinArch, UartConsole, UART_CONSOLE};
 #[cfg(kernel_isa = "x86_64")]

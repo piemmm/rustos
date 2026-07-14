@@ -1643,6 +1643,30 @@ fn run_phases<A: KernelArch>(
     let (mem_map, file_map, mmio_map_facility, dma_alloc_facility, shared_mem_facility) =
         live_producers(state.arch.as_ref(), &state.frame_allocator);
 
+    // Let the kernel global heap grow past its `.bss` bootstrap region now
+    // that the frame allocator and the arch direct physical map both exist
+    // and are `'static`. A bin that registered its `#[global_allocator]`
+    // (via `kheap::register_global_heap`) and a port that wires a direct map
+    // together enable growth; a port with no direct map, or a host harness
+    // with no registered heap, leaves the heap capped at its bootstrap
+    // region — fail closed, never a panic. This must be the frame-drawing
+    // growth source (heap-independent by construction) so a heap-growth miss
+    // never re-enters the heap's own lock.
+    if let Some(physmap) = state.arch.direct_phys_map() {
+        crate::kheap::install_frame_heap_source(&state.frame_allocator, physmap);
+    }
+
+    // Publish the discovered physical-RAM size so every reclaimable cache
+    // sizes its budget against the RAM the machine actually has, not the
+    // (now merely bootstrap) heap size. Set before the mount/unlock path
+    // builds any cache.
+    crate::memstats::set_cache_backing_bytes(
+        state
+            .frame_allocator
+            .usable_frames()
+            .saturating_mul(rustos_kernel_mem::PAGE_SIZE),
+    );
+
     // The production wall clock, named so it backs *both* the
     // `wall_time_get`/`wall_time_set` syscalls and the introspection
     // uptime domain's boot-instant projection — one clock, no second copy.

@@ -212,7 +212,11 @@ impl<B: Block> BlockCache<B> {
     ) -> Result<Self, DriverError> {
         Self::new(
             device,
-            CacheBudget::from_backing(rustos_kalloc::HEAP_BYTES),
+            // Budget from discovered physical RAM (the kernel heap is now
+            // growable, so its bootstrap size is no longer the memory to size
+            // a cache against); falls back to the bootstrap size before the
+            // boot path publishes RAM.
+            CacheBudget::from_backing(rustos_kernel_core::memstats::cache_backing_bytes()),
             pressure,
             sink,
         )

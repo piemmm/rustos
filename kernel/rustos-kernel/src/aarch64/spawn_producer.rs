@@ -111,6 +111,14 @@ impl PhysMap for ConfiguredIdentityPhysMap {
         DirectPhysMap::identity((configured_identity_gigapages() as u64) << 30).translate(phys, len)
     }
 
+    fn reverse(&self, virt: usize) -> Option<PhysAddr> {
+        // Identity map: recover the physical address of a direct-map virtual
+        // address (the growable kernel heap hands a drained region back to
+        // the frame allocator by its virtual base). Bound by the *live*
+        // identity window, exactly as `translate` is.
+        DirectPhysMap::identity((configured_identity_gigapages() as u64) << 30).reverse(virt)
+    }
+
     fn clean_invalidate(&self, phys: PhysAddr, len: usize) {
         if let Some(ptr) = self.translate(phys, len) {
             rustos_arch_aarch64::kernel_arch::clean_invalidate_dcache_range(

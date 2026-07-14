@@ -3792,6 +3792,34 @@ and fail-closed (§24.4) — this work must not loosen them.
   bitmap-hierarchy) with only a bounded working-set cache resident, so even a
   near-full 100 TB+ volume mounts within a fixed RAM budget (see
   `docs/src/filesystem/rustfs-spec.md` §4).
+- Kernel heap arena — `lib/kalloc` `FreeListAllocator` / `HEAP_BYTES` — **done**
+  (the §24.1 fix for the `stress --vm` kernel OOM panic): the heap was a fixed
+  64 MiB `.bss` slab that, once exhausted, returned null from `GlobalAlloc` →
+  `handle_alloc_error` → panic. It is now growable/shrinkable: the `.bss` region
+  is a *bootstrap* only, and a late-installed `HeapSource` lets it draw fresh
+  physically-contiguous frames from the live `FrameAllocator` on a miss and hand
+  whole drained regions back. Production wiring is `kernel/core::kheap`
+  (`register_global_heap` — an `AtomicPtr` slot each arch bin sets in
+  `kernel_main` before `boot` — plus the frame-backed `FrameHeapSource` and
+  `install_frame_heap_source`, called in `kernel_bringup` once the frame
+  allocator and `arch.direct_phys_map()` exist), over a new
+  `PhysMap::reverse(virt)->Option<PhysAddr>` (heap-shrink recovers a region's
+  physical frame from its direct-map base). Growth draws the whole pool
+  (kernel-internal), while a **user** commit is reserve-gated: `FrameAllocator`
+  holds `reserve_frames = usable_frames / RESERVE_DIVISOR` (the divisor hoisted
+  to `kernel/mem::frame`, shared with `pressure`), and `alloc_user` /
+  `alloc_order_user` (which `LiveSpace::map_anonymous*` route through) refuse a
+  draw that would drop the free pool to or below the reserve, so a greedy
+  userland process fails closed with `Errno::OutOfMemory` before it can starve
+  the kernel's ability to grow its heap. The frame allocator's `bitmap` is also
+  rebased to the usable span (indexed from `base_frame`, like `nodes`/
+  `blk_order`) so a high-based/§26.6 huge-address map costs bitmap metadata for
+  its RAM, not its address extent. With the heap growable, the reclaimable cache
+  budgets no longer size off `HEAP_BYTES` (now merely the bootstrap size):
+  `kernel/core::memstats::cache_backing_bytes()` publishes discovered physical
+  RAM (`usable_frames * PAGE_SIZE`, set in `kernel_bringup`), and
+  `block_cache`/`transform_cache`/`volume_service`/`system_mount` derive their
+  `CacheBudget::from_backing` from it.
 - (Explicitly **out of scope / leave fixed**: the §22 RNG reserve
   `DEFAULT_RESERVE_BYTES`/`RANDOM_RESERVE_DEFAULT_BYTES` (charter-blessed), and
   all untrusted-input/format bounds — `lib/vt` `MAX_PARAMS`/`MAX_STRING`,

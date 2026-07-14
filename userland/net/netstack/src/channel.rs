@@ -130,10 +130,10 @@ impl<N: Net> FrameService for LocalFrameService<'_, N> {
 /// The injected doorbell transport of a [`NetChannelClient`].
 ///
 /// One `ipc_call` to the driver process's device endpoint: the live service
-/// backs it with [`rustos_rt::ipc_call`], and host tests back it with an
-/// in-process fake that dispatches to a
-/// [`NetChannelServer`](rustos_virtio_net::NetChannelServer), so the client
-/// is exercised without a kernel.
+/// backs it with `rustos_rt::ipc_call` (an optional bare-metal-only
+/// dependency), and host tests back it with an in-process fake that
+/// dispatches to a `rustos_virtio_net::NetChannelServer` (a dev-dependency),
+/// so the client is exercised without a kernel.
 pub trait NetChannelTransport {
     /// Send `request` to the driver endpoint and copy its reply into
     /// `reply`, returning the reply length.

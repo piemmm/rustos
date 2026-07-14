@@ -46,7 +46,7 @@ use rustos_kernel_mem::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
 use rustos_kernel_mem::{PhysAddr, PAGE_SIZE};
 use rustos_net::addr::IpAddr;
 use rustos_net::stack::StackEvent;
-use rustos_netstack::Netstack;
+use rustos_netstack::{FrameService, LocalFrameService, Netstack};
 use rustos_test_netstack_wire as wire;
 use rustos_virtio::{Transport, VirtioHost, VirtioHostFactory};
 use rustos_virtio_input::VirtioInput;
@@ -567,13 +567,13 @@ fn v4_bytes(addr: core::net::Ipv4Addr) -> [u8; 16] {
 /// refusals (an address still in DAD, a busy resolution queue, a full
 /// ring): the caller's retry cadence covers them, and a persistent
 /// refusal surfaces as the phase budget expiring.
-fn send_echo(
+fn send_echo<F: FrameService>(
     stack: &mut Netstack,
     name: [u8; IF_NAME_LEN],
     dest: IpAddr,
     sequence: u16,
     now: Duration64,
-    rings: &mut FrameRings<'_>,
+    fs: &mut F,
 ) {
     let Some(iface) = stack.interface_mut(name) else {
         return;
@@ -585,9 +585,15 @@ fn send_echo(
         wire::GUEST_ECHO_PAYLOAD,
         now,
     ) {
-        for frame in &out.frames {
-            if rings.tx.push(frame).is_err() {
-                break;
+        // Queue the engine's output into the TX ring bound over the frame
+        // service's own region, exactly as the pump does.
+        let geometry = fs.geometry();
+        let class = fs.class();
+        if let Ok(mut rings) = FrameRings::bind(fs.region_mut(), geometry, class) {
+            for frame in &out.frames {
+                if rings.tx.push(frame).is_err() {
+                    break;
+                }
             }
         }
     }
@@ -607,7 +613,7 @@ pub fn netstack_ping<Tr: Transport>(
     transport: Tr,
     vhost: &dyn VirtioHost,
 ) -> Result<(), &'static str> {
-    let mut net = VirtioNet::open(transport, vhost).map_err(|_| "virtio-net open")?;
+    let net = VirtioNet::open(transport, vhost).map_err(|_| "virtio-net open")?;
     let facts = net.device_facts().map_err(|_| "read device facts")?;
     facts.validate().map_err(|_| "device facts invalid")?;
     env.log("virtio-qemu: virtio-net online");
@@ -620,9 +626,13 @@ pub fn netstack_ping<Tr: Transport>(
         Ok(g) => g,
         Err(_) => panic!("valid ring geometry"),
     };
+    // Present the virtio-net device and the stack-owned frame region as the
+    // single `FrameService` the interface pump drives (the single-address-
+    // space in-process form): each pump binds a `FrameRings` view over this
+    // region and drives the device's `service` doorbell directly.
     let mut region = alloc::vec![0u8; RING_GEOMETRY.region_len()];
-    let mut rings = FrameRings::bind(&mut region, RING_GEOMETRY, BufferClass::NonSensitive)
-        .map_err(|_| "bind frame rings")?;
+    let mut fs = LocalFrameService::new(net, &mut region, RING_GEOMETRY, BufferClass::NonSensitive)
+        .map_err(|_| "frame service")?;
 
     let name = if_name();
     let mut stack = Netstack::new();
@@ -662,7 +672,7 @@ pub fn netstack_ping<Tr: Transport>(
         }
         tick += 1;
         let events = stack
-            .service_interface(name, &mut net, &mut rings, pump_now(tick))
+            .service_interface(name, &mut fs, pump_now(tick))
             .map_err(pump_error)?;
         for event in events {
             if let StackEvent::EchoRequestServed {
@@ -698,7 +708,7 @@ pub fn netstack_ping<Tr: Transport>(
                     IpAddr::V4(wire::PEER_V4),
                     sequence,
                     pump_now(tick),
-                    &mut rings,
+                    &mut fs,
                 );
             }
             if !reply_v6 {
@@ -708,7 +718,7 @@ pub fn netstack_ping<Tr: Transport>(
                     IpAddr::V6(peer_v6),
                     sequence,
                     pump_now(tick),
-                    &mut rings,
+                    &mut fs,
                 );
             }
         }
@@ -718,7 +728,7 @@ pub fn netstack_ping<Tr: Transport>(
         }
         tick += 1;
         let events = stack
-            .service_interface(name, &mut net, &mut rings, pump_now(tick))
+            .service_interface(name, &mut fs, pump_now(tick))
             .map_err(pump_error)?;
         for event in events {
             if let StackEvent::EchoReply {

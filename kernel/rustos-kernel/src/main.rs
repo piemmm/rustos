@@ -73,6 +73,11 @@ mod kernel {
     /// `tests/integration/kernel_arch_boot`).
     #[no_mangle]
     pub extern "C" fn kernel_main(boot_info: u64) -> ! {
+        // Publish the `#[global_allocator]` so the boot path wires the
+        // frame-backed growth source into it (the growable kernel heap):
+        // the heap then grows past its `.bss` bootstrap region on demand
+        // instead of being capped at a fixed slab.
+        rustos_kernel::register_global_heap(&ALLOCATOR);
         boot(
             boot_info,
             &SERIAL_SINK,
@@ -137,6 +142,11 @@ mod kernel {
     /// `tests/integration/devmgr_hwtree_qemu_aarch64`).
     #[no_mangle]
     pub extern "C" fn kernel_main(dtb: u64) -> ! {
+        // Publish the `#[global_allocator]` so the boot path wires the
+        // frame-backed growth source into it (the growable kernel heap):
+        // the heap then grows past its `.bss` bootstrap region on demand
+        // instead of being capped at a fixed slab.
+        rustos_kernel::register_global_heap(&ALLOCATOR);
         boot::boot(
             dtb,
             &SERIAL_SINK,
@@ -204,6 +214,11 @@ mod kernel {
     /// `tests/integration/kernel_arch_boot_riscv64`).
     #[no_mangle]
     pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
+        // Publish the `#[global_allocator]` so the boot path wires the
+        // frame-backed growth source into it (the growable kernel heap):
+        // the heap then grows past its `.bss` bootstrap region on demand
+        // instead of being capped at a fixed slab.
+        rustos_kernel::register_global_heap(&ALLOCATOR);
         boot::boot(
             hartid,
             dtb,

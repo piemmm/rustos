@@ -625,7 +625,10 @@ fn seeded_journal(
 ) -> Arc<SpinLock<RetainedWrites>> {
     let journal = Arc::new(SpinLock::new(RetainedWrites::new(
         block_size,
-        CacheBudget::from_backing(rustos_kalloc::HEAP_BYTES),
+        // Budget from discovered physical RAM (the growable kernel heap's
+        // bootstrap size is no longer the memory to size a cache against);
+        // falls back to the bootstrap size before RAM is published.
+        CacheBudget::from_backing(rustos_kernel_core::memstats::cache_backing_bytes()),
     )));
     if let Some(evidence_len) = head
         .and_then(rustos_fsprobe::evidence_len)

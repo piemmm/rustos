@@ -456,7 +456,11 @@ where
             &self.physmap,
             base_va,
             page_count,
-            || frames.alloc().ok(),
+            // A user anonymous commit draws through the reserve-gated path:
+            // a greedy process fails closed before it can drop the free pool
+            // to or below the kernel reserve and starve the kernel's own
+            // ability to make progress (grow its heap, build page tables).
+            || frames.alloc_user().ok(),
             |frame| {
                 // The frame was just unwound from this space; the matching
                 // free of a frame the allocator handed out cannot fail, and
@@ -477,7 +481,8 @@ where
             &self.physmap,
             base_va,
             page_count,
-            || frames.alloc().ok(),
+            // Reserve-gated user commit (see `map_anonymous`).
+            || frames.alloc_user().ok(),
             |frame| {
                 let _ = frames.free(frame);
             },

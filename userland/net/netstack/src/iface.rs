@@ -419,7 +419,7 @@ impl Netstack {
     /// are queued and flushed in the same pass).
     ///
     /// The pump is written once against the [`FrameService`] seam, so it
-    /// drives an in-process [`Net`] device
+    /// drives an in-process [`Net`](rustos_abi::driver::net::Net) device
     /// ([`LocalFrameService`](crate::LocalFrameService)) and a cross-process
     /// driver ([`NetChannelClient`](crate::NetChannelClient)) identically:
     /// the service owns the frame region and each doorbell is either a direct

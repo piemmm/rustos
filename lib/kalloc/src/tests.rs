@@ -321,4 +321,231 @@ fn over_aligned_request_uses_a_hole_that_is_not_already_over_aligned() {
     );
 }
 
+// --- Growable-heap tests (the injected `HeapSource`) --------------------
+
+extern crate std;
+
+use super::HeapSource;
+
+/// A leaked, page-aligned arena a [`MockSource`] hands chunks out of. 1 MiB
+/// is ample for the growth tests and, being `'static` (leaked), satisfies
+/// [`FreeListAllocator::install_source`]'s `&'static` bound.
+#[repr(C, align(4096))]
+struct Arena([u8; 1 << 20]);
+
+/// A test [`HeapSource`] that bump-allocates 8 KiB-granular chunks out of a
+/// fixed arena and records grow/shrink activity, recycling returned chunks
+/// so a grow-then-shrink cycle can reuse space.
+struct MockSource {
+    state: std::sync::Mutex<MockState>,
+}
+
+struct MockState {
+    /// Arena base as an integer address (keeps the state `Send`/`Sync`
+    /// without unsafe marker impls; the arena is leaked so the address
+    /// stays valid for the test).
+    base: usize,
+    len: usize,
+    cursor: usize,
+    grow_calls: usize,
+    shrink_calls: usize,
+    /// Returned chunks available for reuse: `(offset, len)`.
+    freelist: std::vec::Vec<(usize, usize)>,
+    /// Once `grow_calls` reaches this, `grow` returns `None` (models a
+    /// genuinely exhausted source for the deterministic-OOM test).
+    fail_after: usize,
+}
+
+const GROW_QUANTUM: usize = 8 * 1024;
+
+impl MockSource {
+    // The 1 MiB `Arena` is boxed straight onto the heap; the transient
+    // stack array the constructor names is the standard host-test pattern
+    // (see the on-stack `Backing` fixtures above).
+    #[allow(clippy::large_stack_arrays)]
+    fn new(fail_after: usize) -> Self {
+        let arena = std::boxed::Box::leak(std::boxed::Box::new(Arena([0u8; 1 << 20])));
+        Self {
+            state: std::sync::Mutex::new(MockState {
+                base: arena.0.as_mut_ptr() as usize,
+                len: arena.0.len(),
+                cursor: 0,
+                grow_calls: 0,
+                shrink_calls: 0,
+                freelist: std::vec::Vec::new(),
+                fail_after,
+            }),
+        }
+    }
+
+    fn grow_calls(&self) -> usize {
+        self.state.lock().unwrap().grow_calls
+    }
+
+    fn shrink_calls(&self) -> usize {
+        self.state.lock().unwrap().shrink_calls
+    }
+}
+
+impl HeapSource for MockSource {
+    fn grow(&self, min_len: usize) -> Option<(*mut u8, usize)> {
+        let mut s = self.state.lock().unwrap();
+        s.grow_calls += 1;
+        if s.grow_calls > s.fail_after {
+            return None;
+        }
+        let want = min_len.div_ceil(GROW_QUANTUM).max(1) * GROW_QUANTUM;
+        // Reuse a returned chunk that is big enough, else bump.
+        if let Some(pos) = s.freelist.iter().position(|&(_, len)| len >= want) {
+            let (off, len) = s.freelist.swap_remove(pos);
+            return Some(((s.base + off) as *mut u8, len));
+        }
+        if s.cursor + want > s.len {
+            return None;
+        }
+        let off = s.cursor;
+        s.cursor += want;
+        Some(((s.base + off) as *mut u8, want))
+    }
+
+    fn shrink(&self, base: *mut u8, len: usize) {
+        let mut s = self.state.lock().unwrap();
+        s.shrink_calls += 1;
+        let off = base as usize - s.base;
+        s.freelist.push((off, len));
+    }
+}
+
+#[test]
+fn grows_from_the_source_when_the_bootstrap_is_exhausted() {
+    // A tiny bootstrap that cannot satisfy a single 4 KiB request forces
+    // the allocator to grow from the source.
+    let mut backing = Backing([0u8; 64]);
+    let alloc = fixture(&mut backing);
+    let source = std::boxed::Box::leak(std::boxed::Box::new(MockSource::new(usize::MAX)));
+    alloc.install_source(source);
+
+    let layout = Layout::from_size_align(4096, 8).unwrap();
+    // SAFETY: non-zero layout.
+    let p = unsafe { alloc.alloc(layout) };
+    assert!(
+        !p.is_null(),
+        "growth must satisfy a request the bootstrap cannot"
+    );
+    assert!(
+        source.grow_calls() >= 1,
+        "the source must have been asked to grow"
+    );
+    // Capacity now exceeds the bootstrap region.
+    assert!(alloc.remaining() > 0);
+    // SAFETY: `p` came from this allocator with `layout`.
+    unsafe { alloc.dealloc(p, layout) };
+}
+
+#[test]
+fn draining_a_grown_region_returns_it_to_the_source() {
+    // Bootstrap too small for the request, so the block lands in a grown
+    // region; freeing it drains that region, which must be handed back.
+    let mut backing = Backing([0u8; 64]);
+    let alloc = fixture(&mut backing);
+    let source = std::boxed::Box::leak(std::boxed::Box::new(MockSource::new(usize::MAX)));
+    alloc.install_source(source);
+
+    let layout = Layout::from_size_align(4096, 8).unwrap();
+    // SAFETY: non-zero layout.
+    let p = unsafe { alloc.alloc(layout) };
+    assert!(!p.is_null());
+    assert_eq!(source.shrink_calls(), 0, "nothing returned while in use");
+    // SAFETY: `p` came from this allocator with `layout`.
+    unsafe { alloc.dealloc(p, layout) };
+    assert_eq!(
+        source.shrink_calls(),
+        1,
+        "a wholly-drained grown region must be returned to the source"
+    );
+}
+
+#[test]
+fn grow_shrink_cycles_are_stable_and_reuse_space() {
+    // Repeated grow/shrink cycles must neither leak regions nor exhaust the
+    // arena: the source recycles returned chunks, so many rounds succeed.
+    let mut backing = Backing([0u8; 64]);
+    let alloc = fixture(&mut backing);
+    let source = std::boxed::Box::leak(std::boxed::Box::new(MockSource::new(usize::MAX)));
+    alloc.install_source(source);
+
+    let layout = Layout::from_size_align(4096, 8).unwrap();
+    for _ in 0..1000 {
+        // SAFETY: non-zero layout.
+        let p = unsafe { alloc.alloc(layout) };
+        assert!(
+            !p.is_null(),
+            "each round must grow (reusing space) and succeed"
+        );
+        // SAFETY: `p` came from this allocator with `layout`.
+        unsafe { alloc.dealloc(p, layout) };
+    }
+    // Every grow was matched by a shrink: no region stranded.
+    assert_eq!(source.grow_calls(), source.shrink_calls());
+}
+
+#[test]
+fn deterministic_oom_when_the_source_is_exhausted() {
+    // A source that refuses to grow makes `alloc` fail closed with null
+    // (never a panic), and the heap recovers once the request shrinks to
+    // fit the bootstrap.
+    let mut backing = Backing([0u8; 128]);
+    let alloc = fixture(&mut backing);
+    let source = std::boxed::Box::leak(std::boxed::Box::new(MockSource::new(0)));
+    alloc.install_source(source);
+
+    let big = Layout::from_size_align(4096, 8).unwrap();
+    // SAFETY: non-zero layout.
+    assert!(
+        unsafe { alloc.alloc(big) }.is_null(),
+        "an exhausted source must fail closed with null, never panic"
+    );
+    // A request the bootstrap can serve still succeeds.
+    let small = Layout::from_size_align(16, 8).unwrap();
+    // SAFETY: non-zero layout.
+    let p = unsafe { alloc.alloc(small) };
+    assert!(!p.is_null());
+    // SAFETY: `p` came from this allocator with `small`.
+    unsafe { alloc.dealloc(p, small) };
+}
+
+#[test]
+fn grown_region_does_not_coalesce_into_the_bootstrap() {
+    // The bootstrap has a usable hole, but a request too big for it grows a
+    // region. Even if that region is physically adjacent to the bootstrap,
+    // the boundary guard keeps them distinct so the grown region can still
+    // be recognised as wholly free and returned.
+    let mut backing = Backing([0u8; 4096]);
+    let alloc = fixture(&mut backing);
+    let source = std::boxed::Box::leak(std::boxed::Box::new(MockSource::new(usize::MAX)));
+    alloc.install_source(source);
+
+    // Hold a small bootstrap allocation so the bootstrap region is partly
+    // in use throughout.
+    let small = Layout::from_size_align(16, 8).unwrap();
+    // SAFETY: non-zero layout.
+    let keep = unsafe { alloc.alloc(small) };
+    assert!(!keep.is_null());
+
+    let big = Layout::from_size_align(4096, 8).unwrap();
+    // SAFETY: non-zero layout.
+    let p = unsafe { alloc.alloc(big) };
+    assert!(!p.is_null());
+    // SAFETY: `p` came from this allocator with `big`.
+    unsafe { alloc.dealloc(p, big) };
+    assert_eq!(
+        source.shrink_calls(),
+        1,
+        "the grown region must return despite the live bootstrap block"
+    );
+    // SAFETY: `keep` came from this allocator with `small`.
+    unsafe { alloc.dealloc(keep, small) };
+    assert_eq!(alloc.used(), 0);
+}
+
 extern crate alloc;

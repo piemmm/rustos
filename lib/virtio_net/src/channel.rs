@@ -4,7 +4,8 @@
 //! [`NetChannelServer`] is the pure, host-testable engine the user-space
 //! virtio-net driver *process* drives: the process owns the device
 //! (MMIO/DMA/IRQ) and the call endpoint, and hands each decoded
-//! [`NetChannelRequest`] to this server, which turns it into the right
+//! [`NetChannelRequest`](rustos_abi::driver::net_channel::NetChannelRequest)
+//! to this server, which turns it into the right
 //! device action and the matching reply. The I/O — receiving the request,
 //! mapping the granted frame region, sending the reply and the
 //! receive-frames notify — stays in the process binary (`main.rs`); the
@@ -14,13 +15,17 @@
 //! # State machine
 //!
 //! A freshly-constructed server is **detached**: it answers
-//! [`NetChannelRequest::Facts`] (so the stack can size the ring geometry)
-//! and refuses [`NetChannelRequest::Service`] with [`Errno::NotConnected`].
-//! [`NetChannelRequest::Attach`] validates the offered geometry against the
+//! [`NetChannelRequest::Facts`](rustos_abi::driver::net_channel::NetChannelRequest::Facts)
+//! (so the stack can size the ring geometry) and refuses
+//! [`NetChannelRequest::Service`](rustos_abi::driver::net_channel::NetChannelRequest::Service)
+//! with [`Errno::NotConnected`].
+//! [`NetChannelRequest::Attach`](rustos_abi::driver::net_channel::NetChannelRequest::Attach)
+//! validates the offered geometry against the
 //! device and moves the server to **attached**; from there
 //! [`NetChannelServer::service_reply`] binds a [`FrameRings`] view over the
 //! caller-mapped region and drives one [`Net::service`] doorbell.
-//! [`NetChannelRequest::Detach`] returns the server to detached.
+//! [`NetChannelRequest::Detach`](rustos_abi::driver::net_channel::NetChannelRequest::Detach)
+//! returns the server to detached.
 //!
 //! # Fail closed
 //!

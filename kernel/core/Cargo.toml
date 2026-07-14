@@ -40,6 +40,12 @@ rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
 rustos-log = { path = "../../lib/log", version = "=0.0.0" }
 rustos-sync = { path = "../../lib/sync", version = "=0.0.0" }
 rustos-kernel-mem = { path = "../mem", version = "=0.0.0" }
+# The shared kernel heap allocator (`AGENTS.md` §2.2): kernel/core hosts the
+# growable-heap wiring (`src/kheap.rs`) that lets the bin's
+# `#[global_allocator]` (a `rustos_kalloc::FreeListAllocator`) draw fresh
+# physical frames on demand, so the heap is not capped at its bootstrap
+# `.bss` region.
+rustos-kalloc = { path = "../../lib/kalloc", version = "=0.0.0" }
 rustos-kernel-sec = { path = "../sec", version = "=0.0.0" }
 # The Arch HAL "enter user mode" primitive (`EnterUser`, §17.2) the
 # capability-checked spawn caller (`src/spawn.rs`) reaches through. As the
