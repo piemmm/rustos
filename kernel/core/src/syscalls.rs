@@ -8096,6 +8096,24 @@ where
         let dispatcher = Dispatcher::new(&self.handlers, self.audit);
         let result = dispatcher.dispatch(&caller, raw_number, args);
 
+        // Re-read the live CPU for everything below. A *blocking* handler
+        // (`ipc_call`, `call_recv`, `irq_wait`, `hw_tree_wait`, …) parks
+        // the task, and a parked task can be woken and re-dispatched
+        // (work-stolen) onto a **different** core; when the handler
+        // returns we are physically running on whatever core resumed the
+        // task, which is the core its resume handle is now published on.
+        // The completion path below hands a `CpuId` to the arch port's
+        // `reschedule_current`, which is invoked on this same physical
+        // core — so it must name the core the task is on *now*, never the
+        // `cpu` captured at entry (before any migration). Passing the
+        // stale entry `cpu` would drive `reschedule_current` against a
+        // different core's resume handle, context-switching this core
+        // through another task's saved state and corrupting both — a wild
+        // fault. The task cannot migrate again between here and the
+        // `reschedule_current` call: the kernel is non-preemptible, and
+        // nothing below parks.
+        let completion_cpu = SchedulerArch::current_cpu(self.arch);
+
         // The kill boundary: a termination deferred while this task was
         // inside the handler lands now, after the unwind released
         // everything the handler held. The task never returns to user
@@ -8106,7 +8124,7 @@ where
             if raw_number != SyscallNumber::EXIT.as_u16() {
                 return self
                     .handlers
-                    .land_pending_kill(task_id, signal, result, cpu);
+                    .land_pending_kill(task_id, signal, result, completion_cpu);
             }
         }
 
@@ -8120,7 +8138,10 @@ where
         // turns this into a `reschedule_current` call; if no user kthread is
         // published on this CPU it falls back to an ordinary encoded return
         // (fail closed — `crate::dispatch_slot::DispatchOutcome::Reschedule`).
-        completion_outcome(raw_number, result, cpu)
+        // `completion_cpu` (re-read above) is the core the task is running
+        // on now, so a blocking syscall that migrated mid-handler still
+        // reschedules on the correct core.
+        completion_outcome(raw_number, result, completion_cpu)
     }
 
     fn resolve_user_fault(&self, fault_va: u64, write: bool) -> UserFaultOutcome {
@@ -8316,6 +8337,36 @@ mod tests {
             park_current_task(&sched, &arch, id),
             ParkStep::Parked
         ));
+    }
+
+    /// The completion path acts on the CPU it is handed and **only** that
+    /// CPU — a preemption latch armed on a *different* core neither
+    /// diverts nor is consumed by a syscall completing here.
+    ///
+    /// This is the multi-core half of the completion-CPU contract the
+    /// sibling `completion_outcome_*` tests pin on a single core: because
+    /// `Handlers::dispatch` re-reads the *live* CPU after a (possibly
+    /// blocking, possibly migrating) handler returns, the CPU it passes is
+    /// the core the task is running on now. Reusing the stale entry core
+    /// instead would consult — and reschedule against — the wrong core's
+    /// latch and resume handle, switching that core through another task's
+    /// saved context (a wild fault). The CPU indices are unique to this
+    /// test so parallel test threads never share the process-wide latch.
+    #[test]
+    fn completion_outcome_reads_only_the_given_cpus_preempt_latch() {
+        const HERE: CpuId = 45;
+        const OTHER: CpuId = 46;
+        let ordinary = SyscallNumber::CLOCK_GET.as_u16();
+
+        // A latch armed on `OTHER` must not divert a completion on `HERE`:
+        // the decision reads `HERE`'s own (unset) latch and returns.
+        crate::preempt::note_preempt_tick(OTHER);
+        assert_eq!(
+            completion_outcome(ordinary, Ok(1), HERE),
+            DispatchOutcome::Returned(Ok(1))
+        );
+        // `OTHER`'s latch is left intact — this completion never touched it.
+        assert!(crate::preempt::take_preempt_pending(OTHER));
     }
 
     /// Deterministic stand-in entropy source for the `random_get`
