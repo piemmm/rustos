@@ -54,42 +54,19 @@ use rustos_virtio_net::VIRTIO_NET_DEVICE_ID;
 
 use crate::driver_catalog;
 
-/// First synthetic hardware-tree id for a probed virtio-MMIO child node
-/// (the bind key is the virtio device id read from the
-/// transport, attached as a *probed child* of the raw bus node).
-///
-/// [`RootBlockSelection`] uses a node id only to tell two distinct block
-/// devices apart (the ambiguity check) and to dedupe a re-emitted node.
-/// The discovery walk (`platform::FdtDiscovery`) numbers the raw firmware
-/// nodes from `1` upward; the probed children take ids from this high base
-/// so the two id spaces are obviously disjoint (a collision would be
-/// harmless — only block bindings ever populate the selection's `found` —
-/// but a disjoint range keeps the origin of each id unambiguous). One id
-/// per enumerated block slot, so distinct disks stay distinct.
-const VIRTIO_PROBE_NODE_BASE_ID: u32 = 0x8000_0000;
-
-/// First synthetic hardware-tree id for a probed virtio-MMIO **input**
-/// child node ([`observe_virtio_mmio_input_devices`]).
-///
-/// Kept disjoint from [`VIRTIO_PROBE_NODE_BASE_ID`] (the block-child base)
-/// so a block node and an input node discovered on the same bus never
-/// share an id — the two probe walks number independently, and a shared id
-/// would make the leaked tree's node origins ambiguous. One id per
-/// enumerated input slot, so distinct devices stay distinct.
-const VIRTIO_INPUT_PROBE_NODE_BASE_ID: u32 = 0x8001_0000;
-
-/// First synthetic hardware-tree id for a probed virtio-MMIO **network**
-/// child node ([`observe_virtio_mmio_network_devices`]).
-///
-/// Kept disjoint from the block- (`0x8000_0000`), input- (`0x8001_0000`),
-/// and boot-display ([`crate::boot_display::BOOT_DISPLAY_NODE_ID`],
-/// `0x8002_0000`) bases so a block, input, network, *and* display node
-/// discovered on the same bus never share an id — the probe walks number
-/// independently, and a shared id would make one node silently overwrite
-/// another in the leaked tree (a display world with a NIC hits exactly
-/// this). One id per enumerated network slot, so distinct devices stay
-/// distinct.
-const VIRTIO_NET_PROBE_NODE_BASE_ID: u32 = 0x8003_0000;
+// The synthetic hardware-tree node-id bases the probe walks below number
+// their emitted nodes from. They come from the one shared, disjoint-by-
+// construction map (`crate::hwtree_node_ids`) so no walk's ids can ever
+// alias a node another boot step minted — the block base for
+// `observe_virtio_mmio_block_devices`, the input base for
+// `observe_virtio_mmio_input_devices`, and the network base for
+// `observe_virtio_mmio_network_devices`. `RootBlockSelection` uses a node
+// id only to tell two distinct block devices apart and to dedupe a
+// re-emitted node; the interrupt-driven probes give distinct devices
+// distinct ids by incrementing within their region.
+use crate::hwtree_node_ids::{
+    VIRTIO_BLOCK_PROBE_NODE_BASE_ID, VIRTIO_INPUT_PROBE_NODE_BASE_ID, VIRTIO_NET_PROBE_NODE_BASE_ID,
+};
 
 /// Audit event id for the root-storage bind gate (a
 /// stable id for the security-relevant bind decision). Sits beside the
@@ -312,7 +289,7 @@ pub fn observe_virtio_mmio_block_devices(
     };
     let mut table = [blank; MAX_SLOTS];
     let count = bus.enumerate(&mut table)?;
-    let mut next_id = VIRTIO_PROBE_NODE_BASE_ID;
+    let mut next_id = VIRTIO_BLOCK_PROBE_NODE_BASE_ID;
     for device in &table[..count] {
         if device.device != VIRTIO_BLK_DEVICE_ID {
             continue;
@@ -868,7 +845,7 @@ mod tests {
             .expect("enumerate");
         let binding = selection.finish(&audit).expect("virtio-blk binds");
         assert_eq!(binding.driver_path, VIRTIO_BLK_PATH);
-        assert_eq!(binding.node.id(), VIRTIO_PROBE_NODE_BASE_ID);
+        assert_eq!(binding.node.id(), VIRTIO_BLOCK_PROBE_NODE_BASE_ID);
         assert_eq!(audit.only().1, Level::Info);
     }
 

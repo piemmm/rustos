@@ -652,7 +652,15 @@ improvement, not test scaffolding):
 **Follow-up increments (not this change).**
 - **N4e-riscv64 / N4e-x86_64**: build the driver-autoload-into-user-process
   production vertical on those arches (pioneering their autoload QEMU path),
-  then the same two-process netstack vertical.
+  then the same two-process netstack vertical. Scope reality: riscv64 and
+  x86_64 currently carry *none* of the autoload subsystem (no root mount, no
+  unlock kthread, no `devmgr`, no `driver_spawn_loader`) — pioneering it is
+  the `plans/WIRING.md` / `plans/ARCHSUPPORT.md` parity port, not a small
+  extension. Foundation in place: the synthetic node-id bases the probes emit
+  from now live in one shared, disjoint-by-construction, compile-time-guarded
+  map (`kernel/rustos-kernel/src/hwtree_node_ids.rs`) — a new arch's NIC-probe
+  region is claimed as the next index there, never a fresh literal, so the
+  base-collision class that bit N4e-β cannot recur.
 - **§18.5 scaffold removal** (once all three arches are two-process): delete the
   `register` shell in `drivers/network/virtio_net` (keeping `BIND_KEYS` +
   `VirtioNet`), `FixedSpawner`/`netstack_ping` in the support crate, and

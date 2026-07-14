@@ -150,6 +150,16 @@ pub mod driver_loader;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
 pub mod root_storage;
 
+// The reserved synthetic hardware-tree node-id address space: one shared,
+// disjoint-by-construction home for the high node-id bases the bootstrap-floor
+// virtio-MMIO probes (`root_storage`) and the boot-display shim
+// (`boot_display`) mint their nodes from, plus the compile-time guard that a
+// probe walk never overruns its region. Pure `lib/abi`/`kernel/virtio`
+// constants, so it is host-tested on the CI host and gated, like its two
+// consumers, on the instruction sets whose boot path assembles the tree.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
+pub mod hwtree_node_ids;
+
 // The boot-display publication step (`plans/DISPLAY.md` D7d): turns the
 // architecture port's discovered framebuffer-boot-console scan-out facts
 // into a display-class hardware-tree node carrying the geometry-carrying

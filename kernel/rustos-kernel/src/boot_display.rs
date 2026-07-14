@@ -31,12 +31,11 @@ use rustos_arch_api::{DiscoveryError, HwNodeSink};
 
 /// Node id of the boot display in the discovered tree.
 ///
-/// Kept disjoint from the virtio block-child base (`0x8000_0000`) and the
-/// virtio-input probe base (`0x8001_0000`) in `crate::root_storage`, and
-/// from every FDT-walk id (small integers), so the probe-emitted id spaces
-/// can never collide. There is at most one boot display, so this is a
-/// single id, not a base.
-pub const BOOT_DISPLAY_NODE_ID: u32 = 0x8002_0000;
+/// One entry in the shared, disjoint-by-construction node-id map
+/// ([`crate::hwtree_node_ids`]), so it can never collide with a probe base
+/// or another boot step's node. There is at most one boot display, so this
+/// is a single id, not a base.
+pub use crate::hwtree_node_ids::BOOT_DISPLAY_NODE_ID;
 
 /// The boot console's scan-out surface, as the architecture port
 /// discovered it — plain values, so this module never names an
