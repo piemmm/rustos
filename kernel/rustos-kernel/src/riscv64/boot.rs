@@ -401,12 +401,7 @@ static PREEMPT_STORAGE: rustos_arch_riscv64::preempt::PreemptStorage<1> =
 /// dispatch (tickless).
 #[cfg(all(freestanding, kernel_isa = "riscv64"))]
 extern "C" fn production_preempt_dispatch(cpu: rustos_arch_api::CpuId) {
-    if rustos_kernel_core::take_preempt_pending(cpu) {
-        let _ = rustos_kernel_core::reschedule_current(
-            cpu,
-            rustos_kernel_core::RescheduleAction::Yield,
-        );
-    }
+    let _ = rustos_kernel_core::preempt_current(cpu);
 }
 
 /// The per-tick callback the timer trap path invokes on **every** tick

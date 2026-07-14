@@ -97,6 +97,13 @@ fn build_device_with_sectors(sectors: u64) -> (MockTransport, Rc<RefCell<Vec<u8>
 struct AutoDrainHost {
     inner: MockHost,
     transport: core::cell::UnsafeCell<*mut MockTransport>,
+    /// Number of leading `notify_wait` calls that return **without**
+    /// draining the queue — modelling advisory/spurious wakes whose
+    /// matching completion is not yet in the used ring. Each such wake
+    /// decrements the counter; once it reaches zero every wake drains as
+    /// usual. Zero (the [`Self::new`] default) is the ordinary
+    /// wake-and-complete host.
+    spurious_remaining: core::cell::Cell<u32>,
 }
 
 impl AutoDrainHost {
@@ -104,7 +111,18 @@ impl AutoDrainHost {
         Self {
             inner: MockHost::new(),
             transport: core::cell::UnsafeCell::new(core::ptr::null_mut()),
+            spurious_remaining: core::cell::Cell::new(0),
         }
+    }
+
+    /// An [`AutoDrainHost`] whose first `n` `notify_wait` calls wake the
+    /// driver **without** posting the completion (a spurious/early wake),
+    /// so the driver must re-poll and wait again. A never-completing
+    /// device is modelled with `n` above [`MAX_COMPLETION_WAKES`].
+    fn with_spurious_wakes(n: u32) -> Self {
+        let mut host = Self::new();
+        host.spurious_remaining = core::cell::Cell::new(n);
+        host
     }
     /// Plant the live transport's raw pointer so `notify_wait` can
     /// drain it. Called once per driver instance, while no other
@@ -134,6 +152,15 @@ impl DmaHost for AutoDrainHost {
 
 impl rustos_virtio::VirtioHost for AutoDrainHost {
     fn notify_wait(&self, queue_index: u16) {
+        self.inner.notify_wait(queue_index);
+        // A leading spurious/early wake returns without draining, so the
+        // completion is not yet in the used ring and the driver must
+        // re-poll and wait again.
+        let spurious = self.spurious_remaining.get();
+        if spurious > 0 {
+            self.spurious_remaining.set(spurious - 1);
+            return;
+        }
         // SAFETY: the pointer was installed by `install_transport`
         // while no other borrow of the transport was live; the
         // driver releases its `&mut self.transport` borrow between
@@ -145,7 +172,6 @@ impl rustos_virtio::VirtioHost for AutoDrainHost {
             let t = unsafe { &mut *t_ptr };
             let _ = t.drain_queue(queue_index);
         }
-        self.inner.notify_wait(queue_index);
     }
 }
 
@@ -173,6 +199,51 @@ fn open_with_autodrain_host(
     let mut blk = Box::new(VirtioBlk::open(t, host).expect("open"));
     host.install_transport(blk.transport_mut() as *mut MockTransport);
     (blk, host)
+}
+
+/// Open a driver whose host's first `n` completion wakes are spurious
+/// (they wake without posting the completion), so the driver's re-poll
+/// loop is exercised.
+fn open_with_spurious(t: MockTransport, n: u32) -> Box<VirtioBlk<'static, MockTransport>> {
+    let host: &'static AutoDrainHost = Box::leak(Box::new(AutoDrainHost::with_spurious_wakes(n)));
+    let mut blk = Box::new(VirtioBlk::open(t, host).expect("open"));
+    host.install_transport(blk.transport_mut() as *mut MockTransport);
+    blk
+}
+
+/// A handful of early/spurious wakes before the completion lands must
+/// not defeat a request: the driver re-scans the used ring after each
+/// advisory wake and succeeds once the completion is posted, rather than
+/// concluding `Busy`/`DeviceFault` from a single empty poll (the boot
+/// root-unlock reliability fix).
+#[test]
+fn spurious_wakes_before_completion_still_succeed() {
+    let (t, backing) = build_device();
+    backing.borrow_mut()[7 * SECTOR_SIZE..8 * SECTOR_SIZE].fill(0x5A);
+    // Five leading wakes deliver no completion; the sixth drains it.
+    let mut blk = open_with_spurious(t, 5);
+    let mut buf = vec![0u8; SECTOR_SIZE];
+    blk.read_blocks(7, &mut buf)
+        .expect("read survives spurious wakes");
+    assert!(buf.iter().all(|b| *b == 0x5A));
+}
+
+/// A device that wakes forever without ever posting a completion must
+/// fail **closed** at the `MAX_COMPLETION_WAKES` bound with a typed
+/// `DeviceFault`, never loop forever — the fail-closed guarantee a stuck
+/// or mis-routed shared interrupt must produce.
+#[test]
+fn a_never_completing_device_fails_closed() {
+    let (t, _backing) = build_device();
+    // More spurious wakes than the driver will tolerate: the completion
+    // never lands, so the bounded loop gives up.
+    let mut blk = open_with_spurious(t, MAX_COMPLETION_WAKES + 1);
+    let mut buf = vec![0u8; SECTOR_SIZE];
+    assert_eq!(
+        blk.read_blocks(0, &mut buf),
+        Err(DriverError::DeviceFault),
+        "a wake-storm with no completion must fail closed, not hang"
+    );
 }
 
 #[test]

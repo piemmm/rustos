@@ -26,8 +26,8 @@ use rustos_arch_api::{CpuId, EnterUser};
 use rustos_fdt::Fdt;
 use rustos_kalloc::FreeListAllocator;
 use rustos_kernel_core::{
-    note_preempt_tick, reschedule_current, spawn_image, spawn_user_kthread, take_preempt_pending,
-    RescheduleAction, SpawnRequest, Yielder,
+    note_preempt_tick, preempt_current, preemption_count, reschedule_current, spawn_image,
+    spawn_user_kthread, RescheduleAction, SpawnRequest, Yielder,
 };
 use rustos_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
 use rustos_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
@@ -176,15 +176,16 @@ extern "C" fn ipi_dispatch(cpu: CpuId) {
 }
 
 /// The EL0-preemption callback the IRQ path invokes on return-to-EL0 for any
-/// interrupt — the production `production_preempt_dispatch` shape verbatim: it
-/// reschedules **only** when this CPU owes one (the need-resched latch is set),
-/// suspending the running user task back to the scheduler via
-/// `reschedule_current(_, Yield)`. It records each real reschedule so the test
-/// can prove the SGI drove at least one.
+/// interrupt — this drives the **real** production
+/// [`rustos_kernel_core::preempt_current`] (the exact function the
+/// `production_preempt_dispatch` bins call), which reschedules only when this
+/// CPU owes one and, crucially, increments the kernel's per-CPU preemption
+/// count on a real suspension. The local mirror records each true return so
+/// the test asserts the kernel counter tracks it (the always-zero-counter
+/// regression).
 extern "C" fn preempt_dispatch(cpu: CpuId) {
-    if take_preempt_pending(cpu) {
+    if preempt_current(cpu) {
         PREEMPTIONS.fetch_add(1, Ordering::SeqCst);
-        let _ = reschedule_current(cpu, RescheduleAction::Yield);
     }
 }
 
@@ -387,7 +388,16 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // The SGI, taken from EL0, must have driven the return-to-EL0 preempt point
     // at least once — the regression assertion. Before the fix this stayed 0
     // (the preempt point ran only for the timer PPI) and the run timed out.
-    if PREEMPTIONS.load(Ordering::SeqCst) == 0 {
+    let observed = PREEMPTIONS.load(Ordering::SeqCst);
+    if observed == 0 {
+        qemu_exit::exit_failure(FAIL_NO_PREEMPT);
+    }
+    // The kernel's own per-CPU preemption counter — the value sysmon reports —
+    // must have advanced by exactly the real preemptions performed. This is the
+    // end-to-end regression for the "preempt counter stuck at 0" defect: the
+    // counter now lives in the preemption mechanism and moves under real
+    // preemption, not in the tickless scheduler where it never incremented.
+    if preemption_count(BOOT_CPU) != observed {
         qemu_exit::exit_failure(FAIL_NO_PREEMPT);
     }
     // The spinner resumed correctly after the preemption and ran to its final

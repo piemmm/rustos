@@ -75,6 +75,19 @@ pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     HwMatchKey::virtio(VIRTIO_BLK_DEVICE_ID),
 )];
 
+/// Upper bound on advisory completion wakes a single request tolerates
+/// before failing closed.
+///
+/// A virtio-blk request is serialised by the owner's lock, so exactly one
+/// completion is ever outstanding, and a healthy device posts it within a
+/// wake or two of the notify (an early wake whose used-ring write is not
+/// yet visible, or a wake for the shared line's other queue, costs one
+/// extra re-poll). A count far above that turns a *pathological* stream of
+/// wakes with no matching completion — a stuck or mis-routed shared
+/// interrupt — into a deterministic [`DriverError::DeviceFault`] rather
+/// than an unbounded loop, without ever tripping in normal operation.
+const MAX_COMPLETION_WAKES: u32 = 1024;
+
 /// Driver entry point.
 ///
 /// # Errors
@@ -420,21 +433,47 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
             .add_chain(&segments)
             .map_err(VirtioError::as_driver_error)?;
         self.queue.kick(&mut self.transport);
-        // Block until the host's notifier returns. In production
-        // the kernel host parks the calling task; the mock host
-        // returns immediately (the unit test calls
-        // `MockTransport::drain_queue` to advance the peer).
-        self.host.notify_wait(self.queue.index());
-        let polled = self.queue.poll_used();
+        // Observe the completion. A virtio device signals a finished
+        // request by posting a used-ring entry and raising its single
+        // interrupt line; the host notifier (`notify_wait`) parks the
+        // calling task until that line fires (the mock host drains the
+        // queue and returns). A wake is only *advisory*: the device's
+        // used-`idx` DMA write and its interrupt can be observed in either
+        // order, and the one shared line can wake us for an unrelated
+        // queue, so a single empty `poll_used` is never proof that no
+        // completion is coming. Re-scan the ring after every wake and wait
+        // again only when it is genuinely empty — the request is serialised
+        // by the owner's lock, so exactly one completion is outstanding and
+        // the loop ends when it lands. `MAX_COMPLETION_WAKES` bounds a
+        // pathological wake-storm (a stuck shared line delivering wakes
+        // with no matching completion) so the wait fails closed with
+        // `DeviceFault` rather than looping forever.
+        let mut outcome: Result<(), DriverError> = Err(DriverError::DeviceFault);
+        for _ in 0..MAX_COMPLETION_WAKES {
+            match self.queue.poll_used() {
+                Ok(_token) => {
+                    outcome = Ok(());
+                    break;
+                }
+                Err(VirtioError::NoCompletion) => {
+                    self.host.notify_wait(self.queue.index());
+                }
+                Err(e) => {
+                    outcome = Err(e.as_driver_error());
+                    break;
+                }
+            }
+        }
         // Acknowledge the device's interrupt now that its completion has
-        // been observed, so it de-asserts its line before the next request
-        // re-arms the kernel IRQ (otherwise a stale edge re-delivers and the
-        // following request mis-pairs its completion). Done regardless of
-        // whether `poll_used` found a valid token — a faulted request must
-        // still leave the device's line clear. A no-op on transports that
-        // need no device-side ack (MSI-X PCI, the mock).
+        // been observed (or the wait gave up), so it de-asserts its line
+        // before the next request re-arms the kernel IRQ (otherwise a stale
+        // edge re-delivers and the following request mis-pairs its
+        // completion). Done regardless of the outcome — a faulted or
+        // abandoned request must still leave the device's line clear. A
+        // no-op on transports that need no device-side ack (MSI-X PCI, the
+        // mock).
         self.transport.ack_interrupt();
-        let _token = polled.map_err(VirtioError::as_driver_error)?;
+        outcome?;
         // Decode status first, and copy device-written data back to the
         // caller only on success. The data staging is a persistent
         // buffer reused across requests, so copying on a faulted or

@@ -923,12 +923,7 @@ fn leak_per_cpu_slots(count: usize) -> &'static [core::sync::atomic::AtomicU64] 
 /// is already deactivated across the context switch.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 extern "C" fn production_preempt_dispatch(cpu: rustos_arch_api::CpuId) {
-    if rustos_kernel_core::take_preempt_pending(cpu) {
-        let _ = rustos_kernel_core::reschedule_current(
-            cpu,
-            rustos_kernel_core::RescheduleAction::Yield,
-        );
-    }
+    let _ = rustos_kernel_core::preempt_current(cpu);
 }
 
 /// The IPI callback the SGI IRQ path invokes on every delivered

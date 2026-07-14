@@ -24,7 +24,7 @@ use rustos_arch_x86_64::apic_timer::{Calibration, Rdtsc, TscReader};
 use rustos_arch_x86_64::context_hal::ContextSwitchHal;
 use rustos_arch_x86_64::entropy::PlatformRng as X86PlatformEntropy;
 use rustos_arch_x86_64::kernel_arch::{halt as arch_halt, X86_64Arch};
-use rustos_kernel_core::{reschedule_current, IrqRouting, KernelArch, RescheduleAction};
+use rustos_kernel_core::{IrqRouting, KernelArch};
 use rustos_kernel_irq::{IrqController, IrqTable};
 use rustos_kernel_mem::BootMemoryMap;
 use rustos_kernel_sched_api::{CpuId, SchedulerArch};
@@ -129,24 +129,24 @@ pub extern "C" fn production_external_irq_dispatch(vector: u8) {
 /// honours it.
 ///
 /// When a reschedule is owed it suspends the user task currently running
-/// on `cpu` back to the scheduler with [`RescheduleAction::Yield`] — the
-/// *involuntary* analogue of a `yield` syscall: the task is re-enqueued at
-/// its priority and the scheduler picks the next runnable task, giving
-/// EEVDF-ordered time-slicing and running `drain_pending_wakes` so work a
-/// device IRQ just woke actually gets dispatched. This is the x86_64
-/// sibling of the aarch64/riscv64 `production_preempt_dispatch` (one shape
-/// over the Arch HAL). [`reschedule_current`] returns `false` when no
-/// resumable user kthread is published on `cpu` (unreachable from ring 3
-/// with none switched in, but the fail-closed return means a stray
-/// invocation is a harmless no-op rather than an unsound switch). The call
-/// only ever runs after the ISR has written the LAPIC EOI, so the
-/// in-service bit is already released across the context switch, and the
-/// ISR brackets it with the `swapgs` pair that balances the kthread
-/// cooperative park.
+/// on `cpu` back to the scheduler with
+/// [`rustos_kernel_core::RescheduleAction::Yield`] — the *involuntary*
+/// analogue of a `yield` syscall: the task is re-enqueued at its priority
+/// and the scheduler picks the next runnable task, giving EEVDF-ordered
+/// time-slicing and running `drain_pending_wakes` so work a device IRQ
+/// just woke actually gets dispatched. This is the x86_64 sibling of the
+/// aarch64/riscv64 `production_preempt_dispatch` (one shape over the Arch
+/// HAL): the latch-consult, reschedule, and preemption count all live in
+/// the shared [`rustos_kernel_core::preempt_current`], which returns
+/// `false` when nothing is owed or no resumable user kthread is published
+/// on `cpu` (unreachable from ring 3 with none switched in, but the
+/// fail-closed return means a stray invocation is a harmless no-op rather
+/// than an unsound switch). The call only ever runs after the ISR has
+/// written the LAPIC EOI, so the in-service bit is already released across
+/// the context switch, and the ISR brackets it with the `swapgs` pair
+/// that balances the kthread cooperative park.
 extern "C" fn production_preempt_dispatch(cpu: CpuId) {
-    if rustos_kernel_core::take_preempt_pending(cpu) {
-        let _ = reschedule_current(cpu, RescheduleAction::Yield);
-    }
+    let _ = rustos_kernel_core::preempt_current(cpu);
 }
 
 /// The per-tick callback the LAPIC-timer ISR invokes on **every** tick

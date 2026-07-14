@@ -110,9 +110,14 @@ and audited — because each exposes kernel-wide operational state:
 - `CPU_LOAD` — one `CpuLoadRecord` per online CPU (paged by a
   `CpuLoadRequest`): the run-queue depth sample plus the context-switch
   and preemption counters. The cumulative busy/idle time split stays in
-  `CPU_TIME_STATS`, so the same figure is never served twice; the queue
-  depths and preemption counters are kernel scheduler internals, hence
-  the gate the utilisation split does not carry.
+  `CPU_TIME_STATS`, so the same figure is never served twice. The
+  run-queue depth and context-switch counters are scheduler internals;
+  the preemption counter is the kernel **preemption mechanism**'s own
+  per-CPU count of real involuntary preemptions (the return-to-user
+  preempt point suspending a running task), not a scheduler-policy tick
+  observation — so it moves under load even on the tickless default
+  policy (EEVDF), which takes no periodic scheduler tick. All are kernel
+  internals, hence the gate the utilisation split does not carry.
 
 ## Wire framing
 

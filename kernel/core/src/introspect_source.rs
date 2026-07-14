@@ -467,7 +467,12 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                 reserved: 0,
                 queue_depth: self.state.scheduler.queue_depth(cpu_id).unwrap_or(0),
                 switches: self.state.scheduler.cpu_switches(cpu_id).unwrap_or(0),
-                preemptions: self.state.scheduler.preemption_count(cpu_id).unwrap_or(0),
+                // Real involuntary preemptions performed by the kernel's
+                // preemption mechanism — not the scheduler policy's
+                // internal timer-tick observation, which is always zero
+                // for a tickless policy (EEVDF) and so never reflected
+                // the preemptions actually taken under load.
+                preemptions: crate::preempt::preemption_count(cpu_id),
             };
             out.extend_from_slice(&record.to_le_bytes());
         }
