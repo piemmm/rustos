@@ -238,6 +238,24 @@ pub trait Net {
     ///
     /// Requires [`CapabilityId::NET_RAW`](crate::CapabilityId::NET_RAW).
     fn service(&mut self, rings: &mut FrameRings<'_>) -> Result<ServiceReport, DriverError>;
+
+    /// Acknowledge the device's pending interrupt, deasserting the line.
+    ///
+    /// A user-space NIC driver parks on the device interrupt and, when it
+    /// fires, must clear the device-level assertion **before** the line is
+    /// re-enabled — otherwise the interrupt re-fires immediately and storms
+    /// the driver off the run queue (the busy-wait the charter forbids). This
+    /// is distinct from [`service`](Self::service): acknowledgement only
+    /// clears the interrupt signal; the completed receive descriptors persist
+    /// until the next `service` drains them, so a driver may acknowledge on
+    /// the interrupt and defer the actual frame movement to the stack's next
+    /// service doorbell.
+    ///
+    /// The default is a no-op for devices and back-ends that need no explicit
+    /// acknowledgement (an in-process mock, a transport that self-clears);
+    /// a real hardware device overrides it to clear its interrupt-status
+    /// register.
+    fn ack_interrupt(&mut self) {}
 }
 
 #[cfg(test)]

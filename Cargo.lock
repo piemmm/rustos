@@ -984,6 +984,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-drv-network-virtio-net-driver"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-caps",
+ "rustos-drvrt",
+ "rustos-log",
+ "rustos-rt",
+ "rustos-virtio",
+ "rustos-virtio-net",
+]
+
+[[package]]
 name = "rustos-drv-storage-emmc2"
 version = "0.0.0"
 dependencies = [

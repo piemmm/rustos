@@ -534,6 +534,25 @@ Wire the N4c contract end to end so a real NIC's frames reach the running
 netstack client, and the QEMU verticals land together — so it is one change,
 not a chain of independently-shippable slices.
 
+**Status.** The device-side pieces are built and verified host/build green:
+the user-space driver **process** crate `drivers/network/virtio_net_driver`
+(the freestanding `Run` binary — bring-up, reserved device-channel endpoint
+claim bound restricted-sender `{CAP_NET_RAW}`, `netchan` node emission, and the
+wait-set serve loop over `{call endpoint, device IRQ}` driving the pure
+`NetChannelServer`), and the `Net::ack_interrupt` seam (a user-space NIC
+driver deasserts its device IRQ through the `Net` trait; `VirtioNet` clears the
+virtio interrupt-status register) so an RX interrupt never storms. **Remaining
+(coupled, activates the live path):** netstack `run.rs` `RtNetChannelTransport`
++ `BindDriver` provisioning glue and wait-set token map; `devmgr` autobind of
+the emitted `netchan` node; the netstack + `devmgr` manifest capability
+requests (`CAP_SHM` / `CAP_NET_ADMIN`); removing `VirtioNet::service`'s
+`notify_wait` self-park (a single-process convenience that would block a
+cross-process `Service` doorbell — the doorbell must be non-blocking, parking
+belongs to each process's own wait loop); and rewriting the three `netstack_*`
+QEMU verticals from the in-kernel `register` scaffold into the two-process form
+(netstack process + driver process + host peer), which the `notify_wait`
+removal requires. These land together in the next increment.
+
 **Crate layout / layering (the load-bearing decision).** The driver
 **process** is a *new, separate* binary crate (the `drivers/input/virtio_kbd`
 ↔ `lib/virtio_input` precedent): the kernel/test-kernel must not pull the

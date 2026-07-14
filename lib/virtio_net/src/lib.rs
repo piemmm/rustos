@@ -482,6 +482,14 @@ impl<T: Transport> Net for VirtioNet<'_, T> {
         }
         Ok(report)
     }
+
+    fn ack_interrupt(&mut self) {
+        // Clear the device's interrupt-status register so the line deasserts;
+        // the completed receive descriptors persist in the used ring until the
+        // next `service` drains them. The virtio-MMIO transport writes
+        // `InterruptACK` for exactly the bits it read as pending.
+        self.transport.ack_interrupt();
+    }
 }
 
 #[cfg(test)]

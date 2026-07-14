@@ -84,6 +84,18 @@ impl<N: Net> NetChannelServer<N> {
         &self.net
     }
 
+    /// Borrow the underlying device engine mutably.
+    ///
+    /// The driver process needs this to acknowledge the device interrupt
+    /// (`Transport::ack_interrupt`) the moment its IRQ fires — before it wakes
+    /// the stack with a notify and independently of whether a frame region is
+    /// attached — so a receive interrupt is deasserted promptly and never
+    /// re-fires in a storm while the stack has not yet issued its next
+    /// service doorbell.
+    pub fn net_mut(&mut self) -> &mut N {
+        &mut self.net
+    }
+
     /// Whether the stack has attached a frame region.
     #[must_use]
     pub fn is_attached(&self) -> bool {

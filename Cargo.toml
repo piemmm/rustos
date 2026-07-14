@@ -127,6 +127,7 @@ members = [
 
     # Drivers — network
     "drivers/network/virtio_net",
+    "drivers/network/virtio_net_driver",
 
     # Userland — grouped by class (system, session, shell, gui, apps),
     # mirroring the `drivers/<class>/<name>` layout documented in

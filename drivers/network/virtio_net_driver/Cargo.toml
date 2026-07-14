@@ -1,0 +1,55 @@
+[package]
+name = "rustos-drv-network-virtio-net-driver"
+description = "RustOS autoloaded user-space virtio-net driver process: brings the virtio-net device up over its granted register window, DMA, and interrupt line, and serves the `netchan-v1` device-channel contract to the network stack over a claimed reserved endpoint (`AGENTS.md` §4 / §18, plans/NETWORK.md N4d)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The crate is **only** a binary: the `Run` entry point of the virtio-net
+# driver bundle, installed under `/System/Drivers/` and autoloaded into user
+# space by `devmgr` when a virtio-net device is discovered (`AGENTS.md` §18).
+# It links the userland runtime `rustos-rt`, so it is a separate crate from any
+# kernel-linked driver shell (the kernel must not pull in the userland `_start`
+# / panic handler / allocator), and depends only on `lib/*` crates so the
+# §17.4 layering holds (no `drivers/*`→`drivers/*` edge). It is a freestanding
+# pure-Rust program on the native Tier-1 targets and an inert host stub
+# elsewhere (`src/main.rs` / `build.rs`), mirroring `drivers/input/virtio_kbd`
+# and `drivers/storage/usb_msd`.
+
+# Everything the freestanding program links is pulled in only for the bare-metal
+# targets the binary is actually built for; on the host the binary is an inert
+# stub with no dependencies.
+[target.'cfg(target_os = "none")'.dependencies]
+# The `abi-v1` surface: the `netchan-v1` device-channel contract
+# (`NetChannelServer` handling lives in `lib/virtio_net`), the hardware-tree
+# node/resource types, capability ids, the reserved device-channel endpoint
+# block, and the wait-set vocabulary.
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The capability-set type the rt-backed `DriverHost` is built over (§5.2).
+rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+# The bus-agnostic virtio-MMIO transport this driver builds over its granted
+# register window — a `lib/*` crate, so the §17.4 layering holds (the driver
+# never names `drivers/bus/virtio`; the `lib/usb` ↔ `drivers/bus/usb`
+# precedent).
+rustos-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
+# The bus-agnostic virtio-net device engine (bring-up + frame-ring `Net`
+# service) *and* the driver-side `NetChannelServer` per-request handler — the
+# same engine the host tests and QEMU verticals exercise (§2.2 / §17.4).
+rustos-virtio-net = { path = "../../../lib/virtio_net", version = "=0.0.0" }
+# The user-space driver runtime: turns the kernel-issued device-resource grants
+# into the `MmioMapper` + `VirtioHost` the bring-up consumes (`mmio_map` /
+# `dma_alloc` / `resource_grants` over the syscall surface, §5.4).
+rustos-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
+# The pure-Rust userland runtime (`AGENTS.md` §1 / §16.4): `_start`, the stack
+# canary, the panic handler, the allocator, and the syscall wrappers
+# (`call_create`/`call_recv`/`call_reply`/`shm_map`/`ipc_send`/`irq_bind`/
+# `waitset_*`/`hw_emit_node`).
+rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+# Structured audit logging over the `log_emit` syscall (§19.4).
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
