@@ -60,9 +60,9 @@ use rustos_abi::input::{KeyInput, PointerInput};
 use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
 use rustos_abi::{
     BootFacts, BootId, FileStat, HwNode, InputMode, LimitKind, MapFlags, OpenFlags, Origin,
-    ResourceLimit, Signal, SignalIntakeOp, SyscallNumber, TerminalSize, Time64, WaitFlags,
-    WaitStatus, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, ORIGIN_WIRE_LEN,
-    SPAWN_UID_INHERIT, STDERR, STDIN, STDINFO, STDOUT, TERMINAL_SIZE_WIRE_LEN,
+    RandomFlags, ResourceLimit, Signal, SignalIntakeOp, SyscallNumber, TerminalSize, Time64,
+    WaitFlags, WaitStatus, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT,
+    ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, STDERR, STDIN, STDINFO, STDOUT, TERMINAL_SIZE_WIRE_LEN,
 };
 use rustos_abi_trap::raw_syscall;
 
@@ -72,6 +72,8 @@ mod start;
 mod startup;
 
 pub mod io;
+
+pub mod net;
 
 pub use startup::{arg, arg_count, args, env, env_count, env_var};
 
@@ -208,6 +210,9 @@ const NUM_HW_TREE_READ: u64 = SyscallNumber::HW_TREE_READ.as_u16() as u64;
 
 /// `hw_tree_wait` syscall number (as above).
 const NUM_HW_TREE_WAIT: u64 = SyscallNumber::HW_TREE_WAIT.as_u16() as u64;
+
+/// `random_get` syscall number (as above).
+const NUM_RANDOM_GET: u64 = SyscallNumber::RANDOM_GET.as_u16() as u64;
 
 /// `ipc_call` syscall number (as above).
 const NUM_IPC_CALL: u64 = SyscallNumber::IPC_CALL.as_u16() as u64;
@@ -2175,6 +2180,44 @@ pub fn hw_tree_wait(last_generation: u64, timeout_ns: u64) -> i64 {
     // arguments are scalars; the call reads no caller memory.
     let ret = unsafe { raw_syscall(NUM_HW_TREE_WAIT, [last_generation, timeout_ns, 0, 0, 0, 0]) };
     ret as i64
+}
+
+/// Fill `buf` with cryptographically secure random bytes from the kernel
+/// random subsystem (`SyscallNumber::RANDOM_GET`, `AGENTS.md` §22),
+/// returning the number of bytes written.
+///
+/// The bytes are CSPRNG output, never raw entropy, and are drawn behind
+/// the single kernel random subsystem — no component rolls its own. With
+/// [`RandomFlags::empty`] the draw blocks through a required reseed once
+/// the generator is initialised; with [`RandomFlags::NON_BLOCKING`] it
+/// returns `-EntropyNotReady` rather than waiting. The wrapper adds no
+/// authority: unprivileged callers may draw random bytes.
+///
+/// # Errors
+///
+/// Returns the raw negative kernel result (`-errno`): `-EntropyNotReady`
+/// when a non-blocking draw cannot be served yet, or a hard failure if the
+/// entropy source is genuinely unavailable. The wrapper hides no error.
+pub fn random_get(buf: &mut [u8], flags: RandomFlags) -> Result<usize, i64> {
+    let len = buf.len() as u64;
+    let ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the `(buf, len)` pair against the caller's address space before
+    // writing to it. `buf` is a live exclusive `&mut [u8]` for the
+    // duration of the call, so the pair denotes writable memory the kernel
+    // may fill.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the i64 count-result encoding (count ≥ 0, else -errno).
+    let ret =
+        unsafe { raw_syscall(NUM_RANDOM_GET, [ptr, len, u64::from(flags.bits()), 0, 0, 0]) } as i64;
+    if ret < 0 {
+        return Err(ret);
+    }
+    // Defence in depth: clamp the kernel's count to the buffer so a buggy
+    // count can never drive an out-of-bounds slice in the caller.
+    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_sign_loss)]
+    Ok((ret as usize).min(buf.len()))
 }
 
 /// Block until the system user database leaves its *pending*
@@ -5052,6 +5095,36 @@ mod tests {
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(hw_tree_wait(3, 0), want);
+        });
+    }
+
+    #[test]
+    fn random_get_marshals_buffer_flags_and_clamps_the_count() {
+        let mut buf = [0u8; 16];
+        let ptr = buf.as_mut_ptr() as usize as u64;
+        let (number, args) = capture(16, || {
+            assert_eq!(random_get(&mut buf, RandomFlags::NON_BLOCKING), Ok(16));
+        });
+        assert_eq!(number, NUM_RANDOM_GET);
+        assert_eq!(args[0], ptr);
+        assert_eq!(args[1], 16);
+        assert_eq!(args[2], u64::from(RandomFlags::NON_BLOCKING.bits()));
+        assert_eq!(&args[3..], &[0, 0, 0]);
+        // Defence in depth: a count past the buffer is clamped.
+        let (_, _) = capture(9999, || {
+            assert_eq!(random_get(&mut buf, RandomFlags::empty()), Ok(16));
+        });
+    }
+
+    #[test]
+    fn random_get_surfaces_negative_errno_encoding() {
+        // `EntropyNotReady` (a non-blocking draw before the RNG is seeded)
+        // is encoded as the two's-complement negation; hand it back.
+        let mut buf = [0u8; 8];
+        let want = -i64::from(rustos_abi::Errno::EntropyNotReady.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(random_get(&mut buf, RandomFlags::NON_BLOCKING), Err(want));
         });
     }
 

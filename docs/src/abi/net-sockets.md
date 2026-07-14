@@ -6,10 +6,56 @@ contract, in `lib/abi/src/net.rs` (`rustos_abi::net`), so the client-side
 wrappers and the serving stack share a single source of truth and can never
 drift.
 
-This page documents the wire contract landed in increment **N4a** of
-`plans/NETWORK.md`. The serving dispatcher, the `CAP_NET` capability, the
-`lib/rt` client wrappers, and the end-to-end QEMU verticals land in **N4b**;
-this page describes the contract they build on.
+The wire contract landed in increment **N4a** of `plans/NETWORK.md`; the
+serving dispatcher, the `CAP_NET` capability, and the `lib/rt` client
+wrappers landed in **N4b**. The only remaining N4b piece is the live
+*data path* through the running service, which waits on NIC autobind (a
+driver bound into the `netstack` process) — a later increment. Until then
+the socket control plane is fully served, and the datagram data path is
+exercised end to end by the `lib/net` engine tests and the netstack
+service tests, which drive the same `SocketService` engine over the same
+`lib/net` `Stack` the live service runs.
+
+## The serving side (`CAP_NET`, N4b)
+
+The `netstack` service binds a second reserved endpoint,
+`NETSTACK_SOCKET_ENDPOINT`, alongside its admin endpoint and serves it from
+the same event-driven wait-set loop. Each socket request is dispatched by
+`rustos_netstack::SocketService::serve`, which:
+
+- **checks `CAP_NET` before any state is touched** — the coarse "originate
+  transport traffic" capability (`CapabilityId::NET`), granted to ordinary
+  interactive accounts in the session baseline and enforced against the
+  caller's kernel-attested `Origin`; a caller without it is refused
+  `PermissionDenied` and the denial is audited;
+- keys every socket to the creating principal's unforgeable `ProcId`, so a
+  handle is meaningless — and reported absent (`NotFound`) — to any other
+  principal even if observed;
+- binds ports **globally uniquely** (no silent reuse); a `port` of `0`
+  draws a CSPRNG ephemeral port from the kernel random subsystem;
+- bounds the socket table per principal and globally, failing closed with
+  `LimitExceeded` at capacity; and
+- demultiplexes each inbound `StackEvent::UdpDatagram` to the owning
+  socket, honouring a connected socket's peer filter and multicast
+  membership, and delivers it as a `SocketDatagram` to that socket's
+  delivery port.
+
+Multicast **transmit** rides the same path: a datagram addressed to a group
+is sent straight to the group MAC with a link-local scope (TTL/hop-limit 1),
+needing no route and no membership (a host may send to a group it has not
+joined).
+
+## The client side (`rustos_rt::net`)
+
+A first-party Rust program links the thin client wrappers in
+`rustos_rt::net` — `socket`, `bind`, `connect`, `send`, `recv`, `close`,
+`join_multicast`, `leave_multicast` — which marshal over `ipc_call` to the
+socket endpoint (control plane) and `ipc_recv` on the client's own delivery
+port (receive plane). `recv` returns both the decoded datagram and the
+kernel-attested sender `Origin` so the caller can reject a forged sender:
+the delivery port is otherwise an unauthenticated inbox (fail closed). The
+wrappers add no authority — every capability and input check stays kernel-
+and stack-side.
 
 ## The microkernel-honest transport
 

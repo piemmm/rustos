@@ -8,6 +8,9 @@ use core::cell::RefCell;
 use rustos_abi::driver::net::{DeviceFacts, LinkState, MacAddress, Net, NetOffloads};
 use rustos_abi::driver::net_ring::{FrameRings, RingGeometry, ServiceReport};
 use rustos_abi::driver::BufferClass;
+use rustos_abi::net::{
+    decode_bind_reply, decode_socket_reply, SocketAddr, SocketRequest, SocketType,
+};
 use rustos_abi::net_ipc::{
     decode_counters_reply, decode_page_reply, NetAddrFamily, NetIfKind, NetInterfaceFactsRecord,
     NetInterfaceStateRecord, NetstackRequest, IF_NAME_LEN, NETSTACK_MAX_REPLY,
@@ -20,6 +23,7 @@ use rustos_log::{Event, EventId, Level, Sink};
 use rustos_net::addr::{IpAddr, Ipv4Addr};
 use rustos_net::stack::{Stack, StackConfig, StackEvent};
 
+use crate::socket::{SocketService, MAX_SOCKETS_PER_PRINCIPAL};
 use crate::{serve, Caller, Netstack};
 
 const MAC_A: MacAddress = MacAddress([0x02, 0xAA, 0, 0, 0, 0x01]);
@@ -547,4 +551,594 @@ fn duplicate_interface_aliases_are_refused() {
         ),
         Err(Errno::AlreadyExists)
     );
+}
+
+// --- The socket service ---------------------------------------------
+
+/// A caller holding `CAP_NET`, keyed to process instance `proc_byte` so
+/// tests can model distinct principals.
+fn net_caller(proc_byte: u8) -> Caller {
+    let mut summary = CapabilitySummary::EMPTY;
+    summary.insert(CapabilityId::NET);
+    Caller::new(Origin::new(
+        TrustDomain::User,
+        1000,
+        100,
+        u64::from(proc_byte),
+        ProcId::from_raw([proc_byte; 16]),
+        summary,
+        rustos_abi::ORIGIN_CONSOLE_NONE,
+    ))
+}
+
+/// A deterministic entropy source for ephemeral-port draws.
+fn counter_entropy() -> impl FnMut() -> u32 {
+    let mut seed: u32 = 0xC0FF_EE00;
+    move || {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        seed
+    }
+}
+
+fn encode_request(request: &SocketRequest<'_>) -> Vec<u8> {
+    let mut buf = vec![0u8; 128];
+    let len = request.encode(&mut buf).expect("encode request");
+    buf.truncate(len);
+    buf
+}
+
+fn v4_addr(a: u8, b: u8, c: u8, d: u8, port: u16) -> SocketAddr {
+    let mut addr = [0u8; 16];
+    addr[..4].copy_from_slice(&[a, b, c, d]);
+    SocketAddr {
+        family: NetAddrFamily::V4,
+        addr,
+        port,
+    }
+}
+
+/// A `Netstack` with `wan` configured with `V4_A/24` (a connected route
+/// covering `V4_B`) so socket sends have somewhere to go.
+fn routed_stack() -> Netstack {
+    let mut stack = managed_stack();
+    stack
+        .addr_add(name("wan"), NetAddrFamily::V4, 24, v4_bytes(V4_A), t(1))
+        .expect("addr add");
+    stack
+}
+
+#[test]
+fn socket_open_requires_cap_net() {
+    let mut svc = SocketService::new();
+    let mut stack = managed_stack();
+    let sink = RecordingSink::new();
+    let mut ent = counter_entropy();
+    let mut reply = [0u8; 64];
+    let request = encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V4,
+        sock_type: SocketType::Datagram,
+        deliver_port: 0x5000,
+    });
+    // A caller with only CAP_NET_ADMIN cannot open a socket.
+    assert_eq!(
+        svc.serve(
+            &mut stack,
+            &admin(),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2)
+        ),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(sink.ids(), vec![16_006], "the denial is audited");
+    assert!(svc.is_empty());
+}
+
+#[test]
+fn socket_open_and_bind_assigns_a_port() {
+    let mut svc = SocketService::new();
+    let mut stack = routed_stack();
+    let sink = RecordingSink::new();
+    let mut ent = counter_entropy();
+    let mut reply = [0u8; 64];
+
+    let request = encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V4,
+        sock_type: SocketType::Datagram,
+        deliver_port: 0x5000,
+    });
+    let out = svc
+        .serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2),
+        )
+        .expect("open");
+    let id = decode_socket_reply(&reply[..out.len]).expect("socket id");
+    assert_eq!(svc.len(), 1);
+
+    // Bind to an explicit port.
+    let request = encode_request(&SocketRequest::Bind {
+        socket: id,
+        local: v4_addr(0, 0, 0, 0, 7000),
+    });
+    let out = svc
+        .serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2),
+        )
+        .expect("bind");
+    assert_eq!(decode_bind_reply(&reply[..out.len]).expect("port"), 7000);
+
+    // A second socket cannot take the same port (globally unique).
+    let request = encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V4,
+        sock_type: SocketType::Datagram,
+        deliver_port: 0x5001,
+    });
+    let out = svc
+        .serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2),
+        )
+        .expect("open 2");
+    let id2 = decode_socket_reply(&reply[..out.len]).expect("id2");
+    let request = encode_request(&SocketRequest::Bind {
+        socket: id2,
+        local: v4_addr(0, 0, 0, 0, 7000),
+    });
+    assert_eq!(
+        svc.serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2)
+        ),
+        Err(Errno::AddressInUse)
+    );
+}
+
+#[test]
+fn socket_open_rejects_zero_delivery_port() {
+    let mut svc = SocketService::new();
+    let mut stack = managed_stack();
+    let sink = RecordingSink::new();
+    let mut ent = counter_entropy();
+    let mut reply = [0u8; 64];
+    let request = encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V4,
+        sock_type: SocketType::Datagram,
+        deliver_port: 0,
+    });
+    assert_eq!(
+        svc.serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2)
+        ),
+        Err(Errno::OutOfRange)
+    );
+}
+
+#[test]
+fn a_handle_is_scoped_to_its_creating_principal() {
+    let mut svc = SocketService::new();
+    let mut stack = routed_stack();
+    let sink = RecordingSink::new();
+    let mut ent = counter_entropy();
+    let mut reply = [0u8; 64];
+    let request = encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V4,
+        sock_type: SocketType::Datagram,
+        deliver_port: 0x5000,
+    });
+    let out = svc
+        .serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2),
+        )
+        .expect("open");
+    let id = decode_socket_reply(&reply[..out.len]).expect("id");
+    // A different principal cannot touch the handle: absent, not denied.
+    let request = encode_request(&SocketRequest::Bind {
+        socket: id,
+        local: v4_addr(0, 0, 0, 0, 7000),
+    });
+    assert_eq!(
+        svc.serve(
+            &mut stack,
+            &net_caller(2),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2)
+        ),
+        Err(Errno::NotFound)
+    );
+}
+
+#[test]
+fn per_principal_socket_quota_fails_closed() {
+    let mut svc = SocketService::new();
+    let mut stack = managed_stack();
+    let sink = RecordingSink::new();
+    let mut ent = counter_entropy();
+    let mut reply = [0u8; 64];
+    let request = encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V4,
+        sock_type: SocketType::Datagram,
+        deliver_port: 0x5000,
+    });
+    for _ in 0..MAX_SOCKETS_PER_PRINCIPAL {
+        svc.serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2),
+        )
+        .expect("open within quota");
+    }
+    assert_eq!(
+        svc.serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2)
+        ),
+        Err(Errno::LimitExceeded)
+    );
+    // A different principal still has its own quota.
+    svc.serve(
+        &mut stack,
+        &net_caller(2),
+        &sink,
+        &mut ent,
+        &request,
+        &mut reply,
+        t(2),
+    )
+    .expect("other principal unaffected");
+}
+
+#[test]
+fn unicast_send_originates_frames() {
+    let mut svc = SocketService::new();
+    let mut stack = routed_stack();
+    let sink = RecordingSink::new();
+    let mut ent = counter_entropy();
+    let mut reply = [0u8; 64];
+    let request = encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V4,
+        sock_type: SocketType::Datagram,
+        deliver_port: 0x5000,
+    });
+    let out = svc
+        .serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2),
+        )
+        .expect("open");
+    let id = decode_socket_reply(&reply[..out.len]).expect("id");
+    // Send to V4_B (on-link); the engine parks on ARP and emits the
+    // resolution frame now, so `tx` is non-empty on `wan`.
+    let request = encode_request(&SocketRequest::Send {
+        socket: id,
+        dest: Some(v4_addr(10, 0, 2, 2, 7)),
+        payload: b"hello",
+    });
+    let out = svc
+        .serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2),
+        )
+        .expect("send");
+    assert_eq!(out.tx.len(), 1, "one interface carried it");
+    assert_eq!(out.tx[0].0, name("wan"));
+    assert!(!out.tx[0].1.is_empty(), "ARP request emitted");
+}
+
+#[test]
+fn send_without_a_peer_or_dest_is_not_connected() {
+    let mut svc = SocketService::new();
+    let mut stack = routed_stack();
+    let sink = RecordingSink::new();
+    let mut ent = counter_entropy();
+    let mut reply = [0u8; 64];
+    let request = encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V4,
+        sock_type: SocketType::Datagram,
+        deliver_port: 0x5000,
+    });
+    let out = svc
+        .serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2),
+        )
+        .expect("open");
+    let id = decode_socket_reply(&reply[..out.len]).expect("id");
+    let request = encode_request(&SocketRequest::Send {
+        socket: id,
+        dest: None,
+        payload: b"x",
+    });
+    assert_eq!(
+        svc.serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2)
+        ),
+        Err(Errno::NotConnected)
+    );
+}
+
+#[test]
+fn inbound_datagram_is_delivered_to_the_bound_socket() {
+    let mut svc = SocketService::new();
+    let mut stack = routed_stack();
+    let sink = RecordingSink::new();
+    let mut ent = counter_entropy();
+    let mut reply = [0u8; 64];
+    // Open + bind port 7 for delivery port 0x5000.
+    let request = encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V4,
+        sock_type: SocketType::Datagram,
+        deliver_port: 0x5000,
+    });
+    let out = svc
+        .serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2),
+        )
+        .expect("open");
+    let id = decode_socket_reply(&reply[..out.len]).expect("id");
+    let request = encode_request(&SocketRequest::Bind {
+        socket: id,
+        local: v4_addr(0, 0, 0, 0, 7),
+    });
+    svc.serve(
+        &mut stack,
+        &net_caller(1),
+        &sink,
+        &mut ent,
+        &request,
+        &mut reply,
+        t(2),
+    )
+    .expect("bind");
+
+    let event = StackEvent::UdpDatagram {
+        source: IpAddr::V4(V4_B),
+        destination: IpAddr::V4(V4_A),
+        source_port: 40000,
+        destination_port: 7,
+        payload: b"payload".to_vec(),
+    };
+    let deliveries = svc.deliver(&event);
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].deliver_port, 0x5000);
+    let parsed = rustos_abi::net::SocketDatagram::parse(&deliveries[0].datagram).expect("datagram");
+    assert_eq!(parsed.socket, id);
+    assert_eq!(parsed.source.port, 40000);
+    assert_eq!(parsed.payload, b"payload");
+
+    // A datagram to an unbound port reaches no socket.
+    let other = StackEvent::UdpDatagram {
+        source: IpAddr::V4(V4_B),
+        destination: IpAddr::V4(V4_A),
+        source_port: 40000,
+        destination_port: 9,
+        payload: b"x".to_vec(),
+    };
+    assert!(svc.deliver(&other).is_empty());
+}
+
+#[test]
+fn a_connected_socket_only_receives_from_its_peer() {
+    let mut svc = SocketService::new();
+    let mut stack = routed_stack();
+    let sink = RecordingSink::new();
+    let mut ent = counter_entropy();
+    let mut reply = [0u8; 64];
+    let request = encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V4,
+        sock_type: SocketType::Datagram,
+        deliver_port: 0x5000,
+    });
+    let out = svc
+        .serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2),
+        )
+        .expect("open");
+    let id = decode_socket_reply(&reply[..out.len]).expect("id");
+    let request = encode_request(&SocketRequest::Bind {
+        socket: id,
+        local: v4_addr(0, 0, 0, 0, 7),
+    });
+    svc.serve(
+        &mut stack,
+        &net_caller(1),
+        &sink,
+        &mut ent,
+        &request,
+        &mut reply,
+        t(2),
+    )
+    .expect("bind");
+    let request = encode_request(&SocketRequest::Connect {
+        socket: id,
+        peer: v4_addr(10, 0, 2, 2, 40000),
+    });
+    svc.serve(
+        &mut stack,
+        &net_caller(1),
+        &sink,
+        &mut ent,
+        &request,
+        &mut reply,
+        t(2),
+    )
+    .expect("connect");
+
+    // From the connected peer: delivered.
+    let from_peer = StackEvent::UdpDatagram {
+        source: IpAddr::V4(V4_B),
+        destination: IpAddr::V4(V4_A),
+        source_port: 40000,
+        destination_port: 7,
+        payload: b"ok".to_vec(),
+    };
+    assert_eq!(svc.deliver(&from_peer).len(), 1);
+    // From a stranger: dropped.
+    let from_other = StackEvent::UdpDatagram {
+        source: IpAddr::V4(Ipv4Addr::new(10, 0, 2, 9)),
+        destination: IpAddr::V4(V4_A),
+        source_port: 40000,
+        destination_port: 7,
+        payload: b"no".to_vec(),
+    };
+    assert!(svc.deliver(&from_other).is_empty());
+}
+
+#[test]
+fn multicast_join_gates_group_delivery() {
+    const GROUP: Ipv4Addr = Ipv4Addr::new(239, 1, 2, 3);
+    let mut svc = SocketService::new();
+    let mut stack = routed_stack();
+    let sink = RecordingSink::new();
+    let mut ent = counter_entropy();
+    let mut reply = [0u8; 64];
+    let request = encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V4,
+        sock_type: SocketType::Datagram,
+        deliver_port: 0x5000,
+    });
+    let out = svc
+        .serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2),
+        )
+        .expect("open");
+    let id = decode_socket_reply(&reply[..out.len]).expect("id");
+    let request = encode_request(&SocketRequest::Bind {
+        socket: id,
+        local: v4_addr(0, 0, 0, 0, 7000),
+    });
+    svc.serve(
+        &mut stack,
+        &net_caller(1),
+        &sink,
+        &mut ent,
+        &request,
+        &mut reply,
+        t(2),
+    )
+    .expect("bind");
+
+    let event = StackEvent::UdpDatagram {
+        source: IpAddr::V4(V4_B),
+        destination: IpAddr::V4(GROUP),
+        source_port: 5000,
+        destination_port: 7000,
+        payload: b"m".to_vec(),
+    };
+    // Not joined: no delivery even though the port matches.
+    assert!(svc.deliver(&event).is_empty());
+    // Join, then it is delivered; the join emitted an IGMP report.
+    let request = encode_request(&SocketRequest::JoinMulticast {
+        socket: id,
+        group: local_group(GROUP),
+    });
+    let out = svc
+        .serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2),
+        )
+        .expect("join");
+    assert!(!out.tx.is_empty(), "IGMP report emitted on join");
+    assert_eq!(svc.deliver(&event).len(), 1);
+}
+
+fn local_group(addr: Ipv4Addr) -> SocketAddr {
+    let mut bytes = [0u8; 16];
+    bytes[..4].copy_from_slice(&addr.octets());
+    SocketAddr {
+        family: NetAddrFamily::V4,
+        addr: bytes,
+        port: 0,
+    }
 }

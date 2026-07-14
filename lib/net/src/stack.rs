@@ -101,6 +101,16 @@ const ALL_ROUTERS_V4: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 2);
 /// §2, RFC 3810 §5).
 const MEMBERSHIP_HOP_LIMIT: u8 = 1;
 
+/// Hop limit / TTL of an originated multicast UDP datagram.
+///
+/// A deliberately conservative link-local default (RFC 1112 §6.1): a
+/// datagram addressed to a group stays on the local link and is never
+/// forwarded off it. Without a per-socket multicast-scope control (a
+/// later increment, not invented here) this closes the door on
+/// accidental multicast leakage and amplification off-link — the
+/// fail-safe scope, chosen deliberately over a wider one.
+const MULTICAST_DATA_HOP_LIMIT: u8 = 1;
+
 /// Default per-interface multicast-group membership bound.
 pub const MULTICAST_CAPACITY: usize = 32;
 
@@ -1431,7 +1441,7 @@ impl Stack {
     }
 
     /// Wrap an upper-layer message (ICMP or UDP) for IPv4 and transmit
-    /// it, fragmenting when it exceeds the link MTU.
+    /// it with the default TTL, fragmenting when it exceeds the link MTU.
     fn send_ipv4_packet(
         &mut self,
         out: &mut StackOutput,
@@ -1441,13 +1451,44 @@ impl Stack {
         upper_message: &[u8],
         now: Duration64,
     ) {
+        self.send_ipv4_packet_ttl(out, source, dest, protocol, upper_message, None, now);
+    }
+
+    /// [`Self::send_ipv4_packet`], with an optional TTL override.
+    ///
+    /// A multicast destination maps straight to its group MAC (no
+    /// neighbour resolution, RFC 1112 §6.4); a unicast one resolves its
+    /// next hop through the neighbour cache. `ttl` of [`None`] keeps the
+    /// header's default TTL; multicast datagrams pass an explicit
+    /// link-local scope (see [`MULTICAST_DATA_HOP_LIMIT`]).
+    #[allow(clippy::too_many_arguments)]
+    fn send_ipv4_packet_ttl(
+        &mut self,
+        out: &mut StackOutput,
+        source: Ipv4Addr,
+        dest: Ipv4Addr,
+        protocol: u8,
+        upper_message: &[u8],
+        ttl: Option<u8>,
+        now: Duration64,
+    ) {
         if !self.link_up {
             return;
         }
-        let Some(next_hop) = self.next_hop_v4(dest) else {
-            return;
+        // A multicast group needs no next hop; a unicast destination
+        // that cannot be routed is dropped (fail closed).
+        let next_hop = if dest.is_multicast() {
+            None
+        } else {
+            match self.next_hop_v4(dest) {
+                Some(hop) => Some(hop),
+                None => return,
+            }
         };
         let mut header = Ipv4Header::new(source, dest, protocol);
+        if let Some(ttl) = ttl {
+            header.ttl = ttl;
+        }
         header.identification = self.next_ident;
         self.next_ident = self.next_ident.wrapping_add(1);
         if IPV4_HEADER_LEN + upper_message.len() <= self.link_mtu {
@@ -1456,7 +1497,7 @@ impl Stack {
                 return;
             }
             packet[IPV4_HEADER_LEN..].copy_from_slice(upper_message);
-            self.resolve_and_send(out, IpAddr::V4(next_hop), ETHERTYPE_IPV4, packet, now);
+            self.emit_ipv4_frame(out, dest, next_hop, packet, now);
             return;
         }
         let Some(parts) = crate::ipv4::fragment(header, upper_message.len(), self.link_mtu) else {
@@ -1469,7 +1510,26 @@ impl Stack {
                 continue;
             }
             packet[IPV4_HEADER_LEN..].copy_from_slice(payload);
-            self.resolve_and_send(out, IpAddr::V4(next_hop), ETHERTYPE_IPV4, packet, now);
+            self.emit_ipv4_frame(out, dest, next_hop, packet, now);
+        }
+    }
+
+    /// Emit one built IPv4 packet: a multicast destination (`next_hop`
+    /// [`None`]) goes straight to its group MAC; a unicast one resolves
+    /// `next_hop` through the neighbour cache.
+    fn emit_ipv4_frame(
+        &mut self,
+        out: &mut StackOutput,
+        dest: Ipv4Addr,
+        next_hop: Option<Ipv4Addr>,
+        packet: Vec<u8>,
+        now: Duration64,
+    ) {
+        match next_hop {
+            Some(next_hop) => {
+                self.resolve_and_send(out, IpAddr::V4(next_hop), ETHERTYPE_IPV4, packet, now);
+            }
+            None => self.push_frame(out, ipv4_multicast_mac(&dest), ETHERTYPE_IPV4, &packet),
         }
     }
 
@@ -1706,18 +1766,23 @@ impl Stack {
 
     /// Originate a UDP datagram from `source_port` to `dest`:`destination_port`.
     ///
-    /// This increment addresses unicast destinations only; a multicast
-    /// destination is refused as [`SendError::NotUnicast`] (fail closed)
-    /// until group-membership transmit lands. Over IPv4 an oversize
-    /// datagram is fragmented on emit; over IPv6, which never fragments on
-    /// emit, a datagram past the path MTU is refused as
-    /// [`SendError::TooLarge`].
+    /// A unicast destination resolves its next hop through the neighbour
+    /// cache; a multicast group is transmitted straight to its group MAC
+    /// with a link-local scope (TTL / hop-limit 1) and needs no route or
+    /// membership (a host may send to a group it has not joined,
+    /// RFC 1112 §6.2). The limited broadcast (`255.255.255.255`) and the
+    /// unspecified address are refused as [`SendError::NotUnicast`] (fail
+    /// closed): neither is a meaningful datagram destination here. Over
+    /// IPv4 an oversize datagram is fragmented on emit; over IPv6, which
+    /// never fragments on emit, a datagram past the path MTU (unicast) or
+    /// link MTU (multicast) is refused as [`SendError::TooLarge`].
     ///
     /// # Errors
     ///
-    /// Typed [`SendError`] refusals: link down, non-unicast destination,
-    /// no usable source address / v4 configuration, no route, or a payload
-    /// that cannot fit the path MTU (v6) or the datagram-length field.
+    /// Typed [`SendError`] refusals: link down, broadcast/unspecified
+    /// destination, no usable source address / v4 configuration, no route
+    /// (unicast only), or a payload that cannot fit the path MTU (v6) or
+    /// the datagram-length field.
     pub fn send_datagram(
         &mut self,
         dest: IpAddr,
@@ -1732,13 +1797,13 @@ impl Stack {
         let mut out = StackOutput::default();
         match dest {
             IpAddr::V4(dest) => {
-                if dest.is_multicast() || dest.is_broadcast() || dest.is_unspecified() {
+                if dest.is_broadcast() || dest.is_unspecified() {
                     return Err(SendError::NotUnicast);
                 }
                 let Some((source, _)) = self.iface.ipv4() else {
                     return Err(SendError::NoSourceAddress);
                 };
-                if self.next_hop_v4(dest).is_none() {
+                if !dest.is_multicast() && self.next_hop_v4(dest).is_none() {
                     return Err(SendError::NoRoute);
                 }
                 let mut message = vec![0u8; udp::UDP_HEADER_LEN + payload.len()];
@@ -1753,18 +1818,25 @@ impl Stack {
                     &mut message,
                 )
                 .map_err(|_| SendError::TooLarge)?;
-                self.send_ipv4_packet(&mut out, source, dest, PROTOCOL_UDP, &message, now);
+                let ttl = dest.is_multicast().then_some(MULTICAST_DATA_HOP_LIMIT);
+                self.send_ipv4_packet_ttl(&mut out, source, dest, PROTOCOL_UDP, &message, ttl, now);
             }
             IpAddr::V6(dest) => {
-                if dest.is_multicast() || dest.is_unspecified() {
+                if dest.is_unspecified() {
                     return Err(SendError::NotUnicast);
                 }
                 let source = self.source_for_v6(dest).ok_or(SendError::NoSourceAddress)?;
-                if self.next_hop_v6(dest, now).is_none() {
+                if !dest.is_multicast() && self.next_hop_v6(dest, now).is_none() {
                     return Err(SendError::NoRoute);
                 }
                 let total = udp::UDP_HEADER_LEN + payload.len();
-                let path_mtu = self.pmtu.mtu(dest, self.mtu_v6_wire(), now) as usize;
+                // A group has no path-MTU state: bound multicast against
+                // the link MTU; unicast uses the cached path MTU.
+                let path_mtu = if dest.is_multicast() {
+                    self.mtu_v6_wire() as usize
+                } else {
+                    self.pmtu.mtu(dest, self.mtu_v6_wire(), now) as usize
+                };
                 if IPV6_HEADER_LEN + total > path_mtu {
                     return Err(SendError::TooLarge);
                 }
@@ -1780,13 +1852,18 @@ impl Stack {
                     &mut message,
                 )
                 .map_err(|_| SendError::TooLarge)?;
+                let hop_limit = if dest.is_multicast() {
+                    MULTICAST_DATA_HOP_LIMIT
+                } else {
+                    self.hop_limit
+                };
                 self.send_ipv6_packet(
                     &mut out,
                     source,
                     dest,
                     PROTOCOL_UDP,
                     &message,
-                    self.hop_limit,
+                    hop_limit,
                     now,
                 );
             }
