@@ -8,6 +8,18 @@ frame-ring transport. It ships as the `netstack.app` service bundle
 under `/System/Services/` and runs as the compiled-in `netstack`
 service account (uid 14).
 
+It is a **core boot service**: PID 1 `init` launches it from its
+compiled-in startup config (`userland/system/init` `DEFAULT_CONFIG`),
+after `sysinfod` and before `devmgr`, so the network endpoints are
+published and the interface table is ready before `devmgr` binds any
+discovered NIC device channel to it (`plans/NETWORK.md` N4d). On the
+aarch64 production image the service is spawned from its verified
+on-disk bundle; on x86_64/riscv64 it is part of the compiled-in boot
+floor (`spawn_layout::SPAWN_PROGRAMS`) until those targets' on-disk
+stores land. Until a NIC is bound the interface table is empty, the
+one-shot deadline is unarmed, and the loop parks solely on its
+endpoints — the service does no work and consumes no CPU.
+
 ## Architecture
 
 - **The engine stays pure.** All protocol behaviour lives in

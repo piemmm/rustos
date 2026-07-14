@@ -52,29 +52,31 @@
 //!    `SyscallInvoked` #4 of the supervision chain). `init`'s `wait` then
 //!    reaps it and reads its code.
 //! 5. `init` relaunches the session — a second login `spawn` (an audited
-//!    `SyscallInvoked` of the chain) producing a **fifth**
+//!    `SyscallInvoked` of the chain) producing a **seventh**
 //!    `ProcessSpawned`. The second login blocks at its own prompt;
 //!    the PASS finisher has already fired by then and the script is
 //!    exhausted, so the run ends without typing at it.
 //!
-//! ## Why the PASS keys on five spawns and six audited syscalls
+//! ## Why the PASS keys on seven spawns and eight audited syscalls
 //!
-//! The second and third `ProcessSpawned` are the boot services `init`
-//! launches first (`sysinfod`, `devmgr`). The **fifth** is the supervision
-//! witness: `init` only reaches its second login `spawn` *after* its `wait`
-//! returned, which only happens once the first login was reaped — so a fifth
-//! built image proves the full reap-and-restart cycle, not merely a single
-//! concurrent spawn. Login's `exit` is on the critical path only if login
+//! The second through fifth `ProcessSpawned` are the boot services `init`
+//! launches first (`sysinfod`, `netstack`, `devmgr`, `seatmgr`). The
+//! **seventh** is the supervision witness: `init` only reaches its second
+//! login `spawn` *after* its `wait` returned, which only happens once the
+//! first login was reaped — so a seventh built image proves the full
+//! reap-and-restart cycle, not merely a single concurrent spawn. Login's
+//! `exit` is on the critical path only if login
 //! actually ran and its blocked `stream_read` received the injected UART RX
 //! bytes: its prompt write is gated through its *own* isolated address space, and `init`'s `wait` cannot return until that `exit`
 //! recorded the child's code. The chain's certain audited syscalls are
-//! `init`'s three service `spawn`s, `init`'s `wait`,
+//! `init`'s four service `spawn`s (`sysinfod`, `netstack`, `devmgr`,
+//! `seatmgr`), the login `spawn`, `init`'s `wait`,
 //! login's `exit`, and `init`'s second login `spawn` (login's own audited
 //! `users_db_read`, `sysinfod`'s `call_create`, and login's elevation
 //! `call_create` ride on top, which the `>=` thresholds absorb; `devmgr`'s
 //! `hw_tree_read`/`hw_tree_wait` are unaudited). A regression that never
 //! spawns login, never delivers its input, never reaps it, or never
-//! relaunches it never reaches the fifth
+//! relaunches it never reaches the seventh
 //! `ProcessSpawned`, so the run times out and the harness reports
 //! `Outcome::Timeout` — the documented fail-loud behaviour. The runner adds the converse guard: it fails the run if the guest
 //! exits before every scripted prompt appeared and every line was sent, so
@@ -147,30 +149,31 @@ mod kernel {
     /// audit-id test in `kernel/syscall/src/audit.rs`.
     const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
 
-    /// Number of `ProcessSpawned` records seen so far. PASS requires six:
-    /// PID 1 `init`, the `sysinfod`, `devmgr`, and `seatmgr` services it
-    /// launches first, and the **two** login instances — the second login
-    /// launch can only happen after `init` reaped the first, so a sixth
-    /// `ProcessSpawned` is the witness that supervision (reap + restart)
-    /// ran.
+    /// Number of `ProcessSpawned` records seen so far. PASS requires seven:
+    /// PID 1 `init`, the `sysinfod`, `netstack`, `devmgr`, and `seatmgr`
+    /// services it launches first, and the **two** login instances — the
+    /// second login launch can only happen after `init` reaped the first, so
+    /// a seventh `ProcessSpawned` is the witness that supervision (reap +
+    /// restart) ran.
     static SPAWNED: AtomicUsize = AtomicUsize::new(0);
 
     /// Number of audited `SyscallInvoked` records seen so far. PASS requires
-    /// seven, the certain prefix of `init`'s supervise loop up to the
-    /// relaunch: `init`'s four service/session `spawn`s (`sysinfod`,
-    /// `devmgr`, `seatmgr`, login), `init`'s `wait` (which parks it), the
-    /// first login's fail-closed `exit`, and `init`'s second login `spawn`
-    /// (the relaunch). The audited `call_create` binds (`sysinfod`'s query
-    /// endpoint, `seatmgr`'s seat-admin rendezvous, login's elevation
-    /// rendezvous) ride on top, absorbed by the `>=` threshold; `devmgr`'s
-    /// `hw_tree_read`/`hw_tree_wait` are unaudited.
+    /// eight, the certain prefix of `init`'s supervise loop up to the
+    /// relaunch: `init`'s five service/session `spawn`s (`sysinfod`,
+    /// `netstack`, `devmgr`, `seatmgr`, login), `init`'s `wait` (which parks
+    /// it), the first login's fail-closed `exit`, and `init`'s second login
+    /// `spawn` (the relaunch). The audited `call_create` binds (`sysinfod`'s
+    /// query endpoint, `netstack`'s network rendezvous, `seatmgr`'s
+    /// seat-admin rendezvous, login's elevation rendezvous) ride on top,
+    /// absorbed by the `>=` threshold; `devmgr`'s `hw_tree_read`/
+    /// `hw_tree_wait` are unaudited.
     static SYSCALLS: AtomicUsize = AtomicUsize::new(0);
 
     /// Sink that replays every event through [`SERIAL_SINK`] and reports PASS
-    /// to QEMU once six processes have been built and seven audited syscalls
-    /// have run — proving PID 1 launched the boot services and the session,
-    /// waited on and reaped the session when it exited, and relaunched it
-    /// (supervision, not spawn-and-forget).
+    /// to QEMU once seven processes have been built and eight audited
+    /// syscalls have run — proving PID 1 launched the boot services and the
+    /// session, waited on and reaped the session when it exited, and
+    /// relaunched it (supervision, not spawn-and-forget).
     struct SpawnSessionExitSink;
 
     impl Sink for SpawnSessionExitSink {
@@ -183,7 +186,7 @@ mod kernel {
             } else if event.id == SYSCALL_INVOKED_EVENT_ID {
                 SYSCALLS.fetch_add(1, Ordering::AcqRel);
             }
-            if SPAWNED.load(Ordering::Acquire) >= 6 && SYSCALLS.load(Ordering::Acquire) >= 7 {
+            if SPAWNED.load(Ordering::Acquire) >= 7 && SYSCALLS.load(Ordering::Acquire) >= 8 {
                 qemu_exit::exit_success();
             }
         }

@@ -157,6 +157,13 @@ const PROGRAMS: &[Program] = &[
         prefix: "SEATMGR",
     },
     Program {
+        pkg: "rustos-netstack",
+        bin: "rustos-netstack-run",
+        rel_dir: "../../userland/net/netstack",
+        fixture: "netstack_rxe.rs",
+        prefix: "NETSTACK",
+    },
+    Program {
         pkg: "rustos-ps",
         bin: "rustos-ps-run",
         rel_dir: "../../userland/apps/ps",

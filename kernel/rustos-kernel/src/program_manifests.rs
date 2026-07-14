@@ -135,6 +135,26 @@ pub const SEATMGR_MANIFEST: &[CapabilityId] = &[
     CapabilityId::LOG_EMIT,
 ];
 
+/// The `netstack` network-stack service's manifest (`plans/NETWORK.md` §3):
+/// `CAP_NET_RAW` for the NIC frame rings it alone drives (and to call a NIC
+/// driver's restricted-sender device channel), `CAP_SHM` to create and
+/// grant the shared frame-ring region each channel client owns,
+/// `CAP_IPC_BIND_PRIVILEGED` to bind the reserved `NETSTACK_ENDPOINT` and
+/// `NETSTACK_SOCKET_ENDPOINT` rendezvous (reserved ids fail closed against
+/// squatters serving forged network state), and `CAP_LOG_EMIT` for its
+/// structured audit records. It deliberately does **not** request
+/// `CAP_NET_ADMIN` — the service *enforces* that capability against its
+/// callers; it never holds it. The effective set is this request
+/// intersected with the `netstack` account's `NETSTACK_CEILING`, which
+/// carries exactly the same four.
+#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
+pub const NETSTACK_MANIFEST: &[CapabilityId] = &[
+    CapabilityId::NET_RAW,
+    CapabilityId::SHM,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::LOG_EMIT,
+];
+
 /// The `ps` tool's manifest: `CAP_CONSOLE_WRITE` for its listing on fd 1
 /// and diagnostics on fd 2, `CAP_FS_ACCESS` because its short-help
 /// switches read the bundle's own `Help/` tree through the secured VFS
@@ -441,6 +461,19 @@ mod tests {
             set(SEATMGR_MANIFEST),
             set(&[
                 CapabilityId::SEAT_ADMIN,
+                CapabilityId::IPC_BIND_PRIVILEGED,
+                CapabilityId::LOG_EMIT,
+            ])
+        );
+    }
+
+    #[test]
+    fn netstack_manifest_is_pinned() {
+        assert_eq!(
+            set(NETSTACK_MANIFEST),
+            set(&[
+                CapabilityId::NET_RAW,
+                CapabilityId::SHM,
                 CapabilityId::IPC_BIND_PRIVILEGED,
                 CapabilityId::LOG_EMIT,
             ])
@@ -820,23 +853,6 @@ mod tests {
         CapabilityId::CONSOLE_WRITE,
         CapabilityId::FS_ACCESS,
         CapabilityId::FS_MOUNT,
-    ];
-
-    // The `netstack` service (plans/NETWORK.md §3): `CAP_NET_RAW` for the
-    // NIC frame rings it alone drives (and to call a driver's
-    // restricted-sender device channel), `CAP_SHM` to create and grant the
-    // shared frame-ring region each channel client owns,
-    // `CAP_IPC_BIND_PRIVILEGED` for the reserved `NETSTACK_ENDPOINT`
-    // rendezvous, and `CAP_LOG_EMIT` for its audit records. It deliberately
-    // does not request `CAP_NET_ADMIN` — the service *enforces* that
-    // capability against its callers; it never holds it. A discovered
-    // on-disk service bundle, never an embedded spawn-floor program, so the
-    // list lives only in this pin.
-    const NETSTACK_MANIFEST: &[CapabilityId] = &[
-        CapabilityId::NET_RAW,
-        CapabilityId::SHM,
-        CapabilityId::IPC_BIND_PRIVILEGED,
-        CapabilityId::LOG_EMIT,
     ];
 
     /// Every program crate's on-disk `AppInfo.toml` manifest source

@@ -579,7 +579,29 @@ reach the running `netstack` process. Done:
   ceilings and the manifest requests (effective = ceiling ∩ manifest); the
   stack still never holds `CAP_NET_ADMIN`, it *enforces* it. No new syscall.
 
-### N4e — two-process QEMU vertical (aarch64 first) `[ ]`
+### N4e-α — netstack is a launched core boot service `[x]`
+
+The prerequisite the two-process vertical builds on: `netstack` is now a
+real, launched core service on **every** Tier-1 arch, coming up owning an
+empty interface table and ready to be handed NIC device channels.
+
+- `init`'s `DEFAULT_CONFIG` gains `service /System/Services/netstack.app/Run
+  netstack`, launched after `sysinfod` and before `devmgr` (so it is ready
+  when `devmgr` binds discovered NIC channels to it); `MAX_SERVICES` (4)
+  fits exactly. Global to every production-boot image.
+- netstack is spawnable on every arch: on aarch64 it is spawned from its
+  verified on-disk `netstack.app` bundle (auto-discovered and planted by
+  `image_apps`); on x86_64/riscv64 it is a compiled-in boot-floor row
+  (`spawn_paths::NETSTACK_PATH`, `program_manifests::NETSTACK_MANIFEST` =
+  {`CAP_NET_RAW`, `CAP_SHM`, `CAP_IPC_BIND_PRIVILEGED`, `CAP_LOG_EMIT`},
+  `spawn_layout::SPAWN_PROGRAMS`, built by the kernel `build.rs`) until
+  those targets' on-disk stores land. The effective set is
+  `NETSTACK_MANIFEST ∩ NETSTACK_CEILING` (the same four); the stack still
+  never holds `CAP_NET_ADMIN` — it *enforces* it.
+- Until a NIC is bound the interface table is empty, the deadline is
+  unarmed, and the loop parks solely on its endpoints — no work, no CPU.
+
+### N4e-β — two-process QEMU vertical (aarch64 first) `[ ]`
 
 The three `netstack_*` QEMU verticals still run the in-kernel single-process
 `register` scaffold (`rustos-test-virtio-qemu-support`'s `netstack_ping` over
@@ -596,12 +618,9 @@ crate boots the production `boot_aarch64::boot` pipeline against the
 `AutoloadRootDisk` fixture (extended to also plant the signed
 `virtio_net_driver` bundle at `Drivers/network/virtio_net/Run`) with a
 virtio-net-device-mmio attached and the `netstack_peer` host link-peer on the
-QEMU dgram netdev. The two-process wiring is exercised end to end:
+QEMU dgram netdev. The two-process wiring is exercised end to end (the
+`DEFAULT_CONFIG` netstack launch landed in N4e-α):
 
-- `init`'s `DEFAULT_CONFIG` gains `service /System/Services/netstack.app/Run
-  netstack` (launched before `devmgr`; `MAX_SERVICES` already has the slot).
-  This is the correct production wiring — netstack is a core service — and is
-  global to every production-boot image.
 - `devmgr` autoloads the driver into its own process (its `BIND_KEYS` now
   resolves the discovered virtio-net node), the driver publishes the `netchan`
   node, `devmgr` calls `netstack` `BindDriver`, netstack provisions the channel

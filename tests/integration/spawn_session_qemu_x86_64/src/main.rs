@@ -46,25 +46,26 @@
 //!    supervision cycle (`plans/PI.md` X4 follow-on, the cross-port sibling
 //!    of the aarch64 `spawn_session_qemu_aarch64`).
 //!
-//! ## Why the PASS keys on five spawns and six audited syscalls
+//! ## Why the PASS keys on seven spawns and eight audited syscalls
 //!
-//! The second and third `ProcessSpawned` are the boot services `init`
-//! launches first (`sysinfod`, `devmgr`); the **fourth** proves the runtime
-//! producer authorised the login `spawn`, built an isolated address space,
-//! and admitted it (the X3b deliverable). The **fifth** `ProcessSpawned` is
-//! the supervision-cycle
+//! The second through fifth `ProcessSpawned` are the boot services `init`
+//! launches first (`sysinfod`, `netstack`, `devmgr`, `seatmgr`); the
+//! **sixth** proves the runtime producer authorised the login `spawn`, built
+//! an isolated address space, and admitted it (the X3b deliverable). The
+//! **seventh** `ProcessSpawned` is the supervision-cycle
 //! witness: it can only be emitted if `init`'s `wait` reaped the first login,
 //! returned to ring 3, and issued its relaunch `spawn` — so it proves the whole
-//! cycle, not just a single concurrent spawn. The six certain audited
+//! cycle, not just a single concurrent spawn. The eight certain audited
 //! `SyscallInvoked`
-//! records are `init`'s three service `spawn`s, login's `exit`, `init`'s
+//! records are `init`'s four service `spawn`s, the login `spawn`, login's
+//! `exit`, `init`'s
 //! `wait`, and `init`'s relaunch `spawn`
 //! (`init`'s `wait` only completes after login exits and is reaped, so login's
 //! `exit` necessarily precedes the `wait` record; the audited `call_create`
 //! binds — `sysinfod`'s query endpoint and, when a console is attested,
 //! login's elevation rendezvous — ride on top, absorbed by the `>=`
 //! thresholds). A regression that never
-//! reaps+relaunches (`< 5` spawns / `< 6` certain audited syscalls) never
+//! reaps+relaunches (`< 7` spawns / `< 8` certain audited syscalls) never
 //! reaches the
 //! threshold, so the run times out and the harness reports `Outcome::Timeout`
 //! — the documented fail-loud behaviour.
@@ -119,11 +120,11 @@ mod kernel {
 
     /// `EventId` the spawn caller emits once a ring-3 image is built. Pinned
     /// by the `event_ids_are_unique` test in `kernel/core/src/audit.rs`. PASS
-    /// requires six: PID 1 `init`, the `sysinfod`, `devmgr`, and `seatmgr`
-    /// services it launches first, the login it then launches, and the login
-    /// it **relaunches** after reaping the first — the sixth is the witness
-    /// that the `wait`→reap→relaunch supervision cycle completed
-    /// (`plans/PI.md` X4 follow-on).
+    /// requires seven: PID 1 `init`, the `sysinfod`, `netstack`, `devmgr`,
+    /// and `seatmgr` services it launches first, the login it then launches,
+    /// and the login it **relaunches** after reaping the first — the seventh
+    /// is the witness that the `wait`→reap→relaunch supervision cycle
+    /// completed (`plans/PI.md` X4 follow-on).
     const PROCESS_SPAWNED_EVENT_ID: EventId = EventId(4030);
 
     /// `EventId` the syscall dispatcher emits for a successfully dispatched
@@ -138,7 +139,7 @@ mod kernel {
 
     /// Sink that replays every event through [`SERIAL_SINK`] (so the QEMU
     /// transcript captures the full boot + spawn timeline) and reports PASS to
-    /// QEMU once **six** processes were built and **seven** audited syscalls
+    /// QEMU once **seven** processes were built and **eight** audited syscalls
     /// have run — proving PID 1 launched the boot services, launched the
     /// session into its own isolated ring-3 space, the session executed
     /// there, and `init` reaped it and relaunched a fresh session (the full
@@ -153,7 +154,7 @@ mod kernel {
             } else if event.id == SYSCALL_INVOKED_EVENT_ID {
                 SYSCALLS.fetch_add(1, Ordering::AcqRel);
             }
-            if SPAWNED.load(Ordering::Acquire) >= 6 && SYSCALLS.load(Ordering::Acquire) >= 7 {
+            if SPAWNED.load(Ordering::Acquire) >= 7 && SYSCALLS.load(Ordering::Acquire) >= 8 {
                 qemu_exit::exit_success();
             }
         }

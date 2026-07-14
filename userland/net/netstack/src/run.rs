@@ -23,11 +23,12 @@
 //! capability-checked [`rustos_netstack::serve`] dispatcher against the
 //! caller's kernel-attested origin.
 //!
-//! NIC frame-ring channels join this wait set as the device manager
-//! binds network drivers to the service; until then the interface table
-//! is empty, the deadline is unarmed, and the loop parks solely on the
-//! endpoint. The QEMU vertical that wires a live virtio-net driver
-//! through this loop is the plan's N3c increment.
+//! PID 1 `init` launches this service at boot (its `DEFAULT_CONFIG`,
+//! after `sysinfod` and before `devmgr`). NIC frame-ring channels join
+//! this wait set as the device manager binds network drivers to the
+//! service through the `BindDriver` admin op (`plans/NETWORK.md` N4d);
+//! until then the interface table is empty, the deadline is unarmed, and
+//! the loop parks solely on the endpoints.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy,
 //! and fmt still cover the file.

@@ -74,14 +74,18 @@ pub const MAX_SERVICES: usize = 4;
 /// change.
 pub const DEFAULT_CONFIG: &str = "\
 # RustOS PID 1 startup configuration (plans/PI.md P6b / P11).
-# Open the system console, launch the System Information, device-manager,
-# and seat-manager services, and start the login service as the session —
-# each under its own compiled-in service account (plans/USERS.md).
-# `sysinfod` starts first so the introspection endpoint (`AGENTS.md` §16.6)
-# is published before any client queries it; `seatmgr` (plans/DISPLAY.md D3)
-# holds the seat-multiplexing authority.
+# Open the system console, launch the System Information, network-stack,
+# device-manager, and seat-manager services, and start the login service as
+# the session — each under its own compiled-in service account
+# (plans/USERS.md). `sysinfod` starts first so the introspection endpoint
+# (`AGENTS.md` §16.6) is published before any client queries it; `netstack`
+# (plans/NETWORK.md) owns the network interfaces and is launched before
+# `devmgr` so it is ready to receive the NIC device channels `devmgr` binds
+# to it; `seatmgr` (plans/DISPLAY.md D3) holds the seat-multiplexing
+# authority.
 console
 service /System/Services/sysinfod.app/Run sysinfod
+service /System/Services/netstack.app/Run netstack
 service /System/Services/devmgr.app/Run devmgr
 service /System/Services/seatmgr.app/Run seatmgr
 session /System/Services/login.app/Run login
@@ -428,14 +432,20 @@ mod tests {
                 uid: rustos_users::LOGIN_UID.0,
             }
         );
-        // `sysinfod` is launched before `devmgr` so the introspection endpoint
-        // is published before any client queries it.
+        // `sysinfod` is launched before `netstack`/`devmgr` so the
+        // introspection endpoint is published before any client queries it;
+        // `netstack` is launched before `devmgr` so it is ready when `devmgr`
+        // binds discovered NIC device channels to it.
         assert_eq!(
             config.services(),
             &[
                 Launch {
                     path: "/System/Services/sysinfod.app/Run",
                     uid: rustos_users::SYSINFOD_UID.0,
+                },
+                Launch {
+                    path: "/System/Services/netstack.app/Run",
+                    uid: rustos_users::NETSTACK_UID.0,
                 },
                 Launch {
                     path: "/System/Services/devmgr.app/Run",
