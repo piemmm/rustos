@@ -212,16 +212,30 @@ drivers/network/<nic>                 — link-layer only: frames in/out,
 
 ### 2.4 The socket ABI — `lib/abi/src/net.rs`
 
-- Typed, versioned, fuzzed request/reply + event frames: `socket`
-  (domain v4/v6 × type stream/dgram/raw), `bind`, `listen`, `accept`,
-  `connect`, `send`/`recv` (shm-backed for bulk, inline for small),
-  `shutdown`, `close`, `getsockopt`/`setsockopt` over a **closed**
-  option registry, multicast join/leave, and non-blocking readiness
-  integration with the existing wait-set ABI (a `WaitSourceKind::Socket`
-  member, added in place like `Stream` was).
+- Typed, versioned, fuzzed request/reply + delivery frames. The datagram
+  surface is landed (`SocketRequest`: `socket`/`bind`/`connect`/`send`/
+  `close` + multicast `join`/`leave` over v4/v6; `SocketType::Datagram`,
+  with stream/raw reserved and fail-closed until their increments);
+  `listen`/`accept`/`shutdown`/`getsockopt`/`setsockopt` and shm bulk
+  transfer arrive with the TCP and shared-memory increments (no
+  speculative surface today).
+- **Readiness rides `WaitSourceKind::Port`, not a new kernel kind
+  (design decision, evolved in place).** The kernel owns no socket object
+  (§2.2), so inbound datagrams are delivered by the stack `ipc_send`ing a
+  framed `SocketDatagram` to a per-socket async **port** the client bound
+  and named in `socket()`; the client parks on the existing
+  `WaitSourceKind::Port` and drains with `ipc_recv`, authenticating the
+  stack's attested sender origin (the `plans/APPWIN.md` AW3 window-event
+  precedent). A kernel `WaitSourceKind::Socket` is deliberately **not**
+  added — teaching ring 0 about a stack-owned object would break the
+  microkernel boundary. `recv` is therefore a client-side port drain, not
+  a stack round-trip (more efficient, and "inline for small" today; shm
+  bulk later).
 - Every byte a client sends is untrusted: lengths, addresses, and
   options are validated in the stack before any state change; a
-  malformed request poisons nothing and returns one typed error.
+  malformed request poisons nothing and returns one typed error. Each
+  operation's unused header fields must be zero, so no request smuggles
+  authority through another's fields.
 - `lib/rt` grows the thin safe wrappers first-party programs link; the
   §16.4 networking shared-library class (sockets/DNS/HTTP) later fronts
   this same ABI — it is a consumer, not a second path.
@@ -230,7 +244,7 @@ drivers/network/<nic>                 — link-layer only: frames in/out,
 
 | Capability | Guards | Introduced with |
 |---|---|---|
-| `CAP_NET` (new) | originating transport flows + high-port binds — the whole class of ordinary network use | N4 (socket ABI), enforcement in `netstack` dispatch |
+| `CAP_NET` (new) | originating transport flows + high-port binds — the whole class of ordinary network use | N4b (socket service), enforcement in `netstack` socket dispatch |
 | `CAP_NET_BIND_PRIVILEGED` (new) | binding listeners below port 1024, v4 and v6 alike | N6 (TCP listen), enforcement at `bind`/`listen` |
 | `CAP_NET_RAW` (exists) | raw frame/packet sockets and the NIC frame rings | already live; `netstack` is its principal holder |
 | `CAP_NET_ADMIN` (new) | interface/address/route mutation, offload toggling, stack-wide counters reset | N3 (interface bring-up), enforcement in the admin surface |
@@ -396,7 +410,7 @@ docs, and the full gate) because the whole was too large for one change:
   SUMMARY entry); the `lib/net` `fuzz_net_*` harnesses carry its parser
   coverage. Nothing links it.
 
-### N4 — UDP + the socket ABI + multicast membership `[ ]`
+### N4 — UDP + the socket ABI + multicast membership `[~]`
 - **Engine UDP layer landed:** `lib/net::udp` is the dual-stack UDP
   codec (RFC 768) — one `write`/`UdpDatagram::parse` core folding the
   family-appropriate pseudo-header checksum, IPv4-optional /
@@ -428,19 +442,41 @@ docs, and the full gate) because the whole was too large for one change:
     multicast for ND is formalised here (auto-joined on
     `AddressPreferred`, left on invalidation) and the all-systems group
     is auto-joined on v4 configuration.
-- **Remaining:** the socket ABI (`lib/abi/src/net.rs`) with
-  `socket`/`bind`/`connect`/`send`/`recv`/`close`, `CAP_NET`
-  introduced + enforced, ephemeral ports CSPRNG-randomised, per-socket
-  and per-principal buffer accounting (§24.3), `WaitSourceKind::Socket`
-  readiness; multicast **socket** join/leave and multicast datagram
-  **transmit** built on the landed `mcast` engine.
-- Remaining tests: two-process QEMU vertical (UDP echo v4+v6, multicast
-  join + receive), `fuzz_net_sockabi`, limit-exhaustion tests failing
-  closed. (`fuzz_net_udp`/`fuzz_net_igmp`/`fuzz_net_mld` landed; the
-  membership engine + host-membership + Router-Alert paths are covered
-  by `lib/net` unit/e2e tests.)
-- Docs: `docs/src/abi/net-sockets.md` (remaining); `docs/src/lib/net.md`
-  refreshed for `udp`/`igmp`/`mld`/`mcast`.
+- **N4a — socket ABI wire contract + network errnos `[x]` (landed).**
+  `lib/abi/src/net.rs` (`rustos_abi::net`) is the pure, versioned,
+  fail-closed wire contract: `SocketRequest`
+  (`socket`/`bind`/`connect`/`send`/`close` + multicast `join`/`leave`,
+  dgram v4/v6, `SocketType::Datagram` with stream/raw reserved), the
+  socket-open/bind reply codecs, and the `SocketDatagram` delivery frame
+  the stack sends to a client's async port. `recv` is realised as a
+  client-side `WaitSourceKind::Port` drain of that frame, not a stack
+  round-trip, and there is **no** kernel `WaitSourceKind::Socket` (see
+  §2.4). Reserved socket endpoint `NETSTACK_SOCKET_ENDPOINT`; five
+  network `Errno`s added (`AddressInUse`/`AddressUnavailable`/
+  `NetworkUnreachable`/`NotConnected`/`LimitExceeded`). Host-tested and
+  exercised by the `lib/abi` never-panic/round-trip fuzz harness.
+  `CAP_NET` is **not** introduced here — a capability lands only with a
+  live enforcement point and holder (§5.2), which is N4b. Docs:
+  `docs/src/abi/net-sockets.md`.
+- **N4b — the socket service + client + multicast transmit `[ ]`
+  (remaining).** `CAP_NET` introduced + enforced in the `netstack`
+  socket dispatcher (its live holder is the client manifest); the socket
+  table keyed to the caller's attested origin with CSPRNG-drawn ephemeral
+  ports and per-principal/global bounded accounting failing closed with
+  `LimitExceeded` (§24.3); UDP unicast **and** multicast datagram
+  transmit (the engine `Stack::send_datagram` gains a multicast path over
+  the landed `mcast` engine — today it refuses multicast as `NotUnicast`);
+  inbound demux from `StackEvent::UdpDatagram` to the owning socket's
+  delivery port via `ipc_send`; the `Run` binary binding the second
+  endpoint and pumping it in the wait-set loop; `lib/rt` socket wrappers
+  (`socket`/`bind`/`connect`/`send`/`recv`/`close` over the contract).
+- N4b tests: two-process QEMU vertical (UDP echo v4+v6, multicast
+  join + receive), `fuzz_net_sockabi` (the netstack serve path),
+  limit-exhaustion tests failing closed. (`fuzz_net_udp`/`fuzz_net_igmp`/
+  `fuzz_net_mld` landed; membership + Router-Alert paths covered by
+  `lib/net` unit/e2e tests; the ABI decoders covered by the `lib/abi`
+  harness.) Docs: `docs/src/lib/net.md` refreshed for
+  `udp`/`igmp`/`mld`/`mcast`.
 
 ### N5 — TCP core: the RFC 9293 state machine, retransmission, flow control `[ ]`
 - Connection establishment/teardown (full state machine, simultaneous

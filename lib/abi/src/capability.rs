@@ -608,6 +608,7 @@ mod tests {
         assert_eq!(CapabilityId::SYSINFO_INTROSPECT.as_u16(), 32);
         assert_eq!(CapabilityId::SEAT_ADMIN.as_u16(), 33);
         assert_eq!(CapabilityId::MEM_PIN.as_u16(), 34);
+        assert_eq!(CapabilityId::NET_ADMIN.as_u16(), 35);
     }
 
     #[test]
@@ -641,9 +642,9 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=33 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=35 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=33 {
+        for raw in 1..=35 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }

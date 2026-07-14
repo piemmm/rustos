@@ -128,6 +128,11 @@ const ERRNO_NAMES: &[(&str, Errno)] = &[
     ("NO_DATA", Errno::NoData),
     ("NOT_SUPPORTED", Errno::NotSupported),
     ("INTERRUPTED", Errno::Interrupted),
+    ("ADDRESS_IN_USE", Errno::AddressInUse),
+    ("ADDRESS_UNAVAILABLE", Errno::AddressUnavailable),
+    ("NETWORK_UNREACHABLE", Errno::NetworkUnreachable),
+    ("NOT_CONNECTED", Errno::NotConnected),
+    ("LIMIT_EXCEEDED", Errno::LimitExceeded),
 ];
 
 /// One generated C header: its file name (relative to the include directory)
@@ -3968,11 +3973,11 @@ mod tests {
             let expected = i32::try_from(idx + 1).expect("small index");
             assert_eq!(errno.as_i32(), expected, "errno values must be dense 1..=N");
         }
-        // Interrupted is the last appended abi-v1 variant
-        // (discriminant 33).
+        // LimitExceeded is the last appended abi-v1 variant
+        // (discriminant 38).
         assert_eq!(
             ERRNO_NAMES.last().map(|(_, e)| e.as_i32()),
-            Some(Errno::Interrupted.as_i32()),
+            Some(Errno::LimitExceeded.as_i32()),
             "errno table must end at the last frozen variant"
         );
     }

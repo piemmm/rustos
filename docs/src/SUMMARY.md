@@ -136,6 +136,7 @@
 - [64-bit-native time (`abi-v1`)](./abi/time.md)
 - [Input events (`abi-v1`)](./abi/input.md)
 - [Standard Information Stream (`stdinfo`, fd 3)](./abi/stdinfo.md)
+- [Datagram socket ABI (`netsock-v1`)](./abi/net-sockets.md)
 - [C development header (`abi-v1`)](./abi/c-abi.md)
 - [Calling RustOS from C (worked example)](./abi/calling-from-c.md)
 
