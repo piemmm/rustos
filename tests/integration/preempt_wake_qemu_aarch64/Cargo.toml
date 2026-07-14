@@ -1,0 +1,50 @@
+[package]
+name = "rustos-test-preempt-wake-qemu-aarch64"
+description = "Regression QEMU integration test: prove a NON-timer interrupt taken from EL0 involuntarily preempts a sole, CPU-bound EL0 task when the per-CPU need-resched latch is set. The kernel spawns the pure-Rust el0_spinner (a busy loop that issues no syscall) as the SINGLE runnable task, so the tickless scheduler never arms the preemption one-shot; just before entering EL0 the spinner's kthread sends itself a reschedule SGI (IPI). The SGI is delivered on the first EL0 instruction: its handler latches need_resched (note_preempt_tick), and the fix drives the EL0 preempt point on return-to-EL0 for ANY interrupt, so the latch-gated preempt callback reschedules. Before the fix the SGI only latched (the preempt point ran only for the timer PPI) and the sole spinner ran unpreempted forever -> harness timeout. PASS once the preempt callback fired at least once AND the spinner, resumed mid-loop, still completed and exited."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Regression vertical for the interrupt-return-to-EL0 need-resched fix. The
+# fixture program (`rustos-test-el0-spinner`) is built position-independent by
+# `build.rs` and converted to an `rxe` blob carrying the kernel's compiled-in
+# syscall CFI tag, exactly as the sibling `preempt_el0_qemu_aarch64` vertical
+# does. The distinguishing setup: the spinner is the SOLE runnable task (so the
+# tickless scheduler never arms the preemption timer) and a self-directed
+# reschedule SGI — a NON-timer interrupt — is the only thing that can return
+# control to the scheduler. PASS proves the SGI, taken from EL0, drove the
+# preempt point via the latch; a runaway that never preempts times out
+# (fail-loud, `AGENTS.md` §7).
+#
+# The `test-hooks` feature is on by default. Release builds that enable it are
+# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
+# hacks; §5.4.5 — fail closed).
+[features]
+default = ["test-hooks"]
+test-hooks = []
+
+[[bin]]
+name = "rustos-test-preempt-wake-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+rustos-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
+rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }

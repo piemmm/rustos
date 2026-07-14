@@ -305,12 +305,15 @@ pub fn preempt_callback() -> Option<extern "C" fn(CpuId)> {
 
 /// Invoke the installed U-mode-preemption callback for `cpu`, if any.
 ///
-/// Called from the trap path **only** for a supervisor-timer tick taken
-/// from U-mode (the saved `sstatus.SPP == 0`), **after**
-/// [`on_timer_interrupt`] has re-armed the SBI timer (so the timer line is
-/// no longer pending while the callback context-switches away). A build
-/// that armed the timer without installing the callback keeps cooperative
-/// scheduling — the tick is pure accounting (fail-safe).
+/// Called from the trap path for **any** interrupt taken from U-mode (the
+/// saved `sstatus.SPP == 0`) — a timer tick, a directed reschedule IPI, or
+/// a device (external) interrupt — **after** its source's handler has
+/// acknowledged the pending bit (or re-armed the SBI timer), so no
+/// interrupt line is pending while the callback context-switches away. The
+/// installed callback consults the per-hart need-resched latch and only
+/// switches away when a reschedule is actually owed. A build that armed
+/// the timer without installing the callback keeps cooperative scheduling
+/// — the tick is pure accounting (fail-safe).
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub(crate) fn on_u_mode_preempt_point(cpu: CpuId) {
     let raw = PREEMPT_CALLBACK_FN.load(Ordering::Relaxed);

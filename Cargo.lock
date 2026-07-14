@@ -2825,6 +2825,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-preempt-wake-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-aarch64",
+ "rustos-arch-api",
+ "rustos-fdt",
+ "rustos-itest-harness",
+ "rustos-kalloc",
+ "rustos-kernel-core",
+ "rustos-kernel-mem",
+ "rustos-kernel-sched-eevdf",
+ "rustos-kernel-syscall",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-ps2-qemu-x86-64"
 version = "0.0.0"
 dependencies = [

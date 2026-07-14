@@ -299,16 +299,20 @@ fn read_elr() -> u64 {
 }
 
 /// Handle an IRQ: acknowledge the GIC, dispatch the timer PPI to the
-/// scheduler-tick path, complete the interrupt, then — for a timer tick
-/// taken from EL0 — drive the preemption point.
+/// scheduler-tick path (or an IPI / device interrupt to its handler),
+/// complete the interrupt, then — for **any** interrupt taken from EL0 —
+/// drive the preemption point.
 ///
 /// `from_el0` is `true` when the interrupted context was EL0 user mode
-/// (the `LOWER_IRQ` vector). It gates **preemption only**: a timer tick
-/// taken in EL1 (`CUR_SPX_IRQ`) still runs the scheduler-tick accounting
-/// and re-arms the timer, but it never switches the current task away —
-/// the kernel is non-preemptible, so a half-completed kernel critical
-/// section (a held `lib/sync` lock, an in-flight syscall) is never
-/// abandoned mid-flight (SMP watch-out / no hacks).
+/// (the `LOWER_IRQ` vector). It gates **preemption only**: an interrupt
+/// taken in EL1 (`CUR_SPX_IRQ`) still runs its handler (scheduler-tick
+/// accounting, the timed-wake sweep, a device wake) but never switches the
+/// current task away — the kernel is non-preemptible, so a half-completed
+/// kernel critical section (a held `lib/sync` lock, an in-flight syscall)
+/// is never abandoned mid-flight (SMP watch-out / no hacks); its pending
+/// reschedule is instead latched and honoured at the interrupted syscall's
+/// completion. Only a tick taken from EL0 preempts immediately, and only
+/// when the need-resched latch the preempt callback consults is set.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 fn handle_irq(from_el0: bool) {
     let intid = crate::gic::acknowledge();
@@ -338,18 +342,31 @@ fn handle_irq(from_el0: bool) {
     // so the CPU interface does not wedge with an active priority.
     crate::gic::end_of_interrupt(intid);
 
-    // Preempt **after** the end-of-interrupt handshake: the installed
-    // callback may context-switch away to another task and not return to
-    // this frame for a long time, so the timer line must already be
-    // deactivated (otherwise the GIC would hold an active priority across
-    // the switch and block every further interrupt on this CPU). Only a
-    // timer tick taken from EL0 preempts; the callback suspends the
-    // running user task back to the scheduler (the involuntary analogue
-    // of a `yield` syscall) and returns here when the task is next
-    // dispatched, after which the trampoline `eret`s to the interrupted
-    // EL0 context. A build that armed the timer without installing the
-    // callback keeps cooperative scheduling (fail-safe).
-    if from_el0 && intid == crate::preempt::TIMER_PPI {
+    // Check for a pending reschedule on the way back to user mode, for
+    // **any** interrupt — a timer quantum expiry, a cross-CPU reschedule
+    // IPI, or a device IRQ that woke a higher-priority task. This is the
+    // aarch64 analogue of an OS honouring `need_resched` on
+    // interrupt-return-to-user: without it, a CPU-bound EL0 task that
+    // never issues a syscall (and, being the sole runnable task, has no
+    // tickless quantum armed) could never be forced back into the
+    // scheduler when a device interrupt made new work runnable, so
+    // input/ctrl-C would never run while it spun.
+    //
+    // Preempting runs **after** the end-of-interrupt handshake: the
+    // installed callback may context-switch away to another task and not
+    // return to this frame for a long time, so the interrupt line must
+    // already be deactivated (otherwise the GIC would hold an active
+    // priority across the switch and block every further interrupt on
+    // this CPU). The callback consults the per-CPU need-resched latch and
+    // only suspends the running user task back to the scheduler (the
+    // involuntary analogue of a `yield` syscall) when a reschedule is
+    // actually owed, so an interrupt that woke nothing returns straight to
+    // EL0 with no gratuitous context switch. Only a tick taken from EL0
+    // reaches here: the kernel is non-preemptible, so an interrupt taken
+    // in EL1 latches its reschedule (honoured at the interrupted syscall's
+    // completion) rather than switching away mid-critical-section. A build
+    // that installed no callback keeps cooperative scheduling (fail-safe).
+    if from_el0 {
         crate::preempt::on_el0_preempt_point(cpu);
     }
 }

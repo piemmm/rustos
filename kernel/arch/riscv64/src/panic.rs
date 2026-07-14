@@ -27,7 +27,28 @@ use crate::serial::SbiWriter;
 /// Always returns `!`: emits one record on the SBI console, then parks
 /// the hart via [`halt_current_hart`].
 pub fn handle_panic_via_serial(info: &PanicInfo<'_>) -> ! {
+    // The running hart's id, so a multi-hart post-mortem knows which hart
+    // faulted. Reading it has no side effects and is safe even mid-panic.
+    let hart = crate::smp::current_hartid();
     let mut w = SbiWriter;
-    let _ = writeln!(w, "[rustos-kernel] riscv64 panic: {info}");
+    // A loud, unmistakable multi-line banner. A kernel panic halts the
+    // offending hart with no recovery (fail closed), so the record must
+    // carry everything a post-mortem needs: which hart, and the panic
+    // message plus source location that `PanicInfo`'s `Display` already
+    // formats (`file:line:col` and the message — for an allocation failure
+    // that message is the requested byte count). Terse and factual.
+    let _ = writeln!(
+        w,
+        "\n==================== RustOS KERNEL PANIC ===================="
+    );
+    let _ = writeln!(w, "[rustos-kernel] riscv64 panic on hart {hart}: {info}");
+    let _ = writeln!(
+        w,
+        "hart {hart} halted; the kernel is non-recoverable in production."
+    );
+    let _ = writeln!(
+        w,
+        "============================================================="
+    );
     halt_current_hart()
 }

@@ -470,35 +470,23 @@ unsafe extern "C" fn rustos_riscv64_trap_handler(frame: *mut TrapFrame) {
         crate::kernel_arch::halt_current_hart();
     }
 
+    // Whether the interrupted context was U-mode (the saved `SPP == 0`),
+    // read once so every interrupt kind below shares the one preemption
+    // gate. `frame` is the live saved-register frame the asm vector
+    // passed; reading its saved `sstatus` is a plain field load.
+    // SAFETY: `frame` is the live saved-register frame.
+    let from_user = trap_came_from_user(unsafe { (*frame).sstatus });
+
     if crate::preempt::is_supervisor_timer_interrupt(scause) {
         // Supervisor timer interrupt: drive the scheduler tick and
         // re-arm the SBI timer (which acknowledges `sip.STIP`).
         crate::preempt::on_timer_interrupt();
-        // Involuntary preemption (`plans/PI.md` D2b-2b-A P-1b): a tick
-        // taken from U-mode suspends the running user task back to the
-        // scheduler, exactly as a cooperative `yield` does. The re-arm
-        // above already cleared `sip.STIP`, so the context switch happens
-        // with no timer line pending. A tick taken from S-mode never
-        // preempts — the kernel is non-preemptible, and
-        // the saved `SPP` gate enforces that even if `sstatus.SIE` is ever
-        // enabled in S-mode. `frame` is the live saved-register frame.
-        // SAFETY: `frame` is the live saved-register frame the asm vector
-        // passed; reading its saved `sstatus` is a plain field load.
-        if trap_came_from_user(unsafe { (*frame).sstatus }) {
-            crate::preempt::on_u_mode_preempt_point(crate::smp::current_hartid());
-        }
-        return;
-    }
-
-    if crate::preempt::is_supervisor_software_interrupt(scause) {
+    } else if crate::preempt::is_supervisor_software_interrupt(scause) {
         // Supervisor software interrupt: a directed IPI raised by the
         // SBI IPI extension. Acknowledge it (clear `sip.SSIP`) and run
         // the installed IPI callback.
         crate::preempt::on_software_interrupt();
-        return;
-    }
-
-    if is_supervisor_external_interrupt(scause) {
+    } else if is_supervisor_external_interrupt(scause) {
         let raw = TRAP_DISPATCH_FN.load(Ordering::Acquire);
         if raw != 0 {
             // SAFETY: every value stored into the slot round-trips a
@@ -515,8 +503,26 @@ unsafe extern "C" fn rustos_riscv64_trap_handler(frame: *mut TrapFrame) {
         // before arming any line).
     }
 
-    // Any other interrupt cause is not enabled in this slice; falling
-    // through resumes the interrupted context via `sret`.
+    // Involuntary preemption (`plans/PI.md` D2b-2b-A P-1b), honoured on
+    // return to U-mode for **any** interrupt — a timer quantum expiry, a
+    // directed reschedule IPI, or a device (external) interrupt that woke
+    // a higher-priority task. This is the riscv64 analogue of an OS
+    // honouring `need_resched` on trap-return-to-user: without it a
+    // CPU-bound U-mode task that never issues a syscall (and, being the
+    // sole runnable task, has no tickless quantum armed) could never be
+    // forced back into the scheduler when a device interrupt made new work
+    // runnable. The source's own handler above already acknowledged its
+    // pending bit / re-armed the timer, so the context switch happens with
+    // no interrupt line pending. The callback consults the per-hart
+    // need-resched latch and only switches away when a reschedule is
+    // actually owed, so an interrupt that woke nothing returns straight to
+    // U-mode. A tick taken from S-mode never preempts — the kernel is
+    // non-preemptible, and the saved `SPP` gate enforces that even if
+    // `sstatus.SIE` is ever enabled in S-mode; its reschedule is latched
+    // and honoured at the interrupted syscall's completion instead.
+    if from_user && (scause & SCAUSE_INTERRUPT_BIT) != 0 {
+        crate::preempt::on_u_mode_preempt_point(crate::smp::current_hartid());
+    }
 }
 
 #[cfg(test)]

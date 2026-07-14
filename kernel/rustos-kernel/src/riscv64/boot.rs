@@ -368,27 +368,45 @@ const PREEMPT_TICK_HZ: u64 = rustos_arch_api::timer::DEFAULT_PREEMPT_QUANTUM_HZ;
 static PREEMPT_STORAGE: rustos_arch_riscv64::preempt::PreemptStorage<1> =
     rustos_arch_riscv64::preempt::PreemptStorage::new();
 
-/// The U-mode-preemption callback the timer trap path invokes for a tick
-/// taken from U-mode (installed via
+/// The U-mode-preemption callback the trap path invokes on
+/// return-to-U-mode for **any** interrupt (installed via
 /// [`rustos_arch_riscv64::preempt::set_preempt_callback`]).
 ///
-/// It suspends the user task currently running on `cpu` back to the
-/// scheduler with [`rustos_kernel_core::RescheduleAction::Yield`] — the
-/// *involuntary* analogue of a `yield` syscall: the task is re-enqueued at
-/// its priority and the scheduler picks the next runnable task, giving
-/// EEVDF-ordered time-slicing. [`rustos_kernel_core::reschedule_current`]
-/// returns `false` when no resumable user kthread is published on `cpu`
-/// (unreachable from U-mode with none switched in, but the fail-closed
-/// return means a stray invocation is a harmless no-op rather than an
-/// unsound switch). The call only ever runs after
-/// [`on_timer_interrupt`](rustos_arch_riscv64::preempt) disarmed the SBI
-/// timer (`set_timer(u64::MAX)`), so `sip.STIP` is already cleared across
-/// the context switch; the scheduler re-arms the next one-shot on its
-/// following dispatch (tickless).
+/// It reschedules **only** when this hart owes one — i.e. the per-hart
+/// need-resched latch ([`rustos_kernel_core::take_preempt_pending`]) is
+/// set. A timer quantum expiry, a directed reschedule IPI, and a device
+/// (external) interrupt that woke a higher-priority task all latch it
+/// (respectively [`production_tick_dispatch`], the IPI callback, and the
+/// external-IRQ dispatcher); an interrupt that woke nothing leaves it
+/// clear, so the common case returns straight to U-mode with **no**
+/// gratuitous context switch. Consuming the latch here also means an
+/// S-mode tick — which never reaches this U-mode-only path — keeps its
+/// latch until the interrupted syscall's completion honours it.
+///
+/// When a reschedule is owed it suspends the user task currently running
+/// on `cpu` back to the scheduler with
+/// [`rustos_kernel_core::RescheduleAction::Yield`] — the *involuntary*
+/// analogue of a `yield` syscall: the task is re-enqueued at its priority
+/// and the scheduler picks the next runnable task, giving EEVDF-ordered
+/// time-slicing and, crucially, running `drain_pending_wakes` so work a
+/// device IRQ just woke actually gets dispatched.
+/// [`rustos_kernel_core::reschedule_current`] returns `false` when no
+/// resumable user kthread is published on `cpu` (unreachable from U-mode
+/// with none switched in, but the fail-closed return means a stray
+/// invocation is a harmless no-op rather than an unsound switch). The call
+/// only ever runs after the source's handler acknowledged its pending bit
+/// (the SBI timer disarmed, `sip.STIP`/`sip.SSIP` cleared, the external
+/// claim complete), so no interrupt line is pending across the context
+/// switch; the scheduler re-arms the next one-shot on its following
+/// dispatch (tickless).
 #[cfg(all(freestanding, kernel_isa = "riscv64"))]
 extern "C" fn production_preempt_dispatch(cpu: rustos_arch_api::CpuId) {
-    let _ =
-        rustos_kernel_core::reschedule_current(cpu, rustos_kernel_core::RescheduleAction::Yield);
+    if rustos_kernel_core::take_preempt_pending(cpu) {
+        let _ = rustos_kernel_core::reschedule_current(
+            cpu,
+            rustos_kernel_core::RescheduleAction::Yield,
+        );
+    }
 }
 
 /// The per-tick callback the timer trap path invokes on **every** tick

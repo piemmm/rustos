@@ -99,29 +99,54 @@ pub extern "C" fn production_external_irq_dispatch(vector: u8) {
     // re-checks its own line and parks again.
     // Wait-free and allocation-free, safe from this interrupt context.
     rustos_kernel_core::irq_wake();
+    // Latch need_resched on the serving CPU so that when this interrupt
+    // returns to ring 3 the running user task yields into the scheduler —
+    // which drains the wake and dispatches the task this device IRQ just
+    // woke. Without it a CPU-bound ring-3 task that issues no syscall (and,
+    // being the sole runnable task, has no tickless quantum armed) would
+    // never be forced back into the scheduler. Pure accounting (one atomic
+    // store), safe from interrupt context; the arch-side external-IRQ
+    // dispatch drives the (latch-gated) ring-3 preempt point after EOI.
+    #[cfg(all(freestanding, kernel_isa = "x86_64"))]
+    rustos_kernel_core::note_preempt_tick(rustos_arch_x86_64::preempt::current_cpu_id_from_lapic());
 }
 
-/// The ring-3-preemption callback the LAPIC-timer ISR invokes for a tick
-/// taken from ring 3 (installed via
+/// The ring-3-preemption callback the ISR path invokes on return-to-ring-3
+/// for **any** interrupt (installed via
 /// [`rustos_arch_x86_64::preempt::set_preempt_callback`] in
-/// [`KernelArch::install_irq_dispatch`]).
+/// [`KernelArch::install_irq_dispatch`]), from both the LAPIC-timer ISR (a
+/// quantum expiry or a reschedule IPI — `send_ipi` targets `TIMER_VECTOR`)
+/// and the external-IRQ ISR (a device interrupt that woke a task).
 ///
-/// It suspends the user task currently running on `cpu` back to the
-/// scheduler with [`RescheduleAction::Yield`] — the *involuntary* analogue
-/// of a `yield` syscall: the task is re-enqueued at its priority and the
-/// scheduler picks the next runnable task, giving EEVDF-ordered
-/// time-slicing. This is the x86_64 sibling of the aarch64/riscv64
-/// `production_preempt_dispatch` (one shape over the
-/// Arch HAL). [`reschedule_current`] returns `false` when no resumable
-/// user kthread is published on `cpu` (unreachable from ring 3 with none
-/// switched in, but the fail-closed return means a stray invocation is a
-/// harmless no-op rather than an unsound switch). The
-/// call only ever runs after the ISR has written the LAPIC EOI, so the
+/// It reschedules **only** when this CPU owes one — i.e. the per-CPU
+/// need-resched latch ([`rustos_kernel_core::take_preempt_pending`]) is
+/// set (by [`production_tick_dispatch`] on a tick/IPI, or by
+/// [`production_external_irq_dispatch`] on a device wake); an interrupt
+/// that woke nothing leaves it clear, so the common case returns straight
+/// to ring 3 with **no** gratuitous context switch. Consuming the latch
+/// here also means a ring-0 tick — which never reaches this ring-3-only
+/// path — keeps its latch until the interrupted syscall's completion
+/// honours it.
+///
+/// When a reschedule is owed it suspends the user task currently running
+/// on `cpu` back to the scheduler with [`RescheduleAction::Yield`] — the
+/// *involuntary* analogue of a `yield` syscall: the task is re-enqueued at
+/// its priority and the scheduler picks the next runnable task, giving
+/// EEVDF-ordered time-slicing and running `drain_pending_wakes` so work a
+/// device IRQ just woke actually gets dispatched. This is the x86_64
+/// sibling of the aarch64/riscv64 `production_preempt_dispatch` (one shape
+/// over the Arch HAL). [`reschedule_current`] returns `false` when no
+/// resumable user kthread is published on `cpu` (unreachable from ring 3
+/// with none switched in, but the fail-closed return means a stray
+/// invocation is a harmless no-op rather than an unsound switch). The call
+/// only ever runs after the ISR has written the LAPIC EOI, so the
 /// in-service bit is already released across the context switch, and the
 /// ISR brackets it with the `swapgs` pair that balances the kthread
 /// cooperative park.
 extern "C" fn production_preempt_dispatch(cpu: CpuId) {
-    let _ = reschedule_current(cpu, RescheduleAction::Yield);
+    if rustos_kernel_core::take_preempt_pending(cpu) {
+        let _ = reschedule_current(cpu, RescheduleAction::Yield);
+    }
 }
 
 /// The per-tick callback the LAPIC-timer ISR invokes on **every** tick

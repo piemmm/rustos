@@ -272,7 +272,7 @@ pub fn msi_message(vector: u8, destination: u8) -> MsiMessage {
 /// because the EOI write below assumes the in-service bit is set.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[no_mangle]
-unsafe extern "C" fn rustos_arch_x86_64_external_irq_dispatch(_regs: *mut SavedRegs, vector: u64) {
+unsafe extern "C" fn rustos_arch_x86_64_external_irq_dispatch(regs: *mut SavedRegs, vector: u64) {
     // The asm trampoline pushes a u64 that fits in u8 (every value
     // is ≤ 0xFE by construction). Documented narrowing.
     #[allow(clippy::cast_possible_truncation)]
@@ -301,6 +301,22 @@ unsafe extern "C" fn rustos_arch_x86_64_external_irq_dispatch(_regs: *mut SavedR
     unsafe {
         let eoi = (LAPIC_BASE_PHYS + LAPIC_EOI_OFFSET as u64) as *mut u32;
         core::ptr::write_volatile(eoi, 0);
+    }
+
+    // Honour a pending reschedule on return to ring 3: a device interrupt
+    // that woke a higher-priority task latches need_resched in the bin
+    // dispatcher, so drive the shared ring-3 preempt point (the same one
+    // the timer ISR uses). The installed callback self-gates on the latch,
+    // so an interrupt that woke nothing returns straight to ring 3. Done
+    // *after* the EOI above so the in-service bit is released before any
+    // context switch. This is what lets a device IRQ (e.g. a keystroke)
+    // preempt a CPU-bound ring-3 task that issues no syscall.
+    let cpu_id = crate::preempt::current_cpu_id_from_lapic();
+    // SAFETY: `regs` is the live saved-regs block the trampoline pushed at
+    // the current `%rsp`, with the CPU-pushed frame immediately above it;
+    // the EOI was written just above.
+    unsafe {
+        crate::preempt::preempt_ring3_if_pending(regs, cpu_id);
     }
 }
 

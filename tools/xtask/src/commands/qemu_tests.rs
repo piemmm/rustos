@@ -2033,6 +2033,42 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
+    // Regression vertical for the interrupt-return-to-EL0 need-resched fix: prove
+    // a **non-timer** interrupt taken from EL0 involuntarily preempts a **sole**,
+    // CPU-bound EL0 task. Where the sibling above proves the *timer* preempts a
+    // *contended* task, this proves the behaviour the fix adds — the reported
+    // `stress --cpu 1` hang. It brings up the EL1 vectors + GICv2, builds one
+    // hardware-isolated EL0 address space from the same `rustos-test-el0-spinner`
+    // fixture, and wires the **production** preemption surface: the latch-gated
+    // EL0-preemption callback (reschedules only when `take_preempt_pending` is
+    // set — the `production_preempt_dispatch` shape) and the reschedule-IPI
+    // callback that latches need-resched (`production_ipi_dispatch` shape). The
+    // spinner is the SOLE runnable task, so the tickless scheduler never arms the
+    // preemption timer; just before entering EL0 its kthread sends itself a
+    // reschedule SGI (a non-timer IRQ), which is taken on the first EL0
+    // instruction, latches need-resched, and — via the fix — drives the
+    // return-to-EL0 preempt point so the latch-gated callback reschedules. PASS
+    // once the callback rescheduled at least once AND the spinner, resumed
+    // mid-loop, still completed and exited. Before the fix the SGI only latched
+    // (the preempt point ran solely for the timer PPI) and the sole spinner ran
+    // unpreempted forever, timing out (fail-loud). Single CPU; a 120-second
+    // budget matches the sibling under QEMU TCG.
+    QemuTest {
+        package: "rustos-test-preempt-wake-qemu-aarch64",
+        binary: "rustos-test-preempt-wake-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(120),
+        disk_sectors: None,
+        netstack_peer: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // PI Stage D2b-2b-A P-1b (`plans/PI.md`): the riscv64 involuntary-preemption
     // vertical — the cross-port sibling of the aarch64 preempt test, proving the
     // production supervisor-timer interrupt preempts a **runaway** U-mode task on

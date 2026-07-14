@@ -382,15 +382,7 @@ pub fn cpu_id_for_lapic(lapic_id: u8) -> u32 {
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[no_mangle]
 unsafe extern "C" fn rustos_arch_x86_64_timer_dispatch(regs: *mut SavedRegs) {
-    // SAFETY: LAPIC MMIO is identity-mapped (boot.s SAFETY-INVARIANT 4).
-    // The ID register is read-only and accessing it has no side
-    // effects. The EOI register accepts any 32-bit write.
-    let lapic_id = unsafe {
-        let id_reg = (LAPIC_BASE_PHYS + 0x20) as *const u32;
-        core::ptr::read_volatile(id_reg) >> 24
-    };
-
-    let cpu_id = LAPIC_TO_CPU_ID[(lapic_id & 0xFF) as usize].load(Ordering::Relaxed);
+    let cpu_id = current_cpu_id_from_lapic();
 
     // The LAPIC one-shot fired, so the quantum (if one was armed) is
     // consumed: clear its recorded deadline before the tick callback runs,
@@ -422,57 +414,102 @@ unsafe extern "C" fn rustos_arch_x86_64_timer_dispatch(regs: *mut SavedRegs) {
         core::ptr::write_volatile(eoi, 0);
     }
 
-    // Involuntary preemption (`plans/PI.md` D2b-2b-A P-1c): a tick taken
-    // from ring 3 suspends the running user task back to the scheduler,
-    // exactly as a cooperative `yield` does. A tick taken in ring 0 never
-    // preempts — the kernel is non-preemptible — and an
-    // absent callback keeps the system cooperative (fail-safe).
+    // Involuntary preemption (`plans/PI.md` D2b-2b-A P-1c), honoured on
+    // return to ring 3 for a quantum expiry or a reschedule IPI (which
+    // `X86_64Arch::send_ipi` delivers on `TIMER_VECTOR`, so it lands here).
+    // SAFETY: `regs` is the live saved-regs block the stub passed at the
+    // current `%rsp`, with the CPU-pushed `InterruptStackFrame` immediately
+    // above it; EOI was written above, so the in-service bit is released
+    // before the callback may context-switch away.
+    unsafe {
+        preempt_ring3_if_pending(regs, cpu_id);
+    }
+}
+
+/// The running CPU's dense id, read from its LAPIC ID register through the
+/// `LAPIC_TO_CPU_ID` map, or [`u32::MAX`] when the id is unmapped. Shared
+/// by every ISR that needs the CPU id (the timer and external-IRQ paths).
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub fn current_cpu_id_from_lapic() -> u32 {
+    // SAFETY: LAPIC MMIO is identity-mapped (boot.s SAFETY-INVARIANT 4);
+    // the ID register is read-only and reading it has no side effects.
+    let lapic_id = unsafe {
+        let id_reg = (LAPIC_BASE_PHYS + 0x20) as *const u32;
+        core::ptr::read_volatile(id_reg) >> 24
+    };
+    LAPIC_TO_CPU_ID[(lapic_id & 0xFF) as usize].load(Ordering::Relaxed)
+}
+
+/// Drive the installed ring-3 preemption callback iff the interrupted
+/// context was ring 3.
+///
+/// The single "check need_resched on interrupt-return-to-ring-3" site,
+/// shared by the LAPIC-timer ISR (a quantum expiry or a reschedule IPI)
+/// and the external-IRQ ISR (a device interrupt that woke a
+/// higher-priority task), so the logic lives in exactly one place. The
+/// installed callback (`production_preempt_dispatch`) self-gates on the
+/// per-CPU need-resched latch, so an interrupt that woke nothing returns
+/// straight to ring 3 with no context switch. A tick taken in ring 0 never
+/// preempts — the kernel is non-preemptible — and its reschedule is
+/// latched and honoured at the interrupted syscall's completion; an absent
+/// callback keeps the system cooperative (fail-safe).
+///
+/// # Safety
+///
+/// Must be called from an ISR **after** the LAPIC EOI write, with `regs`
+/// the live saved-regs block the stub pushed at the current `%rsp` and the
+/// CPU-pushed `InterruptStackFrame` immediately above it. `cpu_id` is the
+/// running CPU's dense id (or [`u32::MAX`] when unmapped, making this a
+/// no-op).
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub(crate) unsafe fn preempt_ring3_if_pending(regs: *mut SavedRegs, cpu_id: u32) {
     let preempt_raw = PREEMPT_CALLBACK_FN.load(Ordering::Relaxed);
-    if preempt_raw != 0 && cpu_id != u32::MAX {
-        // The CPU-pushed interrupt frame sits immediately above the saved
-        // GPR block the `define_isr!` stub pushed; its `cs` is the selector
-        // of the interrupted context.
-        // SAFETY: `regs` is the live saved-regs block the stub passed at the
-        // current `%rsp`; the `InterruptStackFrame` the CPU pushed lies
-        // exactly `size_of::<SavedRegs>()` bytes above it (the stub inserts
-        // no other words between them, per `define_isr!`), so the read is in
-        // bounds and reads an initialised qword.
-        let from_ring3 = unsafe {
-            let frame =
-                (regs as usize + core::mem::size_of::<SavedRegs>()) as *const InterruptStackFrame;
-            cs_is_ring3((*frame).cs)
-        };
-        if from_ring3 {
-            // SAFETY: every store into `PREEMPT_CALLBACK_FN` round-trips a
-            // valid `extern "C" fn(u32)` through `set_preempt_callback`; the
-            // callback is a `fn` with no captured environment, safe to call
-            // from interrupt context.
-            let cb: extern "C" fn(u32) =
-                unsafe { core::mem::transmute::<usize, extern "C" fn(u32)>(preempt_raw) };
-            // Establish the in-handler GS convention (current GS = kernel
-            // TLS) the kthread cooperative-park balance expects, exactly as
-            // the `syscall` entry stub's `swapgs` does (`plans/PI.md` X2):
-            // an interrupt gate taken from ring 3 does *not* swap GS, so on
-            // entry the current GS is still the user value. The callback's
-            // `reschedule_current` flips GS to the between-handler
-            // convention for the dispatcher (`enter_cooperative_park`) and
-            // back on resume (`leave_cooperative_park`); the closing
-            // `swapgs` then restores the user GS before the stub's `iretq`
-            // returns to ring 3.
-            // SAFETY: `swapgs` is privileged and runs in ring 0 here; it
-            // touches only the GS-base/`KERNEL_GS_BASE` swap, no memory or
-            // flags. The two swaps bracket exactly one preempt callback on
-            // this task's own ISR control flow, so they pair.
-            unsafe {
-                core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
-            }
-            cb(cpu_id);
-            // SAFETY: as above — the matching swap restoring the user GS the
-            // `iretq` returns into.
-            unsafe {
-                core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
-            }
-        }
+    if preempt_raw == 0 || cpu_id == u32::MAX {
+        return;
+    }
+    // The CPU-pushed interrupt frame sits immediately above the saved GPR
+    // block the stub pushed; its `cs` is the selector of the interrupted
+    // context.
+    // SAFETY: `regs` is the live saved-regs block the stub passed at the
+    // current `%rsp`; the `InterruptStackFrame` the CPU pushed lies exactly
+    // `size_of::<SavedRegs>()` bytes above it (the stubs insert no other
+    // words between them), so the read is in bounds and reads an
+    // initialised qword.
+    let from_ring3 = unsafe {
+        let frame =
+            (regs as usize + core::mem::size_of::<SavedRegs>()) as *const InterruptStackFrame;
+        cs_is_ring3((*frame).cs)
+    };
+    if !from_ring3 {
+        return;
+    }
+    // SAFETY: every store into `PREEMPT_CALLBACK_FN` round-trips a valid
+    // `extern "C" fn(u32)` through `set_preempt_callback`; the callback is a
+    // `fn` with no captured environment, safe to call from interrupt
+    // context.
+    let cb: extern "C" fn(u32) =
+        unsafe { core::mem::transmute::<usize, extern "C" fn(u32)>(preempt_raw) };
+    // Establish the in-handler GS convention (current GS = kernel TLS) the
+    // kthread cooperative-park balance expects, exactly as the `syscall`
+    // entry stub's `swapgs` does (`plans/PI.md` X2): an interrupt gate
+    // taken from ring 3 does *not* swap GS, so on entry the current GS is
+    // still the user value. The callback's `reschedule_current` flips GS to
+    // the between-handler convention for the dispatcher
+    // (`enter_cooperative_park`) and back on resume
+    // (`leave_cooperative_park`); the closing `swapgs` then restores the
+    // user GS before the stub's `iretq` returns to ring 3.
+    // SAFETY: `swapgs` is privileged and runs in ring 0 here; it touches
+    // only the GS-base/`KERNEL_GS_BASE` swap, no memory or flags. The two
+    // swaps bracket exactly one preempt callback on this task's own ISR
+    // control flow, so they pair.
+    unsafe {
+        core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
+    }
+    cb(cpu_id);
+    // SAFETY: as above — the matching swap restoring the user GS the
+    // `iretq` returns into.
+    unsafe {
+        core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
     }
 }
 

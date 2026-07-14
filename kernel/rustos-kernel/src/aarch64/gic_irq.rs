@@ -501,6 +501,12 @@ pub extern "C" fn production_device_irq_dispatch(intid: u32) {
         let rx_pending = rustos_arch_aarch64::serial::service_uart_tx_irq();
         if rx_pending {
             drain_uart_into_console_queue();
+            // A receive drain may have made a parked console reader
+            // runnable; flag the reschedule so the running EL0 task yields
+            // on return and the dispatcher drains the wake. A transmit-only
+            // service woke nothing, so it deliberately does not latch (the
+            // UART-TX drain IRQ is frequent during logging).
+            note_resched_here();
         }
         return;
     }
@@ -522,6 +528,7 @@ pub extern "C" fn production_device_irq_dispatch(intid: u32) {
             BRCM_MSI.clear(vector);
         }
         rustos_kernel_core::irq_wake();
+        note_resched_here();
         return;
     }
     let _ = table.fire(intid, &COMPOSITE_IRQ_CONTROLLER);
@@ -532,6 +539,20 @@ pub extern "C" fn production_device_irq_dispatch(intid: u32) {
     // and parks again. Wait-free and
     // allocation-free, safe from this interrupt context.
     rustos_kernel_core::irq_wake();
+    note_resched_here();
+}
+
+/// Latch a pending reschedule on the CPU currently servicing this device
+/// interrupt, so that when it returns to EL0 the running user task yields
+/// into the scheduler — which runs `drain_pending_wakes` and dispatches
+/// the task this interrupt just woke. Called only where a wake was
+/// actually requested (a bound-line/MSI `irq_wake`, or a console receive
+/// drain); a device interrupt that woke nothing does not latch, so a
+/// CPU-bound EL0 task is disturbed only when there is genuinely new work.
+/// Pure accounting (one atomic store), safe from interrupt context.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+fn note_resched_here() {
+    rustos_kernel_core::note_preempt_tick(rustos_arch_aarch64::smp::current_cpu_index());
 }
 
 /// Saved DAIF state for [`DaifIrqControl`].
@@ -870,26 +891,44 @@ fn leak_per_cpu_slots(count: usize) -> &'static [core::sync::atomic::AtomicU64] 
     alloc::boxed::Box::leak(slots.into_boxed_slice())
 }
 
-/// The EL0-preemption callback the timer IRQ path invokes for a tick taken
-/// from EL0 (installed via
+/// The EL0-preemption callback the arch IRQ path invokes on
+/// return-to-EL0 for **any** interrupt (installed via
 /// [`rustos_arch_aarch64::preempt::set_preempt_callback`]).
 ///
-/// It suspends the user task currently running on `cpu` back to the
-/// scheduler with [`rustos_kernel_core::RescheduleAction::Yield`] — the
-/// *involuntary* analogue of a `yield` syscall: the task is re-enqueued at
-/// its priority and the scheduler picks the next runnable task, giving
-/// EEVDF-ordered time-slicing. [`rustos_kernel_core::reschedule_current`]
-/// returns `false` when no resumable user kthread is published on `cpu`
-/// (it cannot be reached from EL0 with none switched in, but the
-/// fail-closed return means a stray invocation is a harmless no-op rather
-/// than an unsound switch). The call only ever runs
-/// after the GIC end-of-interrupt handshake (see
-/// [`rustos_arch_aarch64::exceptions::handle_irq`]), so the timer line is
-/// already deactivated across the context switch.
+/// It reschedules **only** when this CPU owes one — i.e. the per-CPU
+/// need-resched latch ([`rustos_kernel_core::take_preempt_pending`]) is
+/// set. A timer quantum expiry, a cross-CPU reschedule IPI, and a device
+/// IRQ that woke a higher-priority task all latch it (respectively
+/// [`production_tick_dispatch`], [`production_ipi_dispatch`], and
+/// [`production_device_irq_dispatch`]); an interrupt that woke nothing
+/// leaves it clear, so the common case (e.g. a UART-TX drain IRQ taken
+/// while EL0 runs) returns straight to user mode with **no** gratuitous
+/// context switch. Consuming the latch here also means an EL1 tick — which
+/// never reaches this EL0-only path — keeps its latch until the
+/// interrupted syscall's completion honours it.
+///
+/// When a reschedule is owed it suspends the user task currently running
+/// on `cpu` back to the scheduler with
+/// [`rustos_kernel_core::RescheduleAction::Yield`] — the *involuntary*
+/// analogue of a `yield` syscall: the task is re-enqueued at its priority
+/// and the scheduler picks the next runnable task, giving EEVDF-ordered
+/// time-slicing and, crucially, running `drain_pending_wakes` so work a
+/// device IRQ just woke actually gets dispatched.
+/// [`rustos_kernel_core::reschedule_current`] returns `false` when no
+/// resumable user kthread is published on `cpu` (it cannot be reached from
+/// EL0 with none switched in, but the fail-closed return means a stray
+/// invocation is a harmless no-op rather than an unsound switch). The call
+/// only ever runs after the GIC end-of-interrupt handshake (see
+/// [`rustos_arch_aarch64::exceptions::handle_irq`]), so the interrupt line
+/// is already deactivated across the context switch.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 extern "C" fn production_preempt_dispatch(cpu: rustos_arch_api::CpuId) {
-    let _ =
-        rustos_kernel_core::reschedule_current(cpu, rustos_kernel_core::RescheduleAction::Yield);
+    if rustos_kernel_core::take_preempt_pending(cpu) {
+        let _ = rustos_kernel_core::reschedule_current(
+            cpu,
+            rustos_kernel_core::RescheduleAction::Yield,
+        );
+    }
 }
 
 /// The IPI callback the SGI IRQ path invokes on every delivered

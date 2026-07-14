@@ -32,7 +32,29 @@ pub fn handle_panic_via_serial(info: &PanicInfo<'_>) -> ! {
     // off the producer's hot path). Blocking is
     // fine here: the CPU is about to stop running the dispatch loop.
     crate::serial::flush_serial_blocking();
+    // The running CPU's dense id, so a multi-core post-mortem knows which
+    // core faulted. Reading `MPIDR_EL1` has no side effects and is safe
+    // even mid-panic.
+    let cpu = crate::smp::current_cpu_index();
     let mut w = ConsoleWriter;
-    let _ = writeln!(w, "[rustos-kernel] aarch64 panic: {info}");
+    // A loud, unmistakable multi-line banner. A kernel panic halts the
+    // offending CPU with no recovery (fail closed), so the record must
+    // carry everything a post-mortem needs: which CPU, and the panic
+    // message plus source location that `PanicInfo`'s `Display` already
+    // formats (`file:line:col` and the message — for an allocation failure
+    // that message is the requested byte count). Terse and factual.
+    let _ = writeln!(
+        w,
+        "\n==================== RustOS KERNEL PANIC ===================="
+    );
+    let _ = writeln!(w, "[rustos-kernel] aarch64 panic on CPU {cpu}: {info}");
+    let _ = writeln!(
+        w,
+        "CPU {cpu} halted; the kernel is non-recoverable in production."
+    );
+    let _ = writeln!(
+        w,
+        "============================================================="
+    );
     halt_current_cpu()
 }
