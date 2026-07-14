@@ -217,22 +217,24 @@ where
     Ok(())
 }
 
-/// Release the `page_count`-page region based at `base_va` from the caller's
-/// own live `space`, zeroing every frame before returning it to `free_frame`
-/// (zero on free).
+/// Release the `page_count`-page **demand-paged** region based at `base_va`
+/// from the caller's own live `space`, zeroing every resident frame before
+/// returning it to `free_frame` (zero on free).
 ///
-/// The whole range is validated to be currently mapped *before* any page is
-/// torn down, so a `(base, len)` that does not name a region the caller
-/// mapped fails closed with [`AnonError::NotMapped`] without a partial
-/// teardown.
+/// Anonymous regions are reserved by address space and backed one zeroed
+/// page at a time by the fault path, so a region is **sparsely resident**:
+/// this walks the range, reclaims every page that is resident, and skips
+/// the ones that never faulted in. It does *not* fail on an unbacked page —
+/// the caller validates that `(base_va, page_count)` names a region it
+/// reserved (the registry's `anon_region_exact` and, for a placed base, the
+/// per-task window record), so an unbacked page here is an untouched
+/// reservation page, not a bad range.
 ///
 /// # Errors
 ///
 /// * [`AnonError::ZeroLength`] if `page_count == 0`.
 /// * [`AnonError::Unaligned`] if `base_va` is not page-aligned.
 /// * [`AnonError::Overflow`] if a page address overflows the address space.
-/// * [`AnonError::NotMapped`] if any page in the range is not currently
-///   mapped.
 /// * [`AnonError::PhysUnmapped`] if a reclaimed frame cannot be reached to
 ///   zero it (the frame is still freed; the error is reported).
 pub fn unmap_anonymous<P, F>(
@@ -253,21 +255,21 @@ where
         return Err(AnonError::Unaligned);
     }
 
-    // Validate the whole range first: every page must be live, or the range
-    // is not one the caller mapped and we tear nothing down.
-    for page_index in 0..page_count {
-        let page = page_at(base_va, page_index)?;
-        if space.translate(page).is_none() {
-            return Err(AnonError::NotMapped);
-        }
-    }
-
-    // Now tear it down, zeroing each reclaimed frame. The pages were just
-    // proven mapped, so `unmap` cannot fail; a PhysUnmapped scrub failure is
-    // recorded but never leaks a frame (it is freed regardless).
+    // A demand-paged region is sparsely resident: only the pages that
+    // actually faulted in hold a frame. Tear down every page that *is*
+    // resident (zeroing its reclaimed frame — secret hygiene) and skip the
+    // ones that never faulted; the caller has already validated that
+    // `(base_va, page_count)` names a region it reserved, so an unbacked
+    // page here is an untouched reservation page, not an error. A
+    // `PhysUnmapped` scrub failure is recorded but never leaks a frame (it
+    // is freed regardless).
     let mut first_err = None;
     for page_index in 0..page_count {
         let page = page_at(base_va, page_index)?;
+        if space.translate(page).is_none() {
+            // Never faulted in — nothing to reclaim for this page.
+            continue;
+        }
         match space.unmap(page) {
             Ok(frame) => {
                 if let Err(err) = zero_frame(physmap, frame) {
@@ -517,12 +519,14 @@ mod tests {
     }
 
     #[test]
-    fn unmap_of_unmapped_range_fails_closed_without_teardown() {
+    fn unmap_tolerates_sparsely_resident_pages() {
         let mut space = host_space();
         let sim = sim();
         let frames = Frames::new(8);
         let base = 0x3_0000;
-        // Map only one page, then try to unmap two.
+        // A demand-paged region: only the first page ever faulted in, so
+        // only it is resident. Releasing the whole two-page reservation must
+        // reclaim the resident page and skip the never-touched one, not fail.
         map_anonymous(
             &mut space,
             &sim,
@@ -533,11 +537,11 @@ mod tests {
         )
         .expect("map");
 
-        let err = unmap_anonymous(&mut space, &sim, base, 2, |f| frames.free(f)).unwrap_err();
-        assert_eq!(err, AnonError::NotMapped);
-        // The mapped page was not torn down (validate-all-first).
-        assert_eq!(space.mapped_pages(), 1);
-        assert_eq!(frames.freed_len(), 0);
+        unmap_anonymous(&mut space, &sim, base, 2, |f| frames.free(f)).expect("sparse unmap");
+        // The one resident page was torn down and its frame reclaimed; the
+        // unbacked page was skipped without error.
+        assert_eq!(space.mapped_pages(), 0);
+        assert_eq!(frames.freed_len(), 1);
     }
 
     #[test]

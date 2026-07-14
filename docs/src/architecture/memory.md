@@ -637,6 +637,36 @@ runtime — the foundation the `lib/rt` userland heap allocator (§7d) layers it
 (`MapFlags`) and `rustos_abi::syscall`; the syscall-layer contract is the
 `mem_map` / `mem_unmap` rows of [the syscall page](./syscalls.md).
 
+**Anonymous memory is demand-paged, exactly like the user stack above.**
+`mem_map` **reserves** address space only — it commits no frame and writes
+no page-table entry — and records the reservation `(base, page_count)` in
+the address-space registry (`AddressSpaceRegistry::record_anon_region`).
+Each page then faults in lazily on first touch: a user data abort inside a
+reserved region — read or write, offered *after* stack growth and *before*
+the write-fatal file rule (§7o) — is resolved by
+`resolve_anon_fault`, which backs the single covering page with one fresh
+zeroed `RW|USER` frame through the `mem_map` producer's single-page commit
+and re-freezes the registry snapshot. Per-fault kernel work is therefore
+**one page**, so a task touching a large mapping is preemptible between
+faults; this is what replaced the earlier eager commit, whose single
+`mem_map` syscall zeroed and mapped the whole region in one
+non-preemptible pass and, under a memory-stress workload (`stress --vm`),
+monopolised the CPU for the entire loop and starved every interrupt (the
+serial console stuttered and the machine appeared to lock up). The frame
+draw is reserve-gated (`FrameAllocator::alloc_user`), so a process that
+would starve the kernel's own frame reserve fails closed at the fault (the
+task is killed with the audited `anon` class, deterministic OOM, never a
+panic). `mem_unmap` validates the caller-named `(base, page_count)` against
+the recorded reservation (fail closed with `NotFound` otherwise), then
+**sparsely** tears down the region — reclaiming and zeroing only the pages
+that actually faulted in and skipping the untouched reservation pages — and
+drops the record. The reservation's page-rounded size is what the
+`AddressSpaceBytes` ceiling and the pinned-memory budget are charged at map
+time, so those bounds are enforced up front and the fault path re-checks no
+limit. The copy path stays fault-aware: `copy_in_user` offers a staging
+miss to `resolve_anon_fault` (after the file and stack resolvers) exactly as
+the hardware fault path does.
+
 This is staged (`plans/SPAWN.md` SP5):
 
 - **SP5a (landed).** The `abi-v1` surface (`MapFlags`, the two syscall
@@ -653,10 +683,12 @@ This is staged (`plans/SPAWN.md` SP5):
   mutates a *live* user address space: it maps fresh frames into the
   caller's own [`AddressSpace<P: PageTable>`] as `RW|USER` (the single
   `ANON_FLAGS` set, never executable), zeroes each frame through the kernel
-  direct map *before* the mapping is visible, and on unmap validates the
-  whole range is mapped before zeroing-on-free and releasing every frame. A
-  frame exhaustion part-way through a map unwinds every page it already
-  added, so a failed map leaves the space unchanged (`AGENTS.md` §2.9). The
+  direct map *before* the mapping is visible, and on unmap **sparsely**
+  tears the region down — zeroing-on-free and releasing every frame that is
+  resident and skipping the pages the demand-paging fault path never backed
+  (the caller validates the reservation before it reaches here). A frame
+  exhaustion part-way through a map unwinds every page it already added, so
+  a failed map leaves the space unchanged (`AGENTS.md` §2.9). The
   per-page TLB invalidation rides the existing `AddressSpace::map` /
   `AddressSpace::unmap` flush (the §17.2 `TlbShootdown` slice); the
   cross-CPU shootdown is part of SP5b-2 when the producer is driven from a

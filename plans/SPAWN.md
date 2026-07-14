@@ -527,13 +527,15 @@ landing):**
   `ANON_FLAGS` set — never executable, W^X §19.2), zeroing each frame
   through the kernel direct map before the mapping is visible, and unwinds
   every page already mapped if a later page cannot be backed (fail-closed,
-  all-or-nothing, §2.9). `unmap_anonymous` validates the whole range is
-  mapped before tearing any of it down, zeroes every reclaimed frame on free
-  (§4), and folds an allocator exhaustion onto one OOM type. The per-page
+  all-or-nothing, §2.9). `reserve_anonymous` (placed) / `reserve_anonymous_at`
+  (`FIXED`) reserve address space with no commit — the demand-paged map
+  path that `mem_map` now uses, so a large mapping never eager-commits.
+  `unmap_anonymous` **sparsely** tears the region down — zeroing every
+  reclaimed frame on free (§4) and skipping the pages the fault path never
+  backed (the caller validates the reservation first) — and folds an
+  allocator exhaustion onto one OOM type. The per-page
   TLB flush rides the existing `AddressSpace::map`/`unmap` (`TlbShootdown`
-  slice). Host-proven over `HostPageTable` + `SimPhysMap` (8 unit tests:
-  zeroed RW|USER map, zero-on-free, OOM unwind, already-mapped unwind,
-  validate-all unmap, zero-length/misaligned rejection, page-count rounding).
+  slice). Host-proven over `HostPageTable` + `SimPhysMap`.
 - **SP5b-2 — `-M virt` EL0 vertical `[x]`.** **Landed.** The SP5b-1
   producer is wired through the `kernel/core` `MemMap` seam in a
   self-contained aarch64 `-M virt` vertical
@@ -596,6 +598,17 @@ landing):**
 on free, OOM surfaced as an `Errno`; the immutable-`FrozenAddressSpace` gap
 is closed by a single live-space mutation path (§2.2); `virt` + the headless
 build stay green.
+
+**Anonymous memory is demand-paged (landed).** `mem_map` reserves address
+space only and each page faults in lazily on first touch
+(`resolve_anon_fault` backs one zeroed reserve-gated `RW|USER` page,
+recorded via `AddressSpaceRegistry::record_anon_region`; `mem_unmap`
+validates the reservation and sparsely reclaims). This replaced the eager
+per-`mem_map` commit, whose single non-preemptible zeroing loop over a large
+region monopolised the CPU under `stress --vm` and starved interrupts
+(`plans/STRESSTEST.md`; the fix keeps per-fault work to one page so the task
+stays preemptible between faults). The copy path (`copy_in_user`) offers a
+staging miss to the same resolver.
 
 ### SP6 — `wait`: reap a child + read its exit code `[x]` (beyond P6d)
 

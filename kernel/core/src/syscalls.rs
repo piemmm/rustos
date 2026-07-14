@@ -1184,6 +1184,7 @@ where
                     budget -= 1;
                     if !self.resolve_file_fault(caller.task_id, va)
                         && !self.resolve_stack_fault(caller.task_id, va)
+                        && !self.resolve_anon_fault(caller.task_id, va)
                     {
                         return Err(Errno::BadAddress);
                     }
@@ -1402,6 +1403,11 @@ where
                 }
             } else if aspaces.file_region_covering(task, fault_va).is_some() {
                 "file_region"
+            } else if aspaces.anon_region_covering(task, fault_va) {
+                // A miss inside a reserved anonymous region the resolver
+                // could not back (e.g. frame exhaustion) — deterministic OOM
+                // fatal to this task alone, distinct from a wild access.
+                "anon"
             } else {
                 "wild"
             }
@@ -1511,6 +1517,55 @@ where
                 Err(Errno::BadAddress) => true,
                 Err(_) => false,
             },
+        }
+    }
+
+    /// Resolve a user-mode data abort at `fault_va` as demand-paged
+    /// anonymous backing for `task`, returning `true` when the faulting
+    /// page is now resident and the access should simply be retried.
+    ///
+    /// The demand-paging heart of `mem_map`: anonymous memory is reserved
+    /// by address space (`mem_map` maps no frames), so the first touch of
+    /// any page faults. If `fault_va` lies inside a region the task
+    /// reserved, the single covering page is backed with a fresh **zeroed**
+    /// `RW|USER` frame — drawn through the reserve-gated user path, so a
+    /// greedy process that would starve the kernel's own frame reserve
+    /// fails closed here (frame exhaustion reports `false`, and the port
+    /// terminates only that task — deterministic OOM, never a panic).
+    /// Offered for reads and writes alike (anonymous memory is writable).
+    /// Everything outside every reserved region is refused (fail closed):
+    /// the anonymous fault path never materialises memory the task did not
+    /// map. A page that became resident since the fault (a concurrent
+    /// resolution) is a benign race and reports `true`.
+    ///
+    /// Per-fault kernel work is exactly one page, so a task touching a large
+    /// mapping is preemptible between faults — the lock-up a single
+    /// eager-commit `mem_map` syscall caused is gone.
+    ///
+    /// `task` is the kernel-trusted current task of the faulting CPU, never
+    /// a caller-supplied value.
+    #[must_use]
+    pub fn resolve_anon_fault(&self, task: SecTaskId, fault_va: u64) -> bool {
+        if !self.aspaces.read().anon_region_covering(task, fault_va) {
+            return false;
+        }
+        let page_va = fault_va & !(PAGE_SIZE as u64 - 1);
+        // The reservation already charged this region against the task's
+        // `AddressSpaceBytes` (and pinned-memory) bounds at `mem_map` time,
+        // so no limit is re-checked here; only a genuine frame exhaustion
+        // can fail, and it fails closed.
+        match self.mem_map.map(PAGE_SIZE, MapFlags::FIXED, page_va) {
+            // Freshly backed, or already resident because another resolution
+            // won the race — either way the page is there.
+            Ok(_) | Err(Errno::BadAddress) => {
+                // The fault grew the live space; re-freeze the registry
+                // snapshot so the copy path can see the new page.
+                self.refreeze_task_aspace(task);
+                true
+            }
+            // Frame exhaustion or an uninstalled producer: fatal to the task
+            // and only the task (deterministic OOM, never a panic).
+            Err(_) => false,
         }
     }
 
@@ -4048,25 +4103,32 @@ where
         // the pinned-memory budget over the exempt footprint.
         self.check_map_growth(caller, charged)?;
         // Hand the request to the installed `kernel/mem` producer, which
-        // maps the region into the caller's own live address space, zeroes
-        // it, and returns its base (`plans/SPAWN.md` SP5b). Until one is
-        // installed the default `NULL_MEM_MAP` fails closed with
-        // `NotImplemented`, never pretending a region was
-        // mapped. A frame exhaustion surfaces as `OutOfMemory` here
-        // (deterministic OOM).
-        let result = self.mem_map.map(len, flags, addr_hint);
-        // The map grew the caller's live space; charge the page-rounded size
-        // against the task's address-space accounting and re-freeze the
-        // registry snapshot so the next `copy_in`/`copy_out` can see the new
-        // region (the copy path must reflect live memory). Only on success:
-        // a failed map touched no mappings and charges nothing.
-        if result.is_ok() {
-            self.aspaces
-                .write()
-                .charge_aspace_bytes(caller.task_id, charged);
-            self.refreeze_caller_aspace(caller);
+        // *reserves* the region's address space in the caller's own live
+        // space and returns its base (`plans/SPAWN.md` SP5b). No frame is
+        // committed and no page is zeroed here: the pages fault in one at a
+        // time through `resolve_anon_fault`, so a large `mem_map` can never
+        // zero and map thousands of pages in one non-preemptible syscall
+        // (the lock-up this replaces) — per-fault kernel work is one page.
+        // Until a producer is installed the default `NULL_MEM_MAP` fails
+        // closed with `NotImplemented`, never pretending a region was
+        // reserved. Window exhaustion surfaces as `OutOfMemory`
+        // (deterministic).
+        let base = self.mem_map.reserve(len, flags, addr_hint)?;
+        // The reservation grew the caller's mapped address space: record it
+        // so the anonymous fault path can tell a legitimate first-touch of
+        // this region apart from a wild access (fail closed on a miss),
+        // charge the page-rounded size against the task's address-space
+        // accounting (the reservation is what the `AddressSpaceBytes`
+        // ceiling bounds), and re-freeze the registry snapshot. `charged`
+        // is a whole number of pages by construction.
+        let page_count = charged / PAGE_SIZE as u64;
+        {
+            let mut aspaces = self.aspaces.write();
+            aspaces.record_anon_region(caller.task_id, base, page_count);
+            aspaces.charge_aspace_bytes(caller.task_id, charged);
         }
-        result
+        self.refreeze_caller_aspace(caller);
+        Ok(base)
     }
 
     fn mmio_map(
@@ -4287,29 +4349,46 @@ where
         if len == 0 {
             return Err(Errno::LengthOutOfRange);
         }
+        // A demand-paged region is sparsely resident, so the producer's
+        // teardown can no longer use "is it mapped?" as its validation.
+        // Validate here instead: `(base, page_count)` must name a region the
+        // caller actually reserved with `mem_map`, or the call fails closed
+        // (`NotFound`) touching nothing — a caller can never free a
+        // neighbour's pages or address space it never mapped.
+        let page_count = (len as u64)
+            .div_ceil(PAGE_SIZE as u64)
+            .checked_mul(PAGE_SIZE as u64)
+            .ok_or(Errno::OutOfRange)?
+            / PAGE_SIZE as u64;
+        if !self
+            .aspaces
+            .read()
+            .anon_region_exact(caller.task_id, base, page_count)
+        {
+            return Err(Errno::NotFound);
+        }
         // Hand the range to the installed producer, which zeroes the frames
-        // it reclaims and fails closed when `(base, len)`
-        // does not name a region the caller mapped. The default
-        // `NULL_MEM_MAP` fails closed with `NotImplemented`. Success reports
-        // `Ok(0)` — the `Errno`-return ABI shape (`mem_unmap` returns an
-        // error code, not a value).
+        // it reclaims (secret hygiene) and tolerates the never-faulted pages
+        // of the sparse region. The default `NULL_MEM_MAP` fails closed with
+        // `NotImplemented`. Success reports `Ok(0)` — the `Errno`-return ABI
+        // shape (`mem_unmap` returns an error code, not a value).
         let result = self.mem_map.unmap(base, len).map(|()| 0);
-        // The unmap shrank the caller's live space; credit the page-rounded
-        // size back to the task's address-space accounting (the same figure
-        // `mem_map` charged) and re-freeze the registry snapshot so the freed
-        // pages are dropped from it too — leaving them in the stale snapshot
-        // would let the copy path read or write memory the task no longer
-        // owns (fail closed, never expose freed memory). Only on success: a
-        // failed unmap left the mappings — and the accounting — unchanged.
-        // The credit saturates at zero, so a `len` that rounds larger than
-        // the live total can never underflow into a bogus huge usage.
+        // The unmap shrank the caller's live space; drop the region record,
+        // credit the page-rounded size back to the task's address-space
+        // accounting (the same figure `mem_map` charged), and re-freeze the
+        // registry snapshot so the freed pages are dropped from it too —
+        // leaving them in the stale snapshot would let the copy path read or
+        // write memory the task no longer owns (fail closed, never expose
+        // freed memory). Only on success: a failed unmap left the mappings —
+        // and the accounting — unchanged. The credit saturates at zero, so a
+        // `len` that rounds larger than the live total can never underflow
+        // into a bogus huge usage.
         if result.is_ok() {
-            let credited = (len as u64)
-                .div_ceil(PAGE_SIZE as u64)
-                .saturating_mul(PAGE_SIZE as u64);
-            self.aspaces
-                .write()
-                .credit_aspace_bytes(caller.task_id, credited);
+            let credited = page_count * PAGE_SIZE as u64;
+            let mut aspaces = self.aspaces.write();
+            aspaces.remove_anon_region(caller.task_id, base);
+            aspaces.credit_aspace_bytes(caller.task_id, credited);
+            drop(aspaces);
             self.refreeze_caller_aspace(caller);
         }
         result
@@ -8160,6 +8239,14 @@ where
         // growth by the recorded span and the task's `StackBytes` soft
         // limit (fail closed).
         if self.handlers.resolve_stack_fault(task, fault_va) {
+            return UserFaultOutcome::Resolved;
+        }
+        // Demand-paged anonymous memory (`mem_map`) is offered next, for
+        // reads and writes alike (anonymous memory is writable), so the
+        // write-fatal file rule below never kills a legitimate first-touch
+        // of a reserved anonymous page. The resolver backs only a page
+        // inside a region the task reserved (fail closed otherwise).
+        if self.handlers.resolve_anon_fault(task, fault_va) {
             return UserFaultOutcome::Resolved;
         }
         // A write is never resolved as file backing: file mappings are
@@ -16174,31 +16261,42 @@ mod tests {
     /// can assert the arguments reached it without a real `kernel/mem`
     /// live-mapping path.
     struct RecordingMemMap {
-        last_map: rustos_sync::SpinLock<Option<(usize, u32, u64)>>,
-        last_unmap: rustos_sync::SpinLock<Option<(u64, usize)>>,
+        reservation: rustos_sync::SpinLock<Option<(usize, u32, u64)>>,
+        mapping: rustos_sync::SpinLock<Option<(usize, u32, u64)>>,
+        release: rustos_sync::SpinLock<Option<(u64, usize)>>,
     }
     impl RecordingMemMap {
         fn new() -> Self {
             Self {
-                last_map: rustos_sync::SpinLock::new(None),
-                last_unmap: rustos_sync::SpinLock::new(None),
+                reservation: rustos_sync::SpinLock::new(None),
+                mapping: rustos_sync::SpinLock::new(None),
+                release: rustos_sync::SpinLock::new(None),
             }
         }
     }
     impl crate::memmap::MemMap for RecordingMemMap {
+        fn reserve(
+            &self,
+            len: usize,
+            flags: rustos_abi::MapFlags,
+            addr_hint: u64,
+        ) -> Result<u64, Errno> {
+            *self.reservation.lock() = Some((len, flags.bits(), addr_hint));
+            // Echo a fabricated base derived from the request so the test
+            // can confirm the handler returned the producer's value verbatim.
+            Ok(0x5000_0000 | addr_hint)
+        }
         fn map(
             &self,
             len: usize,
             flags: rustos_abi::MapFlags,
             addr_hint: u64,
         ) -> Result<u64, Errno> {
-            *self.last_map.lock() = Some((len, flags.bits(), addr_hint));
-            // Echo a fabricated base derived from the request so the test
-            // can confirm the handler returned the producer's value verbatim.
+            *self.mapping.lock() = Some((len, flags.bits(), addr_hint));
             Ok(0x5000_0000 | addr_hint)
         }
         fn unmap(&self, base: u64, len: usize) -> Result<(), Errno> {
-            *self.last_unmap.lock() = Some((base, len));
+            *self.release.lock() = Some((base, len));
             Ok(())
         }
     }
@@ -16235,9 +16333,14 @@ mod tests {
             h.mem_map(&ctx, 0x2000, flags, 0x10_0000),
             Ok(0x5000_0000 | 0x10_0000)
         );
+        // `mem_map` reserves address space (demand-paged); no eager commit.
         assert_eq!(
-            *producer.last_map.lock(),
+            *producer.reservation.lock(),
             Some((0x2000, flags.bits(), 0x10_0000))
+        );
+        assert!(
+            producer.mapping.lock().is_none(),
+            "mem_map must reserve, not eagerly map"
         );
     }
 
@@ -16301,7 +16404,7 @@ mod tests {
         );
         // The producer was never reached: the zero-length guard fails
         // closed before any state is touched.
-        assert!(producer.last_map.lock().is_none());
+        assert!(producer.mapping.lock().is_none());
     }
 
     /// The `AddressSpaceBytes` ulimit is actually enforced on the `mem_map`
@@ -16349,12 +16452,12 @@ mod tests {
 
         // A further page would exceed the ceiling: denied, fail closed, and
         // the producer is never reached for the rejected request.
-        *producer.last_map.lock() = None;
+        *producer.mapping.lock() = None;
         assert_eq!(
             h.mem_map(&ctx, 0x1000, rustos_abi::MapFlags::empty(), 0),
             Err(Errno::OutOfRange)
         );
-        assert!(producer.last_map.lock().is_none());
+        assert!(producer.mapping.lock().is_none());
         // The denied request changed no accounting.
         assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(2)), 0x2000);
 
@@ -16743,6 +16846,51 @@ mod tests {
         assert!(fm.pages.lock().is_empty());
     }
 
+    /// The anonymous fault resolver backs exactly the faulting page — one
+    /// `FIXED`, page-aligned single-page commit through the same producer
+    /// `mem_map` uses — only for an address inside a region the task
+    /// reserved, and refuses (without touching the producer) everything
+    /// outside every reserved region (fail closed).
+    #[test]
+    fn resolve_anon_fault_backs_a_covered_page_and_refuses_the_rest() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+
+        // A four-page anonymous region the task "reserved" via `mem_map`.
+        let base = 0x30_0000;
+        aspaces.write().record_anon_region(SecTaskId(2), base, 4);
+
+        let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_mem_map(producer);
+
+        // Outside every reserved region: refused, and the producer is never
+        // reached (no memory materialised for an address the task did not
+        // map).
+        assert!(!h.resolve_anon_fault(SecTaskId(2), base + 4 * PAGE_SIZE as u64));
+        assert!(producer.mapping.lock().is_none());
+
+        // Inside the region: the covering page is backed — one page, FIXED,
+        // at the page-aligned base of the faulting address.
+        let fault = base + PAGE_SIZE as u64 + 5;
+        let page_va = base + PAGE_SIZE as u64;
+        assert!(h.resolve_anon_fault(SecTaskId(2), fault));
+        assert_eq!(
+            *producer.mapping.lock(),
+            Some((PAGE_SIZE, rustos_abi::MapFlags::FIXED.bits(), page_va))
+        );
+    }
+
     /// A fault-kill emits the stable `TaskFaultKilled` audit record naming
     /// the task and the coarse fault class — `file_region` for a miss the
     /// resolver refused inside a live mapping, `wild` for an address
@@ -16811,6 +16959,17 @@ mod tests {
         }
     }
     impl crate::memmap::MemMap for StackGrowMemMap {
+        fn reserve(
+            &self,
+            len: usize,
+            flags: rustos_abi::MapFlags,
+            addr_hint: u64,
+        ) -> Result<u64, Errno> {
+            // This double models the single-page stack-growth commit path
+            // (`map`); reservation is not exercised here, so it simply
+            // delegates.
+            self.map(len, flags, addr_hint)
+        }
         fn map(
             &self,
             len: usize,
@@ -17155,6 +17314,12 @@ mod tests {
         fn map_anonymous_placed(&mut self, _pages: u64) -> Result<u64, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }
+        fn reserve_anonymous(&mut self, _pages: u64) -> Result<u64, LiveSpaceError> {
+            Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
+        }
+        fn reserve_anonymous_at(&mut self, _base: u64, _pages: u64) -> Result<u64, LiveSpaceError> {
+            Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
+        }
         fn unmap_anonymous(&mut self, _base: u64, _pages: u64) -> Result<(), LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::NotMapped))
         }
@@ -17293,7 +17458,16 @@ mod tests {
             caps: &caps,
         };
 
-        // No producer → NotImplemented.
+        // `mem_unmap` validates the region against the caller's reserved
+        // anonymous mappings before any teardown, so record a one-page
+        // region the caller "reserved" at 0x10_0000 (what `mem_map` would
+        // have recorded).
+        aspaces
+            .write()
+            .record_anon_region(SecTaskId(2), 0x10_0000, 1);
+
+        // Region present but no producer → the validated range reaches the
+        // (NULL) producer, which fails closed with NotImplemented.
         let bare = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
@@ -17313,11 +17487,17 @@ mod tests {
             h.mem_unmap(&ctx, 0x10_0000, 0),
             Err(Errno::LengthOutOfRange)
         );
-        assert!(producer.last_unmap.lock().is_none());
+        assert!(producer.release.lock().is_none());
 
-        // A well-formed range reaches the producer and reports Ok(0).
+        // An unreserved base fails closed (`NotFound`) without reaching the
+        // producer — a caller cannot free address space it never mapped.
+        assert_eq!(h.mem_unmap(&ctx, 0x20_0000, 0x1000), Err(Errno::NotFound));
+        assert!(producer.release.lock().is_none());
+
+        // A well-formed range naming the reserved region reaches the
+        // producer and reports Ok(0).
         assert_eq!(h.mem_unmap(&ctx, 0x10_0000, 0x1000), Ok(0));
-        assert_eq!(*producer.last_unmap.lock(), Some((0x10_0000, 0x1000)));
+        assert_eq!(*producer.release.lock(), Some((0x10_0000, 0x1000)));
     }
 
     /// An MMIO-map facility that records the `(phys_base, len)` it was

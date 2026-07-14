@@ -148,6 +148,43 @@ pub trait LiveUserSpace: Send {
     /// range is not one this space mapped).
     fn unmap_anonymous(&mut self, base_va: u64, page_count: u64) -> Result<(), LiveSpaceError>;
 
+    /// Reserve `page_count` pages of *address space* for a demand-paged
+    /// **anonymous** mapping at a **kernel-chosen** base (the non-`FIXED`
+    /// `mem_map`), returning that base. No page-table entry is written and
+    /// no frame is drawn: the region is backed one zeroed `RW|USER` page at
+    /// a time by [`Self::map_anonymous`] from the kernel's anonymous fault
+    /// path, so reserving a large region costs nothing until it is touched
+    /// — a huge `mem_map` never zeroes and commits thousands of pages in
+    /// one non-preemptible syscall.
+    ///
+    /// The placement is drawn from this task's anonymous heap window so a
+    /// second reservation never overlaps the first, the program image, its
+    /// stack, or a granted device window. Anonymous pages must all be
+    /// backable, so the heap window's span is clamped to physical RAM.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveSpaceError::Anon`] — [`AnonError::OutOfMemory`] when the heap
+    /// window is exhausted, or the precise placement error otherwise.
+    fn reserve_anonymous(&mut self, page_count: u64) -> Result<u64, LiveSpaceError>;
+
+    /// Reserve exactly the `page_count`-page anonymous region based at the
+    /// page-aligned `base_va` (the `FIXED` `mem_map`), returning `base_va`.
+    /// Like [`Self::reserve_anonymous`] this commits no frame and writes no
+    /// page-table entry; the pages fault in one at a time. The caller owns
+    /// the placement, so a `base_va` that later collides with resident
+    /// memory fails closed when its first page faults in.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveSpaceError::Anon`] — [`AnonError::ZeroLength`] for a zero page
+    /// count, [`AnonError::Unaligned`] for a misaligned base.
+    fn reserve_anonymous_at(
+        &mut self,
+        base_va: u64,
+        page_count: u64,
+    ) -> Result<u64, LiveSpaceError>;
+
     /// Reserve `page_count` pages of *address space* for a demand-paged,
     /// read-only file mapping at a **kernel-chosen** base, returning that
     /// base. No page table entry is written and no frame is drawn: the
@@ -534,6 +571,31 @@ where
         Ok(())
     }
 
+    fn reserve_anonymous(&mut self, page_count: u64) -> Result<u64, LiveSpaceError> {
+        // Pure placement out of this task's heap window: no page-table entry
+        // and no frame until a fault lands. The pages fault in one at a time
+        // through `map_anonymous`, so a large reservation costs nothing but
+        // address space up front.
+        Ok(self.anon.allocate(page_count)?)
+    }
+
+    fn reserve_anonymous_at(
+        &mut self,
+        base_va: u64,
+        page_count: u64,
+    ) -> Result<u64, LiveSpaceError> {
+        // A caller-placed (`FIXED`) reservation records no window entry: it
+        // is torn down by extent, and the fault path fails closed if a page
+        // it backs collides with resident memory. Validate the shape only.
+        if page_count == 0 {
+            return Err(LiveSpaceError::Anon(AnonError::ZeroLength));
+        }
+        if base_va % crate::frame::PAGE_SIZE as u64 != 0 {
+            return Err(LiveSpaceError::Anon(AnonError::Unaligned));
+        }
+        Ok(base_va)
+    }
+
     fn reserve_file_region(&mut self, page_count: u64) -> Result<u64, LiveSpaceError> {
         // Pure placement: no page table entry and no frame until a fault
         // lands in the region. An absent window (degenerate configuration)
@@ -836,17 +898,18 @@ mod tests {
     }
 
     #[test]
-    fn unmap_of_an_unmapped_range_fails_closed_without_partial_teardown() {
+    fn unmap_of_a_sparsely_resident_range_reclaims_only_the_resident_pages() {
         let mut live = live();
         let base = 0x4000;
+        // A demand-paged region: two of the three pages ever faulted in (the
+        // fault path backs one page at a time via `map_anonymous`), so the
+        // third is a never-touched reservation page.
         live.map_anonymous(base, 2).expect("map");
-        // The second page of a 3-page unmap is mapped but the third is not:
-        // the whole range is rejected and nothing is torn down.
-        assert_eq!(
-            live.unmap_anonymous(base, 3),
-            Err(LiveSpaceError::Anon(AnonError::NotMapped))
-        );
-        assert_eq!(live.space().mapped_pages(), 2, "no partial teardown");
+        // Releasing the whole three-page range reclaims the two resident
+        // pages and skips the unbacked one — sparse residency is not an
+        // error (the caller validates the reservation before it gets here).
+        live.unmap_anonymous(base, 3).expect("sparse release");
+        assert_eq!(live.space().mapped_pages(), 0);
     }
 
     #[test]
@@ -948,6 +1011,45 @@ mod tests {
         live.unmap_anonymous(a, 3)
             .expect("the matching unmap succeeds");
         assert_eq!(live.space().mapped_pages(), 0);
+    }
+
+    #[test]
+    fn reserve_anonymous_places_without_committing_and_faults_in_on_map() {
+        let mut live = live();
+        let base = live.reserve_anonymous(4).expect("the heap window has room");
+        assert!(
+            base >= ANON_WINDOW_BASE
+                && base < ANON_WINDOW_BASE + (ANON_WINDOW_PAGES as u64) * PAGE_SIZE as u64,
+            "a reserved base lies inside the heap window"
+        );
+        // A reservation commits nothing: no page is resident yet.
+        assert_eq!(live.space().mapped_pages(), 0, "reserve maps no frame");
+        // The fault path backs one covering page at a time.
+        live.map_anonymous(base + PAGE_SIZE as u64, 1)
+            .expect("fault in the second page");
+        assert_eq!(live.space().mapped_pages(), 1, "one page faulted in");
+        // Releasing the whole reservation reclaims the one resident page and
+        // skips the three never-touched ones, and frees the placement.
+        live.unmap_anonymous(base, 4).expect("sparse release");
+        assert_eq!(live.space().mapped_pages(), 0);
+        // The freed placement base is reusable.
+        assert_eq!(live.reserve_anonymous(4), Ok(base));
+    }
+
+    #[test]
+    fn reserve_anonymous_at_validates_shape_and_commits_nothing() {
+        let mut live = live();
+        let base = 0x8000;
+        assert_eq!(live.reserve_anonymous_at(base, 2), Ok(base));
+        assert_eq!(live.space().mapped_pages(), 0, "FIXED reserve maps nothing");
+        assert_eq!(
+            live.reserve_anonymous_at(base, 0),
+            Err(LiveSpaceError::Anon(AnonError::ZeroLength))
+        );
+        assert_eq!(
+            live.reserve_anonymous_at(base + 1, 1),
+            Err(LiveSpaceError::Anon(AnonError::Unaligned))
+        );
     }
 
     #[test]

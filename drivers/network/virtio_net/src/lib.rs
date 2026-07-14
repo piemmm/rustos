@@ -26,9 +26,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use rustos_abi::{
-    CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey,
-};
+use rustos_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
 
 pub use rustos_virtio_net::VirtioNet;
 

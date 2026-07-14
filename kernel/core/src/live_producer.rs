@@ -155,14 +155,35 @@ impl<A> MemMap for LiveMemMap<A>
 where
     A: SchedulerArch + Send + Sync + 'static,
 {
+    fn reserve(&self, len: usize, flags: MapFlags, addr_hint: u64) -> Result<u64, Errno> {
+        let page_count = page_count_for(len).map_err(anon_errno)?;
+        let cpu = self.arch.current_cpu();
+        // Reserve address space only — no frame, no page-table entry. The
+        // pages fault in one at a time (`map` below, from the anonymous
+        // fault path), so a large `mem_map` never zeroes and commits
+        // thousands of pages in one non-preemptible syscall. `FIXED` names
+        // its own base; a non-`FIXED` request draws a base from this task's
+        // own heap window (never a base guessed here that might collide with
+        // the image, stack, or a granted device window).
+        if flags.is_fixed() {
+            with_current_live_space(cpu, |space| {
+                space.reserve_anonymous_at(addr_hint, page_count)
+            })
+        } else {
+            with_current_live_space(cpu, |space| space.reserve_anonymous(page_count))
+        }
+        .ok_or(Errno::NotImplemented)?
+        .map_err(live_errno)
+    }
+
     fn map(&self, len: usize, flags: MapFlags, addr_hint: u64) -> Result<u64, Errno> {
         let page_count = page_count_for(len).map_err(anon_errno)?;
         let cpu = self.arch.current_cpu();
-        // `FIXED` names its own base (`addr_hint`); a non-`FIXED` request asks
-        // the live space's per-task heap-window allocator to choose one out of
-        // this task's own free user-VA — never a base guessed here that might
-        // collide with the image, stack, or a granted device window
-        // (`plans/PI.md` 5d-0-ii (c)).
+        // The single-page commit the anonymous and stack fault paths use to
+        // back one reserved page with a fresh zeroed `RW|USER` frame. Always
+        // `FIXED` (the faulting page's own base); a non-`FIXED` request asks
+        // the live space's per-task heap-window allocator to choose a base
+        // out of this task's own free user-VA.
         if flags.is_fixed() {
             with_current_live_space(cpu, |space| space.map_anonymous(addr_hint, page_count))
         } else {
@@ -462,6 +483,8 @@ mod tests {
     struct FakeLive {
         anon_maps: Vec<(u64, u64)>,
         anon_placed: Vec<u64>,
+        anon_reserves: Vec<u64>,
+        anon_reserves_at: Vec<(u64, u64)>,
         anon_unmaps: Vec<(u64, u64)>,
         device_maps: Vec<(u64, usize)>,
         dma_allocs: Vec<(usize, u64)>,
@@ -502,6 +525,26 @@ mod tests {
             match self.next.take() {
                 Some(err) => Err(err),
                 None => Ok(PLACED_BASE),
+            }
+        }
+
+        fn reserve_anonymous(&mut self, page_count: u64) -> Result<u64, LiveSpaceError> {
+            self.anon_reserves.push(page_count);
+            match self.next.take() {
+                Some(err) => Err(err),
+                None => Ok(PLACED_BASE),
+            }
+        }
+
+        fn reserve_anonymous_at(
+            &mut self,
+            base_va: u64,
+            page_count: u64,
+        ) -> Result<u64, LiveSpaceError> {
+            self.anon_reserves_at.push((base_va, page_count));
+            match self.next.take() {
+                Some(err) => Err(err),
+                None => Ok(base_va),
             }
         }
 
@@ -665,6 +708,39 @@ mod tests {
         // SAFETY: the producer's `&mut` has ended; single-threaded read.
         let recorded = unsafe { &*ptr };
         assert_eq!(recorded.anon_placed, std::vec![2]);
+        assert!(recorded.anon_maps.is_empty());
+    }
+
+    #[test]
+    fn mem_map_reserve_non_fixed_routes_to_the_placement_reservation() {
+        let (fake, ptr) = leak_fake();
+        let _guard = publish_live_space_for_test(11, fake);
+
+        let producer = LiveMemMap::new(arch_at(11));
+        // A non-`FIXED` `mem_map` reserves address space only (no eager
+        // commit); the placed base flows back unchanged.
+        let got = MemMap::reserve(&producer, 2 * PAGE, MapFlags::empty(), 0xDEAD_0000);
+        assert_eq!(got, Ok(PLACED_BASE));
+        // SAFETY: the producer's `&mut` has ended; single-threaded read.
+        let recorded = unsafe { &*ptr };
+        assert_eq!(recorded.anon_reserves, std::vec![2]);
+        // A reservation never eagerly maps.
+        assert!(recorded.anon_maps.is_empty());
+        assert!(recorded.anon_placed.is_empty());
+    }
+
+    #[test]
+    fn mem_map_reserve_fixed_routes_to_the_placed_reservation() {
+        let (fake, ptr) = leak_fake();
+        let _guard = publish_live_space_for_test(12, fake);
+
+        let producer = LiveMemMap::new(arch_at(12));
+        let base = 0x4000;
+        let got = MemMap::reserve(&producer, 2 * PAGE, MapFlags::FIXED, base);
+        assert_eq!(got, Ok(base));
+        // SAFETY: the producer's `&mut` has ended; single-threaded read.
+        let recorded = unsafe { &*ptr };
+        assert_eq!(recorded.anon_reserves_at, std::vec![(base, 2)]);
         assert!(recorded.anon_maps.is_empty());
     }
 

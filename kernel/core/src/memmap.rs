@@ -36,6 +36,29 @@ use rustos_abi::{Errno, MapFlags};
 /// by the per-CPU syscall handlers, exactly like the console device and the
 /// spawn producer.
 pub trait MemMap: Sync {
+    /// Reserve `len` bytes (rounded up to whole pages) of anonymous `RW`
+    /// address space in the caller's own space, returning the base address
+    /// of the reserved region. **No frame is committed and no page-table
+    /// entry is made**: the region costs nothing until a fault lands in it
+    /// and the anonymous fault path (`resolve_anon_fault`) backs that one
+    /// page with a fresh zeroed `RW` frame.
+    ///
+    /// This is the demand-paged sibling of [`MemMap::map`]: `mem_map`
+    /// reserves so a large mapping never zeroes and commits thousands of
+    /// pages in one non-preemptible syscall (the lock-up this replaces);
+    /// the pages fault in one at a time, bounding per-fault kernel work to
+    /// a single page. When `flags` contains [`MapFlags::FIXED`] the
+    /// reservation is at exactly `addr_hint` or fails closed; otherwise
+    /// `addr_hint` is advisory and `0` means "producer chooses".
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Errno::OutOfMemory`] when the caller's anonymous window
+    /// cannot hold the reservation (deterministic, fail-closed refusal).
+    /// The default producer ([`NullMemMap`]) returns
+    /// [`Errno::NotImplemented`] to mark an inert interface.
+    fn reserve(&self, len: usize, flags: MapFlags, addr_hint: u64) -> Result<u64, Errno>;
+
     /// Map `len` bytes (rounded up to whole pages) of fresh anonymous `RW`
     /// memory into the caller's own address space, returning the base
     /// address of the new region.
@@ -56,11 +79,14 @@ pub trait MemMap: Sync {
     /// returns [`Errno::NotImplemented`] to mark an inert interface.
     fn map(&self, len: usize, flags: MapFlags, addr_hint: u64) -> Result<u64, Errno>;
 
-    /// Release the region of `len` bytes based at `base` previously returned
-    /// by [`MemMap::map`] from the caller's own address space.
+    /// Release the region of `len` bytes based at `base` previously reserved
+    /// by [`MemMap::reserve`] from the caller's own address space.
     ///
-    /// The implementation zeroes the frames it reclaims (secret hygiene) and fails closed when `(base, len)` does not name a
-    /// region the caller mapped.
+    /// A demand-paged region is **sparsely resident** — only the pages that
+    /// actually faulted in hold frames — so the release tolerates unbacked
+    /// pages in the range, tearing down and zeroing (secret hygiene) only
+    /// the frames that are present. It fails closed when `(base, len)` does
+    /// not name a region the caller reserved.
     ///
     /// # Errors
     ///
@@ -80,6 +106,10 @@ pub trait MemMap: Sync {
 pub struct NullMemMap;
 
 impl MemMap for NullMemMap {
+    fn reserve(&self, _len: usize, _flags: MapFlags, _addr_hint: u64) -> Result<u64, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
     fn map(&self, _len: usize, _flags: MapFlags, _addr_hint: u64) -> Result<u64, Errno> {
         Err(Errno::NotImplemented)
     }
@@ -111,6 +141,18 @@ mod tests {
         // rather than pretending a placement succeeded.
         assert_eq!(
             NullMemMap.map(0x1000, MapFlags::FIXED, 0x10_0000),
+            Err(Errno::NotImplemented)
+        );
+    }
+
+    #[test]
+    fn null_mem_map_reserve_fails_closed() {
+        assert_eq!(
+            NULL_MEM_MAP.reserve(0x1000, MapFlags::empty(), 0),
+            Err(Errno::NotImplemented)
+        );
+        assert_eq!(
+            NullMemMap.reserve(0x1000, MapFlags::FIXED, 0x10_0000),
             Err(Errno::NotImplemented)
         );
     }

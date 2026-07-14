@@ -196,6 +196,22 @@ pub struct AddressSpaceRegistry {
     /// (fail closed). Dropped at [`withdraw`](Self::withdraw) so a reused
     /// id never inherits a dead task's mappings.
     file_regions: BTreeMap<TaskId, BTreeMap<u64, FileRegion>>,
+    /// Each live task's reserved demand-paged **anonymous** mappings (the
+    /// regions `mem_map` reserves and the anonymous fault path backs one
+    /// zeroed page at a time), keyed by region base and valued by the
+    /// page-rounded page count reserved. Co-located with the address space
+    /// for the same reason as [`Self::file_regions`]: a mapping shares the
+    /// exact per-process lifecycle — recorded on `mem_map`, removed on
+    /// `mem_unmap`, and dropped when the task exits — and is keyed by the
+    /// same kernel-trusted [`TaskId`]. A task with no entry has reserved no
+    /// anonymous region, so a fault outside every record resolves to `None`
+    /// and the task is terminated rather than silently backed (fail
+    /// closed). The resident frames themselves are owned by the task's live
+    /// address space and reclaimed by its drop; this map is only the
+    /// fault-validation and accounting bookkeeping. Dropped at
+    /// [`withdraw`](Self::withdraw) so a reused id never inherits a dead
+    /// task's mappings.
+    anon_regions: BTreeMap<TaskId, BTreeMap<u64, u64>>,
     /// Each live task's reserved user-stack span (the region the spawn
     /// layout placed and the stack-growth fault path backs on demand).
     /// Co-located with the address space for the same reason as
@@ -566,6 +582,7 @@ impl AddressSpaceRegistry {
             mapped_aspace_bytes: BTreeMap::new(),
             cwds: BTreeMap::new(),
             file_regions: BTreeMap::new(),
+            anon_regions: BTreeMap::new(),
             stack_spans: BTreeMap::new(),
             fd_delegations: BTreeMap::new(),
             default_limits: LimitSet::DEFAULT,
@@ -654,6 +671,7 @@ impl AddressSpaceRegistry {
         let had_anon = self.mapped_aspace_bytes.remove(&task).is_some();
         let had_cwd = self.cwds.remove(&task).is_some();
         let had_file_regions = self.file_regions.remove(&task).is_some();
+        let had_anon_regions = self.anon_regions.remove(&task).is_some();
         let had_stack_span = self.stack_spans.remove(&task).is_some();
         let had_fd_delegations = self.fd_delegations.remove(&task).is_some();
         self.tasks.remove(&task).is_some()
@@ -666,6 +684,7 @@ impl AddressSpaceRegistry {
             || had_anon
             || had_cwd
             || had_file_regions
+            || had_anon_regions
             || had_stack_span
             || had_fd_delegations
     }
@@ -1104,6 +1123,69 @@ impl AddressSpaceRegistry {
         let regions = self.file_regions.get(&task)?;
         let (_, region) = regions.range(..=va).next_back()?;
         (va < region.base + region.len).then(|| region.clone())
+    }
+
+    /// Record `task`'s live demand-paged anonymous mapping: `page_count`
+    /// pages reserved at `base`, keyed by base.
+    ///
+    /// Called by the `mem_map` handler *after* the producer has reserved
+    /// the address-space range, so every record names address space the
+    /// task actually holds. The record lets the anonymous fault path tell
+    /// a legitimate first-touch of reserved memory apart from a wild access
+    /// (fail closed on a miss). The `task` argument is the kernel-trusted
+    /// caller id.
+    pub fn record_anon_region(&mut self, task: TaskId, base: u64, page_count: u64) {
+        self.anon_regions
+            .entry(task)
+            .or_default()
+            .insert(base, page_count);
+    }
+
+    /// Resolve `task`'s anonymous-mapping record whose `(base, page_count)`
+    /// matches exactly, without removing it.
+    ///
+    /// The `mem_unmap` handler validates the caller-named pair against this
+    /// before any teardown, so a mismatched or unknown pair fails closed
+    /// touching nothing.
+    #[must_use]
+    pub fn anon_region_exact(&self, task: TaskId, base: u64, page_count: u64) -> bool {
+        self.anon_regions
+            .get(&task)
+            .and_then(|regions| regions.get(&base))
+            .is_some_and(|&pages| pages == page_count)
+    }
+
+    /// Remove `task`'s anonymous-mapping record based at `base`, returning
+    /// its page count.
+    ///
+    /// Called by the `mem_unmap` handler *after* the producer released the
+    /// region, so record and reservation leave together.
+    pub fn remove_anon_region(&mut self, task: TaskId, base: u64) -> Option<u64> {
+        let regions = self.anon_regions.get_mut(&task)?;
+        let removed = regions.remove(&base);
+        if regions.is_empty() {
+            self.anon_regions.remove(&task);
+        }
+        removed
+    }
+
+    /// Resolve whether the virtual address `va` lies inside one of `task`'s
+    /// reserved anonymous regions.
+    ///
+    /// The anonymous user-fault resolver calls this to decide whether a
+    /// faulting address is demand-paged anonymous backing (back one zeroed
+    /// page and resume) or a genuine wild access (terminate, fail closed).
+    #[must_use]
+    pub fn anon_region_covering(&self, task: TaskId, va: u64) -> bool {
+        let Some(regions) = self.anon_regions.get(&task) else {
+            return false;
+        };
+        let Some((&base, &pages)) = regions.range(..=va).next_back() else {
+            return false;
+        };
+        // `pages * PAGE_SIZE` cannot overflow: the reservation was validated
+        // to fit the address space at `mem_map` time.
+        va < base + pages * PAGE_SIZE as u64
     }
 
     /// Open a file/directory descriptor for `task`, recording the resolved
@@ -2165,6 +2247,54 @@ mod tests {
         reg.record_file_region(TaskId(5), file_region(0x10_0000, 0x4000));
         assert!(reg.withdraw(TaskId(5)));
         assert!(reg.file_region_covering(TaskId(5), 0x10_0000).is_none());
+    }
+
+    // --- reserved demand-paged anonymous regions (mem_map) ----------------
+
+    #[test]
+    fn anon_region_covering_resolves_only_addresses_inside_a_live_region() {
+        let mut reg = AddressSpaceRegistry::new();
+        // A four-page region based at 0x20_0000.
+        reg.record_anon_region(TaskId(2), 0x20_0000, 4);
+        // Inside the region (first byte, last byte of the fourth page).
+        assert!(reg.anon_region_covering(TaskId(2), 0x20_0000));
+        assert!(reg.anon_region_covering(TaskId(2), 0x20_0000 + 4 * 0x1000 - 1));
+        // One byte past the region is outside.
+        assert!(!reg.anon_region_covering(TaskId(2), 0x20_0000 + 4 * 0x1000));
+        // Below the base and another task both resolve to nothing.
+        assert!(!reg.anon_region_covering(TaskId(2), 0x1F_FFFF));
+        assert!(!reg.anon_region_covering(TaskId(3), 0x20_0000));
+    }
+
+    #[test]
+    fn anon_region_exact_matches_only_the_recorded_pair_of_the_owner() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.record_anon_region(TaskId(2), 0x20_0000, 4);
+        assert!(reg.anon_region_exact(TaskId(2), 0x20_0000, 4));
+        // A wrong page count, a wrong base, or another task all fail closed.
+        assert!(!reg.anon_region_exact(TaskId(2), 0x20_0000, 3));
+        assert!(!reg.anon_region_exact(TaskId(2), 0x21_0000, 4));
+        assert!(!reg.anon_region_exact(TaskId(3), 0x20_0000, 4));
+    }
+
+    #[test]
+    fn remove_anon_region_returns_the_page_count_and_only_once() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.record_anon_region(TaskId(2), 0x20_0000, 4);
+        assert_eq!(reg.remove_anon_region(TaskId(2), 0x20_0000), Some(4));
+        // Gone: neither a covering lookup, an exact lookup, nor a second
+        // removal can see it.
+        assert!(!reg.anon_region_covering(TaskId(2), 0x20_0000));
+        assert!(!reg.anon_region_exact(TaskId(2), 0x20_0000, 4));
+        assert_eq!(reg.remove_anon_region(TaskId(2), 0x20_0000), None);
+    }
+
+    #[test]
+    fn withdraw_drops_anon_regions_so_a_reused_id_starts_clean() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.record_anon_region(TaskId(5), 0x20_0000, 4);
+        assert!(reg.withdraw(TaskId(5)));
+        assert!(!reg.anon_region_covering(TaskId(5), 0x20_0000));
     }
 
     // --- reserved user-stack spans (demand-grown stack) -------------------

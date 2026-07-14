@@ -210,6 +210,14 @@ fn anon_to_errno(err: AnonError) -> Errno {
 }
 
 impl MemMap for AnonProducer {
+    fn reserve(&self, len: usize, flags: MapFlags, addr_hint: u64) -> Result<u64, Errno> {
+        // This harness is an arch-mechanism proving ground that drives
+        // `map`/`unmap` directly (the demand-paged reserve-then-fault-in
+        // policy lives in `kernel/core` and is covered by its host tests),
+        // so a reservation here simply performs the eager map.
+        self.map(len, flags, addr_hint)
+    }
+
     fn map(&self, len: usize, flags: MapFlags, addr_hint: u64) -> Result<u64, Errno> {
         let page_count = page_count_for(len).map_err(anon_to_errno)?;
         // The fixture maps with FIXED placement so the kernel's fault check
