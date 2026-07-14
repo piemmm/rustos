@@ -75,7 +75,13 @@ parked core, so the release also publishes the target core's affinity
 (`SECONDARY_KERNEL_RELEASE_TARGET`) and a woken core proceeds only when it
 matches — bring-up is strictly one core at a time (no concurrent adopt/GIC
 race). Cores a firmware stub keeps parked instead are released through their
-DTB `cpu-release-addr` words — the same trampoline serves both.
+DTB `cpu-release-addr` words — the same trampoline serves both, and it
+applies the **same** target-affinity gate (the shared `smp::release_gate_open`
+predicate) so a firmware release that wakes more than one parked core (a
+shared/aliased release word, or one broadcast `sev`) still lets only the
+named core proceed. The kernel never assumes the firmware `cpu-release-addr`
+channel is per-core; the gate at the trampoline is what enforces one-core-at-
+a-time regardless.
 
 `config.txt` knobs the bring-up relies on:
 
@@ -187,7 +193,16 @@ adopts the boot identity map (`paging::adopt_boot_translation` over the
 published park root), installs its own EL1 vectors, GICv2 CPU
 interface, and tickless preemption/IPI arming, and joins the shared
 kernel dispatch loop through `rustos_kernel_core::run_secondary`,
-attesting `SecondaryCpuOnline`. On a Pi 4B this brings all four
+attesting `SecondaryCpuOnline`. `adopt_boot_translation` first
+invalidates the calling core's local data cache to the point of
+coherency (set/way `dc isw`, never a clean) **before** enabling the
+MMU+caches: a freshly-released secondary's caches are in the
+architecturally-UNKNOWN power-on state and may hold stale lines over the
+physical addresses now used for the boot page tables and that core's
+stack, which — left in place when `SCTLR_EL1.C` comes on — intermittently
+shadow DRAM and fault the core with no vectors installed (the observed
+real-Pi-4B symptom of the last-released core failing to check in). The
+boot CPU needs no equivalent because firmware hands it clean caches. On a Pi 4B this brings all four
 Cortex-A72 cores into service over PSCI (with a PSCI-providing armstub)
 or the stock firmware's spin-table; a tree declaring neither fails each
 start closed and the system continues single-CPU — degraded, loud, and
@@ -2349,13 +2364,17 @@ the firmware stub) and the kernel's own `SECONDARY_KERNEL_RELEASE` word
 (for a core the firmware released straight into `boot.s`'s `_start`,
 whose park loop polls it) — publishes the released core's masked
 affinity in `SECONDARY_KERNEL_RELEASE_TARGET`, sweeps all three to the
-point of coherency, and signals `sev`. The kernel release word is
-*shared*, so one `sev` wakes every core parked in `_start`; the target
-word is the gate that lets only the single core being released proceed
-while the rest re-park, so secondaries come up **strictly one at a
+point of coherency, and signals `sev`. Neither release channel is
+trusted to wake only one core — the kernel release word is *shared*, and
+a firmware `cpu-release-addr` may be shared/aliased or its `sev` may wake
+every core still in the firmware stub — so both the `boot.s` `_start`
+park loop **and** the `smp.s` trampoline apply the target gate (the one
+shared `smp::release_gate_open` predicate): a woken core proceeds only
+when `SECONDARY_KERNEL_RELEASE_TARGET` names its own affinity, and the
+rest re-park, so secondaries come up **strictly one at a
 time**. This is a correctness requirement: waking every secondary at
 once would race them through the concurrent MMU-adopt / GIC-init path,
-which on a real Pi 4 intermittently faulted the last-released core
+which on a real Pi 4 deterministically faulted the last-released core
 mid-bring-up so it never checked in (present in the topology, zero
 context switches). The released core may arrive at EL2 (the Pi firmware
 hand-off): the trampoline drops through the same

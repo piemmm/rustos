@@ -314,17 +314,47 @@ static SECONDARY_KERNEL_RELEASE: AtomicU64 = AtomicU64::new(0);
 /// the release word, and swept to the point of coherency before the
 /// `sev`.
 ///
-/// This is what makes the kernel-park-loop release channel serialise:
-/// one shared `sev` wakes every parked core, but only the core whose
-/// affinity equals this word proceeds — the rest re-park. Without it a
-/// single release would race *all* secondaries through the concurrent
-/// MMU-adopt / GIC-init path at once (observed on a Raspberry Pi 4 as
-/// the last-released core intermittently faulting mid-bring-up and never
-/// checking in). The all-ones initial value matches no real masked
-/// affinity, so the gate is closed until a deliberate release opens it.
+/// This is what serialises secondary bring-up to one core at a time, and
+/// it gates **both** release channels because both converge on the same
+/// entry: the `boot.s` `_start` park loop (a core the firmware released
+/// straight into the kernel) and the `smp.s`
+/// `_start_secondary_spintable_aarch64` trampoline (a core the firmware
+/// released from its own spin table). Each polls this word MMU-off and
+/// proceeds only when it equals the core's own masked affinity; the rest
+/// re-park. The gate lives at the trampoline too because a firmware
+/// spin-table release must **not** be trusted to wake only one core — a
+/// shared/aliased `cpu-release-addr`, or one `sev` waking every parked
+/// core, can deliver several cores into the trampoline at once. Without
+/// the gate they would race *all* released secondaries through the
+/// concurrent MMU-adopt / GIC-init path (observed on a Raspberry Pi 4 as
+/// the last-released core deterministically faulting mid-bring-up and
+/// never checking in). The exact predicate is [`release_gate_open`]. The
+/// all-ones initial value matches no real masked affinity, so the gate is
+/// closed until a deliberate release opens it (fail closed).
 #[no_mangle]
 #[used]
 static SECONDARY_KERNEL_RELEASE_TARGET: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// The per-core release-gate predicate the `boot.s` park loop and the
+/// `smp.s` spin-table trampoline both implement in assembly: a woken
+/// secondary may leave its `wfe` park and begin bring-up only when the
+/// published release target (`SECONDARY_KERNEL_RELEASE_TARGET`) names
+/// its own masked ([`MPIDR_AFFINITY_MASK`]) `MPIDR_EL1` affinity.
+///
+/// This is the single, host-tested definition of the gate decision — the
+/// two assembly sites compile the same `cmp target, affinity` / `b.eq`
+/// against it, so the rule can never drift between them. It is a pure
+/// comparison with no ambient state, so it is exhaustively testable off
+/// the metal even though the parked-core polling itself is not.
+///
+/// `target` is the value read from `SECONDARY_KERNEL_RELEASE_TARGET`
+/// and `own_affinity` the core's masked affinity; the all-ones initial
+/// target names no real affinity, so the gate stays shut until a
+/// deliberate release opens it for exactly one core.
+#[must_use]
+pub const fn release_gate_open(target: u64, own_affinity: u64) -> bool {
+    target == own_affinity
+}
 
 /// Set-once guard for [`register_secondary_affinities`].
 static SECONDARY_AFFINITIES_REGISTERED: AtomicBool = AtomicBool::new(false);

@@ -1359,6 +1359,87 @@ unsafe fn program_stage1_translation(root_phys: u64) {
     }
 }
 
+// The `_invalidate_local_dcache_to_poc` leaf routine: invalidate the
+// calling CPU's entire local data/unified cache, all levels to the Level
+// of Coherence, by set/way (`dc isw`), then `dsb sy; isb`. Called by the
+// `invalidate_local_dcache_to_poc` wrapper below (which carries the
+// rationale and the safety contract). Implemented in assembly so the
+// set/way loop's register discipline is explicit: it uses only
+// caller-saved scratch (`x0`–`x11`), touches no memory, and never uses
+// the stack, so it is a well-formed leaf routine.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+core::arch::global_asm!(
+    ".section .text",
+    ".globl _invalidate_local_dcache_to_poc",
+    "_invalidate_local_dcache_to_poc:",
+    "  mrs   x0, clidr_el1",
+    "  and   x3, x0, #0x7000000", // LoC in CLIDR[26:24]
+    "  lsr   x3, x3, #23",        // x3 = LoC << 1 (loop bound in 2*level units)
+    "  cbz   x3, 5f",             // no cache levels to the PoC → done
+    "  mov   x10, #0",            // x10 = 2 * current cache level
+    "1:",
+    "  add   x2, x10, x10, lsr #1", // x2 = 3*level = bit offset of this level's Ctype
+    "  lsr   x1, x0, x2",
+    "  and   x1, x1, #7", // x1 = cache type at this level
+    "  cmp   x1, #2",
+    "  b.lt  4f",              // <2: no data/unified cache here → skip
+    "  msr   csselr_el1, x10", // select data/unified cache at this level (InD=0)
+    "  isb",
+    "  mrs   x1, ccsidr_el1",
+    "  and   x2, x1, #7",
+    "  add   x2, x2, #4", // x2 = log2(line bytes)
+    "  mov   x4, #0x3ff",
+    "  and   x4, x4, x1, lsr #3", // x4 = associativity - 1 (max way)
+    "  clz   w5, w4",             // w5 = bit position for the way field
+    "  mov   x7, #0x7fff",
+    "  and   x7, x7, x1, lsr #13", // x7 = number of sets - 1 (max set)
+    "2:",
+    "  mov   x9, x4", // x9 = way iterator
+    "3:",
+    "  lsl   x6, x9, x5",
+    "  orr   x11, x10, x6", // set/way operand: level | way
+    "  lsl   x6, x7, x2",
+    "  orr   x11, x11, x6", // | set
+    "  dc    isw, x11",     // invalidate this set/way (never clean)
+    "  subs  x9, x9, #1",
+    "  b.ge  3b",
+    "  subs  x7, x7, #1",
+    "  b.ge  2b",
+    "4:",
+    "  add   x10, x10, #2", // next cache level (2*level units)
+    "  cmp   x3, x10",
+    "  b.gt  1b",
+    "5:",
+    "  dsb   sy",
+    "  isb",
+    "  ret",
+);
+
+/// Invalidate this CPU's local data cache to the Level of Coherence
+/// (see the `_invalidate_local_dcache_to_poc` routine above for why
+/// invalidate, not clean).
+///
+/// # Safety
+///
+/// Must run with the MMU and the data cache **off** (SCTLR.M=0, C=0), as
+/// on a freshly-released secondary before [`adopt_boot_translation`]: it
+/// discards the cache contents without writeback, so it is sound only
+/// when no cache line holds live dirty data — which holds at that point
+/// (the core has made no cacheable access yet).
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+unsafe fn invalidate_local_dcache_to_poc() {
+    extern "C" {
+        fn _invalidate_local_dcache_to_poc();
+    }
+    // SAFETY: a leaf assembly routine that only issues set/way cache
+    // invalidations and barriers; it clobbers caller-saved scratch, uses
+    // no stack, and returns. The MMU/cache-off precondition is the
+    // caller's contract.
+    unsafe {
+        _invalidate_local_dcache_to_poc();
+    }
+}
+
 /// Enable the MMU on a freshly-started secondary core by adopting the
 /// boot address space whose root [`AddressSpace::switch`] published
 /// (`PARK_ROOT`) — a secondary allocates no tables of its own; it joins
@@ -1385,6 +1466,23 @@ pub unsafe fn adopt_boot_translation() -> bool {
     if root == 0 {
         return false;
     }
+    // A secondary core's caches are in the architecturally-UNKNOWN
+    // power-on state: it may hold stale lines (from firmware or a
+    // previous life) over the physical addresses RustOS now uses for the
+    // boot page tables and this core's stack. Enabling the data cache
+    // with those lines present lets them shadow DRAM, so the first
+    // cacheable access after the MMU comes on — the table walk or a stack
+    // access — intermittently reads garbage and the core faults with no
+    // vectors installed (the real Pi 4 symptom: the last-released core
+    // deterministically-then-intermittently never checks in). Invalidate
+    // this core's local cache to the point of coherency first — discard,
+    // never clean, or the garbage would be written back over the live
+    // tables. The boot CPU needs no equivalent: firmware hands it clean
+    // caches before the kernel runs.
+    // SAFETY: runs on a secondary with the MMU and cache off (the
+    // trampoline established `SCTLR_MMU_OFF`) and before any cacheable
+    // access, so no live dirty line is discarded.
+    unsafe { invalidate_local_dcache_to_poc() };
     // SAFETY: the caller upholds the MMU-off/interrupts-masked contract;
     // the published root is the boot space's, whose tables live (and
     // stay coherent — they were cleaned to PoC before the boot switch)

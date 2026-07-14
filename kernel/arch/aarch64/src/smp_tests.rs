@@ -143,4 +143,29 @@ fn kernel_release_target_starts_gated_shut() {
     let initial = SECONDARY_KERNEL_RELEASE_TARGET.load(Ordering::Acquire);
     assert_eq!(initial, u64::MAX);
     assert!(initial > MPIDR_AFFINITY_MASK);
+    // The initial target opens the gate for no core, including affinity 0
+    // (the boot core, which is never a spin-table release target anyway).
+    assert!(!release_gate_open(initial, 0));
+}
+
+#[test]
+fn release_gate_opens_only_for_the_named_core() {
+    // The single definition of the decision the `boot.s` park loop and the
+    // `smp.s` spin-table trampoline both compile to `cmp`/`b.eq`. A woken
+    // core proceeds only when the published target is its own affinity;
+    // every other parked core re-parks, so exactly one core is ever in
+    // bring-up at a time (no concurrent MMU-adopt / GIC-init race).
+    let target = 2u64;
+    assert!(release_gate_open(target, 2));
+    for other in [0u64, 1, 3, MPIDR_AFFINITY_MASK, u64::MAX] {
+        assert!(
+            !release_gate_open(target, other),
+            "only the released core (affinity {target}) may proceed, not {other}"
+        );
+    }
+    // The all-ones initial target names no real masked affinity, so the
+    // gate stays shut for every core until a deliberate release opens it.
+    for affinity in [0u64, 1, 2, 3, MPIDR_AFFINITY_MASK] {
+        assert!(!release_gate_open(u64::MAX, affinity));
+    }
 }

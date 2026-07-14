@@ -557,22 +557,56 @@ hazard cacheless QEMU never shows, seen on metal as the highest dense id
 deterministically never coming online — present in the topology, zero
 context switches).
 
-The barrier only serialises the boot CPU *against* the secondaries; it
-does **not** by itself serialise the secondaries against **each other**,
-because the kernel release word is *shared* — one `sev` wakes every core
-parked in `_start` at once. That gap re-surfaced the same failure
-intermittently: all secondaries woke on the first release and raced
-through the concurrent MMU-adopt / GIC-init path together, and the
-highest dense id (core 3) sometimes lost the race and timed out with
-`no_online_ack`. The completing fix is a **per-core release gate**:
-`start_secondary_spintable` publishes the released core's affinity in
-`SECONDARY_KERNEL_RELEASE_TARGET`, and the `_start` park loop lets a
-woken core proceed only when that target equals its own affinity (the
-rest re-park). Combined with the barrier, exactly one secondary is ever
-in bring-up at a time — no concurrent adopt/GIC race. On-metal
-acceptance item (no `-M raspi4b` in the pinned QEMU): success is all
-four `SecondaryCpuOnline` lines with core 3 scheduling; a still-dead
-core still audits `no_online_ack` loudly rather than silently missing.
+Secondaries are **also** serialised against each other by a **per-core
+release gate** on `SECONDARY_KERNEL_RELEASE_TARGET` (a `sev` wakes every
+parked core at once — the kernel release word is shared and a firmware
+spin-table `sev` likewise wakes every core still in the stub — so the
+release must name exactly one core): `start_secondary_spintable`
+publishes the affinity of the single core being released (swept to PoC
+before the `sev`), and a woken core proceeds only when that target equals
+its own masked affinity — the rest re-park. The gate is enforced at
+**both** convergence points, against the one shared
+`smp::release_gate_open` predicate: the `_start` park loop **and** the
+`_start_secondary_spintable_aarch64` trampoline (the kernel never assumes
+the firmware `cpu-release-addr` channel is per-core). The gate predicate
+and its edge cases are host-tested (`smp_tests`); the parked-core polling
+is assembly.
+
+**Root cause (metal): a secondary's UNKNOWN power-on caches were never
+invalidated before its data cache was enabled.** The cpu-labelled
+beacons localised the death to `adopt_boot_translation` (core printed
+`reached rust entry`/`fp enabled` then stopped before `mmu adopted`),
+and the per-core state dump proved the inputs were identical and correct
+across cores (same boot root, same MMU-off `SCTLR_EL1`, stacks differing
+only by the 64 KiB stride). The failure was a **race**, not bad state:
+deterministic-then-intermittent (~50/50) on the highest/last-released
+core. On AArch64 a core's cache contents are architecturally UNKNOWN at
+power-on; a freshly-released secondary can hold stale lines over the very
+physical addresses RustOS now uses for the boot page tables and that
+core's stack. RustOS enabled `SCTLR_EL1.C` on the secondary
+(`program_stage1_translation`) **without first invalidating its local
+D-cache**, so the first cacheable access after the MMU came on — the
+translation-table walk or a stack access — intermittently read a stale
+cache line shadowing DRAM and the core faulted with no vectors installed.
+The boot CPU never hit this because firmware hands it clean caches. (The
+earlier serialisation-gate and stack-mapping-coherency theories were both
+disproven: core 3 entered Rust cleanly with a correct, PoC-coherent
+`.bss`/low-RAM stack, and the boot CPU only spin-waits during bring-up.)
+
+**Fix:** `adopt_boot_translation` now invalidates the calling core's
+local data cache to the Level of Coherence (`paging`'s set/way
+`_invalidate_local_dcache_to_poc`, `dc isw`) **before**
+`program_stage1_translation` enables the MMU+caches. It is *invalidate*,
+never clean: the stale lines hold no live data this core produced (every
+prior access was MMU-off Device-nGnRnE, never cached), and cleaning would
+write their garbage back over the live tables. This is secondary-path
+only — the boot CPU's `AddressSpace::switch` is unaffected — so it never
+runs on the single-CPU QEMU boot and is safe on QEMU's `cortex-a72`
+model otherwise. The end-to-end release remains on-metal-only (no
+`-M raspi4b` in the pinned QEMU); acceptance is all four
+`SecondaryCpuOnline` lines with core 3 scheduling across repeated boots.
+The `pi-beacon smp:` phase beacons are kept as the on-metal bring-up
+trail until core 3 is confirmed stable, then removed.
 
 ### P6 — Spawn `init` into EL0 on the Pi `[x]`
 

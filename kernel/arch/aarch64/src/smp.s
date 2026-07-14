@@ -111,16 +111,22 @@ _start_secondary_aarch64:
 //   2. A core whose affinity is not in the published table parks in a
 //      `wfe` loop (fail closed): an undescribed core must never select
 //      a stack slice or enter Rust.
-//   3. Bring-up is serialised to one core per release: the `boot.s`
-//      park loop only branches the core whose affinity matches the
-//      published release target, and the firmware `cpu-release-addr`
-//      channel is per-core, so exactly one core enters this trampoline
-//      per release. The affinity-table scan here still recovers that
-//      core's dense id (the release carries no context register), and an
-//      affinity absent from the table parks (fail closed) — so even if a
-//      stray core ever reached here it would resolve its own unique
-//      dense id and never share a stack slice (the dense map is
-//      duplicate-free by construction).
+//   3. Bring-up is serialised to one core per release by the
+//      target-affinity gate below (`.Lspintable_gate`): a core proceeds
+//      only when `SECONDARY_KERNEL_RELEASE_TARGET` names its own
+//      affinity, otherwise it re-parks. Both release channels converge
+//      on this trampoline — a core the firmware released from its own
+//      spin table, and a core the `boot.s` park loop branched in — and a
+//      firmware spin-table release must NOT be trusted to wake only one
+//      core (a shared/aliased `cpu-release-addr`, or one `sev` waking
+//      every parked core, can deliver several here at once). The gate is
+//      what actually enforces "one core in bring-up at a time"; relying
+//      on the firmware release channel being per-core is a firmware
+//      assumption the kernel does not get to make. The affinity-table
+//      scan then recovers the released core's dense id (the release
+//      carries no context register); an affinity absent from the table
+//      parks (fail closed), and the dense map is duplicate-free by
+//      construction, so no two cores ever resolve the same stack slice.
 .global _start_secondary_spintable_aarch64
 _start_secondary_spintable_aarch64:
     // Mask all interrupts until the common path installs vectors.
@@ -150,6 +156,35 @@ _start_secondary_spintable_aarch64:
     movk    x3, #0xff, lsl #16
     and     x2, x2, x3
 
+    // Per-core release gate: proceed only when this core is the single
+    // secondary the boot CPU is releasing right now
+    // (`SECONDARY_KERNEL_RELEASE_TARGET` == this core's affinity). A
+    // firmware spin-table release can deliver more than one parked core
+    // into this trampoline at once (a shared/aliased release word, or one
+    // `sev` waking every parked core); without this gate they would race
+    // through the concurrent MMU-adopt / GIC-init path together and the
+    // highest dense id intermittently faults mid-bring-up and never
+    // checks in (the real-metal Raspberry Pi 4 symptom). Re-park in a
+    // low-power `wfe` loop and re-read the target on every event until it
+    // names this core; the boot CPU stores the target (swept to the point
+    // of coherency) immediately before the `sev` that releases each core,
+    // so exactly one core is ever past this gate at a time. The all-ones
+    // initial target matches no real affinity, so the gate stays closed
+    // until a deliberate release opens it (fail closed). Read with the MMU
+    // (and cache) off, straight from RAM, exactly as the `boot.s` park
+    // loop reads it; x7 is scratch, x2 (this core's affinity) is kept.
+    // The predicate is `smp::release_gate_open` (target == own affinity),
+    // the one definition this and the boot.s park loop both compile to.
+.Lspintable_gate:
+    adrp    x7, SECONDARY_KERNEL_RELEASE_TARGET
+    add     x7, x7, :lo12:SECONDARY_KERNEL_RELEASE_TARGET
+    ldr     x7, [x7]
+    cmp     x7, x2
+    b.eq    .Lspintable_scan_start          // this core's turn: bring up
+    wfe
+    b       .Lspintable_gate                // not yet: re-park, re-check
+
+.Lspintable_scan_start:
     // Published dense-id → affinity table (base 0 = unpublished: park).
     adrp    x3, SECONDARY_AFFINITY_BASE
     add     x3, x3, :lo12:SECONDARY_AFFINITY_BASE

@@ -111,7 +111,11 @@ _start:
     // and the rest re-park. This serialises secondary bring-up: releasing
     // one core never races the others through the concurrent MMU-adopt /
     // GIC-init path (a coherency hazard that intermittently faulted the
-    // last-released core on a real Pi 4). x8 holds this core's affinity;
+    // last-released core on a real Pi 4). The target compare is the shared
+    // `smp::release_gate_open` predicate (target == own affinity), which
+    // the `smp.s` spin-table trampoline gate implements identically — a
+    // core released straight into this loop re-checks the same gate again
+    // when it reaches the trampoline. x8 holds this core's affinity;
     // x4/x5 are scratch.
     wfe
     adrp    x4, SECONDARY_KERNEL_RELEASE

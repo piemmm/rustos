@@ -963,6 +963,14 @@ fn prepare_secondary_bringup(cpu_mpidrs: &[u64]) -> bool {
 /// was issued, so a refusal from `run_secondary` is a genuine fault; it
 /// is reported on the UART debug line and the core parks fail-closed.
 extern "C" fn production_secondary_entry(cpu: u32) -> ! {
+    // Serial-only bring-up beacons, mirroring the boot core's `pi-beacon`
+    // trail: a started secondary reaches here with the MMU (and log sink)
+    // still off, and any fault before `init_vectors` installs this core's
+    // handlers hangs it silently — so each phase leaves an immediate,
+    // lock-free UART mark whose last-printed tag for a given cpu localises
+    // exactly where a core that never checks in died. Reaching this first
+    // mark at all proves the release + wake + trampoline worked for `cpu`.
+    serial::beacon_cpu("pi-beacon smp: reached rust entry (mmu off)", cpu);
     // SAFETY: this secondary core's first action, exactly once, before
     // any FP/SIMD instruction executes on it.
     unsafe {
@@ -974,8 +982,10 @@ extern "C" fn production_secondary_entry(cpu: u32) -> ! {
     // MMU during `boot`), so the adopted tables are live and coherent.
     if !unsafe { rustos_arch_aarch64::paging::adopt_boot_translation() } {
         // No published boot root: nothing sane to run on — park.
+        serial::beacon_cpu("pi-beacon smp: no boot root, parking", cpu);
         halt_current_cpu()
     }
+    serial::beacon_cpu("pi-beacon smp: mmu adopted", cpu);
     // SAFETY: per-CPU installs on this core, exactly once each, before
     // any interrupt source is armed here: the EL1 vector base and the
     // GICv2 CPU interface are banked per core (the distributor write in
@@ -984,9 +994,11 @@ extern "C" fn production_secondary_entry(cpu: u32) -> ! {
         exceptions::init_vectors();
         gic::init();
     }
+    serial::beacon_cpu("pi-beacon smp: vectors + gic up", cpu);
     // Per-CPU tickless preemption + IPI arming (the callbacks and the
     // per-CPU backing were installed by the boot CPU before `CPU_ON`).
     crate::aarch64::gic_irq::init_secondary_preemption(cpu);
+    serial::beacon_cpu("pi-beacon smp: preempt armed, joining kernel", cpu);
 
     // Join the live kernel. Returns only when this core must stop.
     let exit = rustos_kernel_core::run_secondary(cpu);
