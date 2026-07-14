@@ -43,6 +43,18 @@ pub(crate) trait SecondaryDispatch: Sync {
     /// The audit sink the arrival record is emitted through.
     fn audit_sink(&self) -> &'static (dyn Sink + Sync);
 
+    /// Record that dense id `cpu` has completed its per-CPU bring-up and
+    /// is about to join the dispatch loop.
+    ///
+    /// This is the acknowledgement the boot CPU's bring-up barrier waits
+    /// on: it is set once, on `cpu` itself, immediately before
+    /// [`run`](Self::run) is entered — so a boot CPU that observes it
+    /// knows the core has adopted the kernel translation regime, armed
+    /// its per-CPU interrupt state, and is live. A core that never sets
+    /// it never checked in, and the boot CPU's bounded wait fails loud
+    /// rather than proceeding over a half-brought-up core.
+    fn mark_online(&self, cpu: CpuId);
+
     /// Run the kernel dispatch loop on `cpu`. Returns only on a
     /// scheduler error; the caller then parks the core.
     fn run(&self, cpu: CpuId);
@@ -125,6 +137,15 @@ pub fn run_secondary(cpu: CpuId) -> SecondaryExit {
             value: FieldValue::Str(format_usize(cpu as usize, &mut cpu_buf)),
         }],
     );
+    // Acknowledge arrival *before* entering the (never-returning) dispatch
+    // loop, so the boot CPU's bring-up barrier can observe that this core
+    // is fully live and release the next secondary / proceed to spawn PID
+    // 1. The order is load-bearing: the ack is published only after the
+    // arch port's secondary entry has adopted the kernel translation
+    // regime and armed this core's interrupt state, so a boot CPU that
+    // sees it can safely mutate shared kernel state (the ack is the
+    // "bring-up complete" edge).
+    handle.mark_online(cpu);
     handle.run(cpu);
     SecondaryExit::Stopped
 }
@@ -136,6 +157,7 @@ mod tests {
 
     struct FakeDispatch {
         ran_on: AtomicU32,
+        online: AtomicU32,
         sink: &'static crate::test_sink::TestSink,
     }
 
@@ -148,6 +170,9 @@ mod tests {
         }
         fn audit_sink(&self) -> &'static (dyn Sink + Sync) {
             self.sink
+        }
+        fn mark_online(&self, cpu: CpuId) {
+            self.online.store(cpu, Ordering::SeqCst);
         }
         fn run(&self, cpu: CpuId) {
             self.ran_on.store(cpu, Ordering::SeqCst);
@@ -166,6 +191,7 @@ mod tests {
         let handle: &'static FakeDispatch =
             alloc::boxed::Box::leak(alloc::boxed::Box::new(FakeDispatch {
                 ran_on: AtomicU32::new(u32::MAX),
+                online: AtomicU32::new(u32::MAX),
                 sink,
             }));
         publish_secondary_dispatch(handle).expect("first publish succeeds");
@@ -180,6 +206,9 @@ mod tests {
 
         assert_eq!(run_secondary(1), SecondaryExit::Stopped);
         assert_eq!(handle.ran_on.load(Ordering::SeqCst), 1);
+        // The arrival acknowledgement is published before the dispatch
+        // loop is entered, so the boot CPU's bring-up barrier observes it.
+        assert_eq!(handle.online.load(Ordering::SeqCst), 1);
         assert!(
             sink.event_ids()
                 .contains(&AuditEvent::SecondaryCpuOnline.id().0),

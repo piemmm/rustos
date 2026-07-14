@@ -25,6 +25,7 @@
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
 use rustos_abi::hwtree::HwResource;
@@ -421,6 +422,22 @@ struct KernelSecondaryDispatch<A: KernelArch + 'static> {
     state: &'static KernelState<A>,
     boot_cpu: CpuId,
     cpu_count: u32,
+    /// One `false`-initialised flag per dense CPU id (slot `i` is dense
+    /// id `i`; the boot CPU's slot is never set). A started secondary
+    /// sets its own slot from [`crate::smp::run_secondary`] once it has
+    /// fully brought up and is about to join the dispatch loop; the boot
+    /// CPU's bring-up barrier ([`wait_secondary_online`]) waits on it.
+    online: &'static [AtomicBool],
+}
+
+impl<A: KernelArch + 'static> KernelSecondaryDispatch<A> {
+    /// Whether secondary `cpu` has acknowledged it is fully online. An
+    /// out-of-range id reads `false` (fail closed).
+    fn is_online(&self, cpu: CpuId) -> bool {
+        self.online
+            .get(cpu as usize)
+            .is_some_and(|slot| slot.load(Ordering::Acquire))
+    }
 }
 
 impl<A: KernelArch + 'static> crate::smp::SecondaryDispatch for KernelSecondaryDispatch<A> {
@@ -434,6 +451,12 @@ impl<A: KernelArch + 'static> crate::smp::SecondaryDispatch for KernelSecondaryD
 
     fn audit_sink(&self) -> &'static (dyn Sink + Sync) {
         self.state.audit_sink
+    }
+
+    fn mark_online(&self, cpu: CpuId) {
+        if let Some(slot) = self.online.get(cpu as usize) {
+            slot.store(true, Ordering::Release);
+        }
     }
 
     fn run(&self, cpu: CpuId) {
@@ -481,11 +504,23 @@ fn start_secondaries<A: KernelArch + 'static>(
         );
         return;
     };
+    // One arrival-acknowledgement flag per dense CPU id, leaked for the
+    // kernel's lifetime. A growable `Vec` sized to the discovered core
+    // count (never a fixed ceiling): a started secondary sets its own
+    // slot before joining the dispatch loop, and the barrier below reads
+    // it.
+    let online: &'static [AtomicBool] = Box::leak(
+        (0..cpu_count)
+            .map(|_| AtomicBool::new(false))
+            .collect::<alloc::vec::Vec<_>>()
+            .into_boxed_slice(),
+    );
     let handle: &'static KernelSecondaryDispatch<A> =
         Box::leak(Box::new(KernelSecondaryDispatch {
             state,
             boot_cpu,
             cpu_count,
+            online,
         }));
     if crate::smp::publish_secondary_dispatch(handle).is_err() {
         // The hand-off slot is set-once per boot; a second publish means
@@ -502,6 +537,17 @@ fn start_secondaries<A: KernelArch + 'static>(
         );
         return;
     }
+    // Bring the secondaries up **one at a time**, waiting for each to
+    // acknowledge it is fully online before releasing the next and before
+    // returning (the caller then spawns PID 1). This serialisation is a
+    // correctness requirement, not a nicety: a secondary released last
+    // must finish adopting the kernel translation regime and arming its
+    // per-CPU interrupt state *before* the boot CPU proceeds to mutate
+    // shared kernel state (spawning PID 1, allocating page tables), or
+    // that core can fault mid-bring-up on real hardware — a cache/
+    // coherency hazard a cacheless emulator never exhibits, observed as
+    // the last dense id deterministically never coming online.
+    let arch = state.arch.as_ref();
     for cpu in 0..cpu_count {
         if cpu == boot_cpu {
             continue;
@@ -514,15 +560,38 @@ fn start_secondaries<A: KernelArch + 'static>(
         // `cpu` is a dense id inside the validated `0..cpu_count` range
         // and is not the (already running) boot CPU.
         match unsafe { bringup.start_secondary(cpu) } {
-            Ok(()) => emit(
-                audit_sink,
-                Level::Info,
-                AuditEvent::SecondaryCpuStarted,
-                &[Field {
-                    key: "cpu",
-                    value: rustos_log::FieldValue::Str(cpu_str),
-                }],
-            ),
+            Ok(()) => {
+                emit(
+                    audit_sink,
+                    Level::Info,
+                    AuditEvent::SecondaryCpuStarted,
+                    &[Field {
+                        key: "cpu",
+                        value: rustos_log::FieldValue::Str(cpu_str),
+                    }],
+                );
+                // The core signals arrival from `run_secondary`
+                // (`SecondaryCpuOnline`, `mark_online`). Wait for it,
+                // bounded; a core that never checks in is audited and the
+                // boot proceeds on the cores that did (degraded, loud).
+                if !wait_secondary_online(arch, handle, boot_cpu, cpu) {
+                    emit(
+                        audit_sink,
+                        Level::Warn,
+                        AuditEvent::SecondaryCpuStartFailed,
+                        &[
+                            Field {
+                                key: "cpu",
+                                value: rustos_log::FieldValue::Str(cpu_str),
+                            },
+                            Field {
+                                key: "cause",
+                                value: rustos_log::FieldValue::Str("no_online_ack"),
+                            },
+                        ],
+                    );
+                }
+            }
             Err(err) => emit(
                 audit_sink,
                 Level::Warn,
@@ -539,6 +608,42 @@ fn start_secondaries<A: KernelArch + 'static>(
                 ],
             ),
         }
+    }
+}
+
+/// Wait — **bounded** — for secondary `cpu` to acknowledge it has fully
+/// brought up and is about to join the dispatch loop (the `mark_online`
+/// edge `crate::smp::run_secondary` publishes after the arch port's
+/// secondary entry has adopted the kernel translation regime and armed
+/// this core's per-CPU interrupt state).
+///
+/// Returns `true` once the core checks in, or `false` if it does not
+/// within the budget. This is the one-shot secondary-bring-up handshake:
+/// a bounded, fail-loud wait (the narrow spin the charter permits for a
+/// hardware handshake, never a task's steady state), not a busy-poll —
+/// the boot CPU has nothing else it may safely do until the core it just
+/// released is live. The budget is generous: a healthy core checks in
+/// within microseconds, so it only ever elapses for a genuinely dead
+/// core, which the caller then audits rather than wedging the boot.
+fn wait_secondary_online<A: KernelArch + 'static>(
+    arch: &A,
+    handle: &KernelSecondaryDispatch<A>,
+    boot_cpu: CpuId,
+    cpu: CpuId,
+) -> bool {
+    // 500 ms — orders of magnitude above a real core's microsecond
+    // bring-up, small enough that a dead core does not stall the boot
+    // perceptibly.
+    const BRINGUP_BUDGET_NS: u64 = 500_000_000;
+    let start = arch.monotonic_ns(boot_cpu);
+    loop {
+        if handle.is_online(cpu) {
+            return true;
+        }
+        if arch.monotonic_ns(boot_cpu).saturating_sub(start) >= BRINGUP_BUDGET_NS {
+            return false;
+        }
+        core::hint::spin_loop();
     }
 }
 

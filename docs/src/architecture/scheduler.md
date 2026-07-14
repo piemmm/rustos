@@ -658,6 +658,28 @@ kernel is non-preemptible and nothing between it and the
 `reschedule_current` call parks, so the task cannot migrate again in that
 window.
 
+## Secondary-CPU bring-up barrier
+
+Secondary CPUs are brought online **one at a time**, behind a per-core
+acknowledgement barrier, *before* the boot CPU spawns PID 1. The boot CPU
+releases a secondary, then waits (bounded, fail-loud) for that core to
+publish an online acknowledgement — the edge `run_secondary` sets, on the
+core itself, only after the arch port's secondary entry has adopted the
+kernel translation regime and armed the core's per-CPU interrupt state —
+before it releases the next core and before it returns to mutate shared
+kernel state.
+
+This serialisation is a correctness requirement, not a nicety. A
+secondary released last must finish adopting the shared kernel
+translation regime before the boot CPU begins mutating shared kernel
+structures (spawning PID 1, allocating page tables); otherwise that core
+can fault mid-bring-up on real hardware — a cache/coherency hazard a
+cacheless emulator never exhibits, observed as the highest dense id
+deterministically never coming online (present in the topology, zero
+context switches). A core that fails to check in within the budget is
+audited (`no_online_ack`) and the boot proceeds on the cores that did,
+rather than wedging or silently running a half-brought-up core.
+
 ## Invariants
 
 These hold at every API boundary:
