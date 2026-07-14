@@ -567,29 +567,68 @@ reach the running `netstack` process. Done:
   resource, and hands it to `netstack` `BindDriver` under a derived `netN`
   alias — each endpoint bound exactly once across generation bumps, fail-soft
   retry if the stack is not yet up.
+- **The driver's §18.3 bind table** `rustos_drv_network_virtio_net::BIND_KEYS`
+  (`HwMatchKey::virtio(1)`, exact-match `BIND_PRIORITY`): the discovery
+  identity `devmgr`/the signed-manifest bind table is authored from, so a
+  discovered virtio-net node resolves to this driver. Without it the driver
+  process was undiscoverable; it lives in the `drivers/network/virtio_net`
+  `lib` (the `virtio_input`/`virtio_blk` `BIND_KEYS` precedent) and survives
+  the N4e scaffold removal (only `register` goes).
 - **Capabilities**: `netstack` += `CAP_SHM` (owns/grants the frame region),
   `devmgr` += `CAP_NET_ADMIN` (calls `BindDriver`) — in both the account
   ceilings and the manifest requests (effective = ceiling ∩ manifest); the
   stack still never holds `CAP_NET_ADMIN`, it *enforces* it. No new syscall.
 
-### N4e — two-process QEMU vertical + §18.5 scaffold removal `[ ]`
+### N4e — two-process QEMU vertical (aarch64 first) `[ ]`
 
 The three `netstack_*` QEMU verticals still run the in-kernel single-process
 `register` scaffold (`rustos-test-virtio-qemu-support`'s `netstack_ping` over
-an in-process `LocalFrameService`), adapted to the non-blocking doorbell (its
-pump parks on `VirtioNet::wait_for_device_event`). That scaffold is the §18.5
-transitional defect to remove: rewrite the three verticals (aarch64-mmio,
-riscv64-mmio, x86_64-pci) into the **two-process** form — the production boot
-pipeline (the `autoload_input_qemu_aarch64` precedent: a planted disk carrying
-the signed `virtio_net_driver` + `netstack` bundles, `devmgr` autoload of the
-driver into its own user process, `netstack` running as its own process) with
-a virtio-net device attached and a **host-side UDP peer** over the QEMU netdev
-driving UDP echo v4+v6 and multicast join + receive. PASS witnesses: the
-driver's `netchan` node published, the `devmgr` `NETSTACK_BOUND` audit event,
-the `netstack` `DRIVER_BOUND` audit event, and the host peer observing the
-echo/multicast round-trips. Removing the scaffold deletes the `register` shell
-in `drivers/network/virtio_net`, `FixedSpawner`/`netstack_ping` in the support
-crate, and `VirtioNet::wait_for_device_event` (its only consumer).
+an in-process `LocalFrameService`, parking on `VirtioNet::wait_for_device_event`).
+That scaffold is the §18.5 transitional defect to remove. The replacement is
+the **two-process production-boot** vertical, built **aarch64 first** (the only
+arch with a driver-autoload-into-user-process QEMU precedent —
+`autoload_input_qemu_aarch64`, `driver_spawn_qemu_aarch64`; riscv64/x86_64 have
+`spawn_session` but no driver-process autoload vertical yet, so those two and
+the scaffold deletion are the follow-up increments below).
+
+**aarch64 vertical (this increment).** A new `netstack_autoload_qemu_aarch64`
+crate boots the production `boot_aarch64::boot` pipeline against the
+`AutoloadRootDisk` fixture (extended to also plant the signed
+`virtio_net_driver` bundle at `Drivers/network/virtio_net/Run`) with a
+virtio-net-device-mmio attached and the `netstack_peer` host link-peer on the
+QEMU dgram netdev. The two-process wiring is exercised end to end:
+
+- `init`'s `DEFAULT_CONFIG` gains `service /System/Services/netstack.app/Run
+  netstack` (launched before `devmgr`; `MAX_SERVICES` already has the slot).
+  This is the correct production wiring — netstack is a core service — and is
+  global to every production-boot image.
+- `devmgr` autoloads the driver into its own process (its `BIND_KEYS` now
+  resolves the discovered virtio-net node), the driver publishes the `netchan`
+  node, `devmgr` calls `netstack` `BindDriver`, netstack provisions the channel
+  and brings the interface up. The autoloaded driver binds its reserved
+  device-channel endpoint under `CAP_IPC_BIND_PRIVILEGED` exactly as the
+  autoloaded framebuffer display service binds `DISPLAY_ENDPOINT` today (the
+  precedent that de-risks the reserved-endpoint autoload path).
+- **Proof is IPv6 link-local**: `bind_driver` auto-configures the link-local
+  v6 address (EUI-64) but assigns **no IPv4** (no DHCP/admin client in boot),
+  so the host peer campaigns over v6 link-local only; the peer's echo verdict
+  is the authoritative on-wire proof. Guest PASS keys on the audit witnesses:
+  the driver's `netchan`-published beacon (`NET_DRV_READY`), the `devmgr`
+  `NETSTACK_BOUND` event, the `netstack` `DRIVER_BOUND` event, and a new
+  netstack "inbound echo served" audit (emitted from `run.rs::deliver` on an
+  `EchoRequestServed` engine event) — the latter gating exit so the guest
+  stays alive until a frame has crossed the two-process boundary and been
+  answered, avoiding a race with the peer verdict. The existing `netpeer` gains
+  a v6-link-local-only campaign mode (the guest has no v4).
+
+**Follow-up increments (not this change).**
+- **N4e-riscv64 / N4e-x86_64**: build the driver-autoload-into-user-process
+  production vertical on those arches (pioneering their autoload QEMU path),
+  then the same two-process netstack vertical.
+- **§18.5 scaffold removal** (once all three arches are two-process): delete the
+  `register` shell in `drivers/network/virtio_net` (keeping `BIND_KEYS` +
+  `VirtioNet`), `FixedSpawner`/`netstack_ping` in the support crate, and
+  `VirtioNet::wait_for_device_event` (its only consumer).
 
 ### N5 — TCP core: the RFC 9293 state machine, retransmission, flow control `[ ]`
 - Connection establishment/teardown (full state machine, simultaneous
