@@ -78,6 +78,9 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+mod channel;
+pub use channel::NetChannelServer;
+
 use core::convert::TryFrom;
 use rustos_abi::driver::net::{
     DeviceFacts, LinkState, MacAddress, Net, NetOffloads, MAC_ADDRESS_LEN,

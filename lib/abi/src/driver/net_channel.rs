@@ -367,6 +367,20 @@ const SERVICE_PAYLOAD_LEN: usize = 4 + 4 + 1;
 /// on refusal).
 pub const NET_CHANNEL_SERVICE_REPLY_LEN: usize = 4 + SERVICE_PAYLOAD_LEN;
 
+/// Largest reply any device-channel request produces: the [`Facts`] reply is
+/// the widest ([`NET_CHANNEL_FACTS_REPLY_LEN`]), ahead of the [`Service`]
+/// reply and the [`STATUS_REPLY_LEN`](crate::reply::STATUS_REPLY_LEN)-byte
+/// status the [`Attach`]/[`Detach`] operations answer. A fixed bound the
+/// driver's call endpoint and the stack's client both size their reply buffer
+/// to, so the endpoint's `max_reply` is one definition, never a per-site
+/// guess.
+///
+/// [`Facts`]: NetChannelRequest::Facts
+/// [`Service`]: NetChannelRequest::Service
+/// [`Attach`]: NetChannelRequest::Attach
+/// [`Detach`]: NetChannelRequest::Detach
+pub const NET_CHANNEL_MAX_REPLY: usize = NET_CHANNEL_FACTS_REPLY_LEN;
+
 /// Encode the driver's reply to [`NetChannelRequest::Service`]: `0` status
 /// and the report, or a `-errno` status and a zeroed payload.
 #[must_use]

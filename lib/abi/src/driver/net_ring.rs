@@ -61,12 +61,12 @@ impl RingGeometry {
     pub const MAX_SLOTS: u32 = 1024;
 
     /// Smallest slot capacity: the 68-byte IPv4 reassembly-floor MTU
-    /// plus the 14-byte Ethernet header.
-    pub const MIN_SLOT_CAPACITY: u32 = 68 + 14;
+    /// plus the Ethernet header.
+    pub const MIN_SLOT_CAPACITY: u32 = 68 + super::net::ETHERNET_HEADER_LEN;
 
     /// Largest slot capacity: the 65 535-byte MTU ceiling plus the
-    /// 14-byte Ethernet header.
-    pub const MAX_SLOT_CAPACITY: u32 = 65_535 + 14;
+    /// Ethernet header.
+    pub const MAX_SLOT_CAPACITY: u32 = 65_535 + super::net::ETHERNET_HEADER_LEN;
 
     /// Validate and build a geometry.
     ///

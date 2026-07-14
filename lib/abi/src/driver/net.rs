@@ -11,6 +11,13 @@ use crate::Errno;
 /// Length of an Ethernet MAC address.
 pub const MAC_ADDRESS_LEN: usize = 6;
 
+/// Octets an Ethernet II frame header occupies: destination MAC (6) +
+/// source MAC (6) + `EtherType` (2). This is the fixed link-layer overhead a
+/// link MTU excludes, so the largest frame a device moves is its MTU plus
+/// this header. Defined once here and reused wherever a frame size is
+/// derived from an MTU (the ring geometry bounds, the channel attach check).
+pub const ETHERNET_HEADER_LEN: u32 = 14;
+
 /// A 48-bit IEEE 802 link-layer address.
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]

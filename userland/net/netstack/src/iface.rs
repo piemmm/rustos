@@ -11,7 +11,7 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::driver::net::{DeviceFacts, LinkState, Net};
+use rustos_abi::driver::net::{DeviceFacts, LinkState};
 use rustos_abi::driver::net_ring::FrameRings;
 use rustos_abi::net_ipc::{
     validate_if_name, NetAddrFamily, NetAddrState, NetCountersReply, NetIfAddr, NetIfKind,
@@ -20,6 +20,8 @@ use rustos_abi::net_ipc::{
 use rustos_abi::{Duration64, Errno};
 use rustos_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
 use rustos_net::stack::{SendError, Stack, StackConfig, StackEvent};
+
+use crate::channel::FrameService;
 
 /// Frames produced for one or more interfaces, each batch tagged by the
 /// interface alias that emitted it, for the caller to queue onto that
@@ -411,10 +413,19 @@ impl Netstack {
             .collect()
     }
 
-    /// Pump one interface's frames through `driver` once: queue the
-    /// engine's due output into the TX ring, service the device, and
-    /// feed every delivered frame back through the engine (whose
-    /// replies are queued and flushed in the same pass).
+    /// Pump one interface's frames through the frame service `fs` once:
+    /// queue the engine's due output into the TX ring, doorbell the device,
+    /// and feed every delivered frame back through the engine (whose replies
+    /// are queued and flushed in the same pass).
+    ///
+    /// The pump is written once against the [`FrameService`] seam, so it
+    /// drives an in-process [`Net`] device
+    /// ([`LocalFrameService`](crate::LocalFrameService)) and a cross-process
+    /// driver ([`NetChannelClient`](crate::NetChannelClient)) identically:
+    /// the service owns the frame region and each doorbell is either a direct
+    /// `Net::service` or an `ipc_call` to the driver process. Ring bytes are
+    /// never touched across a doorbell, so the call boundary is the whole
+    /// synchronisation.
     ///
     /// Returns the typed [`StackEvent`]s the engine reported.
     ///
@@ -423,21 +434,24 @@ impl Netstack {
     /// * [`Errno::NotFound`] — no interface bears `name`.
     /// * [`Errno::DeviceFault`] — the driver failed.
     /// * [`Errno::BadMagic`] — the ring state is corrupt.
-    pub fn service_interface<N: Net>(
+    pub fn service_interface<F: FrameService>(
         &mut self,
         name: [u8; IF_NAME_LEN],
-        driver: &mut N,
-        rings: &mut FrameRings<'_>,
+        fs: &mut F,
         now: Duration64,
     ) -> Result<Vec<StackEvent>, Errno> {
         let index = self.find(name).ok_or(Errno::NotFound)?;
+        let geometry = fs.geometry();
+        let class = fs.class();
         // Size the reusable scratch to this ring's slot capacity once.
-        let slot_capacity = rings.rx.geometry().slot_capacity() as usize;
+        let slot_capacity = geometry.slot_capacity() as usize;
         if self.scratch.len() < slot_capacity {
             self.scratch.resize(slot_capacity, 0);
         }
         // Split borrow: the pump reads `scratch` while it drives one
-        // interface's engine.
+        // interface's engine. `fs` is a distinct object, borrowed only
+        // while a ring view is bound over its region (never across a
+        // doorbell).
         let Self {
             interfaces,
             scratch,
@@ -445,32 +459,39 @@ impl Netstack {
         let iface = &mut interfaces[index];
         let mut events = Vec::new();
 
-        // Timer-due engine output first (retransmits, DAD probes, RS).
+        // Timer-due engine output first (retransmits, DAD probes, RS),
+        // queued into the TX ring bound over the service's own region.
         let out = iface.stack.advance(now);
         events.extend(out.events);
-        queue_frames(rings, &out.frames);
-        driver.service(rings).map_err(driver_errno)?;
+        {
+            let mut rings = FrameRings::bind(fs.region_mut(), geometry, class)?;
+            queue_frames(&mut rings, &out.frames);
+        }
+        fs.service()?;
 
         // Feed delivered frames through the engine; its replies join
         // the TX ring. Bounded by the ring's slot count per pass — a
         // hostile flood cannot pin this loop.
         let mut replied = false;
-        loop {
-            match rings.rx.pop(scratch) {
-                Ok(Some(len)) => {
-                    let out = iface.stack.on_frame(&scratch[..len], now);
-                    events.extend(out.events);
-                    replied |= !out.frames.is_empty();
-                    queue_frames(rings, &out.frames);
+        {
+            let mut rings = FrameRings::bind(fs.region_mut(), geometry, class)?;
+            loop {
+                match rings.rx.pop(scratch) {
+                    Ok(Some(len)) => {
+                        let out = iface.stack.on_frame(&scratch[..len], now);
+                        events.extend(out.events);
+                        replied |= !out.frames.is_empty();
+                        queue_frames(&mut rings, &out.frames);
+                    }
+                    Ok(None) => break,
+                    // A corrupt slot was consumed; skip it and go on.
+                    Err(Errno::LengthOutOfRange) => {}
+                    Err(err) => return Err(err),
                 }
-                Ok(None) => break,
-                // A corrupt slot was consumed; skip it and go on.
-                Err(Errno::LengthOutOfRange) => {}
-                Err(err) => return Err(err),
             }
         }
         if replied {
-            driver.service(rings).map_err(driver_errno)?;
+            fs.service()?;
         }
         Ok(events)
     }
@@ -494,14 +515,6 @@ fn queue_frames(rings: &mut FrameRings<'_>, frames: &[Vec<u8>]) {
         if rings.tx.push(frame).is_err() {
             break;
         }
-    }
-}
-
-/// Map a driver refusal onto the service's `Errno` vocabulary.
-fn driver_errno(err: rustos_abi::DriverError) -> Errno {
-    match err {
-        rustos_abi::DriverError::BadMagic => Errno::BadMagic,
-        _ => Errno::DeviceFault,
     }
 }
 

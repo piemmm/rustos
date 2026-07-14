@@ -23,6 +23,7 @@ use rustos_log::{Event, EventId, Level, Sink};
 use rustos_net::addr::{IpAddr, Ipv4Addr};
 use rustos_net::stack::{Stack, StackConfig, StackEvent};
 
+use crate::channel::{FrameService, LocalFrameService};
 use crate::socket::{SocketService, MAX_SOCKETS_PER_PRINCIPAL};
 use crate::{serve, Caller, Netstack};
 
@@ -63,8 +64,20 @@ fn rings_region() -> Vec<u8> {
     vec![0u8; GEOMETRY.region_len()]
 }
 
-fn bind_rings(region: &mut [u8]) -> FrameRings<'_> {
-    FrameRings::bind(region, GEOMETRY, BufferClass::NonSensitive).expect("bind rings")
+/// Wrap a loopback [`PeerNet`] as the in-process [`LocalFrameService`] the
+/// pump drives.
+fn local_service(net: PeerNet, region: &mut [u8]) -> LocalFrameService<'_, PeerNet> {
+    LocalFrameService::new(net, region, GEOMETRY, BufferClass::NonSensitive).expect("frame service")
+}
+
+/// Queue engine output onto the service's TX ring before pumping, exactly
+/// as the service layer would.
+fn push_tx(fs: &mut LocalFrameService<'_, PeerNet>, frames: &[Vec<u8>]) {
+    let mut rings =
+        FrameRings::bind(fs.region_mut(), GEOMETRY, BufferClass::NonSensitive).expect("bind");
+    for frame in frames {
+        rings.tx.push(frame).expect("queue");
+    }
 }
 
 /// A loopback [`Net`] fake: the "device" is a full peer `Stack`, so a
@@ -205,9 +218,8 @@ fn loopback_v4_ping_round_trips_through_the_pump() {
     stack
         .addr_add(name("wan"), NetAddrFamily::V4, 24, v4_bytes(V4_A), t(1))
         .expect("addr add");
-    let mut peer = PeerNet::new(t(2));
     let mut region = rings_region();
-    let mut rings = bind_rings(&mut region);
+    let mut fs = local_service(PeerNet::new(t(2)), &mut region);
 
     // Queue an echo request; it parks on ARP resolution, so the
     // queued frame is the ARP request the pump must round-trip.
@@ -217,9 +229,7 @@ fn loopback_v4_ping_round_trips_through_the_pump() {
         .stack_mut()
         .send_echo_request(IpAddr::V4(V4_B), 0x77, 1, b"rustos-netstack", t(2))
         .expect("send echo");
-    for frame in &out.frames {
-        rings.tx.push(frame).expect("queue");
-    }
+    push_tx(&mut fs, &out.frames);
 
     // One pump settles the ARP exchange and the echo round-trip: the
     // peer answers inside the same service call.
@@ -227,7 +237,7 @@ fn loopback_v4_ping_round_trips_through_the_pump() {
     for _ in 0..4 {
         events.extend(
             stack
-                .service_interface(name("wan"), &mut peer, &mut rings, t(2))
+                .service_interface(name("wan"), &mut fs, t(2))
                 .expect("pump"),
         );
         if !events.is_empty() {
@@ -250,18 +260,17 @@ fn loopback_v4_ping_round_trips_through_the_pump() {
 #[test]
 fn loopback_v6_link_local_ping_round_trips_after_dad() {
     let mut stack = managed_stack();
-    let mut peer = PeerNet::new(t(0));
     let mut region = rings_region();
-    let mut rings = bind_rings(&mut region);
+    let mut fs = local_service(PeerNet::new(t(0)), &mut region);
 
     // Bring both link-local addresses through DAD: the pump at t0
     // exchanges the DAD probes, t1 confirms.
     let mut events = Vec::new();
     for step in 0..2 {
-        peer.now = t(step);
+        fs.net_mut().now = t(step);
         events.extend(
             stack
-                .service_interface(name("wan"), &mut peer, &mut rings, t(step))
+                .service_interface(name("wan"), &mut fs, t(step))
                 .expect("pump"),
         );
     }
@@ -269,7 +278,7 @@ fn loopback_v6_link_local_ping_round_trips_after_dad() {
     assert!(events.contains(&StackEvent::AddressPreferred { addr: ours }));
 
     // Ping the peer's link-local address.
-    peer.now = t(3);
+    fs.net_mut().now = t(3);
     let dest = link_local(IID_B);
     let out = stack
         .interface_mut(name("wan"))
@@ -277,14 +286,12 @@ fn loopback_v6_link_local_ping_round_trips_after_dad() {
         .stack_mut()
         .send_echo_request(IpAddr::V6(dest), 0x42, 7, b"ping6", t(3))
         .expect("send echo");
-    for frame in &out.frames {
-        rings.tx.push(frame).expect("queue");
-    }
+    push_tx(&mut fs, &out.frames);
     let mut events = Vec::new();
     for _ in 0..4 {
         events.extend(
             stack
-                .service_interface(name("wan"), &mut peer, &mut rings, t(3))
+                .service_interface(name("wan"), &mut fs, t(3))
                 .expect("pump"),
         );
         if !events.is_empty() {
@@ -1141,4 +1148,177 @@ fn local_group(addr: Ipv4Addr) -> SocketAddr {
         addr: bytes,
         port: 0,
     }
+}
+
+// --- NetChannelClient ↔ NetChannelServer round-trip -----------------
+//
+// The cross-process `netchan-v1` control plane, proven in-process: the
+// real `NetChannelClient` drives the real driver-side `NetChannelServer`
+// over a loopback transport. In production the client's region and the
+// driver's mapping alias one shm region; the host mock keeps a single
+// region owned by the server rig and treats it as that shared truth, so a
+// frame written on the stack side crosses the ring, through the device,
+// and back — exactly what the two-process QEMU vertical exercises over a
+// live kernel.
+
+use crate::channel::NetChannelClient;
+use alloc::rc::Rc;
+use rustos_abi::driver::net_channel::NetChannelRequest;
+use rustos_abi::PortName;
+use rustos_virtio_net::NetChannelServer;
+
+/// An echo device: every frame the stack queues on TX is handed straight
+/// back on RX, so one service call round-trips a raw frame through the
+/// driver-side rings.
+struct EchoNet;
+
+impl Net for EchoNet {
+    fn device_facts(&self) -> Result<DeviceFacts, DriverError> {
+        Ok(facts(MAC_B))
+    }
+
+    fn service(&mut self, rings: &mut FrameRings<'_>) -> Result<ServiceReport, DriverError> {
+        let mut report = ServiceReport::default();
+        let mut frame = vec![0u8; GEOMETRY.slot_capacity() as usize];
+        loop {
+            match rings.tx.pop(&mut frame) {
+                Ok(Some(len)) => {
+                    report.transmitted += 1;
+                    match rings.rx.push(&frame[..len]) {
+                        Ok(()) => report.received += 1,
+                        Err(Errno::NoSpace) => {
+                            report.rx_ring_full = true;
+                            break;
+                        }
+                        Err(_) => return Err(DriverError::BadMagic),
+                    }
+                }
+                Ok(None) => break,
+                Err(Errno::LengthOutOfRange) => {}
+                Err(_) => return Err(DriverError::BadMagic),
+            }
+        }
+        Ok(report)
+    }
+}
+
+/// The driver-side rig: the server plus its mapping of the shared frame
+/// region (the single source of truth the mock keeps coherent).
+struct ChannelRig {
+    server: NetChannelServer<EchoNet>,
+    region: Vec<u8>,
+}
+
+/// A loopback channel transport: each `ipc_call` decodes the request and
+/// runs one pass of the real `NetChannelServer` over the shared region,
+/// exactly as the driver process would on a doorbell.
+struct ChannelLoopback {
+    rig: Rc<RefCell<ChannelRig>>,
+}
+
+impl crate::channel::NetChannelTransport for ChannelLoopback {
+    fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
+        let req = NetChannelRequest::decode(request)?;
+        let mut rig = self.rig.borrow_mut();
+        match req {
+            NetChannelRequest::Facts => copy_reply(reply, &rig.server.facts_reply()),
+            NetChannelRequest::Attach(params) => copy_reply(reply, &rig.server.attach(params)),
+            NetChannelRequest::Service => {
+                let ChannelRig { server, region } = &mut *rig;
+                copy_reply(reply, &server.service_reply(region))
+            }
+            NetChannelRequest::Detach => copy_reply(reply, &rig.server.detach()),
+        }
+    }
+}
+
+/// Copy an encoded reply into the caller's buffer and return its length,
+/// failing closed if it cannot hold it — mirrors the kernel's `ipc_call`
+/// length check.
+fn copy_reply(reply: &mut [u8], out: &[u8]) -> Result<usize, Errno> {
+    if reply.len() < out.len() {
+        return Err(Errno::BufferTooSmall);
+    }
+    reply[..out.len()].copy_from_slice(out);
+    Ok(out.len())
+}
+
+#[test]
+fn net_channel_client_round_trips_a_frame_through_the_server() {
+    // The stack sizes the geometry from the facts; the echo device's MTU
+    // is the standard 1500 so `GEOMETRY` (1514-byte slots) fits.
+    let rig = Rc::new(RefCell::new(ChannelRig {
+        server: NetChannelServer::new(EchoNet),
+        region: rings_region(),
+    }));
+    let mut transport = ChannelLoopback {
+        rig: Rc::clone(&rig),
+    };
+
+    // Facts, then attach the region (the stack would `shm_grant` it; the
+    // grant handle is opaque to the mock).
+    let facts = NetChannelClient::query_facts(&mut transport).expect("facts");
+    assert_eq!(facts.mtu, 1500);
+    let mut view = rings_region();
+    let notify = PortName::from_ascii(b"netstack.nic0").expect("port");
+    let mut client = NetChannelClient::attach(
+        transport,
+        &mut view,
+        GEOMETRY,
+        BufferClass::NonSensitive,
+        0xC0FE,
+        notify,
+    )
+    .expect("attach");
+
+    // A frame written on the stack side (its mapping = the shared region)
+    // crosses to the device and echoes back.
+    {
+        let mut rig = rig.borrow_mut();
+        let mut rings =
+            FrameRings::bind(&mut rig.region, GEOMETRY, BufferClass::NonSensitive).expect("bind");
+        rings.tx.push(&[0xEE; 128]).expect("queue tx");
+    }
+    let report = client.service().expect("doorbell");
+    assert_eq!(report.transmitted, 1);
+    assert_eq!(report.received, 1);
+    {
+        let mut rig = rig.borrow_mut();
+        let mut rings =
+            FrameRings::bind(&mut rig.region, GEOMETRY, BufferClass::NonSensitive).expect("bind");
+        let mut out = vec![0u8; GEOMETRY.slot_capacity() as usize];
+        assert_eq!(rings.rx.pop(&mut out), Ok(Some(128)));
+        assert_eq!(&out[..128], &[0xEE; 128]);
+    }
+
+    client.detach().expect("detach");
+    assert!(!rig.borrow().server.is_attached());
+}
+
+#[test]
+fn net_channel_client_attach_rejects_a_short_region() {
+    let rig = Rc::new(RefCell::new(ChannelRig {
+        server: NetChannelServer::new(EchoNet),
+        region: rings_region(),
+    }));
+    let transport = ChannelLoopback {
+        rig: Rc::clone(&rig),
+    };
+    // A stack view a byte short of the agreed geometry is refused before
+    // any request is sent.
+    let mut short = vec![0u8; GEOMETRY.region_len() - 1];
+    let notify = PortName::from_ascii(b"netstack.nic0").expect("port");
+    assert_eq!(
+        NetChannelClient::attach(
+            transport,
+            &mut short,
+            GEOMETRY,
+            BufferClass::NonSensitive,
+            0xC0FE,
+            notify,
+        )
+        .err(),
+        Some(Errno::BufferTooSmall)
+    );
+    assert!(!rig.borrow().server.is_attached());
 }

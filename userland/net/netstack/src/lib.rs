@@ -28,11 +28,13 @@
 
 extern crate alloc;
 
+mod channel;
 pub mod events;
 mod iface;
 mod service;
 mod socket;
 
+pub use channel::{FrameService, LocalFrameService, NetChannelClient, NetChannelTransport};
 pub use iface::{FrameBatch, Interface, Netstack};
 pub use service::{serve, Caller};
 pub use socket::{

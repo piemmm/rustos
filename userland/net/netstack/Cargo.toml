@@ -59,3 +59,7 @@ rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 # seed/budget seam (one place picks the per-run seed and bounds the
 # smoke/soak loop). Test scaffolding only; never in a RustOS build.
 rustos-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
+# The driver-side `NetChannelServer` the host round-trip test drives the
+# `NetChannelClient` against, so the two halves of `netchan-v1` are proven
+# against the one shared server (§2.2). Test scaffolding only.
+rustos-virtio-net = { path = "../../../lib/virtio_net", version = "=0.0.0" }

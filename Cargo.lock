@@ -1632,6 +1632,7 @@ dependencies = [
  "rustos-log",
  "rustos-net",
  "rustos-rt",
+ "rustos-virtio-net",
 ]
 
 [[package]]
