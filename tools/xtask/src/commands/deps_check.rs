@@ -641,7 +641,11 @@ mod tests {
 
         for (driver, expected_lib) in [
             ("rustos-drv-storage-virtio-blk", "rustos-virtio"),
-            ("rustos-drv-network-virtio-net", "rustos-virtio"),
+            // The virtio-net driver shell consumes the bus-agnostic device
+            // engine from `lib/virtio_net` (hoisted there so a user-space
+            // driver process could link it, §17.4); the engine in turn
+            // consumes the protocol from `lib/virtio`.
+            ("rustos-drv-network-virtio-net", "rustos-virtio-net"),
             // The user-space virtio-input keyboard driver `rxe` builds its
             // bus-agnostic MMIO transport from `lib/virtio`, never the bus
             // driver crate (the `lib/usb` precedent).

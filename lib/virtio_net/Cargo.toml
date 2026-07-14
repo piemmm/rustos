@@ -1,0 +1,25 @@
+[package]
+name = "rustos-virtio-net"
+description = "RustOS arch-neutral, transport-agnostic virtio-net link-layer device logic over the bus-agnostic `lib/virtio` transport (§2.2, §6, §17.4 — plans/NETWORK.md N4d): the open/service frame-ring engine plus the `NetChannelServer` per-request handler both the user-space virtio-net driver process and the host tests compose, so neither the driver nor the harness re-implements it. no_std, fail-closed (§2.9)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The platform-neutral `Net`/`DeviceFacts`/`FrameRings` driver surface the
+# device speaks, the `net_channel` control-plane codecs the `NetChannelServer`
+# marshals, and the `BufferClass` / `DriverError` / `Errno` vocabulary it fails
+# closed with — one ABI definition (§2.2).
+rustos-abi = { path = "../abi", version = "=0.0.0" }
+# The bus-agnostic virtio split-virtqueue protocol (the `Transport` trait,
+# `SplitQueue`, DMA slabs, `VirtioHost`, and the `MockHost`/`MockTransport`
+# host doubles) the device-class logic is written against, so it consumes the
+# protocol without naming a concrete bus driver (`AGENTS.md` §17.4 —
+# `lib/* → lib/*` only).
+rustos-virtio = { path = "../virtio", version = "=0.0.0" }
+
+[lints]
+workspace = true

@@ -458,8 +458,7 @@ docs, and the full gate) because the whole was too large for one change:
   `CAP_NET` is **not** introduced here — a capability lands only with a
   live enforcement point and holder (§5.2), which is N4b. Docs:
   `docs/src/abi/net-sockets.md`.
-- **N4b — the socket service + client + multicast transmit `[~]`.**
-  Landed:
+- **N4b — the socket service + client + multicast transmit `[x]`.**
   - `CAP_NET` (`CapabilityId::NET` = 36) in `SESSION_BASELINE`, enforced
     in the `netstack` socket dispatcher before any state is touched;
   - `rustos_netstack::SocketService`: the origin (`ProcId`)-keyed socket
@@ -530,26 +529,64 @@ the [`net_ring`] frame region across that boundary:
 ### N4d — live driver-process wiring + two-process QEMU vertical `[ ]`
 
 Wire the N4c contract end to end so a real NIC's frames reach the running
-`netstack` process (the increment N4b's control plane waits on):
+`netstack` process (the increment N4b's control plane waits on). This is a
+**coupled** increment — the crate restructure, the driver process, the
+netstack client, and the QEMU verticals land together — so it is one change,
+not a chain of independently-shippable slices.
 
-- A standalone `virtio_net` **driver process** (`main.rs`, the framebuffer
-  driver-process precedent): `RtDriverHost::from_grants_query` for its
-  device resources, bind its device endpoint, and serve the N4c
-  `NetChannelRequest` loop — `shm_map` the granted region on `Attach`,
-  drive the existing `Net::service` on `Service`, `irq_wait` + emit
-  `NetChannelNotify` on receive. The device logic stays in the driver's
-  `lib` (`Net` impl); the process is thin glue.
-- `netstack`: an interface entry backed by a live `NetChannel` client —
-  `shm_create` the region, `Facts`→geometry→`Attach`, add the driver
-  endpoint reply-port and the `notify_port` to the wait set, pump
-  `Service` on TX-ready / timer / notify. Engine unchanged.
-- `devmgr` autobind: on a matched network node, spawn the driver process
-  and hand `netstack` the driver's endpoint (capability-gated,
-  fail-closed, audited).
-- Tests: the two-process QEMU vertical (netstack process + virtio_net
-  driver process + host peer) — UDP echo v4+v6 and multicast join +
-  receive — across the three arch verticals; host tests of the netstack
-  channel client + driver serve loop over an in-process seam fake.
+**Crate layout / layering (the load-bearing decision).** The driver
+**process** is a *new, separate* binary crate (the `drivers/input/virtio_kbd`
+↔ `lib/virtio_input` precedent): the kernel/test-kernel must not pull the
+userland `rustos-rt` `_start`/allocator into its graph, and §17.4 forbids a
+process crate depending on any `drivers/*` crate. Therefore the `VirtioNet`
+`Net` impl (today in the `drivers/network/virtio_net` **lib**, consumed only
+by the in-kernel-scaffold test verticals) must move to a `lib/*` device-logic
+crate — `lib/virtio_net`, the transport-vs-device split mirroring
+`lib/virtio` (transport) ↔ `lib/virtio_input` (device). The process crate
+then depends only on `lib/*` (`rustos-abi`, `rustos-caps`, `rustos-virtio`,
+`lib/virtio_net`, `rustos-drvrt`, `rustos-rt`). The in-kernel `register`
+scaffold in the `netstack_*` QEMU verticals is the §18.5 transitional defect
+this increment **removes**, replacing it with the two-process form.
+
+- **The driver process** (`main.rs`, freestanding-only + inert host stub;
+  build.rs sets the `freestanding` cfg off `target_os = "none"`, the
+  `virtio_kbd` pattern): `RtDriverHost::from_grants_query` +
+  `sole_register_window` + `MmioTransport::new` + `VirtioNet::open` for
+  bring-up, then bind its device *call* endpoint (`call_create`) and run a
+  wait-set loop over **two** sources — the call endpoint (the stack's
+  `Facts`/`Attach`/`Service`/`Detach` doorbells) and, after `Attach`, the
+  device IRQ (`irq_bind`/`irq_wait`). On an IRQ wake it `ipc_send`s a
+  `NetChannelNotify` to the stored `notify_port`; it never busy-polls. The
+  pure per-request handling is a host-testable `NetChannelServer` in
+  `lib/virtio_net`: `Facts` → `encode_facts_reply(net.device_facts())`;
+  `Attach` → validate + store `{geometry, class, notify_port}` (the caller
+  `shm_map`s `region_grant` and holds the mapped slice); `Service` →
+  `FrameRings::bind` over the held region + `net.service` →
+  `encode_service_reply`; `Detach` → clear + `shm_unmap`. Not-attached
+  `Service` fails closed (`encode_service_reply(Err(NotConnected))`).
+- **netstack** grows a live `NetChannel` **client** (host-testable over an
+  injected `ipc_call` seam so it stays pure): `shm_create` a region sized to
+  `RingGeometry::region_len` (geometry derived from the `Facts`
+  `DeviceFacts::mtu`), `shm_grant` it to the driver endpoint, `Attach`, then
+  add both the driver reply-endpoint and the `notify_port` to the service
+  wait set and pump `Service` on TX-ready / engine timer / notify. The engine
+  pump must **not** be duplicated: factor a `FrameService` seam
+  (`fn service(&mut self, rings) -> Result<ServiceReport, Errno>`) that both
+  an in-process `N: Net` and the remote `NetChannelClient` implement, and make
+  `Netstack::service_interface` generic over it (the one pump, §2.2). The
+  channel-backed interface's region is owned by the client and its
+  `FrameRings` view bound over it; `run.rs` adds the notify port to the
+  wait-set token map alongside the existing admin/socket endpoints.
+- **`devmgr` autobind**: on a matched network hardware-tree node, spawn the
+  driver process, then hand `netstack` the driver's endpoint through the
+  admin surface (capability-gated under `CAP_DRV_LOAD`/`CAP_NET_ADMIN`,
+  fail-closed, audited with a stable event id).
+- **Tests**: host tests of the `NetChannelServer` (dispatch + region bind +
+  fail-closed not-attached) and of the `NetChannelClient` ↔ server in-process
+  round-trip (a real frame crossing the ring + engine); the two-process QEMU
+  vertical (netstack process + virtio_net driver process + host peer) — UDP
+  echo v4+v6 and multicast join + receive — across the three arch verticals,
+  replacing the in-kernel `register` scaffold.
 
 ### N5 — TCP core: the RFC 9293 state machine, retransmission, flow control `[ ]`
 - Connection establishment/teardown (full state machine, simultaneous

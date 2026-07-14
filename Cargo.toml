@@ -88,6 +88,7 @@ members = [
     "lib/vcmailbox",
     "lib/virtio",
     "lib/virtio_input",
+    "lib/virtio_net",
     "lib/vt",
     "lib/window",
 
