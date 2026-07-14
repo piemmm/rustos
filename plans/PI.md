@@ -541,6 +541,22 @@ the `-smp 4` `kernel-arch-boot-aarch64` vertical (see
 the end-to-end spin-table release is an on-metal acceptance item (the
 same gap as P2/P3/P4); `cargo xtask cfg-check` stays clean.
 
+Secondaries are brought up **serialised behind a per-core online
+acknowledgement barrier** (`kernel_core::init::start_secondaries` +
+`smp::SecondaryDispatch::mark_online`): the boot CPU releases one
+secondary, waits (bounded via `monotonic_ns`, fail-loud `no_online_ack`)
+for it to publish the online edge from `run_secondary` — set only after
+that core has adopted the kernel translation regime and armed its per-CPU
+interrupt state — then releases the next, and only returns to spawn PID 1
+once all have checked in. This is a correctness requirement on real
+hardware: the last-released core must finish bring-up before the boot CPU
+mutates shared kernel state, or it faults mid-adopt (a cache/coherency
+hazard cacheless QEMU never shows, seen on metal as the highest dense id
+deterministically never coming online — present in the topology, zero
+context switches). Confirmed on Pi 4 hardware: with the barrier in
+place all four cores come online and the previously-dead highest dense
+id (core 3) now schedules work (non-zero context switches).
+
 ### P6 — Spawn `init` into EL0 on the Pi `[x]`
 
 The user-mode milestone is the first time the *production* kernel reaches
