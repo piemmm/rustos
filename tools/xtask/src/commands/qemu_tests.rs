@@ -3895,16 +3895,16 @@ const TESTS: &[QemuTest] = &[
     // kernel-side audit sink has seen `AuditEvent::InputDelivered` with
     // `kind=key` — an autoloaded *user-space* driver instance delivered.
     // Single CPU (PID 1, the unlock/store kthread, the autoloaded driver, and
-    // `devmgr` share the boot hart) and a 240-second budget cover boot +
-    // `/System` mount + autoload + driver bring-up + the injected key on QEMU
-    // TCG. This boot vertical is TCG-speed-bound and is confirmed on CI
-    // hardware (`plans/NETWORK.md` N4e-riscv64 validation note).
+    // `devmgr` share the boot hart). A 60-second budget matches the other
+    // boot-then-do-fixed-work verticals: boot + `/System` mount + autoload +
+    // driver bring-up + the injected key complete in a few seconds on QEMU
+    // TCG, with ample headroom.
     QemuTest {
         package: "rustos-test-autoload-input-qemu-riscv64",
         binary: "rustos-test-autoload-input-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
-        timeout: Duration::from_secs(240),
+        timeout: Duration::from_secs(60),
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
         ramfb: false,

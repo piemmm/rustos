@@ -92,6 +92,50 @@ fn rearm_restores_the_delivering_priority() {
     assert_eq!(controller.source_priority(8), 1);
 }
 
+/// Regression: `rearm` must make a *never-`arm`ed* source deliverable — the
+/// user-space `irq_wait` park path is the only thing that ever routes an
+/// autoloaded driver's line, so nothing calls the inherent `arm` first.
+/// Before the fix `rearm` forwarded to `unmask` (priority only), leaving the
+/// PLIC per-context enable bit clear, so the source never reached the S-mode
+/// context and the parked driver never woke (a deterministic timeout, not a
+/// TCG-speed limit). `rearm` on a fresh source must set both the enable bit
+/// and the delivering priority, exactly as the aarch64 GIC bridge's `rearm`
+/// routes + enables the SPI.
+#[test]
+fn rearm_enables_a_source_no_one_armed() {
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    let mock = MockPlicMmio::new(Arc::clone(&writes));
+    let controller =
+        PlicIrqController::new(PlicController::new(Plic::new(mock, s_mode_context(0)), 31));
+
+    // No `arm` — the source starts masked (priority 0) and disabled (enable
+    // bit clear), exactly the state a user-space-bound line is in when its
+    // driver first parks on `irq_wait`.
+    assert_eq!(controller.source_priority(8), 0);
+    let context = s_mode_context(0);
+    let enable_off = regs::enable_word(context, 8);
+    let enable_bit = regs::enable_bit(8);
+
+    IrqController::rearm(&controller, 8).expect("rearm");
+
+    // The delivering priority is restored *and* the source is enabled in this
+    // context's bitmap — without the enable bit the PLIC never forwards the
+    // interrupt.
+    assert_eq!(controller.source_priority(8), 1, "priority restored");
+    let enable_word = writes
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|&(off, val)| (off == enable_off).then_some(val))
+        .expect("rearm wrote the enable word");
+    assert_ne!(
+        enable_word & enable_bit,
+        0,
+        "rearm must set the source's per-context enable bit"
+    );
+}
+
 #[test]
 fn mask_rejects_out_of_range_source() {
     let writes = Arc::new(Mutex::new(Vec::new()));

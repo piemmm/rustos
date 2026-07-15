@@ -829,6 +829,20 @@ host-testable `PlicMmio` seam, the `plic_controller_passes_arch_hal_irq_conforma
 host test drives `irq::conformance::run_controller` (source 8 valid, 32
 out of range) and `run_entry` over a real `PlicController` on a mock MMIO.
 
+The downstream `kernel/irq` bridge (`PlicIrqController`) that
+`IrqTable::fire` and the `irq_wait` park path drive is deliberately *not*
+symmetric with the arch-HAL `mask`/`unmask` pair: its `mask` drops the
+source priority to zero (mask-before-wake), but its `rearm` calls the
+inherent `arm` (per-context **enable bit** + zero threshold + delivering
+priority), not the priority-only `unmask`. This is the direct analogue of
+the aarch64 GIC bridge's `rearm` (which routes + enables the SPI): the
+user-space `irq_wait` park path re-arms an autoloaded driver's line *on its
+behalf* (the driver holds no PLIC access), and on the PLIC "make deliverable"
+means enabling the source — nothing in-kernel `arm`s a user-space driver's
+line first, so a priority-only `unmask` would leave it enabled-never and its
+interrupt would never reach the S-mode context. `arm` is idempotent, so a
+re-arm of an already-enabled line is a plain pair of register writes.
+
 ## Timer programming (`Timer`)
 
 The riscv64 port implements the Arch HAL `Timer` slice (`AGENTS.md`

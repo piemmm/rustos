@@ -172,9 +172,12 @@ impl<M: PlicMmio> Plic<M> {
 
     /// Set `source`'s enable bit in this context's enable bitmap.
     ///
-    /// This is a read-modify-write of the shared enable word, called
-    /// only at line-arm time — before the S-mode external-interrupt
-    /// enable is set — so it never races the trap handler.
+    /// This is a read-modify-write of the shared enable word. The
+    /// external-interrupt trap handler never writes the enable bitmap
+    /// (it only claims/completes and drops the *priority* register to
+    /// mask), so this RMW never races a taken interrupt; concurrent
+    /// writers to the same 32-source word are serialised by the caller
+    /// (line-arm and the owner's re-arm are the only writers).
     pub fn enable_source(&self, source: u32) {
         let off = regs::enable_word(self.context, source);
         let word = self.mmio.read32(off) | regs::enable_bit(source);
@@ -256,9 +259,13 @@ impl<M: PlicMmio> PlicController<M> {
     /// context threshold to zero, and set the source priority so it can
     /// deliver. Idempotent.
     ///
-    /// Called from boot/line-setup context before S-mode external
-    /// interrupts are enabled, so the enable-bitmap read-modify-write
-    /// is uncontended.
+    /// Called both from boot/line-setup and from the `irq_wait` park
+    /// path's re-arm (the `kernel/irq` bridge forwards `rearm` here so a
+    /// user-space driver's line — which no in-kernel code ever `arm`ed —
+    /// is made deliverable on its behalf). The enable-bitmap
+    /// read-modify-write is safe against a taken interrupt because the
+    /// trap handler never writes the enable bitmap (see
+    /// [`Plic::enable_source`]).
     ///
     /// # Errors
     ///

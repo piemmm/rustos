@@ -39,10 +39,10 @@ use rustos_kernel_irq::{IrqController, MaskError};
 ///
 /// `mask` forwards to the inherent [`PlicController::mask`] (which drops the
 /// source priority to zero and emits a `SeqCst` fence — the mask-before-wake
-/// contract) and `rearm` forwards to [`PlicController::unmask`] (restoring the
-/// delivering priority so the next completion fires), each mapping the arch
-/// port's [`rustos_arch_riscv64::plic::PlicError`] onto
-/// [`MaskError::OutOfRange`].
+/// contract) and `rearm` forwards to [`PlicController::arm`] (enabling the
+/// source in this context's bitmap and restoring the delivering priority so
+/// the next completion fires), each mapping the arch port's
+/// [`rustos_arch_riscv64::plic::PlicError`] onto [`MaskError::OutOfRange`].
 pub struct PlicIrqController<M: PlicMmio>(PlicController<M>);
 
 impl<M: PlicMmio> PlicIrqController<M> {
@@ -73,11 +73,20 @@ impl<M: PlicMmio + Send + Sync> IrqController for PlicIrqController<M> {
         // `IrqTable::fire` masked the source (priority → 0) before the waiter
         // observed `ready` (mask-before-wake); the `irq_wait` / boot park path
         // re-arms it through here once the driver has drained the completion,
-        // restoring the source's delivering priority so the next device
-        // interrupt is taken. Idempotent: the enable bit is set once at `arm`,
-        // so this only rewrites the priority register. An out-of-range source
-        // fails closed without touching a register.
-        self.0.unmask(line).map_err(|_| MaskError::OutOfRange)
+        // so the next device interrupt is taken. This is the re-arm the
+        // user-space `irq_wait` park path drives on an interrupt-driven
+        // driver's behalf (the driver holds no PLIC access), the direct
+        // analogue of the aarch64 GIC bridge's `rearm` (which routes + enables
+        // the SPI): it must make the source *deliverable*, not merely restore
+        // its priority. On the PLIC that means both setting the source's
+        // per-context enable bit and restoring its delivering priority —
+        // `unmask` alone would leave a source that no in-kernel code ever
+        // `arm`ed (an autoloaded user-space driver's line) enabled-never, so
+        // the interrupt would never reach the S-mode context. `arm` does both
+        // and is idempotent, so re-arming an already-enabled line is a plain
+        // pair of register writes. An out-of-range source fails closed without
+        // touching a register.
+        self.0.arm(line).map_err(|_| MaskError::OutOfRange)
     }
 }
 

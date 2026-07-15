@@ -731,14 +731,22 @@ improvement, not test scaffolding):
   broken on a real boot. The fix (`riscv64/irq.rs::plic_routing` +
   `ensure_controller`, the one place the PLIC controller is built; wired into a
   `RiscvBinArch::irq_routing` that returns `max_line = riscv,ndev` + the shared
-  controller) is confirmed on a real guest boot: root-unlock now binds the
-  block line, `/System` mounts, the store scans 3 bundles, and the virtio-input
-  driver autoloads into its own process and arms its PLIC line (`irq_bind`) —
-  the whole autoload path works. What remains for riscv64: the final injected
-  key-delivery PASS of `autoload_input_qemu_riscv64` is TCG-bound (confirmed on
-  CI hardware, not a developer machine), then the two-process
-  `netstack_autoload_qemu_riscv64`. x86_64 then repeats the whole sequence over
-  its virtio-**PCI** bus (its `irq_routing` / IO-APIC path already exists).
+  controller) is confirmed on a real guest boot. Bringing the injected
+  key-delivery PASS home surfaced and fixed a **second** riscv64 defect: the
+  PLIC `IrqController` bridge's `rearm` forwarded to `unmask` (priority only),
+  never setting the source's per-context *enable* bit. In-kernel paths call
+  `arm` (which enables) explicitly, but the user-space driver path only ever
+  re-arms through the bridge — so an autoloaded driver's line was enabled-never
+  and its interrupt never reached S-mode. `PlicIrqController::rearm` now calls
+  the idempotent `arm` (enable + threshold + priority), matching the aarch64
+  GIC bridge's "route + enable on the driver's behalf" `rearm` contract.
+  `autoload_input_qemu_riscv64` now **passes end to end** (production boot →
+  `/System` mount → autoload → user-space driver bring-up → injected key →
+  `InputDelivered kind=key`) in a few seconds on TCG, budgeted at 60 s like the
+  other boot-then-fixed-work verticals. What remains for riscv64: the
+  two-process `netstack_autoload_qemu_riscv64`. x86_64 then repeats the whole
+  sequence over its virtio-**PCI** bus (its `irq_routing` / IO-APIC path
+  already exists).
 - **§18.5 scaffold removal** (once all three arches are two-process): delete the
   `register` shell in `drivers/network/virtio_net` (keeping `BIND_KEYS` +
   `VirtioNet`), `FixedSpawner`/`netstack_ping` in the support crate, and
