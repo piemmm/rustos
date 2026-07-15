@@ -59,6 +59,23 @@ impl Corners {
         if radius == 0 {
             return 255;
         }
+        // Only the four `radius`×`radius` corner squares can be less than
+        // fully opaque; every other pixel is deep inside the rounded
+        // rectangle. A pixel whose column is clear of both corner columns
+        // (`radius <= x < width - radius`), or whose row is clear of both
+        // corner rows, has a zero distance on that axis for every
+        // sub-sample, so its squared distance never exceeds `radius²` and
+        // it is fully covered. Returning 255 for those pixels directly is
+        // bit-for-bit identical to supersampling them, and keeps the
+        // corner-rounding cost proportional to the corner area rather than
+        // the whole surface — a large window rounds as cheaply as a small
+        // one. `radius` is clamped to half the shorter side above, so
+        // `width - radius >= radius` and the subtraction cannot wrap.
+        let in_corner_column = x < radius || x >= width - radius;
+        let in_corner_row = y < radius || y >= height - radius;
+        if !(in_corner_column && in_corner_row) {
+            return 255;
+        }
         coverage_supersampled(x, y, width, height, radius)
     }
 }
@@ -104,4 +121,41 @@ fn axis_distance(pos: u64, low: u64, high: u64) -> u64 {
     // The inset interval is non-empty (the radius is clamped to half
     // the side), so at most one term is non-zero.
     low.saturating_sub(pos) + pos.saturating_sub(high)
+}
+
+#[cfg(test)]
+mod interior_fast_path_tests {
+    use super::{coverage_supersampled, Corners};
+
+    /// The interior fast path in [`Corners::coverage`] is a pure
+    /// optimisation: it must produce the *exact* byte the full
+    /// supersampled scan would for every pixel of a surface, so the only
+    /// thing that changed is the cost, never a pixel. This locks that
+    /// invariant across sizes (including a large surface where the fast
+    /// path skips almost every pixel) and radii (including the
+    /// clamped-to-half degenerate case), so a future edit that breaks the
+    /// equivalence fails here rather than silently altering rounding.
+    #[test]
+    fn interior_fast_path_is_identical_to_full_supersampling() {
+        for &(width, height) in &[(1, 1), (2, 2), (17, 9), (40, 30), (256, 192)] {
+            for radius in [1u32, 2, 5, 8, 16, 64, 200] {
+                let corners = Corners::Rounded { radius };
+                let clamped = radius.min(width / 2).min(height / 2);
+                for y in 0..height {
+                    for x in 0..width {
+                        let got = corners.coverage(x, y, width, height);
+                        let want = if clamped == 0 {
+                            255
+                        } else {
+                            coverage_supersampled(x, y, width, height, clamped)
+                        };
+                        assert_eq!(
+                            got, want,
+                            "coverage mismatch at ({x},{y}) on {width}x{height} r={radius}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
