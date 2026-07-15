@@ -680,11 +680,23 @@ improvement, not test scaffolding):
   `hw_tree_read` / `hw_tree_wait` syscalls expose the riscv64 platform
   (root/memory/timer) inventory to user space. This is pure device-tree
   normalisation — no MMIO — so it is safe before the bootstrap-floor bus
-  bring-up. What remains for the arch's autoload tranche: enable `hwdiscovery`
-  (the virtio-MMIO `DeviceID` probe, which needs the virtio aperture mapped
-  and a riscv64 PLIC per-slot IRQ resolver — QEMU-validated), then the root
-  mount + unlock kthread + `devmgr` + `driver_spawn_loader` parity port, then
-  the two-process netstack vertical.
+  bring-up. Fourth foundation in place: **the riscv64 bootstrap-floor
+  virtio-MMIO `DeviceID` probe is now wired.** `boot_riscv64::seed_hardware_tree`
+  builds the MMIO bus from the discovered device tree
+  (`rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb`, mapped by the Sv39 identity
+  window `boot` enables) and calls the *same* arch-neutral
+  `hwdiscovery::observe_virtio_mmio_{block,input,network}_devices` observers
+  aarch64 uses (§2.2 / §2.21), so the served tree now carries the probed,
+  autoloadable Block/Input/Network nodes. The interrupt-driven input/network
+  nodes carry their discovered PLIC line, resolved by the arch port's pure
+  `rustos_arch_riscv64::fdt::plic_device_source` (reads a `virtio,mmio` node's
+  single `interrupts` cell — the QEMU `virt` PLIC is `#interrupt-cells = <1>`
+  — and bounds it against the discovered `riscv,ndev`; a discovered value,
+  never a board constant, host-tested). What remains for the arch's autoload
+  tranche: the root mount + unlock kthread + `devmgr` + `driver_spawn_loader`
+  parity port, then the two-process netstack vertical (both QEMU-validated on
+  CI hardware — the live-boot TCG verticals are too slow to confirm on a
+  developer machine).
 - **§18.5 scaffold removal** (once all three arches are two-process): delete the
   `register` shell in `drivers/network/virtio_net` (keeping `BIND_KEYS` +
   `VirtioNet`), `FixedSpawner`/`netstack_ping` in the support crate, and

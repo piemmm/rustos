@@ -883,11 +883,11 @@ pub fn try_boot(
     // Discover the platform hardware tree from the firmware device tree and
     // publish it to the authoritative `HW_TREE` the `hw_tree_read` /
     // `hw_tree_wait` syscalls read, so user space observes the same
-    // inventory the kernel discovered (Design D). Pure device-tree
-    // normalisation — no MMIO register access — so it is safe before the
-    // bootstrap-floor bus bring-up lands. It consumes the parsed `fdt`,
-    // which no later step needs.
-    seed_hardware_tree(fdt);
+    // inventory the kernel discovered (Design D). It also runs the
+    // bootstrap-floor virtio-MMIO `DeviceID` probe, so the served tree
+    // carries the autoloadable per-device Block/Input/Network nodes. It
+    // consumes the parsed `fdt`, which no later step needs.
+    seed_hardware_tree(fdt, dtb, log_sink);
 
     let arch = Arc::new(RiscvBinArch::new(
         RiscvArch::new(&STORAGE, BOOT_CPU, timebase_hz),
@@ -948,19 +948,92 @@ pub fn try_boot(
 /// `hw_tree_read` / `hw_tree_wait` syscalls read, so user space observes the
 /// same inventory the kernel discovered (Design D).
 ///
-/// Pure device-tree normalisation through the port's
-/// [`rustos_arch_riscv64::platform::FdtDiscovery`] — no MMIO register access
-/// — so it is safe before the bootstrap-floor bus bring-up that reads device
-/// `DeviceID` registers lands. A malformed tree yields an empty inventory
-/// (fail closed): a discovery error leaves the collecting sink empty and the
-/// syscalls report no devices rather than a boot failure. The buffered tree
-/// is leaked to `'static` (a one-shot boot publish, never a mutable global)
-/// so the inventory readers can borrow it for the kernel's lifetime.
-fn seed_hardware_tree(fdt: Fdt<'_>) {
+/// Two phases feed the one buffered tree:
+///
+/// 1. Device-tree normalisation through the port's
+///    [`rustos_arch_riscv64::platform::FdtDiscovery`] (root, memory, timer)
+///    — pure, no MMIO register access.
+/// 2. The bootstrap-floor virtio-MMIO `DeviceID` probe
+///    (`plans/NETWORK.md` N4e-riscv64): the raw `virtio,mmio` firmware nodes
+///    carry only their `compatible` string, which binds no driver — the
+///    virtio bind key is the device id read from the transport. The probe
+///    builds the MMIO bus from the same device tree
+///    ([`rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb`]) and reads each
+///    slot's `DeviceID` through the frozen bus seam, emitting the probed
+///    Block / Input / Network child nodes (`crate::hwdiscovery`) into the
+///    same sink. The interrupt-driven input/network nodes carry their
+///    discovered PLIC line, resolved by the arch port's
+///    [`rustos_arch_riscv64::fdt::plic_device_source`] — a discovered value,
+///    never a board constant.
+///
+/// The probe is safe here: [`boot`] enabled the Sv39 identity MMU before
+/// `try_boot`, so the `virt`-board virtio-MMIO aperture the device tree
+/// describes keeps its physical address and the side-effect-free `DeviceID`
+/// reads land on mapped Device memory. A board whose tree describes no
+/// `virtio,mmio` node (a bare SiFive part) makes `virtio_mmio_bus_from_dtb`
+/// return `NotFound`, so the probe is a no-op there — additive and
+/// metal-neutral.
+///
+/// Fail closed throughout: a malformed tree, a bus that cannot be built, or
+/// an over-full/erroring bus leaves whatever was already collected and seeds
+/// that, so the syscalls report the devices that *were* discovered rather
+/// than failing the boot. The buffered tree is leaked to `'static` (a
+/// one-shot boot publish, never a mutable global) so the inventory readers
+/// can borrow it for the kernel's lifetime.
+///
+/// # SAFETY-INVARIANT
+///
+/// `dtb` is the verbatim `a1` device-tree pointer OpenSBI handed the boot
+/// hart (as [`boot`]); it addresses the identity-mapped firmware blob that
+/// lives for the kernel's life, so the per-slot re-parse and the bus builder
+/// read valid, immutable bytes.
+fn seed_hardware_tree(fdt: Fdt<'_>, dtb: u64, log_sink: &'static (dyn Sink + Sync)) {
     use rustos_arch_api::PlatformDiscovery;
+    // The validated blob's own length, captured before the discovery walk
+    // consumes the `fdt` reader, so the virtio-MMIO probe below can reborrow
+    // the same firmware bytes the bus builder needs.
+    let total = fdt.total_size();
     let mut sink = crate::boot_hwtree::CollectingHwNodeSink::new();
     // A discovery error leaves the sink empty; seed whatever was collected.
     let _ = rustos_arch_riscv64::platform::FdtDiscovery::new(fdt).discover(&mut sink);
+
+    // Bootstrap-floor virtio-MMIO probe. Build the bus from the discovered
+    // device tree and enumerate each populated slot's probed identity.
+    //
+    // SAFETY: `dtb`/`total` bound the firmware blob validated by the
+    // `try_boot` `Fdt::from_ptr`; it is identity-mapped and immutable for
+    // the kernel's life, and the virtio-MMIO aperture it describes is
+    // identity-mapped Device memory the probe alone reads (side-effect-free
+    // `DeviceID` registers, MMU on — `boot` enabled it before `try_boot`).
+    let dtb_bytes = unsafe { core::slice::from_raw_parts(dtb as *const u8, total) };
+    if let Ok(bus) = unsafe { rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb(dtb_bytes) } {
+        // Resolve each virtio slot's PLIC source from the firmware tree
+        // (`plic_device_source` reads the node's single `interrupts` cell —
+        // a discovered value, never a board constant) so an emitted
+        // input/network node carries the interrupt line its interrupt-driven
+        // user-space driver parks on. The first `fdt` was consumed by the
+        // discovery walk above, so re-parse the validated blob per slot;
+        // there are only a handful of virtio slots, so the re-read is
+        // negligible boot cost.
+        //
+        // SAFETY: as above — `dtb` addresses the identity-mapped, immutable
+        // firmware blob and the MMU is on.
+        let slot_irq = |slot_base: u64| -> Option<u32> {
+            let fdt = unsafe { Fdt::from_ptr(dtb as *const u8) }.ok()?;
+            rustos_arch_riscv64::fdt::plic_device_source(&fdt, slot_base)
+        };
+        // Each probe reads `bus` sequentially, so the immutable borrows do
+        // not overlap. An enumeration error leaves the affected nodes
+        // undiscovered rather than aborting the boot (fail closed).
+        let _ = crate::hwdiscovery::observe_virtio_mmio_block_devices(&bus, &mut sink);
+        let _ = crate::hwdiscovery::observe_virtio_mmio_input_devices(
+            &bus, &slot_irq, &mut sink, log_sink,
+        );
+        let _ = crate::hwdiscovery::observe_virtio_mmio_network_devices(
+            &bus, &slot_irq, &mut sink, log_sink,
+        );
+    }
+
     crate::hwtree_store::HW_TREE.seed(sink.leak());
 }
 

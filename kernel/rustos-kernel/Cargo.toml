@@ -254,6 +254,15 @@ rustos-drv-bus-virtio = { path = "../../drivers/bus/virtio", version = "=0.0.0" 
 # reader (`rustos_arch_riscv64::fdt`), so no `lib/fdt` dep is added here.
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 rustos-arch-riscv64 = { path = "../arch/riscv64", version = "=0.0.0" }
+# The virtio-MMIO bus builder the riscv64 boot path's bootstrap-floor
+# discovery probe reads each `virtio,mmio` slot's `DeviceID` through
+# (`plans/NETWORK.md` N4e-riscv64): `virtio_mmio_bus_from_dtb` builds the
+# bus from the discovered device tree, and `hwdiscovery::observe_*` emit
+# the probed Block/Input/Network nodes into the seeded hardware tree. The
+# kernel binary (`Layer::Tooling`) is the permitted point to name
+# driver-bus crates (`AGENTS.md` §17.4 / §8), exactly as the aarch64 and
+# x86_64 boot paths name their bus crates.
+rustos-drv-bus-mmio = { path = "../../drivers/bus/mmio", version = "=0.0.0" }
 
 [build-dependencies]
 # The aarch64 build script embeds the `init` `Run` rxe so the boot path can

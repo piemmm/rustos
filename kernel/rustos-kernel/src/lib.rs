@@ -158,10 +158,11 @@ pub mod root_storage;
 // driver-signing trust anchor in with it — an architecture whose boot path
 // builds a hardware tree reuses these observers without linking the
 // catalogue. Bus injected through the frozen `lib/abi` seams, so this names
-// no concrete `drivers/bus/*` type; host-tested on the CI host. Gated, like
-// `root_storage` (its aarch64 boot-path consumer), on the two instruction
-// sets whose boot tree assembly compiles today.
-#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
+// no concrete `drivers/bus/*` type; host-tested on the CI host. Gated on
+// the three instruction sets whose boot path assembles a hardware tree and
+// runs the bootstrap-floor virtio-MMIO probe (x86_64, aarch64, and the
+// riscv64 `virt`-board discovery, `plans/NETWORK.md` N4e-riscv64).
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
 pub mod hwdiscovery;
 
 // The reserved synthetic hardware-tree node-id address space: one shared,
@@ -169,9 +170,10 @@ pub mod hwdiscovery;
 // virtio-MMIO probes (`hwdiscovery`) and the boot-display shim
 // (`boot_display`) mint their nodes from, plus the compile-time guard that a
 // probe walk never overruns its region. Pure `lib/abi`/`kernel/virtio`
-// constants, so it is host-tested on the CI host and gated, like its two
-// consumers, on the instruction sets whose boot path assembles the tree.
-#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
+// constants, so it is host-tested on the CI host and gated, like its
+// `hwdiscovery` consumer, on the three instruction sets whose boot path
+// assembles the tree and runs the virtio-MMIO probe.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
 pub mod hwtree_node_ids;
 
 // The boot-display publication step (`plans/DISPLAY.md` D7d): turns the

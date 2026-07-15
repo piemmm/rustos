@@ -141,6 +141,68 @@ pub fn virt_like(base: u64, size: u64, timebase: u32) -> Vec<u8> {
     b.build()
 }
 
+/// A QEMU-`virt`-shaped riscv64 tree with a PLIC and one or more
+/// `virtio_mmio` slots, for exercising the riscv64 bootstrap-floor
+/// virtio-MMIO discovery + PLIC interrupt-line decode.
+///
+/// Extends [`virt_like`] with a `plic` node carrying `riscv,ndev` (the
+/// PLIC source count) and one `virtio_mmio@<base>` node per entry of
+/// `slots`, each `(mmio_base, plic_irq)`: a two-cell `reg` of `<base
+/// 0x1000>` and a single-cell `interrupts` of `plic_irq` — the shape the
+/// QEMU `virt` board produces (`#interrupt-cells = <1>` on the PLIC, so a
+/// device names its PLIC source directly). A `plic_irq` of `0` emits the
+/// PLIC "no source" sentinel, so a test can assert a slot with no routable
+/// line is rejected fail-closed.
+#[must_use]
+pub fn virt_like_with_virtio(
+    base: u64,
+    size: u64,
+    timebase: u32,
+    ndev: u32,
+    slots: &[(u64, u32)],
+) -> Vec<u8> {
+    let mut b = DtbBuilder::new();
+    b.begin_node("");
+    b.prop_u32("#address-cells", 2);
+    b.prop_u32("#size-cells", 2);
+
+    b.begin_node("cpus");
+    b.prop_u32("#address-cells", 1);
+    b.prop_u32("#size-cells", 0);
+    b.prop_u32("timebase-frequency", timebase);
+    b.end_node();
+
+    b.begin_node("memory@80000000");
+    b.prop("device_type", b"memory\0");
+    let mut reg = Vec::new();
+    reg.extend_from_slice(&base.to_be_bytes());
+    reg.extend_from_slice(&size.to_be_bytes());
+    b.prop("reg", &reg);
+    b.end_node();
+
+    // PLIC (`plic@c000000` on the real `virt` board). The interrupt-line
+    // decode reads its `riscv,ndev` to bound a device's source.
+    b.begin_node("plic@c000000");
+    b.prop_str("compatible", "riscv,plic0");
+    b.prop_u32("#interrupt-cells", 1);
+    b.prop_u32("riscv,ndev", ndev);
+    b.end_node();
+
+    for (mmio_base, plic_irq) in slots {
+        b.begin_node(&alloc::format!("virtio_mmio@{mmio_base:x}"));
+        b.prop_str("compatible", "virtio,mmio");
+        let mut vreg = Vec::new();
+        vreg.extend_from_slice(&mmio_base.to_be_bytes());
+        vreg.extend_from_slice(&0x1000u64.to_be_bytes());
+        b.prop("reg", &vreg);
+        b.prop_u32("interrupts", *plic_irq);
+        b.end_node();
+    }
+
+    b.end_node();
+    b.build()
+}
+
 /// An aarch64 tree carrying a `/cpus` node whose `cpu@*` children declare
 /// per-core `reg` (the `MPIDR_EL1` affinity) and an optional
 /// `capacity-dmips-mhz` rating, plus the usual `/memory` node.
