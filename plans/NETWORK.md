@@ -660,7 +660,20 @@ improvement, not test scaffolding):
   from now live in one shared, disjoint-by-construction, compile-time-guarded
   map (`kernel/rustos-kernel/src/hwtree_node_ids.rs`) — a new arch's NIC-probe
   region is claimed as the next index there, never a fresh literal, so the
-  base-collision class that bit N4e-β cannot recur.
+  base-collision class that bit N4e-β cannot recur. Second foundation in
+  place: the pure virtio-MMIO discovery observers
+  (`observe_virtio_mmio_{block,input,network}_devices` + the shared
+  interrupt-class core) now live in the arch-neutral
+  `kernel/rustos-kernel/src/hwdiscovery` module, split out of `root_storage`
+  (which retains only the drvhost-linked root-block *catalogue resolution*).
+  Because `hwdiscovery` injects the enumerated bus through the frozen
+  `lib/abi` seams and links no `driver_catalog` / `drvhost`, a riscv64 /
+  x86_64 boot path reuses the *same* observers without pulling the
+  driver-signing trust anchor onto those arches — so the arch discovery
+  wiring is a thin caller (an injected `FdtDiscovery` + a per-slot arch IRQ
+  resolver), not a copy of the walk (§2.2 / §2.21). The module is gated
+  x86_64+aarch64 today; enabling it for riscv64 is the first step of that
+  arch's tranche.
 - **§18.5 scaffold removal** (once all three arches are two-process): delete the
   `register` shell in `drivers/network/virtio_net` (keeping `BIND_KEYS` +
   `VirtioNet`), `FixedSpawner`/`netstack_ping` in the support crate, and

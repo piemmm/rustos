@@ -1109,7 +1109,7 @@ fn audit_root_storage_binding(
     if let Ok(bus) = probe {
         // A bus enumeration error (an over-full or malformed bus) leaves the
         // root unbound rather than aborting the boot.
-        let _ = crate::root_storage::observe_virtio_mmio_block_devices(&bus, &mut sink);
+        let _ = crate::hwdiscovery::observe_virtio_mmio_block_devices(&bus, &mut sink);
         // Bootstrap-floor virtio-MMIO input discovery: probe each slot's `DeviceID` for a virtio-input device and
         // emit a user-space-autoloadable `Input` node carrying its register
         // window as a grant request into the same buffered tree, so the
@@ -1123,7 +1123,7 @@ fn audit_root_storage_binding(
         // (`device_spi` decodes the node's `interrupts` specifier — a
         // discovered value, never a board constant) so the emitted node carries the IRQ line its interrupt-driven
         // user-space driver parks on.
-        let _ = crate::root_storage::observe_virtio_mmio_input_devices(
+        let _ = crate::hwdiscovery::observe_virtio_mmio_input_devices(
             &bus,
             &|slot_base| {
                 // Re-parse the validated blob per slot: the first `fdt` was
@@ -1152,7 +1152,7 @@ fn audit_root_storage_binding(
         // (a discovered value, never a board constant); a sequential
         // immutable read of `bus`, a no-op on the Pi tree, and fail-closed on
         // any enumeration error, exactly like the input probe.
-        let _ = crate::root_storage::observe_virtio_mmio_network_devices(
+        let _ = crate::hwdiscovery::observe_virtio_mmio_network_devices(
             &bus,
             &|slot_base| {
                 // SAFETY: as the input probe's closure above — `dtb` bounds

@@ -3868,7 +3868,7 @@ table, so a new board is match **data**, not new code. Sub-increments
         - **virtio-input hardware-tree discovery — done (host-proven).** The
           bootstrap-floor virtio-MMIO enumeration now also discovers
           **user-space-autoloadable input devices**:
-          `root_storage::observe_virtio_mmio_input_devices` probes each
+          `hwdiscovery::observe_virtio_mmio_input_devices` probes each
           `virtio,mmio` slot's `DeviceID` for virtio-input
           (`VIRTIO_INPUT_DEVICE_ID = 18`) and emits a discovered
           `HwDeviceClass::Input` node keyed by `HwMatchKey::virtio(18)` and

@@ -1128,7 +1128,7 @@ order (one fully-gated increment each):
              `notify`, and `fence(Acquire)` after reading used.idx. Doc:
              `docs/src/drivers/virtio.md` "Virtqueue memory ordering";
            - **virtio-input hardware-tree discovery — done:**
-             `root_storage::observe_virtio_mmio_input_devices` probes each
+             `hwdiscovery::observe_virtio_mmio_input_devices` probes each
              `virtio,mmio` slot for virtio-input (id 18) and emits a discovered
              `HwDeviceClass::Input` node carrying its register window
              (`HwResource::mmio(base, len)`, the extent from the new
@@ -2675,7 +2675,7 @@ added to the file-map verticals.
   (§18.3 / §18.6) — read-only, fail-closed (no block device → unbound; >1 →
   ambiguous), so the metal boot is unaffected. A device behind a probed bus
   is enumerated too: the bootstrap-floor virtio-MMIO enumeration
-  (`root_storage::observe_virtio_mmio_block_devices`) reads each
+  (`hwdiscovery::observe_virtio_mmio_block_devices`) reads each
   `virtio,mmio` slot's `DeviceID` and folds a probed `HwMatchKey::virtio(2)`
   child node into the same selection, so the QEMU `virt` boot binds its
   virtio-blk root (a no-op on the Pi, which has no `virtio,mmio` node, §2.17).

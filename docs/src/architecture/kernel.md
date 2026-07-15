@@ -332,7 +332,7 @@ disk, whose bind key is the virtio device id read from the transport, not a
 `compatible` string — appears only after a bus enumeration attaches the
 probed child node (§18.2). On the QEMU `virt` board the boot path closes
 that gap with a **bootstrap-floor virtio-MMIO enumeration**
-(`rustos_kernel::root_storage::observe_virtio_mmio_block_devices`): it reads
+(`rustos_kernel::hwdiscovery::observe_virtio_mmio_block_devices`): it reads
 each `virtio,mmio` slot's `DeviceID` through the MMIO bus driver and folds a
 probed virtio-block child node (keyed by the genuine probed device id, never
 a fabricated key) into the same selection, so a discovered virtio-blk root
@@ -347,7 +347,7 @@ nothing — so it changes no boot behaviour beyond the audit record and the
 metal-confirmed boot is unaffected (§2.17).
 
 The same `virtio,mmio` enumeration also discovers **user-space-autoloadable
-input devices** (`rustos_kernel::root_storage::observe_virtio_mmio_input_devices`,
+input devices** (`rustos_kernel::hwdiscovery::observe_virtio_mmio_input_devices`,
 §18.2 / §18.3). A virtio keyboard/pointer is driven entirely from user space
 (§4 — drivers in user space), so unlike the in-kernel bootstrap-floor block
 path (whose bring-up re-derives the slot window from the device tree by

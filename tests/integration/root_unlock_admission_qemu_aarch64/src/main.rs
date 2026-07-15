@@ -22,7 +22,7 @@
 //! `boot_aarch64::boot` verbatim. The production path then:
 //!
 //! 1. **Discovers + binds the root.** The bootstrap-floor virtio-MMIO bus
-//!    enumeration (`root_storage::observe_virtio_mmio_block_devices`,
+//!    enumeration (`hwdiscovery::observe_virtio_mmio_block_devices`,
 //!    driven from `boot::audit_root_storage_binding`) probes the populated
 //!    slot's `DeviceID`, attaches the probed virtio-block child node, binds
 //!    the virtio-blk driver, and stashes the binding for the init seam.

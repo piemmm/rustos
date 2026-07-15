@@ -156,7 +156,7 @@ rustos-fsprobe = { path = "../../lib/fsprobe", version = "=0.0.0" }
 rustos-drv-storage-virtio-blk = { path = "../../drivers/storage/virtio_blk", version = "=0.0.0" }
 rustos-drv-storage-emmc2 = { path = "../../drivers/storage/emmc2", version = "=0.0.0" }
 # The canonical virtio-input device id (`VIRTIO_INPUT_DEVICE_ID = 18`) the
-# bootstrap-floor discovery walk (`root_storage::observe_virtio_mmio_input_devices`)
+# bootstrap-floor discovery walk (`hwdiscovery::observe_virtio_mmio_input_devices`)
 # matches a probed `virtio,mmio` slot's `DeviceID` against to emit a
 # user-space-autoloadable input node — the single source of truth the
 # `drivers/input/virtio_*` bind tables are also built from (`AGENTS.md`
@@ -164,7 +164,7 @@ rustos-drv-storage-emmc2 = { path = "../../drivers/storage/emmc2", version = "=0
 # the CI host.
 rustos-virtio-input = { path = "../../lib/virtio_input", version = "=0.0.0" }
 # The canonical virtio-net device id (`VIRTIO_NET_DEVICE_ID = 1`) the
-# bootstrap-floor discovery walk (`root_storage::observe_virtio_mmio_network_devices`)
+# bootstrap-floor discovery walk (`hwdiscovery::observe_virtio_mmio_network_devices`)
 # matches a probed `virtio,mmio` slot's `DeviceID` against to emit a
 # user-space-autoloadable network node — the single source of truth the
 # `drivers/network/virtio_net` bind table is also built from (`AGENTS.md`

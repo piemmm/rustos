@@ -3346,7 +3346,7 @@ const TESTS: &[QemuTest] = &[
     // device — but, unlike `root_unlock_login` (which drives the unlock
     // *policy* directly), it proves the *kthread admission* path: the
     // bootstrap-floor virtio-MMIO bus enumeration
-    // (`root_storage::observe_virtio_mmio_block_devices`) probes the slot
+    // (`hwdiscovery::observe_virtio_mmio_block_devices`) probes the slot
     // and binds the virtio-blk root, the init seam admits the in-kernel
     // unlock kthread (`unlock_service::spawn_if_present`), and the kthread
     // brings the device up over the production device-IRQ path, prompts at

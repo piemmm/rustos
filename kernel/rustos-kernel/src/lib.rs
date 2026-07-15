@@ -150,9 +150,23 @@ pub mod driver_loader;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
 pub mod root_storage;
 
+// The arch-neutral virtio-MMIO hardware-discovery observers: the pure
+// walks that probe an enumerated virtio-MMIO bus and emit each populated
+// block / input / network slot as a discovered `HwNode`. Kept apart from
+// `root_storage`'s root-block catalogue resolution (which links
+// `driver_catalog` / `drvhost`) so discovering hardware never drags the
+// driver-signing trust anchor in with it — an architecture whose boot path
+// builds a hardware tree reuses these observers without linking the
+// catalogue. Bus injected through the frozen `lib/abi` seams, so this names
+// no concrete `drivers/bus/*` type; host-tested on the CI host. Gated, like
+// `root_storage` (its aarch64 boot-path consumer), on the two instruction
+// sets whose boot tree assembly compiles today.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
+pub mod hwdiscovery;
+
 // The reserved synthetic hardware-tree node-id address space: one shared,
 // disjoint-by-construction home for the high node-id bases the bootstrap-floor
-// virtio-MMIO probes (`root_storage`) and the boot-display shim
+// virtio-MMIO probes (`hwdiscovery`) and the boot-display shim
 // (`boot_display`) mint their nodes from, plus the compile-time guard that a
 // probe walk never overruns its region. Pure `lib/abi`/`kernel/virtio`
 // constants, so it is host-tested on the CI host and gated, like its two
@@ -461,6 +475,13 @@ mod build_support;
 // once here rather than copy-pasted into each test module. Compiled only under `cargo test`.
 #[cfg(test)]
 mod test_support;
+
+// Shared host-test fake virtio-MMIO bus (`FakeBus`): the enumeration stand-in
+// both the `hwdiscovery` observer tests and the `root_storage` root-block
+// resolution tests drive, defined once here rather than copy-pasted into each
+// test module. Compiled only under `cargo test`.
+#[cfg(test)]
+mod discovery_test_bus;
 
 pub use kalloc::FreeListAllocator;
 

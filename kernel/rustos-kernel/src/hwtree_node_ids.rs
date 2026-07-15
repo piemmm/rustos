@@ -3,7 +3,7 @@
 //! Several boot-path steps mint [`HwNode`] ids that are *not* the firmware
 //! discovery ids (`platform::FdtDiscovery` numbers those from `1` upward).
 //! Each such step — every bootstrap-floor virtio-MMIO class probe
-//! ([`crate::root_storage`]) and the boot-display publication shim
+//! ([`crate::hwdiscovery`]) and the boot-display publication shim
 //! ([`crate::boot_display`]) — numbers its emitted nodes from a distinct
 //! high base so their ids stay obviously disjoint: two nodes discovered on
 //! the same bus must never share an id, or one would silently overwrite the
@@ -46,12 +46,12 @@ pub const fn region(index: u32) -> u32 {
 }
 
 /// First synthetic id for a probed virtio-MMIO **block** child node
-/// ([`crate::root_storage::observe_virtio_mmio_block_devices`]). One id per
+/// ([`crate::hwdiscovery::observe_virtio_mmio_block_devices`]). One id per
 /// enumerated block slot, so distinct disks stay distinct.
 pub const VIRTIO_BLOCK_PROBE_NODE_BASE_ID: u32 = region(0);
 
 /// First synthetic id for a probed virtio-MMIO **input** child node
-/// ([`crate::root_storage::observe_virtio_mmio_input_devices`]). One id per
+/// ([`crate::hwdiscovery::observe_virtio_mmio_input_devices`]). One id per
 /// enumerated input slot, so distinct devices stay distinct.
 pub const VIRTIO_INPUT_PROBE_NODE_BASE_ID: u32 = region(1);
 
@@ -61,7 +61,7 @@ pub const VIRTIO_INPUT_PROBE_NODE_BASE_ID: u32 = region(1);
 pub const BOOT_DISPLAY_NODE_ID: u32 = region(2);
 
 /// First synthetic id for a probed virtio-MMIO **network** child node
-/// ([`crate::root_storage::observe_virtio_mmio_network_devices`]). One id
+/// ([`crate::hwdiscovery::observe_virtio_mmio_network_devices`]). One id
 /// per enumerated network slot, so distinct NICs stay distinct.
 pub const VIRTIO_NET_PROBE_NODE_BASE_ID: u32 = region(3);
 
