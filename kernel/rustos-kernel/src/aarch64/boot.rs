@@ -62,7 +62,7 @@ use rustos_arch_aarch64::{
     console, enable_fp_el1, exceptions, fdt, gic, halt_current_cpu, platform, serial, smp,
     syscall_entry, uart_init, video, Aarch64Arch, SERIAL_SINK,
 };
-use rustos_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery, SchedulerArch};
+use rustos_arch_api::{PlatformDiscovery, SchedulerArch};
 use rustos_fdt::Fdt;
 use rustos_kernel_core::{kernel_main, BootInfo};
 use rustos_kernel_sched_api::SchedulerConfig;
@@ -1017,31 +1017,6 @@ extern "C" fn production_secondary_entry(cpu: u32) -> ! {
     halt_current_cpu()
 }
 
-/// A discovery sink that **buffers** the whole discovered hardware tree.
-///
-/// The boot path now needs the full tree, not just the root binding: the
-/// in-kernel unlock kthread autoloads user-space drivers by matching every
-/// discovered node against the signed driver store once the root is mounted, so the input-device node — not only the
-/// block disk — must survive to the init seam. Because the tree must be
-/// buffered for that anyway, the boot path builds it **once** here and
-/// resolves the root binding from the same buffer
-/// ([`crate::root_storage::resolve_root_block_driver`]),
-/// rather than maintaining a second streaming accumulator.
-///
-/// The buffer is a **growable** `Vec`, never a fixed-capacity array, so a
-/// larger machine's richer tree is never silently truncated (no fixed-size tree buffer to outgrow); a node always fits, so
-/// `emit` never fails.
-struct DiscoveredTreeSink {
-    nodes: Vec<HwNode>,
-}
-
-impl HwNodeSink for DiscoveredTreeSink {
-    fn emit(&mut self, node: HwNode) -> Result<(), DiscoveryError> {
-        self.nodes.push(node);
-        Ok(())
-    }
-}
-
 /// Resolve and audit which discovered storage node binds the bootstrap
 /// root block driver.
 ///
@@ -1080,7 +1055,7 @@ fn audit_root_storage_binding(
     // the reader, so the virtio-MMIO probe below can reborrow the same
     // firmware bytes the bus builder needs.
     let total = fdt.total_size();
-    let mut sink = DiscoveredTreeSink { nodes: Vec::new() };
+    let mut sink = crate::boot_hwtree::CollectingHwNodeSink::new();
     if platform::FdtDiscovery::new(fdt)
         .discover(&mut sink)
         .is_err()
@@ -1170,7 +1145,7 @@ fn audit_root_storage_binding(
     // display node (`plans/DISPLAY.md` D7d), into the same buffered tree the
     // block and input probes feed, so the pre-unlock autoload matches the
     // user-space display service against it. A degenerate mode is skipped
-    // fail-closed inside the observer, and `DiscoveredTreeSink` never fills,
+    // fail-closed inside the observer, and the collecting sink never fills,
     // so the emit cannot fail — the discard mirrors the observers above.
     if let Some(video) = video {
         let _ = crate::boot_display::observe_boot_display(
@@ -1190,7 +1165,7 @@ fn audit_root_storage_binding(
     // unlock kthread can match every discovered node against the signed
     // driver store during autoload. The tree
     // outlives the boot frame and lives for the running kernel's lifetime.
-    let tree: &'static [HwNode] = Box::leak(sink.nodes.into_boxed_slice());
+    let tree: &'static [HwNode] = sink.leak();
 
     // Resolve + audit the root binding from the same buffered tree, then
     // stash both (with the firmware DTB pointer) for the init seam, where the

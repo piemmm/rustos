@@ -671,9 +671,20 @@ improvement, not test scaffolding):
   x86_64 boot path reuses the *same* observers without pulling the
   driver-signing trust anchor onto those arches — so the arch discovery
   wiring is a thin caller (an injected `FdtDiscovery` + a per-slot arch IRQ
-  resolver), not a copy of the walk (§2.2 / §2.21). The module is gated
-  x86_64+aarch64 today; enabling it for riscv64 is the first step of that
-  arch's tranche.
+  resolver), not a copy of the walk (§2.2 / §2.21).
+  Third foundation in place: the riscv64 boot path now **seeds the hardware
+  tree**. `boot_riscv64::try_boot` runs the port's `FdtDiscovery` into the
+  shared `kernel/rustos-kernel/src/boot_hwtree.rs` `CollectingHwNodeSink`
+  (the one growable boot-tree sink, extracted from the aarch64 boot path so
+  neither copies it, §2.2) and publishes it to `HW_TREE`, so the
+  `hw_tree_read` / `hw_tree_wait` syscalls expose the riscv64 platform
+  (root/memory/timer) inventory to user space. This is pure device-tree
+  normalisation — no MMIO — so it is safe before the bootstrap-floor bus
+  bring-up. What remains for the arch's autoload tranche: enable `hwdiscovery`
+  (the virtio-MMIO `DeviceID` probe, which needs the virtio aperture mapped
+  and a riscv64 PLIC per-slot IRQ resolver — QEMU-validated), then the root
+  mount + unlock kthread + `devmgr` + `driver_spawn_loader` parity port, then
+  the two-process netstack vertical.
 - **§18.5 scaffold removal** (once all three arches are two-process): delete the
   `register` shell in `drivers/network/virtio_net` (keeping `BIND_KEYS` +
   `VirtioNet`), `FixedSpawner`/`netstack_ping` in the support crate, and

@@ -754,6 +754,20 @@ window as a capability-gated (`CAP_MMIO_MAP`) resource, and a `Timer`
 node. It is host-tested against the shared DTB fixture and exercised by
 the port's `passes_arch_hal_conformance_suite`.
 
+The boot pipeline publishes that discovered tree to user space: after it
+extracts the timer rate, memory map, and CPU name, `try_boot` runs
+`FdtDiscovery` into the shared `rustos_kernel::boot_hwtree::CollectingHwNodeSink`
+(the one growable collection sink the aarch64 boot path also uses, §2.2)
+and seeds the authoritative `HW_TREE` the `hw_tree_read` / `hw_tree_wait`
+syscalls read. This is **pure device-tree normalisation — no MMIO register
+access** — so it is safe before any bootstrap-floor bus bring-up: a
+malformed tree seeds an empty inventory (fail closed), never a boot
+failure. The bootstrap-floor virtio-MMIO `DeviceID` probe (which reads
+device MMIO to publish per-device autoloadable `Block`/`Input`/`Network`
+nodes) and the driver-autoload-into-user-process path are the staged next
+step for the port (`plans/NETWORK.md` N4e-riscv64); until they land the
+riscv64 tree carries the platform (root/memory/timer) nodes only.
+
 ## Per-CPU storage (`tp`)
 
 The riscv64 port implements the Arch HAL `PerCpu` slice (`AGENTS.md`

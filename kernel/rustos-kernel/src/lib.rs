@@ -199,6 +199,18 @@ pub mod boot_display;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
 pub mod hwtree_store;
 
+// The arch-neutral boot-time hardware-tree collection sink: the growable
+// `HwNodeSink` every architecture whose boot path builds a hardware tree
+// collects discovered `HwNode`s into before publishing them to `HW_TREE`,
+// defined once so the trivial collect-into-`Vec` logic cannot diverge
+// between the aarch64 and riscv64 boot paths. Pure `alloc`/`lib/abi` glue
+// over the frozen `PlatformDiscovery` seam. Consumed by the aarch64 and
+// riscv64 boot paths that seed the tree; gated, like `hwtree_store` it
+// feeds, on the three instruction sets whose kernel compiles, so it is
+// host-tested on the CI host (x86_64).
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
+pub mod boot_hwtree;
+
 // The kernel block-device sharing layer (Design D, D2a —
 // `.junie/next-pi-prompt.md`): wraps the one brought-up bootstrap-floor
 // block device behind a `lib/sync` lock so it can back two concurrent

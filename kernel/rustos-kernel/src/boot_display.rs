@@ -103,7 +103,7 @@ mod tests {
     use rustos_abi::HwResourceKind;
 
     /// A sink buffering every emitted node, mirroring the boot path's
-    /// `DiscoveredTreeSink`.
+    /// `boot_hwtree::CollectingHwNodeSink`.
     #[derive(Default)]
     struct CollectingSink {
         nodes: Vec<HwNode>,

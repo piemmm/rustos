@@ -879,6 +879,16 @@ pub fn try_boot(
         .boot_cpu_compatible()
         .and_then(rustos_arch_riscv64::cpuname::name_for_compatible)
         .and_then(rustos_abi::CpuName::new);
+
+    // Discover the platform hardware tree from the firmware device tree and
+    // publish it to the authoritative `HW_TREE` the `hw_tree_read` /
+    // `hw_tree_wait` syscalls read, so user space observes the same
+    // inventory the kernel discovered (Design D). Pure device-tree
+    // normalisation — no MMIO register access — so it is safe before the
+    // bootstrap-floor bus bring-up lands. It consumes the parsed `fdt`,
+    // which no later step needs.
+    seed_hardware_tree(fdt);
+
     let arch = Arc::new(RiscvBinArch::new(
         RiscvArch::new(&STORAGE, BOOT_CPU, timebase_hz),
         cpu_name,
@@ -931,6 +941,27 @@ pub fn try_boot(
         .validate()
         .map_err(|_| BootError::BootInfoInvalid)?;
     Ok(boot_info)
+}
+
+/// Discover the platform hardware tree from the firmware `fdt` and publish
+/// it to the authoritative [`crate::hwtree_store::HW_TREE`] the
+/// `hw_tree_read` / `hw_tree_wait` syscalls read, so user space observes the
+/// same inventory the kernel discovered (Design D).
+///
+/// Pure device-tree normalisation through the port's
+/// [`rustos_arch_riscv64::platform::FdtDiscovery`] — no MMIO register access
+/// — so it is safe before the bootstrap-floor bus bring-up that reads device
+/// `DeviceID` registers lands. A malformed tree yields an empty inventory
+/// (fail closed): a discovery error leaves the collecting sink empty and the
+/// syscalls report no devices rather than a boot failure. The buffered tree
+/// is leaked to `'static` (a one-shot boot publish, never a mutable global)
+/// so the inventory readers can borrow it for the kernel's lifetime.
+fn seed_hardware_tree(fdt: Fdt<'_>) {
+    use rustos_arch_api::PlatformDiscovery;
+    let mut sink = crate::boot_hwtree::CollectingHwNodeSink::new();
+    // A discovery error leaves the sink empty; seed whatever was collected.
+    let _ = rustos_arch_riscv64::platform::FdtDiscovery::new(fdt).discover(&mut sink);
+    crate::hwtree_store::HW_TREE.seed(sink.leak());
 }
 
 /// Round `value` up to the next multiple of `align` (a power of two).
