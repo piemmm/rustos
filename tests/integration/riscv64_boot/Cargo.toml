@@ -14,15 +14,6 @@ workspace = true
 [lib]
 path = "src/lib.rs"
 
-# Host + every target: the `IrqController` bridge over the arch port's
-# `plic::PlicController`. It is host-buildable so the mask-before-wake
-# regression test runs under `cargo test` (the arch port itself owns no
-# `kernel/irq` dependency — `AGENTS.md` §17.2).
-[dependencies]
-rustos-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
-rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
-rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
-
 # Freestanding (`virt`-board) only: the boot wrapper delegates to the
 # production riscv64 boot pipeline in `rustos-kernel` (so there is one
 # riscv64 boot orchestration, `AGENTS.md` §2.2) and publishes the

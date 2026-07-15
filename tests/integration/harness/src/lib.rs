@@ -31,6 +31,13 @@
 
 pub mod elf2rxe;
 
+/// The freestanding cross-compile target vocabulary (`PieArch`): the one
+/// definition of each Tier-1 target's Rust triple and its
+/// `CARGO_TARGET_<triple>_RUSTFLAGS` variable, shared by the `tools/xtask`
+/// image pipeline and the autoload-root fixture's build script so the arch
+/// selection cannot drift between them.
+pub mod pie;
+
 /// Dep-info-driven `cargo:rerun-if-changed` emission for build scripts that
 /// run an inner `cargo build` and embed its output: freshness is derived
 /// from the compiler's own dep-info record, never a hand-kept source list

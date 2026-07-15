@@ -1,12 +1,12 @@
-//! Host unit test for [`PlicIrqController`] (tests in
-//! their own file).
+//! Host unit tests for [`PlicIrqController`] (tests in their own file).
 //!
 //! Pins the mask-before-wake contract end to end: driving
-//! [`rustos_kernel_irq::IrqTable::fire`] through the bridge must mask
-//! the PLIC source (priority → 0) before `fire` returns `Marked`, i.e.
-//! before any waiter can observe `ready = true`. The arch port owns no
-//! `kernel/irq` dependency, so this contract is pinned here, where the
-//! `IrqController` bridge lives.
+//! [`rustos_kernel_irq::IrqTable::fire`] through the bridge must mask the PLIC
+//! source (priority → 0) before `fire` returns `Marked`, i.e. before any
+//! waiter can observe `ready = true`; and `rearm` must restore the delivering
+//! priority so the next completion fires. The arch port owns no `kernel/irq`
+//! dependency, so this contract is pinned here, where the `IrqController`
+//! bridge lives.
 
 use super::*;
 
@@ -18,11 +18,11 @@ use rustos_arch_riscv64::plic::{regs, s_mode_context, Plic, PlicController, Plic
 use rustos_kernel_irq::{FireOutcome, IrqController, IrqTable};
 use rustos_kernel_sec::captable::TaskId;
 
-/// In-memory PLIC register file. Serves the last value written to a
-/// register on a subsequent read and records every write in order
-/// through a shared log so the test can assert the write sequence
-/// (`PlicController`'s fields are private to the arch crate, so the log
-/// is the only seam into the write ordering).
+/// In-memory PLIC register file. Serves the last value written to a register
+/// on a subsequent read and records every write in order through a shared log
+/// so the test can assert the write sequence (`PlicController`'s fields are
+/// private to the arch crate, so the log is the only seam into the write
+/// ordering).
 struct MockPlicMmio {
     cells: Mutex<HashMap<usize, u32>>,
     writes: Arc<Mutex<Vec<(usize, u32)>>>,
@@ -75,6 +75,24 @@ fn mask_before_wake_through_irq_table() {
 }
 
 #[test]
+fn rearm_restores_the_delivering_priority() {
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    let mock = MockPlicMmio::new(Arc::clone(&writes));
+    let controller =
+        PlicIrqController::new(PlicController::new(Plic::new(mock, s_mode_context(0)), 31));
+
+    // Arm then mask (as `IrqTable::fire` does), leaving the source masked.
+    controller.arm(8).expect("arm");
+    IrqController::mask(&controller, 8).expect("mask");
+    assert_eq!(controller.source_priority(8), 0);
+
+    // The park path re-arms the drained line through `IrqController::rearm`,
+    // restoring its delivering priority so the next completion fires.
+    IrqController::rearm(&controller, 8).expect("rearm");
+    assert_eq!(controller.source_priority(8), 1);
+}
+
+#[test]
 fn mask_rejects_out_of_range_source() {
     let writes = Arc::new(Mutex::new(Vec::new()));
     let mock = MockPlicMmio::new(writes);
@@ -84,4 +102,7 @@ fn mask_rejects_out_of_range_source() {
     // `MaskError::OutOfRange` through the bridge.
     assert!(IrqController::mask(&controller, 0).is_err());
     assert!(IrqController::mask(&controller, 16).is_err());
+    // The same range check guards `rearm`.
+    assert!(IrqController::rearm(&controller, 0).is_err());
+    assert!(IrqController::rearm(&controller, 16).is_err());
 }

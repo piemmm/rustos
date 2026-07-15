@@ -43,6 +43,7 @@ use rustos_abi::{CapabilityId, DriverBindKey, DriverKind};
 use rustos_itest_harness::dep_info::emit_dep_info_reruns;
 use rustos_itest_harness::driver_image::build_signed_driver_image;
 use rustos_itest_harness::elf2rxe::elf_to_rxe;
+use rustos_itest_harness::pie::PieArch;
 use rustos_itest_harness::USER_IMAGE_BIAS;
 
 /// The single source of the kernel's driver-signing seed:
@@ -54,9 +55,6 @@ use rustos_itest_harness::USER_IMAGE_BIAS;
 #[allow(dead_code)]
 #[path = "../../../kernel/rustos-kernel/src/build_support.rs"]
 mod build_support;
-
-/// Rust target triple of the freestanding aarch64 driver build.
-const AARCH64_TARGET: &str = "aarch64-unknown-none";
 
 /// One driver to build, sign, and embed.
 struct PlantedDriver {
@@ -189,6 +187,12 @@ fn build_and_convert_driver(
     driver_dir: &str,
     package: &str,
 ) -> Vec<u8> {
+    // The fixture's bytes are host-produced and target-independent, so the
+    // planted bundles are always the aarch64 driver images the `-M virt`
+    // vertical boots; the arch selection is the one shared definition, never
+    // a triple spelled by hand here.
+    let arch = PieArch::Aarch64;
+    let triple = arch.target_triple();
     let run_ld = format!("{driver_dir}/Run.ld");
     let target_dir = format!("{out_dir}/{package}-target");
 
@@ -219,7 +223,7 @@ fn build_and_convert_driver(
         .env_remove("RUSTC_WRAPPER")
         .env_remove("RUSTC_WORKSPACE_WRAPPER")
         .env(
-            "CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS",
+            arch.rustflags_env_var(),
             format!("-C relocation-model=pie -C link-arg=-pie -C link-arg=-T{run_ld}"),
         )
         .args([
@@ -227,7 +231,7 @@ fn build_and_convert_driver(
             "-p",
             package,
             "--target",
-            AARCH64_TARGET,
+            triple,
             "-Z",
             "build-std=core,compiler_builtins,alloc",
             "--target-dir",
@@ -237,7 +241,7 @@ fn build_and_convert_driver(
         .unwrap_or_else(|e| panic!("spawn cargo to build {package}: {e}"));
     assert!(status.success(), "building {package} failed");
 
-    let elf_path = format!("{target_dir}/{AARCH64_TARGET}/debug/{package}");
+    let elf_path = format!("{target_dir}/{triple}/debug/{package}");
     let elf = fs::read(&elf_path).unwrap_or_else(|e| panic!("read {elf_path}: {e}"));
 
     // Register every source the inner build consumed — the driver's own

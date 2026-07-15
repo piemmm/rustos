@@ -116,7 +116,12 @@ const KTHREAD_ARENA_IDENTITY_LIMIT: u64 = 4 << 30;
 /// fork. Identity mapping makes physical == virtual,
 /// so the device-bring-up verticals that read MMIO/DMA at physical
 /// addresses keep working under the paged regime.
-const IDENTITY_GIGABYTES: usize = 512;
+///
+/// `pub(crate)` so the root-unlock bring-up ([`crate::riscv64::root_unlock`])
+/// sizes its device physical map ([`rustos_kernel_mem::DirectPhysMap`]) to the
+/// same identity extent the live boot MMU maps, rather than repeating the
+/// figure (one definition).
+pub(crate) const IDENTITY_GIGABYTES: usize = 512;
 
 /// Boot-time page-table frame source for the Sv39 identity map.
 ///
@@ -306,7 +311,7 @@ impl KernelArch for RiscvBinArch {
         }
     }
 
-    fn install_irq_dispatch(&self, _table: &'static rustos_kernel_irq::IrqTable) {
+    fn install_irq_dispatch(&self, table: &'static rustos_kernel_irq::IrqTable) {
         // Set up tickless supervisor-timer preemption now that the
         // scheduler is up (P-1b, `plans/PI.md` D2b-2b-A): register the
         // per-hart preempt storage, install the U-mode-preemption
@@ -317,10 +322,24 @@ impl KernelArch for RiscvBinArch {
         // `RiscvArch::set_preemption`) and disarms otherwise, so a hart
         // running a sole task takes no timer ticks. The kernel keeps
         // `sstatus.SIE == 0`, so a tick is *taken* only while a U-mode task
-        // runs (the privilege rule U < S). `_table` is unused here — the
-        // riscv64 production boot wires no PLIC external-IRQ dispatch in
-        // this slice (the default no-op).
+        // runs (the privilege rule U < S).
         arm_preemption(self.arch.timebase_hz());
+        // Wire the S-mode external-interrupt (PLIC) dispatch on top: publish
+        // this table, build + publish the PLIC controller from the base +
+        // source count discovered from the firmware tree at boot
+        // (`seed_hardware_tree` → `irq::record_plic`), install the
+        // claim → `IrqTable::fire` → complete dispatcher, and enable
+        // `sie.SEIE` so the interrupt-driven bootstrap-floor bring-up (the
+        // root-unlock virtio-blk completion line, an autoloaded driver's
+        // device line) can be taken. Additive: every source stays masked at
+        // the controller until a driver arms its own line, and `sstatus.SIE`
+        // is toggled by the dispatch loop, so this changes no behaviour until
+        // the first line is armed. A board with no PLIC leaves the dispatch
+        // unwired and interrupt-driven bring-up fails closed.
+        #[cfg(all(freestanding, kernel_isa = "riscv64"))]
+        crate::riscv64::irq::install_dispatch(table);
+        #[cfg(not(all(freestanding, kernel_isa = "riscv64")))]
+        let _ = table;
     }
 
     fn direct_phys_map(&self) -> Option<&'static (dyn rustos_kernel_mem::PhysMap + Sync)> {
@@ -886,8 +905,22 @@ pub fn try_boot(
     // inventory the kernel discovered (Design D). It also runs the
     // bootstrap-floor virtio-MMIO `DeviceID` probe, so the served tree
     // carries the autoloadable per-device Block/Input/Network nodes. It
-    // consumes the parsed `fdt`, which no later step needs.
-    seed_hardware_tree(fdt, dtb, log_sink);
+    // consumes the parsed `fdt`, which no later step needs. Returns the
+    // leaked `'static` tree so the root-storage bind resolution below can
+    // borrow the same nodes.
+    let tree = seed_hardware_tree(fdt, dtb, log_sink);
+
+    // Resolve + audit which discovered node carries the bootstrap root block
+    // device, and which floor block driver binds it, through the same shared
+    // `lib/devmatch` policy the user-space `devmgr` uses, then stash the
+    // binding (with the firmware DTB pointer and the tree) for the init seam
+    // where the in-kernel root-unlock kthread reads it once
+    // (`plans/NETWORK.md` N4e-riscv64, the aarch64 buffered-tree analogue). A
+    // `None` binding (no/ambiguous disk) leaves the unlock a no-op and `login`
+    // fails closed; the tree is still stashed so an input driver can still
+    // autoload once the store is reachable.
+    let binding = crate::root_storage::resolve_root_block_driver(tree, log_sink);
+    crate::unlock_service::record_boot(binding, dtb, tree);
 
     let arch = Arc::new(RiscvBinArch::new(
         RiscvArch::new(&STORAGE, BOOT_CPU, timebase_hz),
@@ -936,7 +969,36 @@ pub fn try_boot(
     // `hw_tree_read` / `hw_tree_wait` syscalls read the one authoritative
     // `HW_TREE`, so the user-space device manager observes the same
     // inventory the kernel discovered (Design D).
-    .with_hw_tree(&crate::hwtree_store::HW_TREE_SOURCE);
+    .with_hw_tree(&crate::hwtree_store::HW_TREE_SOURCE)
+    // Install the on-disk application store (`plans/APPS.md` deliverable 8):
+    // this port embeds no program rows, so every command app and service is
+    // spawned from its verified `/System` store bundle. The storage bring-up
+    // resolves the store's readiness latch on every outcome (mount installed
+    // or given up), so a spawn racing the mount parks and always wakes.
+    .with_app_store(&crate::app_store::APP_STORE)
+    // Hand the syscall dispatch hook the shared set-once credential cell: the
+    // in-kernel root-unlock kthread publishes the mounted root volume's
+    // database into it once the operator's passphrase unlocks the encrypted
+    // root. Until that install the cell fails every `users_db_read` closed, so
+    // login refuses every attempt until a root is mounted.
+    .with_users_db(&crate::root_mount::LATE_USERS_DB)
+    .with_users_admin(&crate::root_mount::LATE_USERS_ADMIN)
+    // Serve the `fs_*` syscalls through the production filesystem service: it
+    // routes each operation through the secured VFS against the late-installed
+    // read-only `/System` mount. The cell fails closed until the disk-owning
+    // task publishes the `/System` window (`system_mount::install_system_mount`),
+    // so wiring the hook here changes no boot behaviour until that install
+    // lands.
+    .with_filesystem(&crate::system_mount::FS_SERVICE)
+    // Resolve `id::<volume-id>/…` paths against the volume forest the
+    // mount/unlock tasks publish each mounted volume's stable identity into
+    // (`plans/DEVICES.md` D3a). Fails closed `NotFound` until a volume is
+    // published, so wiring it here changes no boot behaviour.
+    .with_volumes(&crate::system_mount::VOLUME_FOREST)
+    // Delegate runtime volume attach/detach (`plans/DEVICES.md` D3b) to the
+    // production service; it fails closed `NotImplemented` until the mount
+    // task wires its audit sink and pressure gauge.
+    .with_volume_service(&crate::volume_service::VOLUME_SERVICE);
     boot_info
         .validate()
         .map_err(|_| BootError::BootInfoInvalid)?;
@@ -987,12 +1049,28 @@ pub fn try_boot(
 /// hart (as [`boot`]); it addresses the identity-mapped firmware blob that
 /// lives for the kernel's life, so the per-slot re-parse and the bus builder
 /// read valid, immutable bytes.
-fn seed_hardware_tree(fdt: Fdt<'_>, dtb: u64, log_sink: &'static (dyn Sink + Sync)) {
+fn seed_hardware_tree(
+    fdt: Fdt<'_>,
+    dtb: u64,
+    log_sink: &'static (dyn Sink + Sync),
+) -> &'static [rustos_abi::HwNode] {
     use rustos_arch_api::PlatformDiscovery;
     // The validated blob's own length, captured before the discovery walk
     // consumes the `fdt` reader, so the virtio-MMIO probe below can reborrow
     // the same firmware bytes the bus builder needs.
     let total = fdt.total_size();
+    // Record the PLIC register base + `riscv,ndev` source count for the
+    // external-interrupt dispatch install (`irq::install_dispatch`, run later
+    // in the kernel-core `Irq` phase, which has no device tree). Read before
+    // the discovery walk consumes the `fdt` reader; a board with no PLIC
+    // leaves both `None`, so nothing is recorded and the dispatch install
+    // wires no external IRQ (interrupt-driven bring-up then fails closed).
+    if let (Some(base), Some(ndev)) = (
+        rustos_arch_riscv64::fdt::plic_base(&fdt),
+        rustos_arch_riscv64::fdt::plic_ndev(&fdt),
+    ) {
+        crate::riscv64::irq::record_plic(base, ndev);
+    }
     let mut sink = crate::boot_hwtree::CollectingHwNodeSink::new();
     // A discovery error leaves the sink empty; seed whatever was collected.
     let _ = rustos_arch_riscv64::platform::FdtDiscovery::new(fdt).discover(&mut sink);
@@ -1034,7 +1112,12 @@ fn seed_hardware_tree(fdt: Fdt<'_>, dtb: u64, log_sink: &'static (dyn Sink + Syn
         );
     }
 
-    crate::hwtree_store::HW_TREE.seed(sink.leak());
+    // Leak the buffered tree to `'static` (a one-shot boot publish, never a
+    // mutable global) so the `hw_tree_read` / `hw_tree_wait` syscalls and the
+    // root-storage bind resolution can borrow it for the kernel's lifetime.
+    let tree: &'static [rustos_abi::HwNode] = sink.leak();
+    crate::hwtree_store::HW_TREE.seed(tree);
+    tree
 }
 
 /// Round `value` up to the next multiple of `align` (a power of two).

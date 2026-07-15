@@ -186,6 +186,13 @@ pub fn virt_like_with_virtio(
     b.prop_str("compatible", "riscv,plic0");
     b.prop_u32("#interrupt-cells", 1);
     b.prop_u32("riscv,ndev", ndev);
+    // A two-cell `<base size>` reg matching the node's unit address, as the
+    // real `virt` board declares it, so the PLIC-base resolver has an address
+    // to read.
+    let mut plic_reg = Vec::new();
+    plic_reg.extend_from_slice(&0x0c00_0000u64.to_be_bytes());
+    plic_reg.extend_from_slice(&0x0060_0000u64.to_be_bytes());
+    b.prop("reg", &plic_reg);
     b.end_node();
 
     for (mmio_base, plic_irq) in slots {

@@ -23,6 +23,7 @@
 use rustos_abi::{CapabilityId, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};
 use rustos_itest_harness::driver_image::build_signed_driver_image;
 use rustos_itest_harness::elf2rxe::elf_to_rxe;
+use rustos_itest_harness::pie::PieArch;
 use rustos_itest_harness::USER_IMAGE_BIAS;
 
 use super::pie_build::cross_compile_pie_elf;
@@ -128,7 +129,14 @@ fn build_bundle(
     };
     // A driver crate's `Run` binary shares the package name.
     let crate_dir = ctx.workspace_root.join(rel_dir);
-    let elf = cross_compile_pie_elf(ctx, "image-drivers", package, package, &crate_dir)?;
+    let elf = cross_compile_pie_elf(
+        ctx,
+        PieArch::Aarch64,
+        "image-drivers",
+        package,
+        package,
+        &crate_dir,
+    )?;
     let rxe = elf_to_rxe(
         &elf,
         &rustos_kernel_syscall::SYSCALL_TABLE_HASH,

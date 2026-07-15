@@ -702,17 +702,23 @@ improvement, not test scaffolding):
   driver was compiled into the x86_64 image (and would have been in riscv64's)
   — and lets the riscv64 autoload tranche join the drvhost-gated catalogue
   with a virtio-blk-only floor, never dragging a foreign-silicon driver into
-  its image (host tests + all-three-arch builds green). What remains for the
-  arch's autoload tranche, in order: (1) **extract the arch-neutral
-  autoload/unlock orchestration** out of `aarch64/root_unlock.rs::finish_unlock`
-  into a shared module both arches call over injected console/IRQ/block-unlock/
-  `DriverProcessSpawn` seams (§2.21/§2.2), rewiring aarch64 in the same change;
-  (2) the riscv64 root mount + unlock kthread + `devmgr` + `driver_spawn_loader`
-  parity port over that shared orchestration (adding the `rustos-drvhost`
-  runtime dep the signed *load* gate needs — only the pure `hwdiscovery`
-  observers stay drvhost-free); then (3) the two-process netstack vertical
-  (all QEMU-validated on CI hardware — the live-boot TCG verticals are too slow
-  to confirm on a developer machine).
+  its image (host tests + all-three-arch builds green). Sixth foundation in
+  place: the arch-neutral autoload/unlock orchestration
+  (`unlock_orchestrate::finish_unlock`) is extracted and both arches call it
+  over injected console/spawn seams. **The riscv64 root-mount + unlock-kthread
+  + `devmgr` + `driver_spawn_loader` parity port is now landed and
+  host-gate-green**: the
+  drvhost/devmgr runtime deps + the 11 module gates, the PLIC external-IRQ
+  dispatch (the `PlicIrqController` bridge promoted to the production crate
+  root `riscv64_plic_irq.rs` with a `rearm`→`unmask` override + host tests, and
+  `riscv64/irq.rs` doing `record_plic`/`install_dispatch`/claim→fire→complete
+  over `fdt::plic_base`+`plic_ndev`), `riscv64/root_unlock.rs` (virtio-blk
+  bring-up over the PLIC path → `finish_unlock`, SBI console fail-closed on
+  input), and the `try_boot` BootInfo hooks + init-spawn call. What remains for
+  riscv64 is only the **QEMU boot verticals** (`autoload_input_qemu_riscv64`
+  then the two-process `netstack_autoload_qemu_riscv64`), which are TCG-bound
+  and confirmed on CI hardware, not a developer machine. x86_64 then repeats
+  the whole sequence over its virtio-**PCI** bus.
 - **§18.5 scaffold removal** (once all three arches are two-process): delete the
   `register` shell in `drivers/network/virtio_net` (keeping `BIND_KEYS` +
   `VirtioNet`), `FixedSpawner`/`netstack_ping` in the support crate, and
