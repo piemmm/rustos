@@ -485,6 +485,14 @@ impl<A: SchedulerArch> Scheduler<A> {
         Ok(())
     }
 
+    /// Keep-alive hook the kernel preempt path calls after a fired tick
+    /// that did not owe a context switch. EEVDF is **fully tickless**: a
+    /// lone runnable task has no quantum armed and its core takes no
+    /// timer interrupts, so there is no periodic tick to re-arm — this is
+    /// a deliberate no-op. Only the non-tickless CFQ sibling re-arms here.
+    #[allow(clippy::unused_self)]
+    pub fn rearm_periodic_tick(&self) {}
+
     /// Returns the per-CPU timer-observation count.
     ///
     /// # Errors

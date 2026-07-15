@@ -110,7 +110,7 @@ mod kernel {
     };
     use rustos_kernel_ipc::PortRegistry;
     use rustos_kernel_irq::{IrqTable, UnsupportedController};
-    use rustos_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig, TaskAction};
+    use rustos_kernel_sched_cfq::{Priority, Scheduler, SchedulerConfig, TaskAction};
     use rustos_kernel_sec::{CapTable, TaskCapabilities, TaskId as SecTaskId, UserId};
     use rustos_kernel_syscall::{CallerContext, Dispatcher, RawArgs};
     use rustos_log::{Event, EventId, Sink};

@@ -33,7 +33,7 @@ use rustos_kernel_mem::{
     copy_out, AddressSpace, DirectPhysMap, Frame, PhysAddr, PhysMap, UserAddressSpace, UserStack,
     VirtAddr,
 };
-use rustos_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
+use rustos_kernel_sched_cfq::{Priority, Scheduler, SchedulerConfig};
 use rustos_kernel_sec::TaskId;
 use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
 use rustos_log::{log, Event, EventId, Level, Sink};

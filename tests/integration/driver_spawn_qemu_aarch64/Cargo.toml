@@ -62,7 +62,7 @@ rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
 rustos-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
 rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
 rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
-rustos-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
+rustos-kernel-sched-cfq = { path = "../../../kernel/sched/cfq", version = "=0.0.0" }
 rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 rustos-sync = { path = "../../../lib/sync", version = "=0.0.0" }

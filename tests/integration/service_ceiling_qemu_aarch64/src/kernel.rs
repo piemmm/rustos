@@ -49,7 +49,7 @@ use rustos_kernel_mem::{
     BootMemoryMap, FrameAllocator, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE,
 };
 use rustos_kernel_sched_api::SchedulerArch;
-use rustos_kernel_sched_eevdf::{Scheduler, SchedulerConfig};
+use rustos_kernel_sched_cfq::{Scheduler, SchedulerConfig};
 use rustos_kernel_sec::{CapTable, TaskId as SecTaskId};
 use rustos_log::{log, Event, EventId, Level};
 use rustos_sync::RwLock;

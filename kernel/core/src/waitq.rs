@@ -158,6 +158,14 @@ impl WaitQueue {
         self.wake_pending.swap(false, Ordering::AcqRel)
     }
 
+    /// Non-consuming peek: whether a wake request is currently pending
+    /// (awaiting its dispatcher-context drain). Read by the preemption
+    /// gate so a timer tick never skips a reschedule a device-IRQ wake
+    /// still needs — the woken task must reach [`drain_pending_wakes`].
+    fn wake_is_pending(&self) -> bool {
+        self.wake_pending.load(Ordering::Acquire)
+    }
+
     /// Register `task` as waiting, with an absolute monotonic-ns
     /// `deadline_ns` ([`NO_DEADLINE`] for no timeout). Re-registering the
     /// same task updates its deadline rather than duplicating it, so a
@@ -647,6 +655,46 @@ pub fn drain_pending_wakes() -> bool {
         woke = true;
     }
     woke
+}
+
+/// Non-consuming peek: whether an *edge-flagged* interrupt-context
+/// deferred wake (console RX or a device-IRQ [`irq_wake`]) is awaiting its
+/// dispatcher-context [`drain_pending_wakes`].
+///
+/// The preemption gate consults this so a timer tick on a CPU whose only
+/// task is the one about to be preempted still reschedules when a wake is
+/// owed — the woken task must reach `drain_pending_wakes`, which only runs
+/// after the dispatch loop regains control. Without it, gating the tick
+/// purely on "is there another runnable task" would strand a just-flagged
+/// device wake until the next tick (or forever, on a lone-task CPU).
+///
+/// It deliberately excludes the timed-sweep-pending flag: the per-tick
+/// timer callback sets that flag on **every** fired one-shot, so it is set
+/// again the instant after each drain and would make the gate perpetually
+/// true — defeating the whole point. Whether a timed sweep genuinely owes
+/// a reschedule is answered by [`timed_wake_due`] (a deadline has actually
+/// elapsed), not by the flag alone.
+#[must_use]
+pub fn has_pending_deferred_wake() -> bool {
+    CONSOLE_WAITQ.wake_is_pending() || IRQ_WAITQ.wake_is_pending()
+}
+
+/// Whether a timed waiter's finite deadline has already elapsed, so the
+/// dispatcher-context timed sweep ([`drain_pending_wakes`]) owes it a wake.
+///
+/// The preemption gate consults this: a fired quantum tick on a lone-task
+/// CPU must still reschedule when a sleeping task's timeout has come due
+/// (the sweep — which releases it and makes it a competitor — only runs
+/// once the dispatch loop regains control). A timed waiter whose deadline
+/// is still in the future does **not** owe a reschedule, so a lone task
+/// keeps running until the deadline actually arrives. `false` before the
+/// arch clock hook is installed (nothing can be parked with a deadline).
+#[must_use]
+pub fn timed_wake_due() -> bool {
+    match (nearest_timed_deadline(), wait_now_ns()) {
+        (Some(deadline), Some(now)) => deadline <= now,
+        _ => false,
+    }
 }
 
 /// The installed arch hook's monotonic clock, for a consumer that times a

@@ -48,7 +48,7 @@ rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0
 rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
 rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
 rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
-rustos-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
+rustos-kernel-sched-cfq = { path = "../../../kernel/sched/cfq", version = "=0.0.0" }
 rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
 rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }

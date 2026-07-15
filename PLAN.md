@@ -5461,6 +5461,19 @@ of how much code was produced.
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
 
+- **2026-07-15 — CFQ: the one sanctioned non-tickless scheduler, now the
+  default.** Amended §17.1 (maintainer request) to grant a single, explicit
+  exception to the tickless (NO_HZ) mandate: the new `kernel/sched/cfq`
+  policy — a Linux-CFS-like Completely-Fair-Queuing scheduler — keeps a
+  fixed-frequency periodic quantum tick armed for *any* running task,
+  including a lone CPU-bound one (exactly the case the tickless rule forbids
+  arming for), so every task is periodically preempted like Linux's `HZ`
+  tick. This is deliberate and granted to CFQ **alone**; EEVDF and MLFQ stay
+  fully tickless. CFQ is made the default `scheduler-*` feature in
+  `kernel/core`; EEVDF/MLFQ remain selectable. Motivation: a Linux-familiar,
+  always-preempting default that never leaves a sole CPU-bound task without
+  an armed quantum timer (the `stress --cpu 1` responsiveness class).
+
 - **2026-07-08 — The `plans/` jump-sheet.** Added §15.18 and repointed the
   §3 `plans/` comment at it (maintainer request), after capability work was
   done without consulting `plans/CAPABILITY_USE.md`: agents (and humans)

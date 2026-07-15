@@ -564,6 +564,16 @@ impl<A: SchedulerArch> Scheduler<A> {
         Ok(())
     }
 
+    /// Keep-alive hook the kernel preempt path calls after a fired tick
+    /// that did not owe a context switch. MLFQ is **tickless** for
+    /// preemption — a lone runnable task has no quantum armed and its core
+    /// takes no timer interrupts (its anti-starvation boost cadence rides
+    /// its own on-demand one-shots, never a global periodic tick) — so
+    /// there is no periodic tick to re-arm here: a deliberate no-op. Only
+    /// the non-tickless CFQ sibling re-arms.
+    #[allow(clippy::unused_self)]
+    pub fn rearm_periodic_tick(&self) {}
+
     /// Returns the per-CPU preemption count observed by
     /// [`Self::on_timer_tick`].
     ///

@@ -399,6 +399,30 @@ impl<A: KernelArch + 'static> crate::waitq::WaitQueueArch for SchedWaitQueueArch
     }
 }
 
+impl<A: KernelArch + 'static> crate::preempt::PreemptCompetitor for SchedWaitQueueArch<A> {
+    fn has_runnable_competitor(&self, cpu: CpuId) -> bool {
+        // A competitor is a task queued runnable on `cpu` other than the
+        // one it is currently running (the run-queue excludes the current
+        // task). The preempt path uses this so a fired quantum tick
+        // reschedules only when a switch would change what runs — a lone
+        // runnable task is left in place. An out-of-range CPU or a
+        // transient query error is treated as "no competitor" (fail
+        // closed: never a spurious preemption).
+        matches!(self.scheduler.queue_depth(cpu), Ok(depth) if depth > 0)
+    }
+
+    fn keep_periodic_tick(&self, _cpu: CpuId) {
+        // Delegate to the live policy: the non-tickless CFQ policy re-arms
+        // this CPU's quantum so its fixed-HZ tick keeps firing for a lone
+        // running task (and it re-checks its run queue each tick, picking
+        // up work later enqueued here without an IPI); the tickless
+        // siblings (EEVDF, MLFQ) no-op, so a quiet core keeps taking no
+        // ticks. The re-arm targets the calling CPU — the one whose tick
+        // just fired, which is where the preempt path runs this.
+        self.scheduler.rearm_periodic_tick();
+    }
+}
+
 /// Leak a [`SchedWaitQueueArch`] over the boot-leaked `KernelState` and
 /// install it as the global wait-queue hook (Design D P-2), so the
 /// explicit-wake (`crate::hw_tree_wake`) and timed-wake
@@ -412,6 +436,13 @@ fn publish_wait_queue_arch<A: KernelArch + 'static>(state: &'static KernelState<
         arch: state.arch.as_ref(),
     }));
     let _ = crate::waitq::install_wait_arch(wait_arch);
+    // The same leaked adapter answers the preempt path's "is there a
+    // runnable competitor on this CPU?" query, so a fired quantum tick
+    // reschedules only when a switch would change what runs (the tick
+    // still fires for a lone task — RustOS stays non-tickless under CFQ —
+    // but does not needlessly switch away from it, avoiding the
+    // per-quantum address-space/TLB churn that path would otherwise incur).
+    crate::preempt::install_competitor_gate(wait_arch);
 }
 
 /// Type-erased secondary-CPU hand-off over the boot-leaked

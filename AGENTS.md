@@ -478,6 +478,8 @@ rustos/
 │   ├── mem/             # Allocator, paging, process isolation.
 │   ├── sched/           # SMP scheduler — pluggable (§17.1):
 │   │   ├── api/         #   SchedulerPolicy contract + conformance suite.
+│   │   ├── cfq/         #   Default policy: non-tickless Linux-CFS-like
+│   │   │                #   fair queuing (the tickless carve-out, §17.1).
 │   │   ├── eevdf/       #   Concrete policy (sibling crate, §17.1).
 │   │   └── mlfq/        #   Concrete policy (sibling crate, §17.1).
 │   ├── ipc/             # Capabilities, message ports.
@@ -1978,16 +1980,16 @@ as non-negotiable as §2.
   accounting, and the SMP hooks (per-CPU run queues, work stealing,
   IPI-based preemption requests).
 - Concrete schedulers live in **sibling crates** under `kernel/sched/`,
-  one per policy (e.g. `kernel/sched/eevdf/`, `kernel/sched/rt/`).
-  Adding a scheduler means adding a sibling crate, never editing an
-  existing one.
+  one per policy (e.g. `kernel/sched/cfq/`, `kernel/sched/eevdf/`,
+  `kernel/sched/mlfq/`). Adding a scheduler means adding a sibling crate,
+  never editing an existing one.
 - **No crate outside `kernel/sched/*` may name a concrete scheduler
   type.** The rest of the kernel depends on `SchedulerPolicy` (or a
   generic `Scheduler<P: SchedulerPolicy>`), never on a concrete impl.
 - There is exactly **one selection point**, in `kernel/core`, chosen at
-  build time via a workspace feature (`scheduler-eevdf`,
-  `scheduler-rt`, …). Exactly one such feature must be active per
-  image; the build fails otherwise.
+  build time via a workspace feature (`scheduler-cfq` — the default,
+  `scheduler-eevdf`, `scheduler-mlfq`, …). Exactly one such feature must
+  be active per image; the build fails otherwise.
 - Every concrete scheduler must pass the shared conformance test
   suite in `kernel/sched/api/tests/` (fairness bounds, no starvation
   under N×M load, correct yield/wake semantics, SMP stress on ≥ 4
@@ -2044,40 +2046,58 @@ as non-negotiable as §2.
   dispatch loop that masks interrupts for the whole task run and drains
   device work only at yield points is a defect to be fixed, not a
   configuration (§2.1, §2.16, §2.17) — see `PLAN.md` (immediate work).
-- **Tickless (NO_HZ) is mandatory — no fixed-frequency periodic timer
-  interrupt.** RustOS is a tickless kernel. No CPU may be driven by a
-  fixed-frequency periodic timer interrupt (a "scheduler tick" / `HZ`):
-  scheduler accounting, preemption (above), and timekeeping must none of
-  them depend on a periodic tick. The timer the preemption mechanism and
-  any timed wait use is programmed **one-shot, to the next event the
-  scheduler actually needs** — the running task's preemption deadline or
-  the nearest armed wakeup — and is left **unarmed** whenever a CPU has
-  nothing to preempt to (it is idle, or runs a single runnable task), so
-  an otherwise-quiet core takes no needless interrupts (§2.16 — work paid
-  off the hot path). The reschedule decision and the deadline that arms
-  the next one-shot are the one shared definition every port reuses
-  (§2.2, §17.2); only the genuinely target-divergent register/MMIO
-  arming is arch-specific.
-  - **The default policy (EEVDF) is fully tickless.** Fairness,
-    eligibility, and virtual-time accounting are advanced as work is
-    dispatched, never by a periodic tick; `on_timer_tick` / `ticks_now`
-    are observation-only and no scheduling decision reads them.
+- **Tickless (NO_HZ) is mandatory for every policy but the one sanctioned
+  exception (CFQ) — no other may use a fixed-frequency periodic timer
+  interrupt.** RustOS is a tickless kernel. Except for the CFQ carve-out
+  below, no CPU may be driven by a fixed-frequency periodic timer interrupt
+  (a "scheduler tick" / `HZ`): scheduler accounting, preemption (above), and
+  timekeeping must none of them depend on a periodic tick. The timer the
+  preemption mechanism and any timed wait use is programmed **one-shot, to
+  the next event the scheduler actually needs** — the running task's
+  preemption deadline or the nearest armed wakeup — and is left **unarmed**
+  whenever a CPU has nothing to preempt to (it is idle, or runs a single
+  runnable task), so an otherwise-quiet core takes no needless interrupts
+  (§2.16 — work paid off the hot path). The reschedule decision and the
+  deadline that arms the next one-shot are the one shared definition every
+  port reuses (§2.2, §17.2); only the genuinely target-divergent
+  register/MMIO arming is arch-specific.
+  - **The default policy (CFQ) is deliberately non-tickless — the sole
+    exception, and the only scheduler permitted to be.** CFQ
+    (`kernel/sched/cfq`) is a Linux-CFS-like Completely-Fair-Queuing policy
+    that keeps a fixed-frequency periodic quantum tick armed for *any*
+    running task — including a lone CPU-bound one, exactly the case the
+    tickless rule otherwise forbids arming for — so the timer interrupt
+    fires at a steady `HZ` cadence like Linux's scheduler tick. This is a
+    deliberate, charter-blessed violation of the tickless mandate, granted
+    to CFQ alone; **no other policy may take it.** As in Linux
+    (`check_preempt_tick`), a fired tick forces a context switch only when
+    there is another runnable task to switch to (or pending
+    interrupt-context work to drain); a lone task's tick does its periodic
+    accounting without a needless switch-to-self, and a genuinely idle CPU
+    disarms. It documents the exception in its crate docs (rustdoc + its
+    `docs/src/architecture/scheduler.md` entry).
+  - **The tickless sibling policies (EEVDF, MLFQ) stay fully tickless.**
+    In EEVDF fairness, eligibility, and virtual-time accounting are
+    advanced as work is dispatched, never by a periodic tick;
+    `on_timer_tick` / `ticks_now` are observation-only and no scheduling
+    decision reads them.
   - **Carve-out — a policy that genuinely needs periodic wakeups.** The
     sibling MLFQ policy's anti-starvation priority boost (§17.1
-    modularity) is the sole exemption: such a policy MUST obtain its
-    boost cadence as explicit, on-demand one-shot timer events scheduled
-    for *its own* accounting, and MUST NOT reintroduce a global
-    fixed-frequency tick for the rest of the kernel — preemption and
-    timekeeping stay tickless regardless of policy. Each exempt policy
-    documents that cadence in its crate docs (rustdoc + its
-    `docs/src/architecture/scheduler.md` entry).
+    modularity) is exempted from the *global-tick* ban like CFQ, but more
+    narrowly: such a policy MUST obtain its boost cadence as explicit,
+    on-demand one-shot timer events scheduled for *its own* accounting,
+    and MUST NOT reintroduce a global fixed-frequency tick for the rest of
+    the kernel — preemption and timekeeping stay tickless regardless of
+    policy. Each exempt policy documents that cadence in its crate docs
+    (rustdoc + its `docs/src/architecture/scheduler.md` entry).
   - A fixed-frequency periodic timer armed merely to *drive preemption*
     (instead of a one-shot deadline computed by the scheduler) is a
-    defect, not a configuration — including on a port that already ships
-    one. Where such an arming exists it is migrated to one-shot/deadline
-    form, never left "for now" (§2.19); a migration genuinely too large
-    for the discovering change is staged in `PLAN.md` and surfaced
-    (§2.18, §15.7).
+    defect, not a configuration — **except under the CFQ policy, where the
+    periodic preemption tick is the sanctioned design** — including on a
+    port that already ships one. Where such an arming exists under a
+    *tickless* policy it is migrated to one-shot/deadline form, never left
+    "for now" (§2.19); a migration genuinely too large for the discovering
+    change is staged in `PLAN.md` and surfaced (§2.18, §15.7).
 
 ### 17.2 Pluggable architecture (Arch HAL)
 

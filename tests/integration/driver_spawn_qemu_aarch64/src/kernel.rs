@@ -43,7 +43,7 @@ use rustos_kernel_irq::{IrqTable, UnsupportedController};
 use rustos_kernel_mem::{
     BootMemoryMap, FrameAllocator, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE,
 };
-use rustos_kernel_sched_eevdf::{Scheduler, SchedulerConfig};
+use rustos_kernel_sched_cfq::{Scheduler, SchedulerConfig};
 use rustos_kernel_sec::{CapTable, TaskCapabilities, TaskId as SecTaskId, UserId};
 use rustos_log::{log, Event, EventId, Level};
 use rustos_sync::RwLock;

@@ -344,6 +344,17 @@ pub fn queue_foreground_signal(target: TaskId, signal: Signal) {
     PENDING_FOREGROUND.store(packed, Ordering::Release);
 }
 
+/// Non-consuming peek: whether a foreground signal (`^C`/`^Z`) is queued
+/// awaiting its dispatcher-context [`drain_pending_foreground`].
+///
+/// The preemption gate consults this so a timer tick on a lone-task CPU
+/// still reschedules when a queued signal needs delivering — the delivery
+/// only runs once the dispatch loop regains control.
+#[must_use]
+pub fn has_pending_foreground() -> bool {
+    PENDING_FOREGROUND.load(Ordering::Acquire) != 0
+}
+
 /// Deliver the pending foreground signal, if any, through the installed
 /// [`ForegroundSignal`] producer.
 ///

@@ -7,6 +7,7 @@ members = [
     "kernel/sched/api",
     "kernel/sched/mlfq",
     "kernel/sched/eevdf",
+    "kernel/sched/cfq",
     "kernel/ipc",
     "kernel/irq",
     "kernel/sec",

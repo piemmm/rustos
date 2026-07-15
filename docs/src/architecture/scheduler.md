@@ -18,23 +18,75 @@ day one") and §2 ("Non-negotiable rules").
 
 ## Scheduler policies
 
-The dispatch *policy* is pluggable (`AGENTS.md` §17.1). Two concrete
-policies ship today, each in its own `kernel/sched/<impl>` crate, and
-both implement the same [`SchedulerPolicy`] contract so the rest of the
+The dispatch *policy* is pluggable (`AGENTS.md` §17.1). Three concrete
+policies ship today, each in its own `kernel/sched/<impl>` crate, all
+implementing the same [`SchedulerPolicy`] contract so the rest of the
 kernel is agnostic to which one an image links:
 
-* **EEVDF** (`kernel/sched/eevdf`, feature `scheduler-eevdf`) — the
-  **default**. A fully *tickless* Earliest-Eligible-Virtual-Deadline-First
-  policy (see [EEVDF policy](#eevdf-policy-scheduler-eevdf-default)).
+* **CFQ** (`kernel/sched/cfq`, feature `scheduler-cfq`) — the
+  **default**. A *non-tickless*, Linux-CFS-like Completely-Fair-Queuing
+  policy (see [CFQ policy](#cfq-policy-scheduler-cfq-default)).
+* **EEVDF** (`kernel/sched/eevdf`, feature `scheduler-eevdf`) — a fully
+  *tickless* Earliest-Eligible-Virtual-Deadline-First policy (see
+  [EEVDF policy](#eevdf-policy-scheduler-eevdf)).
 * **MLFQ** (`kernel/sched/mlfq`, feature `scheduler-mlfq`) — a
   Multi-Level Feedback Queue with periodic priority boosting (see
   [MLFQ policy](#mlfq-policy-scheduler-mlfq)).
 
 `kernel/core` is the single build-time selection point and enforces that
 **exactly one** `scheduler-*` feature is active per image. Everything
-below the two policy sections — the IPI hook, the timer entry point, the
-current-task slot, and the invariants — is shared by both policies
+below the policy sections — the IPI hook, the timer entry point, the
+current-task slot, and the invariants — is shared by every policy
 because it lives in the contract, not the policy.
+
+## CFQ policy (`scheduler-cfq`, default)
+
+The default policy is **CFQ — Completely Fair Queuing**, modelled on
+Linux's Completely Fair Scheduler (Molnar, 2007). Each task carries a
+virtual runtime `vruntime`; on each CPU the ready task with the
+*smallest* `vruntime` is dispatched next — the leftmost node of Linux
+CFS's red-black tree, here an ordered `BTreeSet<(vruntime, TaskId)>`
+(`O(log n)` pick/insert/remove). A dispatch charges the running task
+`SCALE / weight` of virtual runtime, so a heavier-weighted task's
+`vruntime` rises more slowly and it is dispatched more often —
+proportional share, with no band ever starved (every `vruntime` advances
+monotonically). The three `Priority` bands map to a 4:2:1 weight ratio
+(the CFS "nice level" analog). A per-CPU monotonic `min_vruntime` floor
+places a joining or migrated task at the front of the CPU's timeline, so
+a task that slept at a low `vruntime` cannot leap the running population,
+and a stolen task carries no lag across CPUs. Per-CPU run queues,
+work-stealing, class-based placement, the overflow list, and the
+park/unpark lost-wakeup token are all shared with the sibling policies'
+mechanics.
+
+### Non-tickless — the tickless carve-out
+
+CFQ is the **one scheduler the charter permits to be non-tickless**
+(`AGENTS.md` §17.1). Where the tickless policies arm their preemption
+one-shot only when a CPU is *contended* and disarm for a sole runnable
+task (so a quiet core takes no timer interrupts), CFQ keeps a
+fixed-frequency periodic quantum tick armed for *any* running task —
+including a lone CPU-bound one — so the timer interrupt fires at a steady
+`HZ` cadence exactly like Linux's scheduler tick. Concretely
+`Scheduler::dispatch` calls [`SchedulerArch::set_preemption`]`(true)`
+unconditionally while a task runs; only a genuinely idle CPU (nothing
+runnable at all) disarms, in `Scheduler::step`.
+
+A fired tick does not blindly context-switch, though. As in Linux
+(`check_preempt_tick`), the kernel's return-to-user preempt point
+(`kernel/core`'s `preempt_current`) reschedules only when the switch would
+change what runs — there is another runnable task on the CPU, or pending
+interrupt-context work (a device-IRQ deferred wake, an elapsed timed
+deadline, a queued foreground signal) to drain. A **lone** runnable task's
+tick therefore does its periodic accounting and returns to that same task
+without a switch-to-self: switching to itself has no scheduling effect and
+would only churn the per-dispatch user-address-space reactivation (and, on
+an emulated target, its full TLB flush), starving the task's own progress.
+This gate lives in the policy-neutral preempt path, keyed off a
+scheduler-backed "runnable competitor?" query, so it holds for every
+policy — but only CFQ ever exercises it, because only CFQ arms a lone
+task's tick. This deliberate violation of the tickless mandate is granted
+to CFQ **alone**; no other policy may take it.
 
 ## MLFQ policy (`scheduler-mlfq`)
 
@@ -104,11 +156,11 @@ entry point — the queue is a single-end FIFO consumer, so MLFQ
 fairness within a band is preserved. Push is wait-free; consume
 is lock-free with a bounded retry loop on `Steal::Retry`.
 
-## EEVDF policy (`scheduler-eevdf`, default)
+## EEVDF policy (`scheduler-eevdf`)
 
-The default policy is **EEVDF — Earliest Eligible Virtual Deadline
-First** (Stoica & Abdel-Wahab, 1995; the same family Linux adopted for
-its fair scheduler in 6.6). It is dispatched via the same per-CPU
+EEVDF — **Earliest Eligible Virtual Deadline First** (Stoica &
+Abdel-Wahab, 1995; the same family Linux adopted for its fair scheduler
+in 6.6) is a fully tickless sibling policy. It is dispatched via the same per-CPU
 work-stealing structure as MLFQ, but orders tasks by a continuous
 *virtual deadline* instead of discrete priority bands.
 
@@ -292,14 +344,29 @@ calls this once per fire, *after* it has acknowledged the device-
 level interrupt source (EOI on the LAPIC, etc.). The scheduler
 itself never reaches for a timer register; the arch port owns that.
 
-RustOS is a **tickless (NO_HZ)** kernel (`AGENTS.md` §17.1): no CPU is
-driven by a fixed-frequency periodic timer interrupt. The timer is armed
-**one-shot**, to the next event the scheduler actually needs (the running
-task's preemption deadline or the nearest timed wakeup), and is left
-unarmed when a CPU is idle or runs a single runnable task. Under the
-default EEVDF policy a periodic tick is **not** required for correctness
-at all (see [EEVDF policy](#eevdf-policy-scheduler-eevdf-default)). The
-sole §17.1 carve-out is a policy that needs periodic wakeups — MLFQ's
+RustOS is a **tickless (NO_HZ)** kernel (`AGENTS.md` §17.1) under every
+policy but the one sanctioned exception, **CFQ** (the default). Under a
+tickless policy no CPU is driven by a fixed-frequency periodic timer
+interrupt: the timer is armed **one-shot**, to the next event the
+scheduler actually needs (the running task's preemption deadline or the
+nearest timed wakeup), and is left unarmed when a CPU is idle or runs a
+single runnable task. Under the tickless EEVDF policy a periodic tick is
+**not** required for correctness at all (see
+[EEVDF policy](#eevdf-policy-scheduler-eevdf)).
+
+**The default CFQ policy is deliberately non-tickless** — the charter's
+one sanctioned exception (see [CFQ policy](#cfq-policy-scheduler-cfq-default)):
+it passes `armed = true` to `set_preemption` for *any* running task,
+including a lone CPU-bound one, so the port keeps re-arming the quantum
+one-shot and the effect is a fixed-frequency `HZ`-style periodic tick.
+Only a genuinely idle CFQ CPU (nothing runnable) disarms. A fired tick
+still only *context-switches* when the switch would change what runs (the
+`preempt_current` gate below) — a lone task's tick does its accounting and
+returns to that same task — so CFQ never needlessly switch-to-self churns.
+Everything below describes the shared mechanism; only the per-dispatch
+arm/disarm *decision* differs between the tickless policies and CFQ.
+
+A narrower §17.1 carve-out is a policy that needs periodic wakeups — MLFQ's
 anti-starvation priority boost. There is exactly one per-CPU timer, and
 the boost interval is far longer than one scheduling quantum, so the
 boost rides the same on-demand one-shots the preemption path already
@@ -314,14 +381,17 @@ the §17.1 mandate the carve-out protects.
 The one-shot is armed through the Arch HAL timer surface
 ([`Timer::arm_oneshot`] / [`Timer::disarm`], `kernel/arch/api`): the
 scheduler decides *whether* to arm on each dispatch — via the provided
-[`SchedulerArch::set_preemption(armed)`] hook, where `armed` is "this CPU
-still has a ready competitor" — and the port programs (or stops) its
-per-CPU timer (the LAPIC one-shot count, `CNTP_TVAL_EL0`, an SBI
-`set_timer`). The per-CPU quantum the one-shot is armed to is the shared
-[`DEFAULT_PREEMPT_QUANTUM_HZ`] (aarch64/riscv64) or the LAPIC calibration
-period (x86_64); a fired timer never re-arms itself, so a CPU running a
-sole runnable task takes no timer interrupts at all (PLAN P-4 retired the
-P-1 100 Hz periodic arming).
+[`SchedulerArch::set_preemption(armed)`] hook. Under a tickless policy
+`armed` is "this CPU still has a ready competitor"; under the default CFQ
+policy `armed` is `true` for *any* running task (the non-tickless
+carve-out). The port programs (or stops) its per-CPU timer (the LAPIC
+one-shot count, `CNTP_TVAL_EL0`, an SBI `set_timer`). The per-CPU quantum
+the one-shot is armed to is the shared [`DEFAULT_PREEMPT_QUANTUM_HZ`]
+(aarch64/riscv64) or the LAPIC calibration period (x86_64); a fired timer
+never re-arms itself, so under a tickless policy a CPU running a sole
+runnable task takes no timer interrupts at all (PLAN P-4 retired the
+P-1 100 Hz periodic arming), while CFQ re-arms it on the next dispatch to
+sustain its periodic tick.
 
 The *nearest timed wakeup* half of the one-shot is the provided
 [`SchedulerArch::set_wakeup(deadline_ns)`] hook: a blocking wait with a
@@ -737,17 +807,20 @@ one policy crate per implementation:
   `SchedError`, `StepOutcome`, `SchedulerConfig`), the re-exported
   Arch HAL surface (`CpuId`, `SchedulerArch`), the host `TestArch`
   double, and the shared `conformance` suite.
-* `kernel/sched/eevdf` (`rustos-kernel-sched-eevdf`) — the EEVDF policy
+* `kernel/sched/cfq` (`rustos-kernel-sched-cfq`) — the CFQ policy
   described above, implementing `SchedulerPolicy`. This is the default.
+* `kernel/sched/eevdf` (`rustos-kernel-sched-eevdf`) — the EEVDF policy
+  described above, implementing `SchedulerPolicy`.
 * `kernel/sched/mlfq` (`rustos-kernel-sched-mlfq`) — the MLFQ policy
-  described above, implementing `SchedulerPolicy`. The two are siblings
+  described above, implementing `SchedulerPolicy`. The three are siblings
   (`AGENTS.md` §2.2 carve-out — parallel policies are deliberate, not
   duplication); adding another policy means adding a sibling crate,
   never editing an existing one.
 * `kernel/core` is the single build-time selection point: exactly one
-  `scheduler-*` feature is active per image (`scheduler-eevdf` by
-  default, `scheduler-mlfq` with `--no-default-features --features
-  scheduler-mlfq`). It re-exports the chosen policy as
+  `scheduler-*` feature is active per image (`scheduler-cfq` by
+  default, `scheduler-eevdf` or `scheduler-mlfq` with
+  `--no-default-features --features scheduler-<impl>`). It re-exports the
+  chosen policy as
   `crate::sched::Scheduler`; `compile_error!` guards reject the
   zero-policy and two-policy configurations. No other crate names a
   concrete policy — they depend on `kernel/sched/api`.
@@ -763,9 +836,15 @@ The scheduler's behaviour is covered by:
   bounded-latency stress of 10 000 tasks across 4 simulated cores.
   Every concrete policy must pass it.
 * `kernel/sched/api/tests/conformance.rs` runs the suite against the
-  in-tree MLFQ policy; `kernel/sched/eevdf/tests/conformance.rs` runs
-  the identical suite against EEVDF — proving the two policies are
-  interchangeable behind the contract.
+  in-tree MLFQ policy; `kernel/sched/eevdf/tests/conformance.rs` and
+  `kernel/sched/cfq/tests/conformance.rs` run the identical suite against
+  EEVDF and CFQ — proving the policies are interchangeable behind the
+  contract.
+* `kernel/sched/cfq/src/scheduler.rs` `#[cfg(test)] mod tests` —
+  CFQ-specific coverage: that a sole runnable task keeps the periodic
+  tick armed (the non-tickless carve-out) while an idle CPU disarms,
+  weight-proportional dispatch, work-stealing, park/unpark, and the
+  `on_timer_tick` preemption counter.
 * `kernel/sched/eevdf/src/scheduler.rs` `#[cfg(test)] mod tests` —
   EEVDF-specific coverage: tickless weight-proportional fairness
   (asserting no tick is ever used), even sharing of equal-weight tasks,

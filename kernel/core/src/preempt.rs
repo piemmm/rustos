@@ -46,9 +46,77 @@
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use rustos_kernel_sched_api::CpuId;
+use rustos_sync::once::OnceCell;
 
 use crate::dispatch_slot::RescheduleAction;
 use crate::kthread::{reschedule_current, KTHREAD_MAX_CPUS};
+
+/// A scheduler-backed query the policy-neutral preempt path uses to decide
+/// whether a fired tick actually owes a context switch: does `cpu` have a
+/// runnable task *other* than the one currently running there — a
+/// competitor the running task must be preempted for?
+///
+/// `kernel/core` is the one place that names the concrete scheduler policy
+/// (§17.1), so it installs this once at boot over the live scheduler and
+/// the preempt path asks through it without naming the policy.
+pub trait PreemptCompetitor: Sync {
+    /// `true` if `cpu` has at least one runnable task besides the one it is
+    /// currently running (an out-of-range `cpu` reports `false`).
+    fn has_runnable_competitor(&self, cpu: CpuId) -> bool;
+
+    /// After a fired tick that does **not** owe a context switch (a lone
+    /// runnable task with nothing pending), keep a *non-tickless* policy's
+    /// fixed-frequency tick alive on `cpu` by re-arming its quantum, so
+    /// the CPU keeps re-checking its run queue at the steady HZ cadence
+    /// (the Linux scheduler-tick model) and promptly picks up work later
+    /// enqueued here *without* an IPI — a task drained back from overflow,
+    /// a rebalance. Re-arms only the timer; it never reschedules-to-self,
+    /// so it incurs none of the address-space/TLB churn a gratuitous
+    /// switch would. A *tickless* policy (EEVDF, MLFQ) implements this as
+    /// a no-op, so a quiet core still takes no ticks.
+    fn keep_periodic_tick(&self, cpu: CpuId);
+}
+
+/// The installed competitor gate, or `None` before the boot path wires it.
+///
+/// Set once per boot ([`install_competitor_gate`]). Before it is set (host
+/// tests, early boot) the preempt path treats every tick as owing a
+/// reschedule, preserving the pre-gate always-reschedule behaviour.
+static COMPETITOR_GATE: OnceCell<&'static dyn PreemptCompetitor> = OnceCell::new();
+
+/// Install the scheduler-backed [`PreemptCompetitor`] gate. Idempotent by
+/// policy: the boot path installs exactly one; a later call is a benign
+/// no-op.
+pub fn install_competitor_gate(gate: &'static dyn PreemptCompetitor) {
+    let _ = COMPETITOR_GATE.set(gate);
+}
+
+/// Whether `cpu` currently owes a reschedule when a tick fires: a runnable
+/// competitor exists, or interrupt-context work (a device-IRQ deferred
+/// wake, a queued foreground signal) is waiting for the dispatch loop to
+/// drain it. Absent the gate, defaults to `true` (always reschedule).
+fn reschedule_owed(cpu: CpuId) -> bool {
+    let competitor = match COMPETITOR_GATE.get() {
+        Ok(Some(gate)) => gate.has_runnable_competitor(cpu),
+        _ => true,
+    };
+    competitor
+        || crate::waitq::has_pending_deferred_wake()
+        || crate::waitq::timed_wake_due()
+        || crate::procsignal::has_pending_foreground()
+}
+
+/// Keep a non-tickless policy's periodic tick alive on `cpu` after a
+/// fired tick that did not owe a switch (see
+/// [`PreemptCompetitor::keep_periodic_tick`]). Routed through the
+/// installed gate so the preempt path never names the concrete policy; a
+/// no-op before the gate is wired (early boot / host tests), where the
+/// dispatch loop still re-arms on its next step.
+fn keep_periodic_tick(cpu: CpuId) {
+    if let Ok(Some(gate)) = COMPETITOR_GATE.get() {
+        gate.keep_periodic_tick(cpu);
+    }
+}
 
 /// Slot `cpu` is `true` while a timer tick taken on that CPU awaits its
 /// preemption point.
@@ -144,6 +212,31 @@ static PREEMPT_COUNT: [AtomicU64; KTHREAD_MAX_CPUS] =
 /// suspension, never on a spurious call.
 pub fn preempt_current(cpu: CpuId) -> bool {
     if !take_preempt_pending(cpu) {
+        return false;
+    }
+    // A fired tick owes a context switch only when it would change what
+    // runs: a runnable competitor to switch to, or interrupt-context work
+    // (a device-IRQ deferred wake, a queued foreground signal) waiting for
+    // the dispatch loop to drain it. A lone runnable task with nothing
+    // pending is left running — the periodic tick still fired (RustOS
+    // stays non-tickless under the CFQ policy), but rescheduling to the
+    // *same* sole task every quantum has no scheduling effect and only
+    // churns the per-dispatch user-address-space switch (and, on an
+    // emulated target, its full TLB flush), which starves the task's own
+    // forward progress. This mirrors Linux's `check_preempt_tick`, which
+    // preempts only when a competitor should run. The latch is consumed
+    // either way — the tick was honoured.
+    if !reschedule_owed(cpu) {
+        // The tick fired but nothing owes a switch (a lone runnable task).
+        // Keep a non-tickless policy's periodic tick alive so this CPU
+        // re-checks its run queue at the next tick and promptly picks up
+        // work later enqueued here without an IPI (a task drained back
+        // from overflow, a rebalance); without this the lone task's tick
+        // would fall silent and strand such work — the source of the
+        // heavy-load stall. This re-arms only the timer, so it avoids the
+        // reschedule-to-self address-space/TLB churn. A tickless policy
+        // no-ops, so a quiet core keeps taking no ticks.
+        keep_periodic_tick(cpu);
         return false;
     }
     if !reschedule_current(cpu, RescheduleAction::Yield) {
