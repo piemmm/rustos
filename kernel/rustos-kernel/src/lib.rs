@@ -356,6 +356,20 @@ pub mod volume_policy;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
 pub mod driver_store_server;
 
+// The architecture-neutral root-unlock / driver-store orchestration
+// (`plans/PI.md` design B): the two-task tail every port's bootstrap-floor
+// block bring-up feeds — the spawned interactive encrypted-root unlock and
+// the persistent capability-gated driver-store serve loop the user-space
+// `devmgr` autoloads through. A port injects only its console-0 seam
+// (`UnlockConsole`) and its `ProcessSpawn` producer, so the tail is never
+// copied into a `kernel/arch/<target>/` sibling. Gated, like its
+// driver-store dependencies, on the two instruction sets that currently
+// drive it — `x86_64` (the CI host, where its dependencies' unit tests run)
+// and `aarch64` (the Raspberry Pi 4 boot path); the riscv64 autoload port
+// joins this gate when it gains the driver-store dependency set.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
+pub mod unlock_orchestrate;
+
 // The architecture ports. Each subtree gathers exactly one instruction
 // set's `KernelArch` wrapper, fail-closed dispatch callback, production
 // boot path, PID 1 (`init`) spawn seam, and runtime `spawn` producer (plus

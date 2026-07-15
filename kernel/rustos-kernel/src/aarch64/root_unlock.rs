@@ -29,7 +29,6 @@
 
 use core::convert::Infallible;
 
-use rustos_abi::driver::block::Block;
 use rustos_abi::driver::dma::PoolId;
 use rustos_abi::driver::sole_register_window;
 use rustos_abi::{CapabilityId, DriverHost, DriverKind, IrqHandle, MmioMapper};
@@ -39,16 +38,13 @@ use rustos_arch_aarch64::paging::{
 };
 use rustos_arch_aarch64::{gic, video, SERIAL_SINK};
 use rustos_caps::CapabilitySet;
-use rustos_crypto::Ed25519PublicKey;
 use rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb;
 use rustos_drv_bus_virtio::MmioTransport;
-use rustos_drv_fs_rustfs::{RustFs, VolumeKey};
 use rustos_drv_storage_emmc2::{CompletionSignal, CompletionWait};
 use rustos_drv_storage_virtio_blk::{VirtioBlk, VIRTIO_BLK_DEVICE_ID};
 use rustos_fdt::Fdt;
 use rustos_kernel_core::{
-    ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, IrqParkWaiter, SecretFeedback,
-    YieldHandle,
+    ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, IrqParkWaiter, YieldHandle,
 };
 use rustos_kernel_irq::{IrqTable, WaitOutcome};
 use rustos_kernel_mem::{
@@ -58,7 +54,6 @@ use rustos_kernel_sec::captable::TaskCapabilities;
 use rustos_kernel_sec::identity::UserId;
 use rustos_kernel_virtio::{provision_virtio_mmio, KernelMmioMapper, KernelVirtioHost};
 use rustos_log::{Level, Sink};
-use rustos_partition::{parse_partition_table, PartitionBlock, PartitionType};
 
 use crate::aarch64::arch_wrapper::{
     UART_CONSOLE, UART_CONSOLE_READ, VIDEO_CONSOLE, VIDEO_KEYBOARD,
@@ -67,21 +62,13 @@ use crate::aarch64::gic_irq::{
     published_irq_table, COMPOSITE_IRQ_CONTROLLER, CPU0_TARGET, GIC_IRQ_CONTROLLER,
 };
 use crate::aarch64::spawn_producer::AARCH64_PROCESS_SPAWN;
-use crate::block_cache::BlockCache;
-use crate::driver_catalog::{EMMC2_PATH, KERNEL_DRIVER_SIGNER_PUBKEY, VIRTIO_BLK_PATH};
+use crate::driver_catalog::{EMMC2_PATH, VIRTIO_BLK_PATH};
 use crate::driver_loader::KernelDriverLoader;
-use crate::driver_spawn_loader::InitCtxDriverProcessSpawn;
-use crate::root_mount::{
-    unlock_root_disk_interactively, AdminInstall, UnlockInstall, UnlockOutcome, WritableRootSink,
-    LATE_USERS_ADMIN, LATE_USERS_DB,
-};
+use crate::root_mount::LATE_USERS_DB;
 use crate::root_storage::RootBlockBinding;
-use crate::shared_block::{DriverStoreService, SharedBlock};
-use crate::system_mount::{register_writable_state, KernelFs, ROOT_VOLUME_HANDLE};
-use crate::transform_cache::TransformClusterCache;
+use crate::unlock_orchestrate::{finish_unlock, UnlockConsole, UnlockEnv};
 use crate::unlock_service::{
-    autoload_caps, loader_caps, note, note_stage, service_caps, store_endpoint_binder_caps,
-    take_boot, KthreadConsoleRead, CONSOLE0_GATE, UNLOCK_TASK, USERS_DB_INSTALLED_MESSAGE,
+    loader_caps, note, note_stage, service_caps, take_boot, CONSOLE0_GATE, UNLOCK_TASK,
 };
 
 /// Per-device DMA window capacity, in pages, the virtio-blk driver
@@ -320,6 +307,54 @@ fn release_console0_to_login() {
     }
 }
 
+/// The aarch64 console-0 seam the shared root-unlock orchestration
+/// ([`crate::unlock_orchestrate`]) reaches the primary console through.
+///
+/// Selects the framebuffer video console when a display is active, else the
+/// discovered UART — arming the UART's interrupt-driven receive so a keystroke
+/// wakes the parked passphrase reader — and releases console 0 to `login`
+/// through [`release_console0_to_login`] the instant the unlock resolves.
+struct Aarch64UnlockConsole;
+
+/// The single `'static` [`Aarch64UnlockConsole`] the bring-ups hand the shared
+/// orchestration.
+static AARCH64_UNLOCK_CONSOLE: Aarch64UnlockConsole = Aarch64UnlockConsole;
+
+impl UnlockConsole for Aarch64UnlockConsole {
+    fn acquire_console0(
+        &self,
+    ) -> (
+        &'static dyn ConsoleWrite,
+        &'static (dyn ConsoleRead + Sync + 'static),
+    ) {
+        // Primary console (index 0): the video console + its keyboard queue
+        // when a framebuffer console is active, else the discovered UART. Both
+        // input halves are interrupt-fed console queues (the keyboard
+        // injection queue, or the UART's `UART_INPUT`-backed read half) whose
+        // `push` wakes `CONSOLE_WAITQ`, so the kthread reader parks for input
+        // rather than busy-polling a raw FIFO.
+        if video::is_active() {
+            let write: &'static dyn ConsoleWrite = &VIDEO_CONSOLE;
+            let read: &'static (dyn ConsoleRead + Sync + 'static) = &VIDEO_KEYBOARD;
+            (write, read)
+        } else {
+            // Switch the UART console to interrupt-driven receive for the
+            // unlock window so a keystroke wakes the parked reader
+            // (`console_wake`) — the RX ISR drains the FIFO into `UART_INPUT`,
+            // which `UART_CONSOLE_READ` reads. Idempotent with the
+            // `release_console0_to_login` handoff enable.
+            crate::aarch64::gic_irq::enable_uart_console_irq();
+            let write: &'static dyn ConsoleWrite = &UART_CONSOLE;
+            let read: &'static (dyn ConsoleRead + Sync + 'static) = &UART_CONSOLE_READ;
+            (write, read)
+        }
+    }
+
+    fn release_console0_to_login(&self) {
+        release_console0_to_login();
+    }
+}
+
 /// Admit the in-kernel root-unlock kthread if the boot path bound a
 /// virtio-blk root block device, returning whether it was started.
 ///
@@ -487,25 +522,6 @@ fn run_unlock(
     }
 }
 
-/// The `'static` boot environment a root-unlock bring-up threads through:
-/// the init-spawn context (the per-arch driver-spawn seam) and the audit
-/// sink. The matched-node grants a driver load mints are resolved from the
-/// live [`crate::hwtree_store::HW_TREE`] inventory directly, so no boot-tree snapshot rides along here.
-///
-/// Grouped because both travel together from the kthread body through the
-/// per-device bring-up into the shared [`finish_unlock`] tail; passing one
-/// cohesive `Copy` value rather than re-listing two `'static` references in
-/// every signature keeps the seams readable and below the argument-count bar.
-#[derive(Clone, Copy)]
-struct UnlockEnv {
-    ctx: &'static (dyn InitSpawnCtx + Sync),
-    audit: &'static (dyn Sink + Sync),
-    /// The system memory-pressure gauge the mounted volumes' caches
-    /// sample (`plans/SMARTRAM.md` SMART2), built over the kernel
-    /// frame allocator before the unlock kthread spawns.
-    pressure: &'static MemoryPressure,
-}
-
 /// Bring the virtio-blk root device up over the production device-IRQ path
 /// and hand it to the shared [`finish_unlock`] tail (the QEMU `virt` /
 /// x86_64 root, proven on `-M virt`).
@@ -639,7 +655,13 @@ fn virtio_blk_unlock<'a>(
     // `'static`, so the opened device is `VirtioBlk<'static>` and can be
     // shared for life behind the block-sharing layer (`finish_unlock`).
     let blk = VirtioBlk::open(transport, vhost).map_err(|_| "root-unlock: virtio-blk open")?;
-    finish_unlock(blk, coop, env)
+    finish_unlock(
+        blk,
+        coop,
+        env,
+        &AARCH64_UNLOCK_CONSOLE,
+        &AARCH64_PROCESS_SPAWN,
+    )
 }
 
 /// Bring the Raspberry Pi 4 EMMC2 SD host up over its interrupt-driven SDHCI
@@ -775,383 +797,13 @@ fn emmc2_unlock<'a>(
             },
         )?
     };
-    finish_unlock(blk, coop, env)
-}
-
-/// The shared two-task tail both floor block bring-ups feed, turning the one brought-up disk into a disk shared for life by two
-/// independent preemptive tasks (Design D D2b-2c).
-///
-/// `blk` is the brought-up whole-disk [`Block`] device (virtio-blk or EMMC2),
-/// already boot-leaked to `'static` by its bring-up. It is wrapped in a
-/// leaked `&'static` [`DriverStoreService`] (over the [`SharedBlock`] layer),
-/// so two tasks reach it through independent serialised windows:
-///
-/// * A **separate, spawned** preemptive task runs the interactive
-///   encrypted-root unlock against the *user-data* volume and, when it
-///   resolves (installed or fail-closed), releases the console-0 gate to
-///   `login`.
-/// * **This** task becomes the persistent driver-store serve loop: it binds
-///   and serves the capability-gated store IPC endpoint the user-space
-///   `devmgr` loads signed `/System` drivers through, real-parking on `SERVE_WAITQ` between requests, and never
-///   returns on success.
-///
-/// Crucially the store endpoint binds **independently of** the user-data
-/// passphrase (the signed driver store lives on the always-readable `/System`
-/// volume, `plans/PI.md` design B), so the keyboard driver loads in user
-/// space *before* the unlock prompt — no chicken-and-egg, and no cooperative
-/// interleaving of the two on one kthread.
-///
-/// The live [`WritableRootSink`]: on a successful unlock it opens a second,
-/// independent `'static` read-write [`RustFs`] window onto the `RustFsRoot`
-/// partition under the just-derived key and registers it as the **writable
-/// root volume** backing — `/` itself and every writable sub-mount of it
-/// (`/Users`, `/Apps`, `/Storage`, `/System/Logs`, `/System/Settings`),
-/// which all resolve to this one volume
-/// (`crate::system_mount::register_writable_state`).
-///
-/// This is the only path that can mount the writable state: the encrypted
-/// root is the one writable partition, so its key — live only at the moment
-/// of a successful unlock — is required, and until it lands every write to
-/// `/` and its subtrees fails closed. The read window the unlock used for
-/// `/System/Security` is already dropped, so this read-write view is the
-/// sole writer of the volume. Fail-soft and audited: any partition/window/
-/// mount refusal leaves the writable tree failing closed and never disturbs
-/// the users/identity install.
-struct WritableStateSink<B: Block + 'static> {
-    store: &'static DriverStoreService<B>,
-    audit: &'static (dyn Sink + Sync),
-    /// The system memory-pressure gauge the writable root volume's
-    /// cache samples, threaded from [`UnlockEnv`].
-    pressure: &'static MemoryPressure,
-}
-
-impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
-    fn publish(
-        &self,
-        volume_key: &VolumeKey,
-    ) -> Option<alloc::sync::Arc<rustos_kernel_core::SleepLock<alloc::boxed::Box<dyn KernelFs>>>>
-    {
-        // Locate the RustFsRoot extent on a throwaway probe window, then open
-        // the durable owned `'static` window onto it.
-        let extent = {
-            let mut probe = self.store.window();
-            let Ok(table) = parse_partition_table(&mut probe) else {
-                note(
-                    self.audit,
-                    Level::Error,
-                    "root-unlock: writable-state partition table invalid",
-                );
-                return None;
-            };
-            let Some(extent) = table.first_of_type(PartitionType::RustFsRoot) else {
-                note(
-                    self.audit,
-                    Level::Error,
-                    "root-unlock: writable-state no root partition",
-                );
-                return None;
-            };
-            extent
-        };
-        let Ok(window) = PartitionBlock::from_partition(self.store.window(), &extent) else {
-            note(
-                self.audit,
-                Level::Error,
-                "root-unlock: writable-state window out of range",
-            );
-            return None;
-        };
-        // Re-open the same encrypted volume read-write under the just-derived
-        // key. The driver retains the derived master key for the life of the
-        // mount, exactly as the read mount does. Compressed clusters are
-        // served through the SMART3 transform cache, charged to the root
-        // volume's mount identity and governed by the shared pressure gauge.
-        let Ok(fs) = RustFs::open(window, volume_key) else {
-            note(
-                self.audit,
-                Level::Error,
-                "root-unlock: writable-state mount failed",
-            );
-            return None;
-        };
-        let fs = fs.with_cluster_cache(TransformClusterCache::for_volume(
-            ROOT_VOLUME_HANDLE,
-            self.pressure,
-            self.audit,
-        ));
-        // The registered driver is the volume's single writer; the
-        // `CAP_USER_ADMIN` account-administration engine shares this same
-        // lock (`plans/CAPABILITY_USE.md` CU4) — `/System/Security` is
-        // shadowed by the read-only `/System` mount, so the engine
-        // persists through this driver directly. Fail-soft: a
-        // registration refusal leaves the writable tree and `users_admin`
-        // failing closed.
-        let volume_uuid = fs.volume_uuid();
-        let driver: alloc::boxed::Box<dyn KernelFs> = alloc::boxed::Box::new(fs);
-        register_writable_state(driver, volume_uuid, self.audit, self.pressure)
-    }
-}
-
-/// On success this never returns. Every fallible *setup* step fails closed
-/// with a stable stage string the caller logs.
-fn finish_unlock<B: Block + 'static>(
-    blk: B,
-    coop: &CooperativeYield<'_>,
-    env: UnlockEnv,
-) -> Result<Infallible, &'static str> {
-    let UnlockEnv {
-        ctx,
-        audit,
-        pressure,
-    } = env;
-
-    // The one brought-up disk, boot-leaked to `'static` behind the
-    // block-sharing layer so two independent preemptive tasks drive it through
-    // their own serialised windows: *this* task is the
-    // driver-store serve loop (below), and a *separate* spawned task runs the
-    // encrypted-root unlock. A geometry fault refuses the device fail-closed.
-    // The device sits behind the SMART11 block cache (`plans/SMARTRAM.md`),
-    // on the device side of the sharing lock, so every window reads through
-    // one coherent, pressure-governed cache of recently used blocks.
-    let blk = BlockCache::for_boot_disk(blk, pressure, audit)
-        .map_err(|_| "root-unlock: block device geometry")?;
-    rustos_kernel_core::memstats::MEM_STATS.register_ledger(blk.accounting_shared());
-    let store: &'static DriverStoreService<BlockCache<B>> =
-        alloc::boxed::Box::leak(alloc::boxed::Box::new(DriverStoreService::new(
-            SharedBlock::new(blk).map_err(|_| "root-unlock: block device geometry")?,
-        )));
-
-    // Spawn the encrypted-root unlock as its own preemptive task. The
-    // user-data volume's passphrase is independent of the always-readable
-    // `/System` driver store (`plans/PI.md` design B), so the store endpoint
-    // (bound + served by *this* task below) answers `devmgr` immediately —
-    // the keyboard driver loads in user space *before* the prompt, with no
-    // cooperative interleaving on one kthread (two
-    // independent tasks sharing the disk). The unlock task drives its own
-    // console reader over its own scheduler yield handle.
-    let unlock_body = move |yielder: &mut dyn YieldHandle| {
-        let coop = CooperativeYield::new(yielder);
-        // Primary console (index 0): the video console + its keyboard queue
-        // when a framebuffer console is active, else the discovered UART.
-        // Both input halves are interrupt-fed console queues (the keyboard
-        // injection queue, or the UART's `UART_INPUT`-backed read half) whose
-        // `push` wakes `CONSOLE_WAITQ` (`console_wake`), so the kthread reader
-        // parks for input rather than busy-polling a raw FIFO (nothing cooperative). It reads the raw device behind
-        // the console-0 gate `login` reads through (the gate stays closed
-        // until this unlock resolves), so the two never contend.
-        let (console_write, raw_read): (
-            &'static dyn ConsoleWrite,
-            &'static (dyn ConsoleRead + Sync + 'static),
-        ) = if video::is_active() {
-            (&VIDEO_CONSOLE, &VIDEO_KEYBOARD)
-        } else {
-            // Switch the UART console to interrupt-driven receive for the
-            // unlock window so a keystroke wakes the parked reader
-            // (`console_wake`) — the RX ISR drains the FIFO into `UART_INPUT`,
-            // which `UART_CONSOLE_READ` reads (and which `pump_tx` then drains
-            // the transmit backlog around, the loop now reaching idle).
-            // Idempotent with the `release_console0_to_login` handoff enable.
-            crate::aarch64::gic_irq::enable_uart_console_irq();
-            (&UART_CONSOLE, &UART_CONSOLE_READ)
-        };
-        // The passphrase prompt's secret-entry feedback: the same
-        // `[input active...]` marker a user-space password read shows,
-        // drawn to this console's own output. Armed for the whole unlock
-        // window — the marker only ever appears while a passphrase line is
-        // partially typed (it hides on Enter and on a full erase), so the
-        // silent blank probe and the mount attempts render nothing.
-        let secret = SecretFeedback::new(console_write);
-        secret.arm();
-        // The kthread's own scheduler id (published at admission), so the
-        // reader registers on `CONSOLE_WAITQ` and the RX interrupt unparks it
-        // by id.
-        let reader = KthreadConsoleRead::new(
-            raw_read,
-            &coop,
-            crate::unlock_service::unlock_console_task(),
-            Some(&secret),
-        );
-        // The unlock owns console 0 for the passphrase prompt (its
-        // `GatedConsoleRead` keeps `login` parked). The moment it resolves —
-        // a database installed *or* given up — console 0 must be released to
-        // `login`: open the gate so the primary console's `login` (the video
-        // keyboard on the Pi, the UART on a headless board) can finally read
-        // its input, arm the UART receive interrupt so a serial `login` is
-        // woken by a keystroke, and resolve the `LateUsersDb` pending wait.
-        // `unlock_root_disk_interactively` calls this `on_resolved` callback
-        // exactly once on every internal return path, so a successful unlock
-        // can no longer leave the gate latched shut and the UART RX masked —
-        // the defect that wedged both the keyboard and serial `login` after a
-        // good unlock (a failed unlock still installs no
-        // database, so `login` keeps refusing).
-        // Publish the writable root volume backing (`/` and its writable
-        // subtrees — `/Users`, `/Apps`, `/Storage`, `/System/Logs`,
-        // `/System/Settings`) on a successful unlock, from a second `'static`
-        // read-write window onto the same `'static`-leaked disk (park-safe via
-        // the device `SleepLock`), under the just-derived key.
-        let writable = WritableStateSink {
-            store,
-            audit,
-            pressure,
-        };
-        // The anti-brute-force pause after a wrong passphrase: a genuine
-        // timed park (never a busy-wait) for at least three seconds, so a
-        // scripted brute-force gains no faster oracle than the honest
-        // operator, before the "Incorrect passphrase" notice and re-prompt.
-        let retry_delay = || {
-            crate::unlock_service::park_for_ns(
-                &coop,
-                crate::unlock_service::unlock_console_task(),
-                crate::unlock_service::WRONG_PASSPHRASE_RETRY_DELAY_NS,
-            );
-        };
-        match unlock_root_disk_interactively(
-            store.window(),
-            console_write,
-            &reader,
-            &UnlockInstall {
-                users: &LATE_USERS_DB,
-                identity: &crate::root_mount::LATE_IDENTITY,
-                writable: &writable,
-                admin: Some(AdminInstall {
-                    cell: &LATE_USERS_ADMIN,
-                    users: &LATE_USERS_DB,
-                    identity: &crate::root_mount::LATE_IDENTITY,
-                    audit,
-                }),
-                storage_gid: &crate::volume_policy::LATE_STORAGE_GID,
-            },
-            audit,
-            &retry_delay,
-            &release_console0_to_login,
-        ) {
-            UnlockOutcome::Installed => note(audit, Level::Info, USERS_DB_INSTALLED_MESSAGE),
-            UnlockOutcome::GaveUp => note(
-                audit,
-                Level::Error,
-                "root-unlock: gave up fail-closed; login refused until reboot",
-            ),
-        }
-        // The unlock task then ends (the disk stays alive — it is
-        // `'static`-leaked — and this task's window borrow ends with it).
-    };
-    match ctx.spawn_kernel_service(alloc::boxed::Box::new(unlock_body)) {
-        // Publish the interactive unlock kthread's scheduler id so its
-        // passphrase reader can register on `CONSOLE_WAITQ` and the console
-        // RX interrupt can unpark it by id. On a multi-core boot the
-        // spawned body can start on another CPU before this store lands;
-        // the reader tolerates that by re-resolving the id on every poll
-        // (`KthreadConsoleRead::read`), so a pre-publish start degrades to
-        // at most one transient cooperative yield, never a lost wake.
-        Some(unlock_task) => crate::unlock_service::set_unlock_console_task(unlock_task),
-        // The unlock task could not be admitted: nothing will prompt for the
-        // passphrase or open the console-0 gate, so open it here (login still
-        // refuses, as no database is installed) and serve the store anyway so
-        // `devmgr` can load drivers.
-        None => {
-            note(
-                audit,
-                Level::Error,
-                "root-unlock: unlock task not admitted; console gate opened, store still served",
-            );
-            release_console0_to_login();
-        }
-    }
-
-    // Publish the read-only `/System` volume as the userland `fs_*` mount
-    // before entering the serve loop: a second, park-safe `'static` window
-    // onto the same `'static`-leaked disk (`PREREQUISITES.md` P-A). The store
-    // serve loop below keeps its own independent window, so the two never
-    // conflict. Fail-soft and audited: a disk with no readable `/System`
-    // volume simply leaves the `fs_*` syscalls failing closed.
-    crate::system_mount::install_system_mount(store, audit, pressure);
-
-    // The driver-signing trust anchor the autoload load gate verifies each
-    // winning bundle against — the kernel's own embedded key, the single
-    // source `KernelDriverLoader` also trusts. A
-    // corrupt key is a broken build, not an admissible state: fail closed rather than autoload against no anchor.
-    let trust_anchor = Ed25519PublicKey::from_bytes(&KERNEL_DRIVER_SIGNER_PUBKEY)
-        .map_err(|_| "root-unlock: driver trust anchor")?;
-    let trusted = [trust_anchor];
-    // The scheduler-agnostic driver-spawn seam over the captured boot
-    // context + the aarch64 process producer —
-    // the one per-arch input the otherwise arch-neutral driver-store load op
-    // needs to spawn a verified driver into its own process.
-    let driver_spawn = InitCtxDriverProcessSpawn::new(ctx, &AARCH64_PROCESS_SPAWN);
-    // The kernel-side load mechanism the persistent driver-store service
-    // keeps in its trusted base (Design D D2b-2c): the driver-signing trust
-    // anchor, the delegatable `autoload_caps` gate superset (`CAP_DRV_LOAD`
-    // to pass the gate plus the resource caps an autoloaded driver's class
-    // may request — `CAP_INPUT_INJECT`/`CAP_IRQ_BIND` for an input driver and
-    // `CAP_IPC_BIND_PRIVILEGED` for a bus service driver such as the VideoCore
-    // `vcmailbox`, intersected per driver with its signed manifest request), the aarch64 process-spawn seam, and the
-    // **live** hardware inventory (`crate::hwtree_store::HW_TREE`) a matched
-    // `node_id` is resolved against to mint exactly that node's grants (no ambient authority). Resolving against the live store (not a frozen
-    // boot snapshot) is what lets a node a user-space bus driver publishes at
-    // runtime through `hw_emit_node` be loaded the moment it appears — the recursive bus chain (pcie → vl805 → usb_kbd)
-    // depends on it. The user-space `devmgr` owns the matching *policy*; this
-    // kthread serves the *mechanism* over the capability-gated store endpoint
-    // below.
-    let serve_ctx = crate::driver_store_server::StoreServeContext {
-        trusted: &trusted,
-        caps: autoload_caps(),
-        spawn: &driver_spawn,
-        nodes: &crate::hwtree_store::HW_TREE,
-    };
-
-    // This task is now the persistent driver-store service: it binds and
-    // serves the capability-gated store IPC endpoint the user-space `devmgr`
-    // reads the signed `/System` driver store through, real-parking on `SERVE_WAITQ` between requests. It serves over
-    // its own `/System` window onto the `'static`-leaked shared disk,
-    // independently of the encrypted-root unlock task spawned above
-    // (`plans/PI.md` design B). `login`, PID 1, `devmgr`, the unlock task, and
-    // every other task run on their own tasks.
-    //
-    // The binder context holds only `IPC_BIND_PRIVILEGED` (the privileged
-    // authority to bind the restricted-sender store endpoint), distinct
-    // from the kthread's own minimal `service_caps` (no ambient
-    // authority).
-    let binder = TaskCapabilities::derive(
-        UNLOCK_TASK,
-        UserId(0),
-        store_endpoint_binder_caps(),
-        store_endpoint_binder_caps(),
-        audit,
-    );
-    // The persistent `/System` window is taken in an inner scope so that, on
-    // a fail-closed fallback, the window borrow of `store` ends before the
-    // `store.hold` park. On the success path `serve_system_store` never
-    // returns, so the window stays borrowed for the life of the system.
-    let outcome = {
-        let mut window = store.window();
-        crate::root_mount::with_system_volume(&mut window, audit, |volume| {
-            crate::driver_store_server::serve_system_store(volume, &serve_ctx, &binder, coop, audit)
-        })
-    };
-    match outcome {
-        // The serve loop never returns on success (`Infallible`).
-        Some(Ok(never)) => match never {},
-        // The endpoint could not be bound (e.g. its well-known id is already
-        // registered, or the mount became unreadable). Fail closed: log the stage and park the kthread for life
-        // still owning the disk, so an `ipc_call` to the unbound store
-        // endpoint fails closed with `NotFound` rather than blocking.
-        Some(Err(stage)) => {
-            note(audit, Level::Error, stage);
-            store.hold(coop)
-        }
-        // No read-only `/System` volume on this disk (already audited
-        // `SYSTEM_VOLUME_UNAVAILABLE`): nothing to serve. Park for life
-        // owning the disk; `devmgr`'s store reads fail closed with
-        // `NotFound`.
-        None => {
-            note(
-                audit,
-                Level::Error,
-                "driver-store: no /System volume to serve; driver-store endpoint not bound",
-            );
-            store.hold(coop)
-        }
-    }
+    finish_unlock(
+        blk,
+        coop,
+        env,
+        &AARCH64_UNLOCK_CONSOLE,
+        &AARCH64_PROCESS_SPAWN,
+    )
 }
 
 /// A minimal in-kernel [`DriverHost`] exposing only a capability-gated
