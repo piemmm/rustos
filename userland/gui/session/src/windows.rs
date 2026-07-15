@@ -45,12 +45,12 @@ const CASCADE_WRAP: i32 = 8;
 
 /// One served window's session-side state.
 struct WindowRecord {
-    /// The compositor window presenting this served window.
+    /// The compositor window presenting this served window. The window's
+    /// content surface lives there and nowhere else: a present converts
+    /// its damaged pixels straight into that one owned buffer
+    /// (`Compositor::edit_window_surface`), so the session keeps no second
+    /// copy to convert into and clone from.
     wm: WindowId,
-    /// The window's persistent content surface: the master copy the
-    /// damaged pixels of each present are converted into, cloned to the
-    /// compositor so undamaged content survives partial presents.
-    surface: Surface,
 }
 
 /// The session's bookkeeping for every live served window.
@@ -149,20 +149,16 @@ impl rustos_window::WindowHost for ShellWindowHost<'_> {
             return Err(Errno::LengthOutOfRange);
         };
         let origin = self.windows.next_origin();
+        // The compositor takes ownership of the content surface; the
+        // session keeps only the id mapping, never a second copy.
         let Some(wm) = self
             .shell
-            .open_window(self.compositor, origin, content.clone(), title)
+            .open_window(self.compositor, origin, content, title)
         else {
             return Err(Errno::LengthOutOfRange);
         };
         self.windows.opened += 1;
-        self.windows.records.insert(
-            window_id,
-            WindowRecord {
-                wm,
-                surface: content,
-            },
-        );
+        self.windows.records.insert(window_id, WindowRecord { wm });
         self.windows.by_wm.insert(wm, window_id);
         Ok(())
     }
@@ -174,25 +170,24 @@ impl rustos_window::WindowHost for ShellWindowHost<'_> {
         frame: &[u8],
         damage: DamageRect,
     ) -> Result<(), Errno> {
-        let Some(record) = self.windows.records.get_mut(&window_id) else {
+        let Some(record) = self.windows.records.get(&window_id) else {
             return Err(Errno::NotFound);
         };
-        // Convert exactly the damaged pixels of the presented frame into
-        // the master surface. The engine validated the damage against the
-        // window's surface and handed a frame slice sized from the mode,
-        // but every index below is still checked: a disagreement refuses
-        // the present rather than reading out of bounds.
-        convert_damage(&mut record.surface, surface, frame, damage)?;
-        // Hand the compositor the updated content; it tracks the damage
-        // for the next composite. A window the compositor no longer knows
-        // fails closed.
-        if !self
-            .compositor
-            .set_surface(record.wm, record.surface.clone())
-        {
+        let wm = record.wm;
+        // Convert exactly the damaged pixels of the presented frame
+        // directly into the compositor's own window surface — the single
+        // owned copy — and mark it dirty for the next composite. The
+        // engine validated the damage against the window's surface and
+        // handed a frame slice sized from the mode, but every index in
+        // `convert_damage` is still checked: a disagreement refuses the
+        // present rather than reading out of bounds. A window the
+        // compositor no longer knows fails closed.
+        let Some(result) = self.compositor.edit_window_surface(wm, |content| {
+            convert_damage(content, surface, frame, damage)
+        }) else {
             return Err(Errno::NotFound);
-        }
-        Ok(())
+        };
+        result
     }
 
     fn window_closed(&mut self, window_id: u64) {
@@ -397,10 +392,13 @@ mod tests {
                 )
                 .expect("presents");
             }
-            let record = windows.records.get(&1).expect("live");
-            assert_eq!(record.surface.get(2, 1), Some(want.premultiply()));
+            // The window's one surface lives in the compositor; the
+            // present converted the damaged pixel straight into it.
+            let wm = windows.records.get(&1).expect("live").wm;
+            let content = compositor.window(wm).expect("composited").surface();
+            assert_eq!(content.get(2, 1), Some(want.premultiply()));
             // Undamaged pixels keep the open fill.
-            assert_eq!(record.surface.get(0, 0), Some(OPEN_FILL.premultiply()));
+            assert_eq!(content.get(0, 0), Some(OPEN_FILL.premultiply()));
         }
     }
 

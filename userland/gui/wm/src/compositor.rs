@@ -246,6 +246,29 @@ impl Compositor {
         self.mutate(id, |w| w.replace_surface(surface))
     }
 
+    /// Edit a window's content surface **in place**, marking the window's
+    /// bounds dirty, and return the edit's own result — or `None` for an
+    /// unknown `id`.
+    ///
+    /// Unlike [`set_surface`](Self::set_surface), the caller writes into
+    /// the window's existing buffer rather than handing over a fresh one,
+    /// so a presenter applying a per-frame damage region into the
+    /// window's persistent content needs no second copy of the surface to
+    /// convert into and clone from. The edit must not resize the surface
+    /// (a window's dimensions are fixed for its lifetime); the marked
+    /// bounds are the window's current bounds.
+    pub fn edit_window_surface<T>(
+        &mut self,
+        id: WindowId,
+        edit: impl FnOnce(&mut Surface) -> T,
+    ) -> Option<T> {
+        let window = self.windows.iter_mut().find(|w| w.id() == id)?;
+        let bounds = window.bounds();
+        let out = edit(window.surface_mut());
+        self.damage.add(bounds);
+        Some(out)
+    }
+
     /// Raise a window to the top of the z-order; its bounds are marked
     /// dirty.
     pub fn raise(&mut self, id: WindowId) -> bool {
@@ -362,15 +385,32 @@ impl Compositor {
         let screen = self.screen_rect();
         let damage = core::mem::take(&mut self.damage);
         let mut bounds = Rect::EMPTY;
+        // The root fill is constant for the whole composite; premultiply
+        // it once rather than per pixel.
+        let base = self.background.premultiply();
+        // Reused across rectangles so a multi-rectangle composite makes
+        // no per-rectangle allocation on this hot path.
+        let mut hits: Vec<usize> = Vec::new();
         for &dirty in damage.rects() {
             let area = dirty.intersection(&screen);
             if area.is_empty() {
                 continue;
             }
             bounds = bounds.union(&area);
+            // Only a window whose bounds overlap this rectangle can
+            // contribute a pixel inside it; every other window's sample
+            // is unconditionally `None` here, so skipping it is exact
+            // (bit-for-bit identical output) and turns the per-pixel
+            // window scan from "all windows" into "the few that overlap".
+            hits.clear();
+            for (index, window) in self.windows.iter().enumerate() {
+                if window.is_visible() && !window.bounds().intersection(&area).is_empty() {
+                    hits.push(index);
+                }
+            }
             for y in area.top()..area.bottom() {
                 for x in area.left()..area.right() {
-                    self.recompose_pixel(x, y);
+                    self.recompose_pixel(x, y, base, &hits);
                 }
             }
         }
@@ -542,10 +582,10 @@ impl Compositor {
 
     /// Recompute the composited value of screen pixel `(x, y)` and write
     /// it to the back buffer and the encoded frame.
-    fn recompose_pixel(&mut self, x: i32, y: i32) {
-        let mut acc = self.background.premultiply();
-        for window in &self.windows {
-            if let Some(src) = window.sample(x, y) {
+    fn recompose_pixel(&mut self, x: i32, y: i32, base: Pixel, hits: &[usize]) {
+        let mut acc = base;
+        for &index in hits {
+            if let Some(src) = self.windows[index].sample(x, y) {
                 acc = src.over(acc);
             }
         }

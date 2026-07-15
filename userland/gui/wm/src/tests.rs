@@ -155,6 +155,76 @@ fn damage_clear_empties() {
     assert_eq!(d.bounds(), Rect::EMPTY);
 }
 
+#[test]
+fn damage_coalesces_repeated_rectangles() {
+    // The window-open path marks the same window rectangle dirty several
+    // times (open, focus, surface update) and the taskbar its bar
+    // rectangle several times per present. Recomposition is per
+    // rectangle, so without coalescing that region would be composited
+    // once per duplicate — the defect this guards. The same rectangle
+    // added many times must collapse to exactly one.
+    let mut d = DamageRegion::new();
+    let window = Rect::new(80, 80, 900, 620);
+    for _ in 0..6 {
+        d.add(window);
+    }
+    assert_eq!(d.rects(), &[window]);
+    assert_eq!(d.bounds(), window);
+}
+
+#[test]
+fn damage_coalesces_overlapping_into_their_union() {
+    // Two overlapping updates (a window's old and new position after a
+    // move) merge into one rectangle so the overlap is not composited
+    // twice.
+    let mut d = DamageRegion::new();
+    d.add(Rect::new(0, 0, 4, 4));
+    d.add(Rect::new(2, 2, 4, 4));
+    assert_eq!(d.rects(), &[Rect::new(0, 0, 6, 6)]);
+}
+
+#[test]
+fn damage_bridging_rectangle_merges_a_disjoint_pair() {
+    // A later rectangle overlapping two previously-disjoint rectangles
+    // draws all three into a single union, never leaving a stale
+    // duplicate behind.
+    let mut d = DamageRegion::new();
+    d.add(Rect::new(0, 0, 2, 2));
+    d.add(Rect::new(6, 0, 2, 2));
+    assert_eq!(d.rects().len(), 2);
+    d.add(Rect::new(0, 0, 8, 2));
+    assert_eq!(d.rects(), &[Rect::new(0, 0, 8, 2)]);
+}
+
+#[test]
+fn duplicate_damage_composites_a_window_once_and_correctly() {
+    // Marking a window's rectangle dirty repeatedly must not change the
+    // composited result (and, with coalescing, composites it once): the
+    // frame is identical to a single clean composite.
+    let mut once = Compositor::new(mode(4, 4), BLUE).expect("compositor");
+    once.add_window(Point::new(1, 1), opaque(2, 2, RED));
+    once.composite();
+
+    let mut many = Compositor::new(mode(4, 4), BLUE).expect("compositor");
+    let id = many.add_window(Point::new(1, 1), opaque(2, 2, RED));
+    // Extra identical damage on top of the add's own damage: each
+    // surface replacement re-dirties the same window rectangle.
+    for _ in 0..5 {
+        assert!(many.set_surface(id, opaque(2, 2, RED)));
+    }
+    many.composite();
+
+    for y in 0..4 {
+        for x in 0..4 {
+            assert_eq!(
+                frame_pixel(&once, x, y),
+                frame_pixel(&many, x, y),
+                "pixel ({x},{y}) differs after duplicated damage"
+            );
+        }
+    }
+}
+
 // ---- compositor ------------------------------------------------------
 
 #[test]

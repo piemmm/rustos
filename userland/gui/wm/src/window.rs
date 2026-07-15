@@ -95,6 +95,13 @@ impl Window {
         &self.surface
     }
 
+    /// Borrow the window's content surface mutably, for an in-place
+    /// update of its pixels (the compositor marks the window's bounds
+    /// dirty around the edit).
+    pub(crate) fn surface_mut(&mut self) -> &mut Surface {
+        &mut self.surface
+    }
+
     /// The window's screen rectangle (origin plus surface size).
     #[must_use]
     pub fn bounds(&self) -> Rect {

@@ -5,11 +5,19 @@
 //! (a window moved, a surface was repainted) so [`composite`] can skip
 //! the untouched majority of the screen.
 //!
-//! The representation is deliberately simple — a list of rectangles
-//! plus their cached bounding box. It never merges overlapping
-//! rectangles (that would cost more than the pixels saved at this
-//! scale); a pixel covered by two damage rectangles is simply visited
-//! by composition under each, which is idempotent.
+//! The representation is a list of rectangles plus their cached
+//! bounding box. Overlapping rectangles are coalesced into their union
+//! on [`add`](DamageRegion::add): recomposition is per rectangle, so a
+//! region marked dirty more than once (the same window rectangle pushed
+//! by an open, a focus, and a surface update, or a window's old and new
+//! position after a move) must not become the *same pixels composited
+//! several times* — at a full window's size that is the difference
+//! between one recomposite and four. Disjoint rectangles (a window and
+//! the far-away taskbar) stay separate, so coalescing never inflates the
+//! work to the whole screen either. The union of two overlapping
+//! rectangles can cover a few pixels in neither original; recompositing
+//! them is harmless (composition reads the live window state and is
+//! idempotent), and it is far cheaper than revisiting the overlap twice.
 //!
 //! [`composite`]: crate::Compositor::composite
 
@@ -41,15 +49,36 @@ impl DamageRegion {
     }
 
     /// Mark `rect` dirty. Empty rectangles are ignored.
-    pub fn add(&mut self, rect: Rect) {
+    ///
+    /// `rect` is coalesced with every already-dirty rectangle it
+    /// overlaps, growing to their union, so the same region is never
+    /// recorded — and later recomposited — more than once. A rectangle
+    /// disjoint from all current damage is kept as its own entry, so
+    /// unrelated updates never merge into one screen-spanning rectangle.
+    pub fn add(&mut self, mut rect: Rect) {
         if rect.is_empty() {
             return;
+        }
+        let mut i = 0;
+        while i < self.rects.len() {
+            if overlaps(&self.rects[i], &rect) {
+                rect = rect.union(&self.rects[i]);
+                // Order carries no meaning: each rectangle is composited
+                // independently, so a swap-remove is safe. Restart the
+                // scan because the grown rectangle may now reach earlier
+                // rectangles it did not before.
+                self.rects.swap_remove(i);
+                i = 0;
+            } else {
+                i += 1;
+            }
         }
         self.bounds = self.bounds.union(&rect);
         self.rects.push(rect);
     }
 
-    /// The dirty rectangles, in the order they were added.
+    /// The coalesced dirty rectangles, in no particular order (each is
+    /// composited independently, so their order is immaterial).
     #[must_use]
     pub fn rects(&self) -> &[Rect] {
         &self.rects
@@ -72,4 +101,10 @@ impl DamageRegion {
         self.rects.clear();
         self.bounds = Rect::EMPTY;
     }
+}
+
+/// `true` when `a` and `b` share at least one pixel. Rectangles that
+/// merely touch along an edge do not overlap and are left separate.
+fn overlaps(a: &Rect, b: &Rect) -> bool {
+    !a.intersection(b).is_empty()
 }
