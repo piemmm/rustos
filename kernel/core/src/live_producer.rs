@@ -22,14 +22,16 @@
 //! task spawned without a retained space) fails closed with
 //! [`Errno::NotImplemented`] rather than touching another task's memory.
 
+use alloc::vec::Vec;
+
 use rustos_abi::{Errno, MapFlags};
 use rustos_kernel_mem::{
     page_count_for, AllocError, AnonError, DmaError, Frame, FrameAllocator, LiveSpaceError,
-    MmioError, PhysAddr, PhysMap, MAX_ORDER, PAGE_SIZE,
+    MmioError, PhysAddr, PhysMap, PAGE_SIZE,
 };
 use rustos_kernel_sched_api::SchedulerArch;
 
-use crate::devres::{DmaAllocFacility, DmaCarve, MmioMapFacility, SharedMemFacility};
+use crate::devres::{DmaAllocFacility, DmaCarve, MmioMapFacility, SharedChunk, SharedMemFacility};
 use crate::filemap::FileMap;
 use crate::kthread::with_current_live_space;
 use crate::memmap::MemMap;
@@ -96,25 +98,6 @@ fn alloc_errno(err: AllocError) -> Errno {
         // to an out-of-range error.
         _ => Errno::OutOfRange,
     }
-}
-
-/// The smallest buddy order whose `2^order` frames cover `pages`, or an
-/// [`Errno`] if `pages` is zero or exceeds the largest allocatable block.
-fn order_for(pages: u64) -> Result<u32, Errno> {
-    if pages == 0 {
-        return Err(Errno::LengthOutOfRange);
-    }
-    // `2^order >= pages`: the bit width of `pages - 1` (zero for a single
-    // page, where `pages - 1 == 0`).
-    let order = if pages == 1 {
-        0
-    } else {
-        u64::BITS - (pages - 1).leading_zeros()
-    };
-    if order > MAX_ORDER {
-        return Err(Errno::OutOfRange);
-    }
-    Ok(order)
 }
 
 /// Fold a [`LiveSpaceError`] onto a stable [`Errno`].
@@ -411,25 +394,51 @@ impl<A> SharedMemFacility for LiveSharedMem<A>
 where
     A: SchedulerArch + Send + Sync + 'static,
 {
-    fn alloc_region(&self, pages: u64) -> Result<(u64, u32), Errno> {
-        let order = order_for(pages)?;
-        // Allocate the physically-contiguous backing block the region owns,
-        // then scrub it before it can become user-visible (no cross-process
-        // leak). Scrubbing through the kernel direct map needs no user
-        // mapping, so it is robust in every context.
-        let frame = self.frames.alloc_order(order).map_err(alloc_errno)?;
-        let phys_base = frame.start().as_u64();
-        self.scrub(phys_base, pages);
-        Ok((phys_base, order))
+    fn alloc_region(&self, pages: u64) -> Result<Vec<SharedChunk>, Errno> {
+        if pages == 0 {
+            return Err(Errno::LengthOutOfRange);
+        }
+        // Allocate the backing as a set of physically-contiguous buddy chunks
+        // (one for a small region, several for one larger than the 8 MiB
+        // single-block ceiling), so the region size is bounded by RAM.
+        let blocks = self.frames.alloc_chunks(pages).map_err(alloc_errno)?;
+        let mut chunks: Vec<SharedChunk> = Vec::new();
+        if chunks.try_reserve_exact(blocks.len()).is_err() {
+            // Bookkeeping OOM: return every just-allocated block and fail
+            // closed, leaking nothing.
+            for (frame, order) in &blocks {
+                let _ = self.frames.free_order(*frame, *order);
+            }
+            return Err(Errno::OutOfMemory);
+        }
+        for (frame, order) in blocks {
+            let phys_base = frame.start().as_u64();
+            let pages = 1u64 << order;
+            // Scrub each block before it can become user-visible (no
+            // cross-process leak); the kernel direct map needs no user
+            // mapping, so it is robust in every context.
+            self.scrub(phys_base, pages);
+            chunks.push(SharedChunk {
+                phys_base,
+                order,
+                pages,
+            });
+        }
+        Ok(chunks)
     }
 
-    fn map_region(&self, phys_base: u64, pages: u64) -> Result<u64, Errno> {
-        let len = usize::try_from(pages)
-            .ok()
-            .and_then(|p| p.checked_mul(PAGE_SIZE))
-            .ok_or(Errno::OutOfRange)?;
+    fn map_region(&self, chunks: &[SharedChunk]) -> Result<u64, Errno> {
+        // Project the chunk list onto the `(phys_base, pages)` list the live
+        // space maps into one contiguous virtual window.
+        let mut list: Vec<(u64, u64)> = Vec::new();
+        if list.try_reserve_exact(chunks.len()).is_err() {
+            return Err(Errno::OutOfMemory);
+        }
+        for c in chunks {
+            list.push((c.phys_base, c.pages));
+        }
         let cpu = self.arch.current_cpu();
-        with_current_live_space(cpu, |space| space.map_shared(phys_base, len))
+        with_current_live_space(cpu, |space| space.map_shared_chunks(&list))
             .ok_or(Errno::NotImplemented)?
             .map_err(live_errno)
     }
@@ -441,21 +450,27 @@ where
             .map_err(live_errno)
     }
 
-    fn free_region(&self, phys_base: u64, order: u32, pages: u64) {
-        // Scrub before returning the frames to the allocator (zero-on-free)
+    fn free_region(&self, chunks: &[SharedChunk]) {
+        // Scrub before returning each block to the allocator (zero-on-free)
         // through the kernel direct map, then free the buddy block. Robust in
         // every context, including a kernel-thread teardown with no live
         // address space.
-        self.scrub(phys_base, pages);
-        let frame = Frame::containing(PhysAddr::new(phys_base));
-        let _ = self.frames.free_order(frame, order);
+        for c in chunks {
+            self.scrub(c.phys_base, c.pages);
+            let frame = Frame::containing(PhysAddr::new(c.phys_base));
+            let _ = self.frames.free_order(frame, c.order);
+        }
     }
 
-    fn kernel_window(&self, phys_base: u64, len: usize) -> Option<core::ptr::NonNull<u8>> {
-        // The same direct-map translation the scrub path uses: the region's
-        // frames are physically contiguous, so one translation covers the
-        // whole window.
-        self.physmap.translate(PhysAddr::new(phys_base), len)
+    fn kernel_window(&self, chunks: &[SharedChunk], len: usize) -> Option<core::ptr::NonNull<u8>> {
+        // Only a single-chunk region is physically contiguous, so one direct-
+        // map translation covers the whole window; a multi-chunk region is
+        // not contiguous and fails closed (no kernel consumer maps one).
+        if let [chunk] = chunks {
+            self.physmap.translate(PhysAddr::new(chunk.phys_base), len)
+        } else {
+            None
+        }
     }
 }
 
@@ -615,6 +630,15 @@ mod tests {
             // The shared-memory producer's map/unmap routing is exercised at
             // the syscall-handler level and end-to-end in QEMU; this double
             // only satisfies the trait for the other producers' tests.
+            match self.next.take() {
+                Some(err) => Err(err),
+                None => Ok(0x9000_5000),
+            }
+        }
+
+        fn map_shared_chunks(&mut self, _chunks: &[(u64, u64)]) -> Result<u64, LiveSpaceError> {
+            // As `map_shared`: the chunked mapping is covered at the
+            // syscall-handler level and end-to-end in QEMU.
             match self.next.take() {
                 Some(err) => Err(err),
                 None => Ok(0x9000_5000),

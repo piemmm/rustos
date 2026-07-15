@@ -33,7 +33,7 @@ use rustos_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType}
 use rustos_abi::{CapabilityId, CapabilityQuery, DriverError, Errno};
 use rustos_caps::CapabilitySet;
 use rustos_drv_fs_fat32::Fat32;
-use rustos_kernel_core::devres::{install_shared_mem_facility, SharedMemFacility};
+use rustos_kernel_core::devres::{install_shared_mem_facility, SharedChunk, SharedMemFacility};
 use rustos_kernel_core::fs::FilesystemService;
 use rustos_kernel_core::{sharedreg, Vfs};
 use rustos_kernel_ipc::{CallEndpoint, CallEndpointLimits, EndpointId, RecvCall};
@@ -100,18 +100,28 @@ struct TestFacility {
 unsafe impl Sync for TestFacility {}
 
 impl SharedMemFacility for TestFacility {
-    fn alloc_region(&self, _pages: u64) -> Result<(u64, u32), Errno> {
-        Ok((0x4000_0000, 0))
+    fn alloc_region(&self, pages: u64) -> Result<Vec<SharedChunk>, Errno> {
+        // A single contiguous chunk (the block-service data window is small).
+        Ok(vec![SharedChunk {
+            phys_base: 0x4000_0000,
+            order: 0,
+            pages,
+        }])
     }
-    fn map_region(&self, phys_base: u64, _pages: u64) -> Result<u64, Errno> {
-        Ok(0x9000_0000 + phys_base)
+    fn map_region(&self, chunks: &[SharedChunk]) -> Result<u64, Errno> {
+        Ok(0x9000_0000 + chunks[0].phys_base)
     }
     fn unmap_region(&self, _base: u64, _len: usize) -> Result<(), Errno> {
         Ok(())
     }
-    fn free_region(&self, _phys_base: u64, _order: u32, _pages: u64) {}
-    fn kernel_window(&self, _phys_base: u64, _len: usize) -> Option<core::ptr::NonNull<u8>> {
-        core::ptr::NonNull::new(self.window)
+    fn free_region(&self, _chunks: &[SharedChunk]) {}
+    fn kernel_window(&self, chunks: &[SharedChunk], _len: usize) -> Option<core::ptr::NonNull<u8>> {
+        // The single-chunk region resolves to the one leaked test window.
+        if chunks.len() == 1 {
+            core::ptr::NonNull::new(self.window)
+        } else {
+            None
+        }
     }
 }
 

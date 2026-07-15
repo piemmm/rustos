@@ -17362,6 +17362,9 @@ mod tests {
         fn map_shared(&mut self, _phys: u64, _len: usize) -> Result<u64, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }
+        fn map_shared_chunks(&mut self, _chunks: &[(u64, u64)]) -> Result<u64, LiveSpaceError> {
+            Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
+        }
         fn unmap_shared(&mut self, _base: u64, _len: usize) -> Result<(), LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::NotMapped))
         }
@@ -21881,16 +21884,23 @@ mod tests {
         va: u64,
     }
     impl crate::devres::SharedMemFacility for RecordingSharedFacility {
-        fn alloc_region(&self, _pages: u64) -> Result<(u64, u32), Errno> {
-            Ok((0xAB00_0000, 0))
+        fn alloc_region(
+            &self,
+            pages: u64,
+        ) -> Result<alloc::vec::Vec<crate::devres::SharedChunk>, Errno> {
+            Ok(alloc::vec![crate::devres::SharedChunk {
+                phys_base: 0xAB00_0000,
+                order: 0,
+                pages,
+            }])
         }
-        fn map_region(&self, _phys_base: u64, _pages: u64) -> Result<u64, Errno> {
+        fn map_region(&self, _chunks: &[crate::devres::SharedChunk]) -> Result<u64, Errno> {
             Ok(self.va)
         }
         fn unmap_region(&self, _base: u64, _len: usize) -> Result<(), Errno> {
             Ok(())
         }
-        fn free_region(&self, _phys_base: u64, _order: u32, _pages: u64) {}
+        fn free_region(&self, _chunks: &[crate::devres::SharedChunk]) {}
     }
 
     /// `shm_create` maps the region into the caller, mints the caller the

@@ -746,6 +746,76 @@ impl FrameAllocator {
         g.free_order(frame.0, order)
     }
 
+    /// Allocate `pages` frames as a *set* of physically-contiguous buddy
+    /// chunks, each of order `≤` [`MAX_ORDER`], preferring the largest block
+    /// that fits the remainder so a large request costs few chunks.
+    ///
+    /// This is the path a cross-process shared-memory region draws its
+    /// backing from: a region larger than the 8 MiB single-block ceiling
+    /// ([`MAX_ORDER`]) is satisfied by several blocks the caller then maps
+    /// into one contiguous virtual window, so the region size is bounded by
+    /// available RAM rather than a fixed order. A region that fits one block
+    /// is returned as a single chunk (the common small case). Each chunk is
+    /// returned as `(start_frame, order)` in allocation order.
+    ///
+    /// Like [`Self::alloc_order`] this is the kernel-internal path and may
+    /// draw the reserve. When a block of the preferred order is unavailable
+    /// the search steps down one order at a time before giving up, so a
+    /// fragmented pool is still satisfied while enough total RAM is free.
+    ///
+    /// On any failure every chunk already taken is returned to the allocator
+    /// before the error propagates, so a failed call leaks nothing and leaves
+    /// the free pool unchanged.
+    ///
+    /// # Errors
+    ///
+    /// - [`AllocError::SizeUnsupported`] if `pages` is zero.
+    /// - [`AllocError::OutOfMemory`] if the request cannot be satisfied even
+    ///   after stepping down to single frames, or if the chunk-list
+    ///   bookkeeping cannot be grown.
+    pub fn alloc_chunks(&self, pages: u64) -> Result<Vec<(Frame, u32)>, AllocError> {
+        if pages == 0 {
+            return Err(AllocError::SizeUnsupported);
+        }
+        let mut out: Vec<(Frame, u32)> = Vec::new();
+        let mut remaining = pages;
+        while remaining > 0 {
+            // Largest order whose block fits the remainder, capped at
+            // MAX_ORDER. `remaining >= 1` (the loop guard), so `ilog2` is
+            // well-defined (it is `floor(log2(remaining))`).
+            let fit = remaining.ilog2();
+            let mut order = core::cmp::min(fit, MAX_ORDER);
+            let (frame, taken) = loop {
+                match self.alloc_order(order) {
+                    Ok(frame) => break (frame, order),
+                    // No block of this order is free; the pool may be
+                    // fragmented, so step down one size and retry before
+                    // declaring the whole request out of memory.
+                    Err(AllocError::OutOfMemory) if order > 0 => order -= 1,
+                    Err(e) => {
+                        for (f, o) in out.drain(..) {
+                            let _ = self.free_order(f, o);
+                        }
+                        return Err(e);
+                    }
+                }
+            };
+            // Grow the chunk list fallibly before recording the block, so a
+            // bookkeeping OOM returns every chunk (including this one) rather
+            // than aborting.
+            if out.try_reserve(1).is_err() {
+                let _ = self.free_order(frame, taken);
+                for (f, o) in out.drain(..) {
+                    let _ = self.free_order(f, o);
+                }
+                return Err(AllocError::OutOfMemory);
+            }
+            out.push((frame, taken));
+            remaining -= 1u64 << taken;
+        }
+        Ok(out)
+    }
+
     /// Number of frames the allocator can still hand out.
     #[must_use]
     pub fn free_frames(&self) -> FrameCount {
@@ -900,6 +970,80 @@ mod tests {
             a.alloc_order(MAX_ORDER + 1).err(),
             Some(AllocError::SizeUnsupported)
         );
+    }
+
+    /// Total frames across a chunk list.
+    fn chunk_frames(chunks: &[(Frame, u32)]) -> u64 {
+        chunks.iter().map(|&(_, o)| 1u64 << o).sum()
+    }
+
+    #[test]
+    fn alloc_chunks_rejects_zero() {
+        let m = small_map(4);
+        let a = FrameAllocator::new(&m).unwrap();
+        assert_eq!(a.alloc_chunks(0).err(), Some(AllocError::SizeUnsupported));
+    }
+
+    #[test]
+    fn alloc_chunks_of_a_power_of_two_is_a_single_block() {
+        let m = small_map(16);
+        let a = FrameAllocator::new(&m).unwrap();
+        // Four frames is one order-2 block: the common small case stays a
+        // single chunk (so the USB URB-buffer path is unaffected).
+        let chunks = a.alloc_chunks(4).unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].1, 2);
+        assert_eq!(a.free_frames(), 16 - 4);
+        for (f, o) in chunks {
+            a.free_order(f, o).unwrap();
+        }
+        assert_eq!(a.free_frames(), 16);
+    }
+
+    #[test]
+    fn alloc_chunks_splits_a_non_power_of_two_into_descending_blocks() {
+        let m = small_map(16);
+        let a = FrameAllocator::new(&m).unwrap();
+        // Six frames = one order-2 block (4) + one order-1 block (2), largest
+        // first.
+        let chunks = a.alloc_chunks(6).unwrap();
+        assert_eq!(chunk_frames(&chunks), 6);
+        assert_eq!(chunks.iter().map(|&(_, o)| o).collect::<Vec<_>>(), [2, 1]);
+        assert_eq!(a.free_frames(), 16 - 6);
+        for (f, o) in chunks {
+            a.free_order(f, o).unwrap();
+        }
+        assert_eq!(a.free_frames(), 16);
+    }
+
+    #[test]
+    fn alloc_chunks_spans_more_than_one_max_order_block() {
+        // A request larger than a single order-`MAX_ORDER` block (8 MiB) must
+        // be satisfied by several blocks — the whole point of the chunked
+        // backing that removes the shared-region ceiling.
+        let m = small_map(5000);
+        let a = FrameAllocator::new(&m).unwrap();
+        let want = 4096; // 16 MiB, twice the 8 MiB single-block ceiling.
+        let chunks = a.alloc_chunks(want).unwrap();
+        assert!(chunks.len() >= 2, "must span multiple blocks");
+        assert!(chunks.iter().all(|&(_, o)| o <= MAX_ORDER));
+        assert_eq!(chunk_frames(&chunks), want);
+        assert_eq!(a.free_frames(), 5000 - usize::try_from(want).unwrap());
+        for (f, o) in chunks {
+            a.free_order(f, o).unwrap();
+        }
+        assert_eq!(a.free_frames(), 5000);
+    }
+
+    #[test]
+    fn alloc_chunks_frees_every_block_on_exhaustion() {
+        let m = small_map(4);
+        let a = FrameAllocator::new(&m).unwrap();
+        // Nine frames cannot be satisfied by four: the partial progress (an
+        // order-2 block over the whole pool) is returned and the call fails
+        // closed, leaving the pool exactly as it was found.
+        assert_eq!(a.alloc_chunks(9).err(), Some(AllocError::OutOfMemory));
+        assert_eq!(a.free_frames(), 4);
     }
 
     #[test]
