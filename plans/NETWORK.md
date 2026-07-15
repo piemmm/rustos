@@ -714,11 +714,31 @@ improvement, not test scaffolding):
   `riscv64/irq.rs` doing `record_plic`/`install_dispatch`/claim→fire→complete
   over `fdt::plic_base`+`plic_ndev`), `riscv64/root_unlock.rs` (virtio-blk
   bring-up over the PLIC path → `finish_unlock`, SBI console fail-closed on
-  input), and the `try_boot` BootInfo hooks + init-spawn call. What remains for
-  riscv64 is only the **QEMU boot verticals** (`autoload_input_qemu_riscv64`
-  then the two-process `netstack_autoload_qemu_riscv64`), which are TCG-bound
-  and confirmed on CI hardware, not a developer machine. x86_64 then repeats
-  the whole sequence over its virtio-**PCI** bus.
+  input), and the `try_boot` BootInfo hooks + init-spawn call. Seventh
+  foundation in place: the image pipeline is now **per-arch**
+  (`rustos_itest_harness::pie::PieArch` threaded through `image_apps` +
+  `image_drivers`, per-arch memoised; `qemu_tests::stores_for` composes only
+  the `/System` stores an enrolment plants, for its own target arch), so a
+  non-aarch64 autoload vertical plants that arch's rxe. **The first riscv64
+  boot vertical, `autoload_input_qemu_riscv64`, is authored + enrolled** (the
+  `virt`-board virtio-mmio input-autoload analogue of the aarch64 vertical,
+  reduced to the input path: no display world, and the encrypted-root unlock
+  fails closed by design because the SBI console has no interactive input this
+  slice). Authoring it surfaced and fixed a **pre-existing riscv64 defect**:
+  `RiscvBinArch` never overrode `KernelArch::irq_routing`, so the kernel-core
+  `IrqTable` was sized `max_line = 0` and *every* device-source `bind` failed
+  closed — root-unlock, root-mount, and all interrupt-driven bring-up were
+  broken on a real boot. The fix (`riscv64/irq.rs::plic_routing` +
+  `ensure_controller`, the one place the PLIC controller is built; wired into a
+  `RiscvBinArch::irq_routing` that returns `max_line = riscv,ndev` + the shared
+  controller) is confirmed on a real guest boot: root-unlock now binds the
+  block line, `/System` mounts, the store scans 3 bundles, and the virtio-input
+  driver autoloads into its own process and arms its PLIC line (`irq_bind`) —
+  the whole autoload path works. What remains for riscv64: the final injected
+  key-delivery PASS of `autoload_input_qemu_riscv64` is TCG-bound (confirmed on
+  CI hardware, not a developer machine), then the two-process
+  `netstack_autoload_qemu_riscv64`. x86_64 then repeats the whole sequence over
+  its virtio-**PCI** bus (its `irq_routing` / IO-APIC path already exists).
 - **§18.5 scaffold removal** (once all three arches are two-process): delete the
   `register` shell in `drivers/network/virtio_net` (keeping `BIND_KEYS` +
   `VirtioNet`), `FixedSpawner`/`netstack_ping` in the support crate, and

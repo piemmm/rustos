@@ -164,22 +164,14 @@ fn qemu_units(ctx: &Context) -> Vec<FlakeUnit<'_>> {
             FlakeUnit::new(label, budget, move |_| {
                 let target_dir = target_dir.clone();
                 let job_label = job_label.clone();
-                // Resolve the memoised (`'static`) application-bundle store
-                // (and its memsoak-augmented sibling) per job so the
-                // `'static` job closure captures plain slices; `build_all`
-                // pre-warmed both, so this is a lookup, and a memoised
-                // composition failure fails the job closed.
-                let apps = crate::commands::image_apps::app_store_files(ctx);
-                let apps_with_memsoak = crate::commands::image_apps::memsoak_store_files(ctx);
-                let autoload_drivers =
-                    crate::commands::image_drivers::autoload_driver_store_files(ctx);
+                // Resolve this enrolment's memoised (`'static`) per-arch
+                // `/System`-store bundle set off the job closure so the
+                // `'static` closure captures the resolved `StoreSet` by
+                // value; `build_all` pre-warmed it, so this is a lookup, and
+                // a memoised composition failure fails the job closed.
+                let stores = enrol.stores(ctx);
                 Job::closure(job_label, weight, move || {
-                    enrol.run(
-                        &target_dir,
-                        apps.clone()?,
-                        apps_with_memsoak.clone()?,
-                        autoload_drivers.clone()?,
-                    )
+                    enrol.run(&target_dir, stores.clone()?)
                 })
             })
         })

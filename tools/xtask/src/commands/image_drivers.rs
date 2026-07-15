@@ -115,6 +115,7 @@ pub const VOLMGR_STORE_PATH: &[&[u8]] = &[b"Drivers", b"storage", b"volmgr", b"R
 /// ELF->rxe conversion failure, or a structurally invalid composed bundle.
 fn build_bundle(
     ctx: &Context,
+    arch: PieArch,
     package: &str,
     caps: &[CapabilityId],
     bind_keys: &[rustos_abi::DriverBindKey],
@@ -138,14 +139,7 @@ fn build_bundle(
     };
     // A driver crate's `Run` binary shares the package name.
     let crate_dir = ctx.workspace_root.join(rel_dir);
-    let elf = cross_compile_pie_elf(
-        ctx,
-        PieArch::Aarch64,
-        "image-drivers",
-        package,
-        package,
-        &crate_dir,
-    )?;
+    let elf = cross_compile_pie_elf(ctx, arch, "image-drivers", package, package, &crate_dir)?;
     let rxe = elf_to_rxe(
         &elf,
         &rustos_kernel_syscall::SYSCALL_TABLE_HASH,
@@ -180,9 +174,10 @@ fn build_bundle(
 ///
 /// A string describing a failed cross-compile, a missing ELF artefact, or an
 /// ELF->rxe conversion failure.
-pub fn build_vcmailbox_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
+pub fn build_vcmailbox_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String> {
     build_bundle(
         ctx,
+        arch,
         "rustos-drv-bus-mailbox-vcmailbox",
         &[
             CapabilityId::MMIO_MAP,
@@ -207,9 +202,10 @@ pub fn build_vcmailbox_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
 /// # Errors
 ///
 /// As [`build_vcmailbox_bundle`].
-pub fn build_pcie_brcm_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
+pub fn build_pcie_brcm_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String> {
     build_bundle(
         ctx,
+        arch,
         "rustos-drv-bus-pcie-brcm",
         &[
             CapabilityId::MMIO_MAP,
@@ -233,9 +229,10 @@ pub fn build_pcie_brcm_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
 /// # Errors
 ///
 /// As [`build_vcmailbox_bundle`].
-pub fn build_vl805_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
+pub fn build_vl805_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String> {
     build_bundle(
         ctx,
+        arch,
         "rustos-drv-bus-usb-vl805",
         &[CapabilityId::MAILBOX, CapabilityId::HW_EMIT],
         rustos_drv_bus_usb_vl805::BIND_KEYS,
@@ -256,9 +253,10 @@ pub fn build_vl805_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
 /// # Errors
 ///
 /// As [`build_vcmailbox_bundle`].
-pub fn build_xhci_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
+pub fn build_xhci_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String> {
     build_bundle(
         ctx,
+        arch,
         "rustos-drv-bus-usb",
         &[
             CapabilityId::MMIO_MAP,
@@ -286,9 +284,10 @@ pub fn build_xhci_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
 /// # Errors
 ///
 /// As [`build_vcmailbox_bundle`].
-pub fn build_usb_kbd_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
+pub fn build_usb_kbd_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String> {
     build_bundle(
         ctx,
+        arch,
         "rustos-drv-input-usb-kbd",
         &[
             CapabilityId::INPUT_INJECT,
@@ -313,9 +312,10 @@ pub fn build_usb_kbd_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
 /// # Errors
 ///
 /// As [`build_vcmailbox_bundle`].
-pub fn build_usb_mouse_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
+pub fn build_usb_mouse_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String> {
     build_bundle(
         ctx,
+        arch,
         "rustos-drv-input-usb-mouse",
         &[
             CapabilityId::INPUT_INJECT,
@@ -342,9 +342,10 @@ pub fn build_usb_mouse_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
 /// # Errors
 ///
 /// As [`build_vcmailbox_bundle`].
-pub fn build_usb_msd_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
+pub fn build_usb_msd_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String> {
     build_bundle(
         ctx,
+        arch,
         "rustos-drv-storage-usb-msd",
         &[
             CapabilityId::SHM,
@@ -372,9 +373,10 @@ pub fn build_usb_msd_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
 /// # Errors
 ///
 /// As [`build_vcmailbox_bundle`].
-pub fn build_volmgr_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
+pub fn build_volmgr_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String> {
     build_bundle(
         ctx,
+        arch,
         "rustos-drv-storage-volmgr",
         &[
             CapabilityId::SHM,
@@ -400,9 +402,10 @@ pub fn build_volmgr_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
 /// # Errors
 ///
 /// As [`build_vcmailbox_bundle`].
-pub fn build_virtio_kbd_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
+pub fn build_virtio_kbd_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String> {
     build_bundle(
         ctx,
+        arch,
         "rustos-drv-input-virtio-kbd",
         &[
             CapabilityId::MMIO_MAP,
@@ -432,9 +435,10 @@ pub fn build_virtio_kbd_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
 /// # Errors
 ///
 /// As [`build_vcmailbox_bundle`].
-pub fn build_framebuffer_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
+pub fn build_framebuffer_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String> {
     build_bundle(
         ctx,
+        arch,
         "rustos-drv-display-framebuffer",
         &[
             CapabilityId::MMIO_MAP,
@@ -462,9 +466,10 @@ pub fn build_framebuffer_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
 /// # Errors
 ///
 /// As [`build_vcmailbox_bundle`].
-pub fn build_virtio_net_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
+pub fn build_virtio_net_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String> {
     build_bundle(
         ctx,
+        arch,
         "rustos-drv-network-virtio-net-driver",
         &[
             CapabilityId::MMIO_MAP,
@@ -497,14 +502,18 @@ pub fn build_virtio_net_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
 ///
 /// A string describing a failed cross-compile, ELF→rxe conversion, or a
 /// structurally invalid composed bundle.
-pub fn autoload_driver_store_files(ctx: &Context) -> Result<&'static [AppStoreFile], String> {
-    static FILES: OnceLock<Result<Vec<AppStoreFile>, String>> = OnceLock::new();
-    FILES
+pub fn autoload_driver_store_files(
+    ctx: &Context,
+    arch: PieArch,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; PieArch::COUNT] =
+        [const { OnceLock::new() }; PieArch::COUNT];
+    FILES[arch.index()]
         .get_or_init(|| {
             Ok(vec![
-                store_file(VIRTIO_KBD_STORE_PATH, build_virtio_kbd_bundle(ctx)?),
-                store_file(FRAMEBUFFER_STORE_PATH, build_framebuffer_bundle(ctx)?),
-                store_file(VIRTIO_NET_STORE_PATH, build_virtio_net_bundle(ctx)?),
+                store_file(VIRTIO_KBD_STORE_PATH, build_virtio_kbd_bundle(ctx, arch)?),
+                store_file(FRAMEBUFFER_STORE_PATH, build_framebuffer_bundle(ctx, arch)?),
+                store_file(VIRTIO_NET_STORE_PATH, build_virtio_net_bundle(ctx, arch)?),
             ])
         })
         .as_ref()

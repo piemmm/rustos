@@ -48,6 +48,36 @@ impl PieArch {
         }
     }
 
+    /// This architecture's stable index into a per-arch table (its position
+    /// in [`Self::ALL`]), so a builder can memoise one composed artefact per
+    /// target in a fixed-size `[_; PieArch::COUNT]` array without a runtime
+    /// map. Kept in lockstep with [`Self::ALL`] by
+    /// `index_matches_all_position`.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            PieArch::Aarch64 => 0,
+            PieArch::Riscv64 => 1,
+            PieArch::X86_64 => 2,
+        }
+    }
+
+    /// The number of architectures in this vocabulary — the length a per-arch
+    /// memo table indexed by [`Self::index`] must have.
+    pub const COUNT: usize = 3;
+
+    /// The architecture whose freestanding target triple is `triple`, or
+    /// `None` for a triple this vocabulary does not name. The inverse of
+    /// [`Self::target_triple`], so the image pipeline can recover the arch a
+    /// QEMU enrolment's `target` string selects without a second table.
+    #[must_use]
+    pub fn from_target_triple(triple: &str) -> Option<PieArch> {
+        PieArch::ALL
+            .iter()
+            .copied()
+            .find(|a| a.target_triple() == triple)
+    }
+
     /// The `CARGO_TARGET_<triple>_RUSTFLAGS` variable that scopes the PIE
     /// link recipe to [`Self::target_triple`].
     ///
@@ -120,5 +150,30 @@ mod tests {
             PieArch::ALL.len(),
             "ALL must not repeat an arch"
         );
+    }
+
+    #[test]
+    fn index_matches_all_position() {
+        assert_eq!(PieArch::ALL.len(), PieArch::COUNT);
+        for (position, &arch) in PieArch::ALL.iter().enumerate() {
+            assert_eq!(
+                arch.index(),
+                position,
+                "{arch:?} index must be its position in ALL"
+            );
+            assert!(arch.index() < PieArch::COUNT);
+        }
+    }
+
+    #[test]
+    fn from_target_triple_inverts_target_triple() {
+        for &arch in PieArch::ALL {
+            assert_eq!(
+                PieArch::from_target_triple(arch.target_triple()),
+                Some(arch)
+            );
+        }
+        assert_eq!(PieArch::from_target_triple("wasm32-unknown-unknown"), None);
+        assert_eq!(PieArch::from_target_triple(""), None);
     }
 }

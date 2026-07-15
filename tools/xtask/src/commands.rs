@@ -8,6 +8,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use rustos_itest_harness::pie::PieArch;
+
 use crate::Context;
 
 mod abi_check;
@@ -1391,46 +1393,49 @@ type DriverBundles = Vec<(&'static [&'static [u8]], Vec<u8>)>;
 /// as a block-service endpoint behind a per-LUN storage node
 /// (`plans/DEVICES.md` D2).
 fn build_image_driver_bundles(ctx: &Context) -> Result<DriverBundles, String> {
+    // The flashable Raspberry Pi image is an aarch64 target, so every bundle
+    // is cross-compiled for that arch.
+    let arch = PieArch::Aarch64;
     Ok(vec![
         (
             image_drivers::VCMAILBOX_STORE_PATH,
-            image_drivers::build_vcmailbox_bundle(ctx)?,
+            image_drivers::build_vcmailbox_bundle(ctx, arch)?,
         ),
         (
             image_drivers::PCIE_BRCM_STORE_PATH,
-            image_drivers::build_pcie_brcm_bundle(ctx)?,
+            image_drivers::build_pcie_brcm_bundle(ctx, arch)?,
         ),
         (
             image_drivers::VL805_STORE_PATH,
-            image_drivers::build_vl805_bundle(ctx)?,
+            image_drivers::build_vl805_bundle(ctx, arch)?,
         ),
         (
             image_drivers::USB_XHCI_STORE_PATH,
-            image_drivers::build_xhci_bundle(ctx)?,
+            image_drivers::build_xhci_bundle(ctx, arch)?,
         ),
         (
             image_drivers::USB_KBD_STORE_PATH,
-            image_drivers::build_usb_kbd_bundle(ctx)?,
+            image_drivers::build_usb_kbd_bundle(ctx, arch)?,
         ),
         (
             image_drivers::USB_MOUSE_STORE_PATH,
-            image_drivers::build_usb_mouse_bundle(ctx)?,
+            image_drivers::build_usb_mouse_bundle(ctx, arch)?,
         ),
         (
             image_drivers::VIRTIO_KBD_STORE_PATH,
-            image_drivers::build_virtio_kbd_bundle(ctx)?,
+            image_drivers::build_virtio_kbd_bundle(ctx, arch)?,
         ),
         (
             image_drivers::FRAMEBUFFER_STORE_PATH,
-            image_drivers::build_framebuffer_bundle(ctx)?,
+            image_drivers::build_framebuffer_bundle(ctx, arch)?,
         ),
         (
             image_drivers::USB_MSD_STORE_PATH,
-            image_drivers::build_usb_msd_bundle(ctx)?,
+            image_drivers::build_usb_msd_bundle(ctx, arch)?,
         ),
         (
             image_drivers::VOLMGR_STORE_PATH,
-            image_drivers::build_volmgr_bundle(ctx)?,
+            image_drivers::build_volmgr_bundle(ctx, arch)?,
         ),
     ])
 }
@@ -1513,7 +1518,7 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
     // + `Run` planted beside its `Help/` tree (`plans/APPS.md` deliverable
     // 8). Discovery walks the userland `AppInfo.toml` sources; no per-bundle
     // list exists here.
-    let apps = image_apps::app_store_files(ctx)?;
+    let apps = image_apps::app_store_files(ctx, PieArch::Aarch64)?;
 
     let built = image_apps::with_plant_refs(apps, |app_files| {
         rustos_mkimage::build_rpi_image(

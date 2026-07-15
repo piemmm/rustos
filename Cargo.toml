@@ -337,6 +337,7 @@ members = [
     "tests/integration/framebuffer_display_qemu_aarch64",
     "tests/integration/input_virtio_mmio_qemu_aarch64",
     "tests/integration/input_virtio_mmio_qemu_riscv64",
+    "tests/integration/autoload_input_qemu_riscv64",
     "tests/integration/timer_preempt_qemu_riscv64",
     "tests/integration/ipi_smp_qemu_riscv64",
     "tests/integration/ipi_smp_qemu_aarch64",

@@ -65,7 +65,7 @@ use rustos_arch_riscv64::paging::{AddressSpace, PageTablePool};
 use rustos_arch_riscv64::{
     halt_current_hart, serial, syscall_entry, trap, RiscvArch, RiscvArchStorage,
 };
-use rustos_kernel_core::{kernel_main, BootInfo, ConsoleWrite, KernelArch};
+use rustos_kernel_core::{kernel_main, BootInfo, ConsoleWrite, IrqRouting, KernelArch};
 use rustos_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE};
 use rustos_kernel_sched_api::SchedulerConfig;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
@@ -308,6 +308,25 @@ impl KernelArch for RiscvBinArch {
         #[cfg(not(all(freestanding, kernel_isa = "riscv64")))]
         {
             let _ = enabled;
+        }
+    }
+
+    fn irq_routing(&self) -> IrqRouting {
+        // Size the core `IrqTable` to the discovered PLIC source ceiling and
+        // hand it the shared PLIC controller (`Phase::Irq`), so a device
+        // source — the root-unlock virtio-blk completion line, an autoloaded
+        // driver's line — can be bound. Without this override the core falls
+        // back to the unsupported routing (`max_line = 0`) and every device
+        // `bind` fails closed as out-of-range, wedging every interrupt-driven
+        // bring-up. A board with no PLIC (or a host build) returns the
+        // unsupported routing and interrupt-driven bring-up fails closed.
+        #[cfg(all(freestanding, kernel_isa = "riscv64"))]
+        {
+            crate::riscv64::irq::plic_routing()
+        }
+        #[cfg(not(all(freestanding, kernel_isa = "riscv64")))]
+        {
+            IrqRouting::unsupported()
         }
     }
 

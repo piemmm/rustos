@@ -26,6 +26,7 @@ use alloc::boxed::Box;
 
 use rustos_arch_riscv64::plic::{s_mode_context, Plic, PlicController, VolatilePlicMmio};
 use rustos_arch_riscv64::{halt_current_hart, trap};
+use rustos_kernel_core::IrqRouting;
 use rustos_kernel_irq::{IrqController, IrqTable};
 use rustos_sync::once::OnceCell;
 
@@ -117,31 +118,21 @@ extern "C" fn production_external_dispatch() {
     }
 }
 
-/// Publish `table`, build + publish the PLIC controller from the recorded
-/// [`PLIC_INFO`], install the external-interrupt dispatcher, and enable
-/// `sie.SEIE`.
+/// Build the single-context S-mode PLIC controller from the discovered
+/// [`PLIC_INFO`] and publish it into [`PLIC_CONTROLLER`], or return the
+/// already-published one; [`None`] when no PLIC was discovered.
 ///
-/// Called once per boot from
-/// [`RiscvBinArch::install_irq_dispatch`](crate::riscv64::boot::RiscvBinArch),
-/// in the kernel-core `Irq` phase — after the scheduler is up and before
-/// `init` drops to user mode. A second publish (a stray re-call) fails closed
-/// by halting the hart; the boot pipeline calls it exactly once.
-///
-/// With no PLIC discovered ([`PLIC_INFO`] empty — a bare part with no
-/// interrupt controller, or an unreadable tree) it publishes the table but
-/// wires no controller or dispatch and returns: interrupt-driven bring-up
-/// then fails closed (the root-unlock kthread refuses rather than parking
-/// forever on a line that can never fire).
-pub fn install_dispatch(table: &'static IrqTable) {
-    if IRQ_TABLE_SLOT.set(table).is_err() {
-        halt_current_hart();
+/// The one place the `'static` [`PlicIrqController`] is constructed, so the
+/// kernel-core [`IrqTable`]'s masking seam ([`plic_routing`], run in
+/// `Phase::Irq`) and the external-interrupt dispatch install
+/// ([`install_dispatch`], run immediately after) share **one** controller
+/// instance rather than each minting its own.
+fn ensure_controller() -> Option<&'static PlicIrqController<VolatilePlicMmio>> {
+    if let Some(controller) = PLIC_CONTROLLER.get().ok().flatten().copied() {
+        return Some(controller);
     }
-    let Some((base, ndev)) = PLIC_INFO.get().ok().flatten().copied() else {
-        return;
-    };
-    let Ok(base) = usize::try_from(base) else {
-        return;
-    };
+    let (base, ndev) = PLIC_INFO.get().ok().flatten().copied()?;
+    let base = usize::try_from(base).ok()?;
     // SAFETY: `base` is the PLIC register-block base read from the firmware
     // device tree, identity-mapped (the boot path enabled the Sv39 identity
     // MMU before discovery) and exclusively the controller's to access on the
@@ -155,9 +146,61 @@ pub fn install_dispatch(table: &'static IrqTable) {
     // system by the trap dispatcher, the root-unlock kthread, and every
     // interrupt-driven driver's park path (kernel state is never freed).
     let controller: &'static PlicIrqController<VolatilePlicMmio> = Box::leak(Box::new(controller));
-    if PLIC_CONTROLLER.set(controller).is_err() {
+    match PLIC_CONTROLLER.set(controller) {
+        Ok(()) => Some(controller),
+        // A concurrent publisher won the set-once race (not possible on the
+        // single-hart boot slice, but fail safe): use the winner.
+        Err(_) => PLIC_CONTROLLER.get().ok().flatten().copied(),
+    }
+}
+
+/// The kernel-core IRQ routing this port hands the core in `Phase::Irq`: the
+/// inclusive PLIC source ceiling as `max_line` (so the core [`IrqTable`] can
+/// bind any discovered device source) and the shared [`PlicIrqController`] as
+/// the mask/re-arm seam.
+///
+/// Without this the core would fall back to [`IrqRouting::unsupported`]
+/// (`max_line = 0`), and every device-source `bind` — the root-unlock block
+/// completion line, an autoloaded driver's line — would fail closed as
+/// out-of-range. With no PLIC discovered it returns the unsupported routing,
+/// and interrupt-driven bring-up fails closed rather than binding a line that
+/// can never fire.
+#[must_use]
+pub fn plic_routing() -> IrqRouting {
+    match (ensure_controller(), PLIC_INFO.get().ok().flatten().copied()) {
+        (Some(controller), Some((_, ndev))) => IrqRouting {
+            max_line: ndev,
+            controller,
+        },
+        _ => IrqRouting::unsupported(),
+    }
+}
+
+/// Publish `table`, install the external-interrupt dispatcher over the shared
+/// PLIC controller ([`ensure_controller`]), and enable `sie.SEIE`.
+///
+/// Called once per boot from
+/// [`RiscvBinArch::install_irq_dispatch`](crate::riscv64::boot::RiscvBinArch),
+/// in the kernel-core `Irq` phase — immediately after `plic_routing` sized the
+/// core [`IrqTable`] and built the controller, so this only publishes the
+/// table and arms the trap path. A second publish (a stray re-call) fails
+/// closed by halting the hart; the boot pipeline calls it exactly once.
+///
+/// With no PLIC discovered ([`PLIC_INFO`] empty — a bare part with no
+/// interrupt controller, or an unreadable tree) it publishes the table but
+/// wires no dispatch and returns: interrupt-driven bring-up then fails closed
+/// (the root-unlock kthread refuses rather than parking forever on a line that
+/// can never fire).
+pub fn install_dispatch(table: &'static IrqTable) {
+    if IRQ_TABLE_SLOT.set(table).is_err() {
         halt_current_hart();
     }
+    // Reuse the one controller `plic_routing` already built and published in
+    // `Phase::Irq` (or build it now if this port ever installs without a
+    // routing step); no PLIC discovered leaves the dispatch unwired.
+    let Some(_controller) = ensure_controller() else {
+        return;
+    };
     if trap::set_trap_dispatch(production_external_dispatch).is_err() {
         halt_current_hart();
     }

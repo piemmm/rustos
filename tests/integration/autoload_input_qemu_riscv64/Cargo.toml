@@ -1,0 +1,48 @@
+[package]
+name = "rustos-test-autoload-input-qemu-riscv64"
+description = "QEMU integration test (plans/NETWORK.md N4e-riscv64 first stage): boot the production riscv64 rustos-kernel pipeline on the virt board with a planted whole-disk encrypted-root image whose always-readable /System volume carries the kernel-signed virtio-input keyboard driver bundle in its Drivers/ store, plus an attached virtio-keyboard-device on the virtio-mmio transport, and prove the driver-loading-by-discovery autoload path end to end: the in-kernel unlock kthread mounts /System and serves its signed driver store (independent of the encrypted-root passphrase), the user-space devmgr matches the signed virtio_kbd bundle to the discovered virtio-input node and asks the kernel to load it, the kernel re-runs the full signed gate and spawns it into its own user-space process, and that autoloaded driver brings its device up, arms its granted PLIC interrupt line (the audited irq_bind syscall), and injects the runner-typed key into the kernel input-focus arbiter. PASS via the SiFive Test finisher once AuditEvent::InputDelivered with kind=key is observed — an autoloaded user-space input driver delivered."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding "boot the production riscv64 kernel pipeline with a planted
+# encrypted-root virtio-blk disk carrying a signed virtio-input keyboard driver
+# bundle on its always-readable /System volume, and prove devmgr autoloads that
+# user-space driver, which delivers an injected keystroke to the input-focus
+# arbiter" integration test. It reuses the entire production riscv64 boot
+# pipeline through `rustos-kernel`'s library half (`boot_riscv64::boot`) — the
+# bootstrap-floor virtio-MMIO enumeration (block + input discovery), the
+# `InitSpawn` seam, the runtime `ProcessSpawn` producer, the PLIC device-IRQ
+# wiring, `unlock_service::spawn_if_present`, and the shared driver-store serve
+# tail (`unlock_orchestrate::finish_unlock`, which binds the store endpoint
+# independently of the encrypted-root passphrase) — and only swaps the audit
+# sink to report PASS on the one-shot `AuditEvent::InputDelivered` witness
+# (`AGENTS.md` §2.2 — no duplication). Keeping the QEMU-exit shortcut in a
+# dedicated bin (not a Cargo feature on a production crate) prevents feature
+# unification from leaking it into any production build (fail closed).
+
+[[bin]]
+name = "rustos-test-autoload-input-qemu-riscv64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
+rustos-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
+# The production riscv64 boot pipeline (with the unlock/autoload seam) lives in
+# `rustos-kernel`'s library half; this vertical reuses it verbatim and only
+# swaps the audit sink (`AGENTS.md` §2.2 — no duplication).
+rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
+# The kernel/core audit vocabulary: the `InputDelivered` event id the witness
+# keys on — the shared definition, never a magic number.
+rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+# The boot heap `kernel_core::kernel_main` allocations draw from.
+rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

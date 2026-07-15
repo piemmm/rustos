@@ -19,8 +19,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use rustos_itest_harness::pie::PieArch;
 use rustos_qemu::{Outcome, Runner, Spec};
 
+use super::image_apps::AppStoreFile;
 use super::parallel::{self, Job};
 use crate::Context;
 
@@ -3871,6 +3873,52 @@ const TESTS: &[QemuTest] = &[
         pointer_script: Some(autoload_desktop_pointer_script),
         serial: &[],
     },
+    // `plans/NETWORK.md` N4e-riscv64 (first stage): the riscv64
+    // driver-loading-by-discovery autoload vertical — the `virt`-board
+    // virtio-mmio analogue of the aarch64 `autoload_input` vertical, reduced
+    // to the input-autoload path (no display world, no desktop). It boots the
+    // *production* riscv64 pipeline on the `virt` board against the shared
+    // `FsDisk::AutoloadRootDisk` whole-disk image — whose always-readable
+    // `/System` store carries the kernel-signed virtio-input keyboard driver
+    // bundle (cross-compiled for riscv64 by `image_drivers`) — with a
+    // `virtio-keyboard-device` attached. The boot binds the virtio-blk root
+    // and discovers the virtio-input node; the unlock kthread mounts `/System`
+    // and serves its signed store **independently of** the encrypted-root
+    // passphrase (the riscv64 SBI console has no interactive input drain this
+    // slice, so the interactive unlock fails closed — no passphrase is typed),
+    // and the user-space `devmgr` matches the signed bundle to the discovered
+    // node and asks the kernel to spawn it into its own process. Once the
+    // autoloaded driver arms its granted PLIC interrupt (the audited
+    // `irq_bind` syscall — the `sc=irq_bind` serial marker), the runner sends
+    // one key through the QEMU monitor; the eventq IRQ fires and the driver
+    // decodes+injects it. PASS via the SiFive Test finisher once the
+    // kernel-side audit sink has seen `AuditEvent::InputDelivered` with
+    // `kind=key` — an autoloaded *user-space* driver instance delivered.
+    // Single CPU (PID 1, the unlock/store kthread, the autoloaded driver, and
+    // `devmgr` share the boot hart) and a 240-second budget cover boot +
+    // `/System` mount + autoload + driver bring-up + the injected key on QEMU
+    // TCG. This boot vertical is TCG-speed-bound and is confirmed on CI
+    // hardware (`plans/NETWORK.md` N4e-riscv64 validation note).
+    QemuTest {
+        package: "rustos-test-autoload-input-qemu-riscv64",
+        binary: "rustos-test-autoload-input-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(240),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::AutoloadRootDisk,
+        // One virtio-input node → one autoloaded driver instance → one
+        // `irq_bind`, so the injection gates on the marker's first appearance
+        // (`with_virtio_keyboard`); the injected key is the whole observable
+        // effect the `kind=key` witness proves.
+        keyboard: Some((AUTOLOAD_INPUT_KEY_MARKER, "a")),
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // `plans/NETWORK.md` N3c: `rustos-test-netstack-mmio-aarch64` is the
     // aarch64 `virt`-board MMIO analogue of the riscv64 netstack-mmio
     // vertical — same bring-up as the blk MMIO vertical, then drive the
@@ -4338,17 +4386,15 @@ pub fn build_all(ctx: &Context, only: Option<&str>) -> Result<(), String> {
         let label = format!("test --qemu (build {target}: {} pkg)", packages.len());
         ctx.run(&label, cmd)?;
     }
-    // Pre-warm the composed application-bundle store the encrypted-root
-    // plants lay onto their `/System` volume — and its memsoak-augmented
-    // sibling the memory-stability vertical plants — so the (possibly
-    // concurrent) run passes reuse one composition instead of racing to
-    // build it.
-    super::image_apps::app_store_files(ctx)?;
-    super::image_apps::memsoak_store_files(ctx)?;
-    // Likewise pre-warm the autoload driver bundles the `-M virt` autoload
-    // verticals plant, so their (possibly concurrent) run passes reuse one
-    // cross-compile-and-sign set instead of racing to build it.
-    super::image_drivers::autoload_driver_store_files(ctx)?;
+    // Pre-warm each selected enrolment's per-arch `/System`-store bundle set
+    // (`stores_for` composes only what the enrolment's `fs_disk` plants, for
+    // its own target arch, and memoises per arch), so the (possibly
+    // concurrent) run passes reuse one composition per arch instead of racing
+    // to build it. An enrolment that plants no store resolves to empty sets
+    // and pays no cross-compile.
+    for t in &selected {
+        stores_for(ctx, t)?;
+    }
     Ok(())
 }
 
@@ -4463,23 +4509,22 @@ pub fn run_once(ctx: &Context, only: Option<&str>) -> Result<(), String> {
     let selected = enrolled(only)?;
     let target_dir = ctx.target_dir();
     let budget = parallel::host_parallelism();
-    // Resolve the memoised (`'static`) application-bundle store before the
-    // jobs are built, so the `'static` job closures capture a plain slice
-    // reference rather than the borrowed context.
-    let apps = super::image_apps::app_store_files(ctx)?;
-    let apps_with_memsoak = super::image_apps::memsoak_store_files(ctx)?;
-    let autoload_drivers = super::image_drivers::autoload_driver_store_files(ctx)?;
+    // Resolve each enrolment's memoised (`'static`) `/System`-store bundle
+    // set for its own target arch before the jobs are built, so the `'static`
+    // job closures capture the resolved [`StoreSet`] (plain slices) by value
+    // rather than the borrowed context.
     let jobs: Vec<Job> = selected
         .into_iter()
         .map(|t| {
             let label = format!("test --qemu (run {}) cpus={}", t.package, t.cpus);
             let weight = usize::try_from(t.cpus).unwrap_or(1);
             let target_dir = target_dir.clone();
-            Job::closure(label, weight, move || {
-                run_one(&target_dir, t, apps, apps_with_memsoak, autoload_drivers)
-            })
+            let stores = stores_for(ctx, t)?;
+            Ok(Job::closure(label, weight, move || {
+                run_one(&target_dir, t, stores)
+            }))
         })
-        .collect();
+        .collect::<Result<Vec<Job>, String>>()?;
     parallel::run(jobs, budget)
 }
 
@@ -4505,25 +4550,22 @@ pub(crate) struct Enrolment {
 impl Enrolment {
     /// Drive this enrolment to completion once, exactly as [`run_once`] does,
     /// with no retry. `target_dir` is where the pre-built kernel binaries live
-    /// (see [`build_all`]); `apps` is the composed application-bundle store
-    /// the encrypted-root plants lay onto their `/System` volume
-    /// ([`super::image_apps::app_store_files`]), and `apps_with_memsoak` its
-    /// memsoak-augmented sibling the memory-stability vertical plants
-    /// ([`super::image_apps::memsoak_store_files`]).
-    pub(crate) fn run(
-        &self,
-        target_dir: &Path,
-        apps: &'static [super::image_apps::AppStoreFile],
-        apps_with_memsoak: &'static [super::image_apps::AppStoreFile],
-        autoload_drivers: &'static [super::image_apps::AppStoreFile],
-    ) -> Result<(), String> {
-        run_one(
-            target_dir,
-            self.test,
-            apps,
-            apps_with_memsoak,
-            autoload_drivers,
-        )
+    /// (see [`build_all`]); `stores` is the enrolment's own per-arch
+    /// `/System`-store bundle set (see [`Self::stores`] / [`stores_for`]).
+    pub(crate) fn run(&self, target_dir: &Path, stores: StoreSet) -> Result<(), String> {
+        run_one(target_dir, self.test, stores)
+    }
+
+    /// Resolve the `/System`-store bundle sets this enrolment plants,
+    /// cross-compiled for its own target arch (see [`stores_for`]). Called
+    /// off the `'static` job closure (it needs the build context) so the
+    /// closure captures the resolved [`StoreSet`] by value.
+    ///
+    /// # Errors
+    ///
+    /// As [`stores_for`].
+    pub(crate) fn stores(&self, ctx: &Context) -> Result<StoreSet, String> {
+        stores_for(ctx, self.test)
     }
 }
 
@@ -4562,13 +4604,63 @@ fn encrypted_root_disk_bytes(
     })
 }
 
-fn run_one(
-    target_dir: &Path,
-    t: &QemuTest,
-    apps: &[super::image_apps::AppStoreFile],
-    apps_with_memsoak: &[super::image_apps::AppStoreFile],
-    autoload_drivers: &[super::image_apps::AppStoreFile],
-) -> Result<(), String> {
+/// The composed `/System`-store bundle sets one enrolment plants on its
+/// backing image, each resolved for the enrolment's own target arch and only
+/// when its `fs_disk` actually plants it (empty otherwise, so no arch pays a
+/// cross-compile it never uses). Copy `'static` slices, so a job closure
+/// captures the set by value without borrowing the build context.
+#[derive(Copy, Clone)]
+pub(crate) struct StoreSet {
+    /// The application/service bundles the encrypted-root plants lay on the
+    /// read-only `/System` volume.
+    apps: &'static [AppStoreFile],
+    /// The memsoak-augmented application set the memory-stability vertical
+    /// plants.
+    apps_with_memsoak: &'static [AppStoreFile],
+    /// The signed autoload driver bundles the `-M virt` autoload verticals
+    /// plant in the `/System/Drivers/` store.
+    autoload_drivers: &'static [AppStoreFile],
+}
+
+/// Resolve exactly the `/System`-store bundle sets `t` plants, cross-compiled
+/// for the target arch its triple names. Each set is composed only when `t`'s
+/// `fs_disk` plants it, so a target never pays a cross-compile it never uses;
+/// the underlying builders memoise per arch, so repeated calls are lookups.
+///
+/// # Errors
+///
+/// A string naming a target triple this pipeline cannot cross-compile, or a
+/// failed bundle composition.
+fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
+    const EMPTY: &[AppStoreFile] = &[];
+    let arch = PieArch::from_target_triple(t.target).ok_or_else(|| {
+        format!(
+            "test --qemu ({}): target {} is not a freestanding cross-compile target",
+            t.package, t.target
+        )
+    })?;
+    let apps = match t.fs_disk {
+        FsDisk::EncryptedRootDisk | FsDisk::AutoloadRootDisk => {
+            super::image_apps::app_store_files(ctx, arch)?
+        }
+        _ => EMPTY,
+    };
+    let apps_with_memsoak = match t.fs_disk {
+        FsDisk::MemsoakRootDisk => super::image_apps::memsoak_store_files(ctx, arch)?,
+        _ => EMPTY,
+    };
+    let autoload_drivers = match t.fs_disk {
+        FsDisk::AutoloadRootDisk => super::image_drivers::autoload_driver_store_files(ctx, arch)?,
+        _ => EMPTY,
+    };
+    Ok(StoreSet {
+        apps,
+        apps_with_memsoak,
+        autoload_drivers,
+    })
+}
+
+fn run_one(target_dir: &Path, t: &QemuTest, stores: StoreSet) -> Result<(), String> {
     let kernel: PathBuf = target_dir.join(t.target).join("debug").join(t.binary);
     // Select the per-arch QEMU `Spec`: the riscv64 enrolments boot the
     // `virt` board through OpenSBI; everything else uses the x86_64
@@ -4609,7 +4701,12 @@ fn run_one(
     // Attach the shared filesystem volume as the backing image, when the
     // enrolment names one. Only the non-zero sectors are planted; the
     // planter zero-fills the rest, matching a freshly-formatted volume.
-    if let Some(fs) = fs_disk_image(t, apps, apps_with_memsoak, autoload_drivers)? {
+    if let Some(fs) = fs_disk_image(
+        t,
+        stores.apps,
+        stores.apps_with_memsoak,
+        stores.autoload_drivers,
+    )? {
         let image = kernel.with_extension(fs.extension);
         let sector_bytes = rustos_qemu::disk::SECTOR_BYTES;
         let planted: Vec<(u64, &[u8])> = fs

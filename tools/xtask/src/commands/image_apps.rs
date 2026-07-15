@@ -68,22 +68,23 @@ pub struct AppStoreFile {
     pub bytes: Vec<u8>,
 }
 
-/// Build every discovered application bundle for the aarch64 image: walk
+/// Build every discovered application bundle for `arch`'s image: walk
 /// the userland crate roots for `AppInfo.toml` manifest sources, compile
-/// each crate's `Run` binary, and compose its signed `AppInfo`.
+/// each crate's `Run` binary for that target, and compose its signed
+/// `AppInfo`.
 ///
 /// # Errors
 ///
 /// A string describing a failed discovery walk, cross-compile, ELF→rxe
 /// conversion, composition, or a composed manifest that fails the
 /// fail-closed sanity check.
-pub fn build_app_bundles(ctx: &Context) -> Result<Vec<BuiltAppBundle>, String> {
+pub fn build_app_bundles(ctx: &Context, arch: PieArch) -> Result<Vec<BuiltAppBundle>, String> {
     let userland = ctx.workspace_root.join("userland");
     let discovered = discover_app_manifests(&userland)
         .map_err(|e| format!("image: app-manifest discovery: {e}"))?;
     discovered
         .iter()
-        .map(|app| build_bundle(ctx, app))
+        .map(|app| build_bundle(ctx, arch, app))
         .collect()
 }
 
@@ -123,10 +124,11 @@ pub fn store_files(bundles: &[BuiltAppBundle]) -> Vec<AppStoreFile> {
 /// # Errors
 ///
 /// As [`build_app_bundles`].
-pub fn app_store_files(ctx: &Context) -> Result<&'static [AppStoreFile], String> {
-    static FILES: OnceLock<Result<Vec<AppStoreFile>, String>> = OnceLock::new();
-    FILES
-        .get_or_init(|| build_app_bundles(ctx).map(|bundles| store_files(&bundles)))
+pub fn app_store_files(ctx: &Context, arch: PieArch) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; PieArch::COUNT] =
+        [const { OnceLock::new() }; PieArch::COUNT];
+    FILES[arch.index()]
+        .get_or_init(|| build_app_bundles(ctx, arch).map(|bundles| store_files(&bundles)))
         .as_ref()
         .map(Vec::as_slice)
         .map_err(Clone::clone)
@@ -147,11 +149,15 @@ const MEMSOAK_CRATE_DIR: &str = "tests/integration/memsoak_program";
 /// # Errors
 ///
 /// As [`build_app_bundles`], plus a failed fixture-manifest discovery.
-pub fn memsoak_store_files(ctx: &Context) -> Result<&'static [AppStoreFile], String> {
-    static FILES: OnceLock<Result<Vec<AppStoreFile>, String>> = OnceLock::new();
-    FILES
+pub fn memsoak_store_files(
+    ctx: &Context,
+    arch: PieArch,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; PieArch::COUNT] =
+        [const { OnceLock::new() }; PieArch::COUNT];
+    FILES[arch.index()]
         .get_or_init(|| {
-            let base = app_store_files(ctx)?;
+            let base = app_store_files(ctx, arch)?;
             let crate_dir = ctx.workspace_root.join(MEMSOAK_CRATE_DIR);
             let app = discover_crate_manifest(&crate_dir)
                 .map_err(|e| format!("image: memsoak manifest discovery: {e}"))?
@@ -161,7 +167,7 @@ pub fn memsoak_store_files(ctx: &Context) -> Result<&'static [AppStoreFile], Str
                         crate_dir.display()
                     )
                 })?;
-            let bundle = build_bundle(ctx, &app)?;
+            let bundle = build_bundle(ctx, arch, &app)?;
             let mut files = base.to_vec();
             files.extend(store_files(&[bundle]));
             Ok(files)
@@ -193,20 +199,17 @@ pub fn with_plant_refs<R>(
 /// Build one discovered program's bundle: compile its `Run` binary, convert
 /// it to the production-biased rxe, and compose the signed `AppInfo` over
 /// the bundle's shipped contents (`Run` plus its `Help/` documents).
-fn build_bundle(ctx: &Context, app: &DiscoveredApp) -> Result<BuiltAppBundle, String> {
+fn build_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    app: &DiscoveredApp,
+) -> Result<BuiltAppBundle, String> {
     // Every program crate's `Run` binary is named `<package>-run`
     // (the kernel `build.rs` builds the same bins); the artefact is read
     // back fail-closed, so a crate that breaks the convention fails the
     // build loudly.
     let bin = format!("{}-run", app.package);
-    let elf = cross_compile_pie_elf(
-        ctx,
-        PieArch::Aarch64,
-        "image-apps",
-        &app.package,
-        &bin,
-        &app.crate_dir,
-    )?;
+    let elf = cross_compile_pie_elf(ctx, arch, "image-apps", &app.package, &bin, &app.crate_dir)?;
     let run = elf_to_rxe(
         &elf,
         &rustos_kernel_syscall::SYSCALL_TABLE_HASH,
