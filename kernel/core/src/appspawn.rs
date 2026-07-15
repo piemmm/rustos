@@ -51,14 +51,16 @@ use rustos_abi::{
     APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_SUFFIX, MIME_ENTRY_LEN, SYSTEM_APP_STORE,
     SYSTEM_SERVICE_STORE,
 };
-use rustos_appload::{AppError, BundleStore, LoadedApp, Verifier};
+use rustos_appload::{AppError, BundleStore, Clock, LoadedApp, Verifier};
 use rustos_crypto::{Ed25519PublicKey, Ed25519Signature, Sha256Stream};
 use rustos_kernel_mem::{CacheBudget, MemoryPressure};
 use rustos_log::Sink;
 use rustos_sync::RwLock;
 
+use crate::bootinfo::KernelArch;
 use crate::fs::FilesystemService;
 use crate::launch_cache::LaunchCache;
+use crate::sched::SchedulerArch;
 
 /// The on-disk application store has not reached a terminal state yet: the
 /// boot path that mounts `/System` is still running.
@@ -406,6 +408,33 @@ impl Verifier for AnchorVerifier {
     }
 }
 
+/// The [`Clock`] the load gate reads to time its phases, backed by the
+/// architecture monotonic clock.
+///
+/// It reports the current CPU's monotonic nanoseconds on every read (the
+/// same source `clock_get` and the wait-queue deadlines use), so the
+/// [`rustos_appload::events::APP_LOADED`] record can attribute a slow first
+/// launch to disk reads versus verification. The reading is audit-only and
+/// never affects a load decision.
+pub struct ArchClock<'a, A: KernelArch> {
+    arch: &'a A,
+}
+
+impl<'a, A: KernelArch> ArchClock<'a, A> {
+    /// A clock reading the monotonic time source of `arch`.
+    #[must_use]
+    pub const fn new(arch: &'a A) -> Self {
+        Self { arch }
+    }
+}
+
+impl<A: KernelArch> Clock for ArchClock<'_, A> {
+    fn now_ns(&self) -> u64 {
+        self.arch
+            .monotonic_ns(SchedulerArch::current_cpu(self.arch))
+    }
+}
+
 /// A spawnable store-bundle entry-point path, split into the bundle root
 /// the load gate judges and the command name the child is attested as.
 #[derive(Debug, Eq, PartialEq)]
@@ -486,6 +515,15 @@ mod tests {
         }
     }
 
+    /// A fixed clock: these tests assert the load *outcome*, not the timing,
+    /// so a constant reading (zero-length phases) is sufficient.
+    struct TestClock;
+    impl Clock for TestClock {
+        fn now_ns(&self) -> u64 {
+            0
+        }
+    }
+
     fn load(
         fs: &MemFs,
         anchor: [u8; 32],
@@ -493,11 +531,13 @@ mod tests {
         let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
         let store = FsBundleStore::new(fs, 1000, &NoCaps);
         let verifier = AnchorVerifier::new(anchor);
+        let clock = TestClock;
         let loader = AppLoader::new(AppLoaderConfig {
             accepted_abi_version: ABI_VERSION_CURRENT,
             syscall_table_hash: SYSCALL_TABLE_HASH,
             store: &store,
             verifier: &verifier,
+            clock: &clock,
             sink,
         });
         loader.load(

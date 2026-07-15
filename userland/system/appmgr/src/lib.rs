@@ -21,5 +21,5 @@
 
 pub use rustos_appload::{bundle, error, events, loader};
 pub use rustos_appload::{
-    AppError, AppLoader, AppLoaderConfig, BundleStore, LoadedApp, ResolvedLibrary, Verifier,
+    AppError, AppLoader, AppLoaderConfig, BundleStore, Clock, LoadedApp, ResolvedLibrary, Verifier,
 };

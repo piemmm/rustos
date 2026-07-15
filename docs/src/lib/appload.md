@@ -66,6 +66,10 @@ security-relevant code is testable without a kernel:
   on a running system.
 - `Verifier` — verifies an Ed25519 signature. Backed by `lib/crypto`
   (§2.12 — the one place cryptographic primitives live).
+- `Clock` — reports monotonic nanoseconds, read only to time the load and
+  verify phases for the `APP_LOADED` record. Backed by the architecture
+  monotonic clock in the kernel; audit-only, so no load decision depends on
+  it.
 
 ## Audit
 
@@ -74,6 +78,12 @@ Every decision is recorded through `lib/log` (§19.4) in the reserved
 `APP_MANIFEST_INVALID`, `APP_INTERFACE_MISMATCH`, `APP_SIGNATURE_INVALID`,
 `APP_CONTENT_MISMATCH`, `APP_STORE_ERROR`, `LIBRARY_RESOLVED`,
 `LIBRARY_REFUSED`, and `APP_RUN_IMAGE_INVALID`.
+
+The `APP_LOADED` record additionally carries a `load` duration (time spent
+reading the bundle off the store — the "getting it from disk" cost) and a
+`verify` duration (the remaining layout / manifest / interface-hash /
+signature / content-hash / run-image checking), so a slow first launch is
+diagnosable from the audit log.
 
 The crate is `no_std` (with `alloc`) and depends only on `rustos-abi`,
 `rustos-caps`, and `rustos-log` (§17.4); it has no `unsafe` and no

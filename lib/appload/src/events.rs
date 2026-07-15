@@ -15,6 +15,12 @@ pub const APPMGR_RANGE_END: u32 = 12_000;
 
 /// A bundle was accepted: its layout validated, its manifest verified, and
 /// its capability ceiling computed.
+///
+/// The record carries two timing fields so a slow first launch is
+/// diagnosable: `load`, the time spent reading the bundle off the store (the
+/// "getting it from disk" cost), and `verify`, the remaining time spent
+/// checking it (layout, manifest, interface hash, signature, content hash,
+/// and the entry-point image).
 pub const APP_LOADED: EventId = EventId(11_001);
 /// A bundle was refused because its top-level layout deviates from the fixed
 /// set.

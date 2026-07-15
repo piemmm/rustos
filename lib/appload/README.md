@@ -65,12 +65,20 @@ Injected, so the security-relevant code is testable without a kernel:
   Backed by the VFS on a running system.
 - `Verifier::verify(signed, signature, signer_pubkey)` — Ed25519
   verification. Backed by `lib/crypto` (§2.12).
+- `Clock::now_ns()` — monotonic nanoseconds, read only to time the load and
+  verify phases for the `APP_LOADED` record. Backed by the architecture
+  monotonic clock in the kernel; audit-only, so no load decision depends on
+  it.
 
 ## Audit events
 
 Reserved `EventId` range `11000..12000`:
 
-- `11001 APP_LOADED` — a bundle was accepted (Info).
+- `11001 APP_LOADED` — a bundle was accepted (Info). Carries a `load`
+  duration (time spent reading the bundle off the store — the "getting it
+  from disk" cost) and a `verify` duration (the remaining layout / manifest /
+  interface-hash / signature / content-hash / run-image checking), so a slow
+  first launch is diagnosable from the audit log.
 - `11002 APP_LAYOUT_REJECTED` — layout outside the fixed set (Warn).
 - `11003 APP_MANIFEST_INVALID` — manifest undecodable / bad ABI (Warn).
 - `11004 APP_INTERFACE_MISMATCH` — syscall-hash mismatch (Warn).
@@ -99,7 +107,8 @@ error; a truncated capability body; the in-policy and out-of-policy library
 resolutions; the C-bundle run-image needed-library resolution (runtime from
 `/System/Libraries/` + a private bundle library), capability intersection for
 a C bundle, an out-of-tree needed library, a run-image CFI mismatch, and a
-malformed run image; plus the `EventId` range/uniqueness invariants.
+malformed run image; the `APP_LOADED` record carrying non-zero `load` and
+`verify` durations; plus the `EventId` range/uniqueness invariants.
 
 ## Stability
 

@@ -14,7 +14,7 @@ use rustos_abi::{
     BundleFileDigest, CapabilityId, CapabilityQuery, Errno, FileKind, FileStat, OpenFlags,
     UnlinkFlags, ABI_VERSION_CURRENT, LOAD_MAGIC,
 };
-use rustos_appload::{AppError, AppLoader, AppLoaderConfig, LoadedApp};
+use rustos_appload::{AppError, AppLoader, AppLoaderConfig, Clock, LoadedApp};
 use rustos_caps::CapabilitySet;
 use rustos_itest_harness::app_image::{compose_signed_appinfo, AppKind, AppManifestSource};
 use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
@@ -315,17 +315,28 @@ impl CapabilityQuery for NoCaps {
     }
 }
 
+/// A fixed clock: this fixture asserts load *outcomes*, not timing, so a
+/// constant reading (zero-length phases) is sufficient.
+struct NullClock;
+impl Clock for NullClock {
+    fn now_ns(&self) -> u64 {
+        0
+    }
+}
+
 /// Run the full `rustos_appload` gate over `fs`, exactly as the spawn
 /// path does.
 pub(crate) fn gate_load(fs: &MemFs, anchor: [u8; 32]) -> Result<LoadedApp, AppError> {
     let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
     let store = FsBundleStore::new(fs, 1000, &NoCaps);
     let verifier = AnchorVerifier::new(anchor);
+    let clock = NullClock;
     let loader = AppLoader::new(AppLoaderConfig {
         accepted_abi_version: ABI_VERSION_CURRENT,
         syscall_table_hash: SYSCALL_TABLE_HASH,
         store: &store,
         verifier: &verifier,
+        clock: &clock,
         sink,
     });
     loader.load(

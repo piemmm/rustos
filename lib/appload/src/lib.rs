@@ -62,6 +62,6 @@ pub mod error;
 pub mod events;
 pub mod loader;
 
-pub use bundle::{BundleStore, LoadedApp, ResolvedLibrary, Verifier};
+pub use bundle::{BundleStore, Clock, LoadedApp, ResolvedLibrary, Verifier};
 pub use error::AppError;
 pub use loader::{AppLoader, AppLoaderConfig};

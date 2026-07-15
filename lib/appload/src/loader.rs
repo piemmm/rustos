@@ -10,13 +10,13 @@ use alloc::string::String;
 
 use rustos_abi::{
     decode_capability_ids, resolve_library as resolve_library_policy, validate_bundle_layout,
-    AppInfoHeader, CapabilityId, Errno, LibraryScope, LoadImage, APPINFO_MAX_CAPABILITIES,
-    SYSCALL_TABLE_HASH_LEN,
+    AppInfoHeader, CapabilityId, Duration64, Errno, LibraryScope, LoadImage,
+    APPINFO_MAX_CAPABILITIES, SYSCALL_TABLE_HASH_LEN,
 };
 use rustos_caps::CapabilitySet;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 
-use crate::bundle::{BundleStore, LoadedApp, ResolvedLibrary, Verifier};
+use crate::bundle::{BundleStore, Clock, LoadedApp, ResolvedLibrary, Verifier};
 use crate::error::AppError;
 use crate::events;
 
@@ -35,6 +35,10 @@ pub struct AppLoaderConfig<'a> {
     pub store: &'a dyn BundleStore,
     /// Seam that verifies a manifest signature.
     pub verifier: &'a dyn Verifier,
+    /// Monotonic clock, read only to time the load-from-store and
+    /// verification phases for the [`events::APP_LOADED`] audit record. No
+    /// load decision depends on it.
+    pub clock: &'a dyn Clock,
     /// Structured audit log sink.
     pub sink: &'a dyn Sink,
 }
@@ -65,10 +69,10 @@ impl<'a> AppLoader<'a> {
     /// for a syscall-hash mismatch, [`AppError::Signature`] for a failed
     /// signature, or [`AppError::ContentHashMismatch`] for tampered contents.
     pub fn load(&self, bundle: &str, user_grants: &CapabilitySet) -> Result<LoadedApp, AppError> {
+        let start_ns = self.cfg.clock.now_ns();
+        let mut load_ns = 0u64;
         let names = self
-            .cfg
-            .store
-            .entries(bundle)
+            .timed(&mut load_ns, || self.cfg.store.entries(bundle))
             .map_err(|e| self.store_error(bundle, e))?;
         let refs: alloc::vec::Vec<&str> = names.iter().map(String::as_str).collect();
         if let Err(e) = validate_bundle_layout(&refs) {
@@ -82,9 +86,7 @@ impl<'a> AppLoader<'a> {
         }
 
         let bytes = self
-            .cfg
-            .store
-            .read_appinfo(bundle)
+            .timed(&mut load_ns, || self.cfg.store.read_appinfo(bundle))
             .map_err(|e| self.store_error(bundle, e))?;
         let header = match AppInfoHeader::from_bytes(&bytes) {
             Ok(header) => header,
@@ -121,9 +123,7 @@ impl<'a> AppLoader<'a> {
         self.verify_manifest_signature(bundle, &bytes, &header)?;
 
         let actual = self
-            .cfg
-            .store
-            .content_hash(bundle)
+            .timed(&mut load_ns, || self.cfg.store.content_hash(bundle))
             .map_err(|e| self.store_error(bundle, e))?;
         if ct_ne(&actual, &header.content_hash) {
             self.audit(
@@ -138,15 +138,16 @@ impl<'a> AppLoader<'a> {
         let requested = self.requested_capabilities(&bytes, &header, bundle)?;
         let granted = requested.intersection(user_grants);
 
-        let (run_image, libraries) = self.validate_run_image(bundle)?;
+        let (run_image, libraries) = self.validate_run_image(bundle, &mut load_ns)?;
 
         let run_path = join(bundle, "Run");
-        self.audit(
-            events::APP_LOADED,
-            Level::Info,
-            bundle,
-            header.bundle_name(),
-        );
+        // The two phases split the whole load: time spent inside the store
+        // seam (reading the bundle off disk) is the load cost; everything
+        // else since `start_ns` (layout, manifest, interface-hash, signature,
+        // content-hash, and entry-point verification) is the verify cost.
+        let total_ns = self.cfg.clock.now_ns().saturating_sub(start_ns);
+        let verify_ns = total_ns.saturating_sub(load_ns);
+        self.audit_loaded(bundle, header.bundle_name(), load_ns, verify_ns);
         Ok(LoadedApp::new(
             header.bundle_id().into(),
             header.bundle_name().into(),
@@ -198,11 +199,10 @@ impl<'a> AppLoader<'a> {
     fn validate_run_image(
         &self,
         bundle: &str,
+        load_ns: &mut u64,
     ) -> Result<(alloc::vec::Vec<u8>, alloc::vec::Vec<ResolvedLibrary>), AppError> {
         let run_bytes = self
-            .cfg
-            .store
-            .read_run(bundle)
+            .timed(load_ns, || self.cfg.store.read_run(bundle))
             .map_err(|e| self.store_error(bundle, e))?;
         let image = LoadImage::parse(&run_bytes, &self.cfg.syscall_table_hash).map_err(|e| {
             self.audit(
@@ -331,6 +331,51 @@ impl<'a> AppLoader<'a> {
     fn store_error(&self, bundle: &str, err: Errno) -> AppError {
         self.audit(events::APP_STORE_ERROR, Level::Warn, bundle, "store error");
         AppError::Store(err)
+    }
+
+    /// Run `f`, adding the monotonic time it took to `acc`. Used to
+    /// accumulate the time spent inside the store seam (reading the bundle
+    /// off disk) so the [`events::APP_LOADED`] record can report it. A clock
+    /// that fails to advance contributes a zero-length span, never a
+    /// wrap-around, thanks to the saturating subtraction.
+    fn timed<T>(&self, acc: &mut u64, f: impl FnOnce() -> T) -> T {
+        let start = self.cfg.clock.now_ns();
+        let out = f();
+        *acc = acc.saturating_add(self.cfg.clock.now_ns().saturating_sub(start));
+        out
+    }
+
+    /// Emit the [`events::APP_LOADED`] record for an accepted bundle,
+    /// carrying how long the load-from-store and verification phases took so
+    /// a slow first launch (a large bundle read off disk, or an expensive
+    /// signature/content-hash check) is diagnosable from the audit log.
+    fn audit_loaded(&self, bundle: &str, name: &str, load_ns: u64, verify_ns: u64) {
+        log(
+            self.cfg.sink,
+            &Event {
+                level: Level::Info,
+                id: events::APP_LOADED,
+                message: event_message(events::APP_LOADED),
+                fields: &[
+                    Field {
+                        key: "bundle",
+                        value: rustos_log::FieldValue::Str(bundle),
+                    },
+                    Field {
+                        key: "detail",
+                        value: rustos_log::FieldValue::Str(name),
+                    },
+                    Field {
+                        key: "load",
+                        value: rustos_log::FieldValue::Duration(Duration64::from_nanos(load_ns)),
+                    },
+                    Field {
+                        key: "verify",
+                        value: rustos_log::FieldValue::Duration(Duration64::from_nanos(verify_ns)),
+                    },
+                ],
+            },
+        );
     }
 
     fn audit(&self, id: EventId, level: Level, bundle: &str, detail: &str) {
@@ -566,11 +611,15 @@ mod tests {
 
     struct RecordingSink {
         events: RefCell<Vec<EventId>>,
+        /// The `(load, verify)` durations carried by the last `APP_LOADED`
+        /// record, so a test can assert both phases were timed and emitted.
+        loaded_phases: RefCell<Option<(rustos_abi::Duration64, rustos_abi::Duration64)>>,
     }
     impl RecordingSink {
         fn new() -> Self {
             Self {
                 events: RefCell::new(Vec::new()),
+                loaded_phases: RefCell::new(None),
             }
         }
         fn count(&self, id: EventId) -> usize {
@@ -580,12 +629,45 @@ mod tests {
     impl Sink for RecordingSink {
         fn write_event(&self, event: &Event<'_>) {
             self.events.borrow_mut().push(event.id);
+            if event.id == events::APP_LOADED {
+                let phase = |key| {
+                    event.fields.iter().find_map(|f| match (f.key, f.value) {
+                        (k, rustos_log::FieldValue::Duration(d)) if k == key => Some(d),
+                        _ => None,
+                    })
+                };
+                if let (Some(load), Some(verify)) = (phase("load"), phase("verify")) {
+                    *self.loaded_phases.borrow_mut() = Some((load, verify));
+                }
+            }
+        }
+    }
+
+    /// A monotonic clock that advances a fixed step on every read, so the
+    /// loader observes non-zero elapsed time for both phases deterministically
+    /// (no host wall clock in a `no_std` unit test).
+    struct StepClock {
+        now: core::cell::Cell<u64>,
+    }
+    impl StepClock {
+        fn new() -> Self {
+            Self {
+                now: core::cell::Cell::new(0),
+            }
+        }
+    }
+    impl crate::bundle::Clock for StepClock {
+        fn now_ns(&self) -> u64 {
+            let t = self.now.get();
+            self.now.set(t + 1_000);
+            t
         }
     }
 
     fn cfg<'a>(
         store: &'a dyn BundleStore,
         verifier: &'a dyn Verifier,
+        clock: &'a dyn crate::bundle::Clock,
         sink: &'a RecordingSink,
     ) -> AppLoaderConfig<'a> {
         AppLoaderConfig {
@@ -593,6 +675,7 @@ mod tests {
             syscall_table_hash: KERNEL_HASH,
             store,
             verifier,
+            clock,
             sink,
         }
     }
@@ -602,7 +685,8 @@ mod tests {
         let store = MockStore::good(&[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW]);
         let verifier = AcceptVerifier;
         let sink = RecordingSink::new();
-        let loader = AppLoader::new(cfg(&store, &verifier, &sink));
+        let clock = StepClock::new();
+        let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
 
         // The user holds only NET_RAW, so FS_MOUNT is dropped on intersect.
         let user = cap_set(&[CapabilityId::NET_RAW]);
@@ -643,7 +727,8 @@ mod tests {
         let store = MockStore::good(&[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW]);
         let verifier = CapturingVerifier(core::cell::RefCell::new(alloc::vec::Vec::new()));
         let sink = RecordingSink::new();
-        let loader = AppLoader::new(cfg(&store, &verifier, &sink));
+        let clock = StepClock::new();
+        let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         loader
             .load("/Apps/Example.app", &cap_set(&[CapabilityId::NET_RAW]))
             .expect("loads");
@@ -666,7 +751,8 @@ mod tests {
         store.entries = vec!["AppInfo".to_string(), "Run".to_string()];
         let verifier = AcceptVerifier;
         let sink = RecordingSink::new();
-        let loader = AppLoader::new(cfg(&store, &verifier, &sink));
+        let clock = StepClock::new();
+        let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         let app = loader
             .load("/Apps/Example.app", &CapabilitySet::empty())
             .expect("loads");
@@ -679,7 +765,8 @@ mod tests {
         store.entries.push("Plugins".to_string());
         let verifier = AcceptVerifier;
         let sink = RecordingSink::new();
-        let loader = AppLoader::new(cfg(&store, &verifier, &sink));
+        let clock = StepClock::new();
+        let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
             loader.load("/Apps/Example.app", &CapabilitySet::empty()),
             Err(AppError::Layout(BundleLayoutError::UnknownEntry))
@@ -693,7 +780,8 @@ mod tests {
         store.entries = vec!["AppInfo".to_string(), "Resources".to_string()];
         let verifier = AcceptVerifier;
         let sink = RecordingSink::new();
-        let loader = AppLoader::new(cfg(&store, &verifier, &sink));
+        let clock = StepClock::new();
+        let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
             loader.load("/Apps/Example.app", &CapabilitySet::empty()),
             Err(AppError::Layout(BundleLayoutError::MissingRun))
@@ -706,7 +794,8 @@ mod tests {
         store.appinfo[0] ^= 0xFF; // corrupt magic
         let verifier = AcceptVerifier;
         let sink = RecordingSink::new();
-        let loader = AppLoader::new(cfg(&store, &verifier, &sink));
+        let clock = StepClock::new();
+        let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
             loader.load("/Apps/Example.app", &CapabilitySet::empty()),
             Err(AppError::Manifest(Errno::BadMagic))
@@ -719,7 +808,8 @@ mod tests {
         let store = MockStore::good(&[]);
         let verifier = AcceptVerifier;
         let sink = RecordingSink::new();
-        let mut config = cfg(&store, &verifier, &sink);
+        let clock = StepClock::new();
+        let mut config = cfg(&store, &verifier, &clock, &sink);
         config.accepted_abi_version = ABI_VERSION_CURRENT + 1;
         let loader = AppLoader::new(config);
         assert_eq!(
@@ -739,7 +829,8 @@ mod tests {
         };
         let verifier = AcceptVerifier;
         let sink = RecordingSink::new();
-        let loader = AppLoader::new(cfg(&store, &verifier, &sink));
+        let clock = StepClock::new();
+        let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
             loader.load("/Apps/Example.app", &CapabilitySet::empty()),
             Err(AppError::InterfaceHashMismatch)
@@ -752,7 +843,8 @@ mod tests {
         let store = MockStore::good(&[]);
         let verifier = RejectVerifier;
         let sink = RecordingSink::new();
-        let loader = AppLoader::new(cfg(&store, &verifier, &sink));
+        let clock = StepClock::new();
+        let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
             loader.load("/Apps/Example.app", &CapabilitySet::empty()),
             Err(AppError::Signature)
@@ -766,7 +858,8 @@ mod tests {
         store.content = [0x77; 32]; // does not match the manifest's CONTENT_HASH
         let verifier = AcceptVerifier;
         let sink = RecordingSink::new();
-        let loader = AppLoader::new(cfg(&store, &verifier, &sink));
+        let clock = StepClock::new();
+        let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
             loader.load("/Apps/Example.app", &CapabilitySet::empty()),
             Err(AppError::ContentHashMismatch)
@@ -780,7 +873,8 @@ mod tests {
         store.entries_fail = true;
         let verifier = AcceptVerifier;
         let sink = RecordingSink::new();
-        let loader = AppLoader::new(cfg(&store, &verifier, &sink));
+        let clock = StepClock::new();
+        let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
             loader.load("/Apps/Example.app", &CapabilitySet::empty()),
             Err(AppError::Store(Errno::NotFound))
@@ -796,7 +890,8 @@ mod tests {
         store.appinfo.truncate(AppInfoHeader::WIRE_LEN);
         let verifier = AcceptVerifier;
         let sink = RecordingSink::new();
-        let loader = AppLoader::new(cfg(&store, &verifier, &sink));
+        let clock = StepClock::new();
+        let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
             loader.load("/Apps/Example.app", &CapabilitySet::empty()),
             Err(AppError::Manifest(Errno::BufferTooSmall))
@@ -808,7 +903,8 @@ mod tests {
         let store = MockStore::good(&[]);
         let verifier = AcceptVerifier;
         let sink = RecordingSink::new();
-        let loader = AppLoader::new(cfg(&store, &verifier, &sink));
+        let clock = StepClock::new();
+        let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
 
         assert_eq!(
             loader.resolve_library("/Apps/Example.app", "/Apps/Example.app/Libraries/libui.so"),
@@ -826,7 +922,8 @@ mod tests {
         let store = MockStore::good(&[]);
         let verifier = AcceptVerifier;
         let sink = RecordingSink::new();
-        let loader = AppLoader::new(cfg(&store, &verifier, &sink));
+        let clock = StepClock::new();
+        let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
 
         assert_eq!(
             loader.resolve_library("/Apps/Example.app", "/System/Kernel/secret"),
@@ -850,7 +947,8 @@ mod tests {
         );
         let verifier = AcceptVerifier;
         let sink = RecordingSink::new();
-        let loader = AppLoader::new(cfg(&store, &verifier, &sink));
+        let clock = StepClock::new();
+        let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
 
         let app = loader
             .load("/Apps/Example.app", &CapabilitySet::empty())
@@ -872,7 +970,8 @@ mod tests {
         let store = MockStore::good(&[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW]);
         let verifier = AcceptVerifier;
         let sink = RecordingSink::new();
-        let loader = AppLoader::new(cfg(&store, &verifier, &sink));
+        let clock = StepClock::new();
+        let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
 
         let user = cap_set(&[CapabilityId::NET_RAW]);
         let app = loader.load("/Apps/Example.app", &user).expect("loads");
@@ -889,7 +988,8 @@ mod tests {
         store.run = build_run_image(&["/System/Kernel/secret.so"], KERNEL_HASH);
         let verifier = AcceptVerifier;
         let sink = RecordingSink::new();
-        let loader = AppLoader::new(cfg(&store, &verifier, &sink));
+        let clock = StepClock::new();
+        let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
             loader.load("/Apps/Example.app", &CapabilitySet::empty()),
             Err(AppError::Library(LibraryError::OutsidePolicy))
@@ -903,7 +1003,8 @@ mod tests {
         store.run = build_run_image(&[RUNTIME_LIB], [0x99; SYSCALL_TABLE_HASH_LEN]);
         let verifier = AcceptVerifier;
         let sink = RecordingSink::new();
-        let loader = AppLoader::new(cfg(&store, &verifier, &sink));
+        let clock = StepClock::new();
+        let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
             loader.load("/Apps/Example.app", &CapabilitySet::empty()),
             Err(AppError::RunImage(RxeError::InterfaceHashMismatch))
@@ -917,12 +1018,42 @@ mod tests {
         store.run = alloc::vec![0u8, 1, 2, 3];
         let verifier = AcceptVerifier;
         let sink = RecordingSink::new();
-        let loader = AppLoader::new(cfg(&store, &verifier, &sink));
+        let clock = StepClock::new();
+        let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert!(matches!(
             loader.load("/Apps/Example.app", &CapabilitySet::empty()),
             Err(AppError::RunImage(_))
         ));
         assert_eq!(sink.count(events::APP_RUN_IMAGE_INVALID), 1);
+    }
+
+    #[test]
+    fn app_loaded_records_load_and_verify_durations() {
+        // The clock advances 1000 ns per read; the pipeline makes four store
+        // reads (entries, AppInfo, content hash, Run), each opened and closed
+        // once, so the load phase is 4 × 1000 ns and the verify phase is the
+        // remaining elapsed span. Both must be present and non-zero on the
+        // successful-load record, so a slow first launch is diagnosable.
+        let store = MockStore::good(&[]);
+        let verifier = AcceptVerifier;
+        let sink = RecordingSink::new();
+        let clock = StepClock::new();
+        let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
+
+        loader
+            .load("/Apps/Example.app", &CapabilitySet::empty())
+            .expect("loads");
+
+        assert_eq!(sink.count(events::APP_LOADED), 1);
+        let (load, verify) = sink
+            .loaded_phases
+            .borrow()
+            .expect("APP_LOADED carries load and verify durations");
+        assert_eq!(load, rustos_abi::Duration64::from_nanos(4_000));
+        assert!(
+            verify > rustos_abi::Duration64::ZERO,
+            "verification time must be recorded"
+        );
     }
 
     #[test]

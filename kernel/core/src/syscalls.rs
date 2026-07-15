@@ -2419,11 +2419,13 @@ where
         let fs_store =
             crate::appspawn::FsBundleStore::new(self.filesystem, uid, caller.caps.effective());
         let verifier = crate::appspawn::AnchorVerifier::new(store.anchor());
+        let clock = crate::appspawn::ArchClock::new(self.arch);
         let loader = rustos_appload::AppLoader::new(rustos_appload::AppLoaderConfig {
             accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
             syscall_table_hash: rustos_kernel_syscall::SYSCALL_TABLE_HASH,
             store: &fs_store,
             verifier: &verifier,
+            clock: &clock,
             sink: self.audit,
         });
         // The full-word set is the identity element of the gate's

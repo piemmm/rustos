@@ -57,6 +57,21 @@ pub trait BundleStore {
     fn read_run(&self, bundle: &str) -> Result<Vec<u8>, Errno>;
 }
 
+/// A monotonic clock the loader reads only to *measure* how long its two
+/// observable phases take: the time spent reading the bundle off the
+/// [`BundleStore`] (the "load from disk" cost) and the remaining time spent
+/// verifying it (layout, manifest, interface-hash, signature, content-hash,
+/// and entry-point checks). The readings are for the audit record only; no
+/// load decision depends on them, so a coarse or even fixed clock is safe and
+/// never widens authority.
+pub trait Clock {
+    /// A monotonically non-decreasing reading in nanoseconds. Only
+    /// *differences* between two readings are used, so the epoch is
+    /// irrelevant. A reading that fails to advance yields a zero-length
+    /// phase rather than a negative span.
+    fn now_ns(&self) -> u64;
+}
+
 /// One shared-library reference the entry-point binary declares it needs,
 /// paired with the policy root it resolved against.
 ///
