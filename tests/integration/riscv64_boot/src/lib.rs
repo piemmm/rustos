@@ -56,3 +56,12 @@ pub use publish::{published_dtb, published_memory_map};
 // the freestanding target links the kernel, so the re-export is gated to it.
 #[cfg(freestanding)]
 pub use rustos_kernel::riscv64_plic_irq::PlicIrqController;
+
+// The production boot pipeline installs the S-mode PLIC dispatch and
+// publishes the kernel IRQ table + controller in its `Irq` phase. A
+// `virt`-board vertical that runs the full boot before its scenario reuses
+// that one IRQ path (the charter forbids building a second, and the arch
+// `set_trap_dispatch` is set-once per boot), so re-export the accessors it
+// binds its device source through.
+#[cfg(freestanding)]
+pub use rustos_kernel::riscv64::irq::{plic_controller, published_irq_table};

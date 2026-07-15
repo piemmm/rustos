@@ -567,11 +567,17 @@ port, which must not name `kernel/mem` — `AGENTS.md` §17.2 / §5.4.5):
   and the external-IRQ path.
 
 Both slots are one-shot (`AGENTS.md` §2.1) and the accessors expose no
-writable surface (`AGENTS.md` §2.4). Unlike x86_64 there is no published
-`IrqTable`: the boot-to-`BootCompleted` slice runs with interrupts
-disabled and hands the kernel `IrqRouting::unsupported`, so a vertical
-builds its own `PlicIrqController` + `IrqTable` over the DTB-discovered
-PLIC base rather than reusing a `max_line == 0` kernel-core table.
+writable surface (`AGENTS.md` §2.4). The external-interrupt path is
+**not** a test-only slot: the production boot pipeline builds the
+single-context S-mode `PlicIrqController` from the firmware device tree,
+sizes and publishes the kernel-core `IrqTable` (`max_line == riscv,ndev`),
+installs the S-mode external-interrupt dispatch, and enables `sie.SEIE`
+in its `Irq` phase (leaving `sstatus.SIE` to the task the scheduler
+runs). `riscv64_boot` re-exports the kernel accessors
+(`published_irq_table` / `plic_controller`) so a vertical binds its
+device source into that one published path rather than standing up a
+second controller + table — the trap dispatch is set-once per boot and
+the controller is one-per-boot (`AGENTS.md` §2.2).
 
 ## virtio-MMIO QEMU verticals
 
@@ -595,12 +601,12 @@ The riscv64 bring-up (`imp_mmio`):
    type stays crate-private behind `impl VirtioMmioBus`, §8) and
    provisions an `MmioTransport` through the `CAP_MMIO_MAP`-gated
    `KernelMmioMapper` (`kernel/virtio::provision_virtio_mmio`).
-3. Walks the DTB for the PLIC base + `riscv,ndev` and the device's
-   `interrupts` source, builds a `PlicIrqController` (the `IrqController`
-   bridge wrapping the arch port's `PlicController`) + `IrqTable`, `arm`s
-   the source, installs the S-mode trap dispatch (PLIC claim →
-   virtio-MMIO `InterruptACK` → `IrqTable::fire` → complete), and calls
-   `init_traps`.
+3. Walks the DTB for the device's `interrupts` source, binds it into the
+   kernel `IrqTable` the boot pipeline published, and `arm`s the source
+   through the published `PlicIrqController`. The production S-mode trap
+   dispatch (PLIC claim → `IrqTable::fire` → complete → wake) and
+   `sie.SEIE` are already installed by the boot pipeline, so the vertical
+   installs no dispatch of its own and calls no `init_traps`.
 4. Mints a `KernelVirtioHost` over the carved DMA pool and runs the
    shared `drive_driver_lifecycle` (`load → reload → device round-trip →
    unload`).
@@ -610,9 +616,10 @@ source, clears `sstatus.SIE`, re-checks the line's ready flag, parks on
 `wfi` only if still not ready, then restores `SIE`. Clearing `SIE` holds
 a completion that lands in the check/`wfi` window *pending* (not taken)
 so `wfi` observes it — no lost wake-up, no bounding timer. The
-virtio-MMIO `InterruptACK` in the dispatch is load-bearing: a level-high
-virtio-mmio source never re-edges, so without the ACK the device raises
-no fresh interrupt for the next used buffer.
+device-level virtio-MMIO `InterruptACK` is the loaded driver's job (its
+transport acknowledges the source as it drains the used ring), so a
+level-high virtio-mmio source deasserts before the waiter re-arms it —
+the park needs no dispatch-level ACK.
 
 The `kernel/virtio` (`rustos-kernel-virtio`) crate holds the
 architecture-neutral `KernelVirtioFactory` and the PCI/MMIO provisioning

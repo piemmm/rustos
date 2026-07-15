@@ -6,23 +6,18 @@
 //! that produces an [`MmioTransport`] and an interrupt path: build the
 //! `virt`-board virtio-MMIO bus from the published device tree, provision
 //! the transport through the `CAP_MMIO_MAP`-gated [`KernelMmioMapper`],
-//! walk the DTB for the PLIC base and the device's interrupt source,
-//! arm the [`PlicController`], wire the S-mode trap dispatch to an
-//! [`IrqTable`], and park on timer-bounded `wfi`.
-
-extern crate alloc;
-
-use alloc::boxed::Box;
-use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+//! walk the DTB for the device's interrupt source, bind it into the
+//! IRQ table the production boot published, arm it through the
+//! boot-built PLIC controller, and park on a race-free `wfi`.
 
 use rustos_abi::{CapabilityId, IrqHandle};
-use rustos_arch_riscv64::plic::{s_mode_context, Plic, PlicController, VolatilePlicMmio};
-use rustos_arch_riscv64::{qemu_exit, trap, SERIAL_SINK};
+use rustos_arch_riscv64::plic::VolatilePlicMmio;
+use rustos_arch_riscv64::{qemu_exit, SERIAL_SINK};
 use rustos_caps::CapabilitySet;
 use rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb;
 use rustos_drv_bus_virtio::MmioTransport;
 use rustos_fdt::Fdt;
-use rustos_kernel_irq::{IrqController, IrqTable, IrqWaitAbort, IrqWaiter};
+use rustos_kernel_irq::{IrqTable, IrqWaitAbort, IrqWaiter};
 use rustos_kernel_mem::{
     AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, HostPageTable, MmioMap, VirtAddr,
 };
@@ -33,7 +28,9 @@ use rustos_kernel_virtio::{
     KernelVirtioHost,
 };
 use rustos_log::{Event, EventId, Level, Sink};
-use rustos_test_riscv64_boot::{published_dtb, published_memory_map, PlicIrqController};
+use rustos_test_riscv64_boot::{
+    plic_controller, published_dtb, published_irq_table, published_memory_map, PlicIrqController,
+};
 use rustos_virtio::{PoolId, VirtioHost, VirtioHostFactory};
 
 /// Re-export so the verticals name the concrete transport for the shared
@@ -121,9 +118,6 @@ const MMIO_CAP_PAGES: usize = 64;
 /// lost-wake-up window without a bounding timer.
 const SSTATUS_SIE: u64 = 1 << 1;
 
-/// PLIC `compatible` string QEMU's `virt` board advertises.
-const PLIC_COMPATIBLE: &str = "riscv,plic0";
-
 /// virtio-MMIO transport `compatible` string.
 const VIRTIO_MMIO_COMPATIBLE: &str = "virtio,mmio";
 
@@ -159,29 +153,6 @@ impl QemuEnv for MmioEnv {
 
 // --- Device-tree helpers ---------------------------------------------
 
-/// PLIC parameters read from the device tree.
-struct PlicInfo {
-    /// Physical base of the PLIC register block.
-    base: u64,
-    /// Highest interrupt source id (`riscv,ndev`).
-    ndev: u32,
-}
-
-/// Find the PLIC's register base and source count in `dtb`.
-fn plic_info(dtb: &Fdt<'_>) -> Option<PlicInfo> {
-    for node in dtb.nodes() {
-        let node = node.ok()?;
-        if !node.is_compatible(PLIC_COMPATIBLE) {
-            continue;
-        }
-        let reg = node.property("reg")?;
-        let base = reg.read_be_u64(0).ok()?;
-        let ndev = node.property("riscv,ndev")?.read_be_u32(0).ok()?;
-        return Some(PlicInfo { base, ndev });
-    }
-    None
-}
-
 /// Find the PLIC interrupt source of the `virtio,mmio` slot whose `reg`
 /// base equals `slot_base` (its single `interrupts` cell).
 fn device_interrupt(dtb: &Fdt<'_>, slot_base: u64) -> Option<u32> {
@@ -197,67 +168,6 @@ fn device_interrupt(dtb: &Fdt<'_>, slot_base: u64) -> Option<u32> {
         return node.property("interrupts")?.read_be_u32(0).ok();
     }
     None
-}
-
-// --- Trap dispatch ---------------------------------------------------
-
-/// The PLIC controller the trap dispatch claims/masks/completes through.
-/// Published once (from a leaked `'static` box) before traps are armed.
-static DISPATCH_PLIC: AtomicPtr<PlicIrqController<VolatilePlicMmio>> =
-    AtomicPtr::new(core::ptr::null_mut());
-
-/// The IRQ table the trap dispatch fires into. Published with
-/// [`DISPATCH_PLIC`].
-static DISPATCH_TABLE: AtomicPtr<IrqTable> = AtomicPtr::new(core::ptr::null_mut());
-
-/// Physical base of the provisioned device's virtio-MMIO register window.
-/// Published with [`DISPATCH_PLIC`] so the trap dispatch can acknowledge
-/// the device-level interrupt (`0` until set).
-static DISPATCH_DEV_BASE: AtomicU64 = AtomicU64::new(0);
-
-/// virtio-MMIO `InterruptStatus` register offset (virtio 1.1 §4.2.2).
-const VIRTIO_MMIO_INTERRUPT_STATUS: u64 = 0x060;
-
-/// virtio-MMIO `InterruptACK` register offset (virtio 1.1 §4.2.2).
-const VIRTIO_MMIO_INTERRUPT_ACK: u64 = 0x064;
-
-/// S-mode external-interrupt dispatcher: claim the pending PLIC source,
-/// forward it to [`IrqTable::fire`] (which masks the source before any
-/// waiter observes `ready`), then complete the claim. Installed via
-/// [`trap::set_trap_dispatch`].
-extern "C" fn trap_dispatch() {
-    let plic_ptr = DISPATCH_PLIC.load(Ordering::Acquire);
-    let table_ptr = DISPATCH_TABLE.load(Ordering::Acquire);
-    if plic_ptr.is_null() || table_ptr.is_null() {
-        return;
-    }
-    // SAFETY: both pointers were published once, before `init_traps`
-    // armed interrupts, from `Box::leak`ed `'static` allocations that
-    // are never freed or mutated; the dispatch only takes `&` to them.
-    let plic: &PlicIrqController<VolatilePlicMmio> = unsafe { &*plic_ptr };
-    let table: &IrqTable = unsafe { &*table_ptr };
-    let source = plic.claim();
-    if source != 0 {
-        // Acknowledge the device-level virtio-MMIO interrupt: read
-        // `InterruptStatus` and write the same bits to `InterruptACK`
-        // so the device deasserts its line. Without this a level-high
-        // virtio-MMIO source never re-edges, so the device raises no
-        // fresh interrupt for the next used buffer (virtio 1.1 §4.2.2).
-        let dev_base = DISPATCH_DEV_BASE.load(Ordering::Acquire);
-        if dev_base != 0 {
-            // SAFETY: `dev_base` is the identity-mapped virtio-MMIO
-            // register window of the provisioned device, valid for the
-            // life of the guest; both registers are 4-byte aligned.
-            unsafe {
-                let isr = core::ptr::read_volatile(
-                    (dev_base + VIRTIO_MMIO_INTERRUPT_STATUS) as *const u32,
-                );
-                core::ptr::write_volatile((dev_base + VIRTIO_MMIO_INTERRUPT_ACK) as *mut u32, isr);
-            }
-        }
-        let _ = table.fire(source, plic as &dyn IrqController);
-        plic.complete(source);
-    }
 }
 
 // --- IRQ waiter ------------------------------------------------------
@@ -307,14 +217,22 @@ impl IrqWaiter for WfiWaiter {
     }
 }
 
-/// Build the external-IRQ path the riscv64 verticals own: resolve the
-/// PLIC base + the device's interrupt source from the device tree, build
-/// a [`PlicController`] + [`IrqTable`] (leaked to `'static` so the trap
-/// dispatch and the waiter can hold them), bind + arm the source, publish
-/// the dispatch state, and install the S-mode trap vector.
+/// Bind this device's interrupt into the external-IRQ path the production
+/// boot pipeline already stood up, and arm the source.
 ///
-/// The riscv64 boot hands the kernel `IrqRouting::unsupported`, so the
-/// verticals own this path. Any failure flips QEMU failure via `env`.
+/// The boot harness runs the full `boot_riscv64` pipeline before this
+/// scenario, and that pipeline builds the single-context S-mode PLIC
+/// controller from the firmware device tree, publishes the kernel
+/// [`IrqTable`], installs the S-mode external-interrupt dispatcher
+/// (claim → [`IrqTable::fire`] → complete → wake), and enables `sie.SEIE`.
+/// The set-once trap dispatch and the one-controller-per-boot rule mean the
+/// scenario must **reuse** that path, not build a second: it resolves the
+/// device's PLIC source from the device tree, binds it into the published
+/// table, and arms it through the published controller. The `wfi` waiter
+/// manages `sstatus.SIE` itself, and the loaded driver acknowledges the
+/// device-level virtio-MMIO interrupt through its transport, so no
+/// scenario-owned dispatch is needed. Any failure flips QEMU failure via
+/// `env`.
 fn arm_external_irq(
     env: &MmioEnv,
     dtb: &Fdt<'_>,
@@ -325,44 +243,21 @@ fn arm_external_irq(
     IrqHandle,
     u32,
 ) {
-    let Some(plic_info) = plic_info(dtb) else {
-        env.fail("no PLIC in DTB");
+    let Some(table) = published_irq_table() else {
+        env.fail("kernel IRQ table unpublished");
+    };
+    let Some(controller) = plic_controller() else {
+        env.fail("kernel PLIC controller unpublished");
     };
     let Some(source) = device_interrupt(dtb, slot_base) else {
         env.fail("no device interrupt in DTB");
     };
-    let Ok(plic_base) = usize::try_from(plic_info.base) else {
-        env.fail("PLIC base out of range");
-    };
-    // SAFETY: `plic_base` is the PLIC register-block base read from the
-    // device tree, identity-mapped and exclusively ours on the
-    // single-hart `virt` board.
-    let plic_mmio = unsafe { VolatilePlicMmio::new(plic_base) };
-    let controller = PlicIrqController::new(PlicController::new(
-        Plic::new(plic_mmio, s_mode_context(0)),
-        plic_info.ndev,
-    ));
-    let controller: &'static PlicIrqController<VolatilePlicMmio> = Box::leak(Box::new(controller));
-    let table: &'static IrqTable = Box::leak(Box::new(IrqTable::new(plic_info.ndev)));
-
     let Ok(bind) = table.bind(source, TASK) else {
         env.fail("bind device source");
     };
     if controller.arm(source).is_err() {
         env.fail("arm PLIC source");
     }
-    DISPATCH_PLIC.store(
-        (controller as *const PlicIrqController<VolatilePlicMmio>).cast_mut(),
-        Ordering::Release,
-    );
-    DISPATCH_TABLE.store((table as *const IrqTable).cast_mut(), Ordering::Release);
-    if trap::set_trap_dispatch(trap_dispatch).is_err() {
-        env.fail("install trap dispatch");
-    }
-    // SAFETY: called once on the boot hart with a stack established and
-    // the dispatch installed; arms the S-mode trap vector + external
-    // interrupts.
-    unsafe { trap::init_traps() };
     (table, controller, bind.handle, source)
 }
 
@@ -436,12 +331,12 @@ where
         };
         (prov.transport, prov.base)
     };
-    DISPATCH_DEV_BASE.store(slot_base, Ordering::Release);
     env.log("virtio-qemu: MMIO transport provisioned");
 
-    // 5. Build the external-IRQ path (PLIC + S-mode traps) from the DTB.
+    // 5. Bind + arm this device's interrupt in the boot-published PLIC
+    //    path (the production dispatch is already installed).
     let (table, controller, handle, source) = arm_external_irq(&env, &dtb, slot_base);
-    env.log("virtio-qemu: PLIC armed, S-mode traps live");
+    env.log("virtio-qemu: PLIC source armed on the published table");
 
     // 6. Mint the per-device DMA host the driver allocates through.
     let space = AddressSpace::new(HostPageTable::new());
