@@ -1138,10 +1138,11 @@ order (one fully-gated increment each):
              metal-neutral (no-op on the Pi tree, §2.17);
            - the **`-M virt` autoload vertical — done.**
              `tests/integration/autoload_input_qemu_aarch64` boots the
-             production pipeline on `virt` with the
-             `rustos-test-autoload-root-image` whole-disk fixture (encrypted
-             rustfs root carrying the kernel-signed `virtio_kbd.rxe` at
-             `/System/Drivers/input/virtio_kbd/Run`) and an attached
+             production pipeline on `virt` with the shared encrypted-root
+             whole-disk fixture, planted with the kernel-signed driver bundles
+             the `image_drivers` pipeline cross-compiles and signs (the
+             `virtio_kbd.rxe` at `/System/Drivers/input/virtio_kbd/Run`), and
+             an attached
              `virtio-keyboard-device`: unlock → enumerate → match the discovered
              virtio-input node → verify against `KERNEL_DRIVER_SIGNER_PUBKEY` →
              spawn into a user-space process → a typed keystroke reaches the
@@ -1179,8 +1180,9 @@ order (one fully-gated increment each):
              non-secret `SYSTEM_VOLUME_KEY`, and the kernel mounting `/System`
              read-only over a `lib/partition` window in
              `root_mount::autoload_system_drivers` (audited 4140/4141). The
-             `encrypted_root_image`/`autoload_root_image` fixtures author the
-             split;
+             `encrypted_root_image` fixture authors the split, with the
+             autoload driver bundles built and planted by the `image_drivers`
+             pipeline;
            - **B2 — DONE (host + `-M virt`)** — the aarch64 unlock kthread runs
              `root_mount::autoload_system_drivers(&mut blk, &mut AutoloadHook,
              audit)` **once, before** the passphrase prompt: it mounts the

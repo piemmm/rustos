@@ -25,11 +25,13 @@
 //!   process spawn handshake with a stub program.
 //!
 //! This vertical composes them on the production boot path: it attaches the
-//! shared `rustos_test_autoload_root_image` whole-disk image (a three-partition
-//! disk whose **read-only `/System` volume** carries the signed `virtio_kbd`
-//! bundle at the volume-relative `Drivers/input/virtio_kbd/Run` and the
-//! signed framebuffer display-service bundle at
-//! `Drivers/display/framebuffer/Run`, design B) as a virtio-blk-mmio device
+//! shared `rustos_test_encrypted_root_image` whole-disk image, additionally
+//! planted with the autoload driver bundles the `image_drivers` pipeline
+//! cross-compiles and signs (a three-partition disk whose **read-only
+//! `/System` volume** carries the signed `virtio_kbd` bundle at the
+//! volume-relative `Drivers/input/virtio_kbd/Run` and the signed framebuffer
+//! display-service bundle at `Drivers/display/framebuffer/Run`, design B) as a
+//! virtio-blk-mmio device
 //! **plus** a `ramfb` display, a `virtio-keyboard-device`, and a
 //! `virtio-mouse-device`, and boots `boot_aarch64::boot` verbatim. The
 //! production path then:

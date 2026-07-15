@@ -3888,10 +3888,11 @@ table, so a new board is match **data**, not new code. Sub-increments
           autoload spawn below binds against.
         - the `-M virt` autoload vertical — **done**.
           `tests/integration/autoload_input_qemu_aarch64` boots the production
-          aarch64 pipeline on `virt` with the new
-          `rustos-test-autoload-root-image` whole-disk fixture (the encrypted
-          root additionally carrying a kernel-signed `virtio_kbd.rxe` bundle at
-          `/System/Drivers/input/virtio_kbd/Run`) and an attached
+          aarch64 pipeline on `virt` with the shared encrypted-root whole-disk
+          fixture, planted with the kernel-signed autoload driver bundles the
+          `image_drivers` pipeline cross-compiles and signs (the
+          `virtio_kbd.rxe` bundle at `/System/Drivers/input/virtio_kbd/Run`),
+          and an attached
           `virtio-keyboard-device`. The runner types the passphrase; the unlock
           kthread mounts the root, and its post-mount `AutoloadHook` scans the
           signed store, verifies the bundle against the kernel's embedded
@@ -3899,11 +3900,13 @@ table, so a new board is match **data**, not new code. Sub-increments
           virtio-input node, and spawns it into its own user-space process; the
           injected key is decoded and delivered via `key_inject`, and the audit
           sink reports PASS on `AuditEvent::InputDelivered` (`EventId(4050)`).
-          The fixture's `build.rs` cross-compiles `drivers/input/virtio_kbd`
-          PIE (new `drivers/input/virtio_kbd/Run.ld`), converts it to an `rxe`
-          relocated for the shared `rustos_itest_harness::USER_IMAGE_BIAS`, and
-          signs it via the shared `rustos_itest_harness::driver_image` composer
-          with `build_support::KERNEL_DRIVER_SIGNING_SEED` over the driver's own
+          The `image_drivers` pipeline (`build_virtio_kbd_bundle`, the one
+          definition every image consumer shares, §2.2) cross-compiles
+          `drivers/input/virtio_kbd` PIE (its `drivers/input/virtio_kbd/Run.ld`),
+          converts it to an `rxe` relocated for the shared
+          `rustos_itest_harness::USER_IMAGE_BIAS`, and signs it via the shared
+          `rustos_itest_harness::driver_image` composer with
+          `build_support::KERNEL_DRIVER_SIGNING_SEED` over the driver's own
           `BIND_KEYS` + caps (`CAP_MMIO_MAP`/`CAP_MEM_DMA`/`CAP_INPUT_INJECT`).
           The autoload caller presents the delegatable
           `unlock_service::autoload_caps` superset (`service_caps` +
@@ -3913,7 +3916,8 @@ table, so a new board is match **data**, not new code. Sub-increments
           the unlock kthread's own context stays minimal (§5.2 / §5.4). The
           seed-hoist and one-shot `InputDelivered` witness prerequisites are
           done; the signed bundle is host-proven valid + matched over the real
-          `scan_store`/`devmatch` path (`autoload_root_image` tests);
+          `scan_store`/`devmatch` path (the `image_drivers` autoload-decision
+          tests);
         - `tools/mkimage` laying the signed input-driver bundle into the
           signed driver store, signed with the kernel's driver-signing trust
           anchor (a seed shared in one place with the kernel build, §2.2) —
@@ -4008,8 +4012,9 @@ keyboard never regresses (§2.17), until the final flip:
   three MBR partitions (boot @2048 / `/System` @133120 / encrypted root). The
   kernel discovers + mounts `/System` read-only over a `lib/partition` window
   in `root_mount::autoload_system_drivers`, auditing `SYSTEM_VOLUME_MOUNTED`
-  (4140) / `SYSTEM_VOLUME_UNAVAILABLE` (4141). The `encrypted_root_image` /
-  `autoload_root_image` `-M virt` fixtures author the split. The installer
+  (4140) / `SYSTEM_VOLUME_UNAVAILABLE` (4141). The `encrypted_root_image`
+  `-M virt` fixture authors the split (the autoload driver bundles it plants
+  are built and signed by the `image_drivers` pipeline). The installer
   (§11) is a Stage-8 placeholder; the split author is `tools/mkimage`.
 - **B2 — relocate the autoload store to the `/System` volume + run it
   pre-unlock. DONE (host + `-M virt`).** The aarch64 unlock kthread now calls

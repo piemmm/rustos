@@ -167,11 +167,15 @@ enum FsDisk {
     /// `/System/Security/Users` — the root-mount->login vertical's backing
     /// (`plans/PI.md` P11 Chunk B-2).
     EncryptedRootDisk,
-    /// The shared [`rustos_test_autoload_root_image`] whole-disk image: the
-    /// [`Self::EncryptedRootDisk`] layout whose **read-only `/System` volume**
-    /// additionally carries a kernel-signed virtio-input keyboard driver bundle
-    /// in its `Drivers/` store — the pre-unlock driver-loading-by-discovery
-    /// autoload vertical's backing (`plans/PI.md` design B / B2).
+    /// The [`Self::EncryptedRootDisk`] layout whose **read-only `/System`
+    /// volume** additionally carries the kernel-signed autoload driver
+    /// bundles — the virtio-input keyboard driver, the framebuffer display
+    /// service, and the virtio-net link-layer driver — in its `Drivers/`
+    /// store. The bundles are the ones the `image_drivers` pipeline
+    /// cross-compiles and signs ([`super::image_drivers::autoload_driver_store_files`]),
+    /// planted through the same generic encrypted-root fixture; the pre-unlock
+    /// driver-loading-by-discovery autoload vertical's backing (`plans/PI.md`
+    /// design B / B2, `plans/NETWORK.md` N4e).
     AutoloadRootDisk,
     /// The [`Self::EncryptedRootDisk`] layout whose **read-only `/System`
     /// volume** additionally carries the test-only `memsoak` fixture bundle
@@ -4341,6 +4345,10 @@ pub fn build_all(ctx: &Context, only: Option<&str>) -> Result<(), String> {
     // build it.
     super::image_apps::app_store_files(ctx)?;
     super::image_apps::memsoak_store_files(ctx)?;
+    // Likewise pre-warm the autoload driver bundles the `-M virt` autoload
+    // verticals plant, so their (possibly concurrent) run passes reuse one
+    // cross-compile-and-sign set instead of racing to build it.
+    super::image_drivers::autoload_driver_store_files(ctx)?;
     Ok(())
 }
 
@@ -4460,6 +4468,7 @@ pub fn run_once(ctx: &Context, only: Option<&str>) -> Result<(), String> {
     // reference rather than the borrowed context.
     let apps = super::image_apps::app_store_files(ctx)?;
     let apps_with_memsoak = super::image_apps::memsoak_store_files(ctx)?;
+    let autoload_drivers = super::image_drivers::autoload_driver_store_files(ctx)?;
     let jobs: Vec<Job> = selected
         .into_iter()
         .map(|t| {
@@ -4467,7 +4476,7 @@ pub fn run_once(ctx: &Context, only: Option<&str>) -> Result<(), String> {
             let weight = usize::try_from(t.cpus).unwrap_or(1);
             let target_dir = target_dir.clone();
             Job::closure(label, weight, move || {
-                run_one(&target_dir, t, apps, apps_with_memsoak)
+                run_one(&target_dir, t, apps, apps_with_memsoak, autoload_drivers)
             })
         })
         .collect();
@@ -4506,8 +4515,15 @@ impl Enrolment {
         target_dir: &Path,
         apps: &'static [super::image_apps::AppStoreFile],
         apps_with_memsoak: &'static [super::image_apps::AppStoreFile],
+        autoload_drivers: &'static [super::image_apps::AppStoreFile],
     ) -> Result<(), String> {
-        run_one(target_dir, self.test, apps, apps_with_memsoak)
+        run_one(
+            target_dir,
+            self.test,
+            apps,
+            apps_with_memsoak,
+            autoload_drivers,
+        )
     }
 }
 
@@ -4551,6 +4567,7 @@ fn run_one(
     t: &QemuTest,
     apps: &[super::image_apps::AppStoreFile],
     apps_with_memsoak: &[super::image_apps::AppStoreFile],
+    autoload_drivers: &[super::image_apps::AppStoreFile],
 ) -> Result<(), String> {
     let kernel: PathBuf = target_dir.join(t.target).join("debug").join(t.binary);
     // Select the per-arch QEMU `Spec`: the riscv64 enrolments boot the
@@ -4592,7 +4609,7 @@ fn run_one(
     // Attach the shared filesystem volume as the backing image, when the
     // enrolment names one. Only the non-zero sectors are planted; the
     // planter zero-fills the rest, matching a freshly-formatted volume.
-    if let Some(fs) = fs_disk_image(t, apps, apps_with_memsoak)? {
+    if let Some(fs) = fs_disk_image(t, apps, apps_with_memsoak, autoload_drivers)? {
         let image = kernel.with_extension(fs.extension);
         let sector_bytes = rustos_qemu::disk::SECTOR_BYTES;
         let planted: Vec<(u64, &[u8])> = fs
@@ -5050,6 +5067,7 @@ fn fs_disk_image(
     t: &QemuTest,
     apps: &[super::image_apps::AppStoreFile],
     apps_with_memsoak: &[super::image_apps::AppStoreFile],
+    autoload_drivers: &[super::image_apps::AppStoreFile],
 ) -> Result<Option<FsImage>, String> {
     Ok(match t.fs_disk {
         FsDisk::None => None,
@@ -5078,8 +5096,21 @@ fn fs_disk_image(
         }),
         FsDisk::AutoloadRootDisk => Some(FsImage {
             extension: "autoload-root.img",
-            bytes: super::image_apps::with_plant_refs(apps, |files| {
-                rustos_test_autoload_root_image::build_image(files)
+            // The whole-disk encrypted-root image with the autoload driver
+            // bundles planted in its read-only `/System/Drivers/` store
+            // alongside the app/service bundles. The driver bundles are the
+            // ones the `image_drivers` pipeline cross-compiled and signed
+            // (`autoload_driver_store_files`), each paired with its store
+            // path; the generic encrypted-root fixture plants both stores
+            // (`AGENTS.md` §2.2 — one whole-disk author, no per-fixture copy).
+            bytes: super::image_apps::with_plant_refs(autoload_drivers, |driver_files| {
+                super::image_apps::with_plant_refs(apps, |app_files| {
+                    rustos_test_encrypted_root_image::build_image_with_contents(
+                        driver_files,
+                        app_files,
+                        rustos_test_encrypted_root_image::PASSPHRASE,
+                    )
+                })
             })
             .map_err(|e| {
                 format!(
@@ -5087,7 +5118,7 @@ fn fs_disk_image(
                     t.package
                 )
             })?,
-            total_sectors: rustos_test_autoload_root_image::TOTAL_SECTORS,
+            total_sectors: rustos_test_encrypted_root_image::TOTAL_SECTORS,
         }),
         // The encrypted-root layout with the memsoak-augmented bundle set:
         // the same builder, planting the same store plus the one test-only

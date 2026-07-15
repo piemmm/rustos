@@ -350,7 +350,9 @@ verifies (§18.6).
 The `tests/integration/autoload_input_qemu_aarch64` `-M virt` vertical
 proves this end to end on the production boot path: it plants a kernel-signed
 `virtio_kbd` driver bundle in the read-only `/System` volume's `Drivers/`
-store (the `rustos-test-autoload-root-image` fixture) and attaches a
+store (the shared encrypted-root image fixture, planted with the autoload
+driver bundles the `image_drivers` pipeline cross-compiles and signs) and
+attaches a
 `virtio-keyboard` device. The discovered virtio-input node carries its
 register window, a coherent DMA constraint, and its discovered GICv2
 interrupt line as grant requests (§18.3); `devmgr` matches the signed bundle

@@ -93,13 +93,15 @@ rustos-test-rustfs-image = { path = "../../tests/integration/rustfs_image", vers
 # image authored by the real in-tree drivers, the same bytes the
 # `root_mount` host tests split — so the planted layout and the guest's
 # unlock share one source of truth (`AGENTS.md` §2.2).
+# The `plans/PI.md` P10 5d-2-ii(b-2-iii) / `plans/NETWORK.md` N4e autoload
+# verticals boot the same encrypted-root image, additionally carrying the
+# kernel-signed virtio-input keyboard driver, framebuffer display service, and
+# virtio-net link-layer driver bundles in `/System/Drivers/`. Those bundles are
+# now cross-compiled and signed by the `image_drivers` pipeline (the one
+# definition every image consumer shares, `AGENTS.md` §2.2) and planted through
+# this same encrypted-root fixture, so there is no separate fixed-arch fixture
+# crate baking them at build time.
 rustos-test-encrypted-root-image = { path = "../../tests/integration/encrypted_root_image", version = "=0.0.0" }
-# `test --qemu` plants the `plans/PI.md` P10 5d-2-ii(b-2-iii) autoload
-# vertical's backing from the `rustos-test-autoload-root-image` fixture — the
-# encrypted-root image additionally carrying the kernel-signed virtio-input
-# keyboard driver bundle in `/System/Drivers/`, so the booted kernel discovers,
-# verifies, and spawns it off the very volume it mounts (`AGENTS.md` §2.2).
-rustos-test-autoload-root-image = { path = "../../tests/integration/autoload_root_image", version = "=0.0.0" }
 # The memory-stability vertical's fixture constants: the `MEMSOAK PASS`
 # marker its serial script waits for is pinned against the fixture's own
 # `PASS_MARKER` by a unit test, so the script and the program cannot drift.
@@ -148,6 +150,12 @@ rustos-drv-bus-usb = { path = "../../drivers/bus/usb/xhci", version = "=0.0.0" }
 rustos-drv-input-usb-kbd = { path = "../../drivers/input/usb_kbd", version = "=0.0.0" }
 rustos-drv-input-usb-mouse = { path = "../../drivers/input/usb_mouse", version = "=0.0.0" }
 rustos-drv-input-virtio-input = { path = "../../drivers/input/virtio_input", version = "=0.0.0" }
+# The virtio-net link-layer driver's canonical §18.3 bind table (and its
+# single-source virtio device id, used by the autoload-match tests): the
+# `image_drivers` pipeline signs `BIND_KEYS` into the bundle it cross-compiles
+# from the sibling driver-process crate (`rustos-drv-network-virtio-net-driver`),
+# so the on-disk bundle and the driver never drift (`AGENTS.md` §2.2 / §18.3).
+rustos-drv-network-virtio-net = { path = "../../drivers/network/virtio_net", version = "=0.0.0" }
 rustos-drv-display-framebuffer = { path = "../../drivers/display/framebuffer", version = "=0.0.0" }
 rustos-drv-storage-usb-msd = { path = "../../drivers/storage/usb_msd", version = "=0.0.0" }
 rustos-drv-storage-volmgr = { path = "../../drivers/storage/volmgr", version = "=0.0.0" }
@@ -179,3 +187,16 @@ rustos-kernel-ipc = { path = "../../kernel/ipc", version = "=0.0.0" }
 # `format_hex_u64` — the same renderer the kernel/ipc audit fields use, so
 # the endpoint marker compares the exact on-wire spelling.
 rustos-util = { path = "../../lib/util", version = "=0.0.0" }
+
+[dev-dependencies]
+# The `image_drivers` autoload-decision tests drive the real production match
+# over the bundles the pipeline signs: the drvhost store scanner decodes each
+# manifest bind table and the shared devmatch policy resolves it against a
+# discovered node (`AGENTS.md` §2.2 / §18.3 / §18.6). The single-source
+# virtio-input device id keys the input node; the framebuffer compatible string
+# and the virtio-net device id come from `rustos-abi` / the network driver dep
+# above.
+rustos-drvhost = { path = "../../userland/system/drvhost", version = "=0.0.0" }
+rustos-devmatch = { path = "../../lib/devmatch", version = "=0.0.0" }
+rustos-log = { path = "../../lib/log", version = "=0.0.0" }
+rustos-virtio-input = { path = "../../lib/virtio_input", version = "=0.0.0" }

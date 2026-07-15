@@ -1,20 +1,19 @@
 //! The freestanding cross-compile target the image pipeline builds a
 //! position-independent `Run` binary for.
 //!
-//! Two independent build paths cross-compile the same PIE program images the
-//! kernel spawn/autoload path loads — the `tools/xtask` image pipeline
-//! (`pie_build`, `image_apps`, `image_drivers`) and the autoload-root image
-//! fixture's build script (`tests/integration/autoload_root_image/build.rs`).
-//! Both need the same two architecture-derived facts: the Rust target triple
+//! The `tools/xtask` image pipeline (`pie_build`, `image_apps`,
+//! `image_drivers`) cross-compiles the PIE program images the kernel
+//! spawn/autoload path loads. Every such build needs the same two
+//! architecture-derived facts: the Rust target triple
 //! to build for, and the `CARGO_TARGET_<triple>_RUSTFLAGS` environment
 //! variable that scopes the PIE link recipe to that target (and to it alone,
 //! so a crate's own host build script is never affected).
 //!
-//! Spelling those two facts by hand in each path is the duplication the
-//! charter forbids: a mistyped variable name silently drops the link flags
-//! and the converter reads a stale or wrongly-linked ELF. This type is the
-//! one definition both paths draw from, so the arch selection cannot drift
-//! between them.
+//! Spelling those two facts by hand in each of the pipeline's builders is the
+//! duplication the charter forbids: a mistyped variable name silently drops
+//! the link flags and the converter reads a stale or wrongly-linked ELF. This
+//! type is the one definition every builder draws from, so the arch selection
+//! cannot drift between them.
 
 /// A freestanding Tier-1 target the image pipeline can cross-compile a
 /// position-independent `Run` binary for.

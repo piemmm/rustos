@@ -171,8 +171,15 @@ fn qemu_units(ctx: &Context) -> Vec<FlakeUnit<'_>> {
                 // composition failure fails the job closed.
                 let apps = crate::commands::image_apps::app_store_files(ctx);
                 let apps_with_memsoak = crate::commands::image_apps::memsoak_store_files(ctx);
+                let autoload_drivers =
+                    crate::commands::image_drivers::autoload_driver_store_files(ctx);
                 Job::closure(job_label, weight, move || {
-                    enrol.run(&target_dir, apps.clone()?, apps_with_memsoak.clone()?)
+                    enrol.run(
+                        &target_dir,
+                        apps.clone()?,
+                        apps_with_memsoak.clone()?,
+                        autoload_drivers.clone()?,
+                    )
                 })
             })
         })

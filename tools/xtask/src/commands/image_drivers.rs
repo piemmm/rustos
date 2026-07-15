@@ -20,12 +20,15 @@
 //! re-rolled here. This is host-only build glue; the
 //! production image stays Rust-only.
 
+use std::sync::OnceLock;
+
 use rustos_abi::{CapabilityId, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};
 use rustos_itest_harness::driver_image::build_signed_driver_image;
 use rustos_itest_harness::elf2rxe::elf_to_rxe;
 use rustos_itest_harness::pie::PieArch;
 use rustos_itest_harness::USER_IMAGE_BIAS;
 
+use super::image_apps::AppStoreFile;
 use super::pie_build::cross_compile_pie_elf;
 use crate::Context;
 
@@ -85,6 +88,11 @@ pub const VIRTIO_KBD_STORE_PATH: &[&[u8]] = &[b"Drivers", b"input", b"virtio_kbd
 /// any platform-published linear scan-out surface.
 pub const FRAMEBUFFER_STORE_PATH: &[&[u8]] = &[b"Drivers", b"display", b"framebuffer", b"Run"];
 
+/// Store path of the virtio-net link-layer driver bundle: class `network`,
+/// the `virtio_net` leaf naming the (vendor-neutral) driver — the path the
+/// `-M virt` two-process netstack autoload vertical's disk plants it at.
+pub const VIRTIO_NET_STORE_PATH: &[&[u8]] = &[b"Drivers", b"network", b"virtio_net", b"Run"];
+
 /// Store path of the USB mass-storage class-driver bundle: class `storage`,
 /// the `usb_msd` leaf naming the (vendor-neutral) driver.
 pub const USB_MSD_STORE_PATH: &[&[u8]] = &[b"Drivers", b"storage", b"usb_msd", b"Run"];
@@ -122,6 +130,7 @@ fn build_bundle(
         "rustos-drv-input-usb-kbd" => "drivers/input/usb_kbd",
         "rustos-drv-input-usb-mouse" => "drivers/input/usb_mouse",
         "rustos-drv-input-virtio-kbd" => "drivers/input/virtio_kbd",
+        "rustos-drv-network-virtio-net-driver" => "drivers/network/virtio_net_driver",
         "rustos-drv-display-framebuffer" => "drivers/display/framebuffer",
         "rustos-drv-storage-usb-msd" => "drivers/storage/usb_msd",
         "rustos-drv-storage-volmgr" => "drivers/storage/volmgr",
@@ -437,6 +446,81 @@ pub fn build_framebuffer_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
     )
 }
 
+/// Build and sign the virtio-net link-layer driver bundle.
+///
+/// The `-M virt` two-process netstack path's link driver: it maps its
+/// granted register window (`CAP_MMIO_MAP`), carves its virtqueue DMA slab
+/// (`CAP_MEM_DMA`), parks on the device interrupt its serve loop waits on
+/// (`CAP_IRQ_BIND`), maps the shared frame region (`CAP_SHM`), claims and
+/// binds the reserved device-channel endpoint (`CAP_IPC_ENDPOINT`,
+/// `CAP_IPC_BIND_PRIVILEGED`), publishes its `netchan` node (`CAP_HW_EMIT`),
+/// and emits its readiness beacon (`CAP_LOG_EMIT`) — and nothing more.
+/// Carries `rustos_drv_network_virtio_net::BIND_KEYS`, so it autoloads
+/// against a discovered virtio-net node (and stays unbound on a machine
+/// whose tree carries none — §18.4).
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_virtio_net_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        "rustos-drv-network-virtio-net-driver",
+        &[
+            CapabilityId::MMIO_MAP,
+            CapabilityId::MEM_DMA,
+            CapabilityId::IRQ_BIND,
+            CapabilityId::SHM,
+            CapabilityId::IPC_ENDPOINT,
+            CapabilityId::IPC_BIND_PRIVILEGED,
+            CapabilityId::HW_EMIT,
+            CapabilityId::LOG_EMIT,
+        ],
+        rustos_drv_network_virtio_net::BIND_KEYS,
+    )
+}
+
+/// The composed, signed driver bundles the `-M virt` autoload verticals
+/// plant into their whole-disk fixture's `/System/Drivers/` store, each
+/// paired with its store path as an [`AppStoreFile`] the planter lays down:
+/// the virtio-input keyboard driver, the framebuffer display service, and
+/// the virtio-net link-layer driver.
+///
+/// Built **once per xtask process** and shared by every consumer (the
+/// concurrent QEMU matrix and the long-CI flake hunt plant the identical
+/// set), so the three cross-compiles are paid a single time; a build
+/// failure is memoised too and returned to every caller (fail closed,
+/// never a partial store). Concurrent first callers are serialised by
+/// cargo's own build locking and one result wins.
+///
+/// # Errors
+///
+/// A string describing a failed cross-compile, ELF→rxe conversion, or a
+/// structurally invalid composed bundle.
+pub fn autoload_driver_store_files(ctx: &Context) -> Result<&'static [AppStoreFile], String> {
+    static FILES: OnceLock<Result<Vec<AppStoreFile>, String>> = OnceLock::new();
+    FILES
+        .get_or_init(|| {
+            Ok(vec![
+                store_file(VIRTIO_KBD_STORE_PATH, build_virtio_kbd_bundle(ctx)?),
+                store_file(FRAMEBUFFER_STORE_PATH, build_framebuffer_bundle(ctx)?),
+                store_file(VIRTIO_NET_STORE_PATH, build_virtio_net_bundle(ctx)?),
+            ])
+        })
+        .as_ref()
+        .map(Vec::as_slice)
+        .map_err(Clone::clone)
+}
+
+/// Pair a `/System`-volume-relative store path with a built bundle's bytes
+/// as the [`AppStoreFile`] the planter accepts.
+fn store_file(path: &[&[u8]], bytes: Vec<u8>) -> AppStoreFile {
+    AppStoreFile {
+        components: path.iter().map(|c| c.to_vec()).collect(),
+        bytes,
+    }
+}
+
 /// Fail-closed sanity check on a freshly composed bundle before it is planted
 /// into the image (never ship a malformed store entry).
 ///
@@ -469,4 +553,178 @@ fn verify_signed_bundle(image: &[u8]) -> Result<(), String> {
         return Err("image: composed driver bundle is unsigned".to_string());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! The autoload-decision coverage for the `-M virt` driver store: that
+    //! each driver crate's own `BIND_KEYS` (the same table
+    //! [`autoload_driver_store_files`] signs into its bundle) is discovered
+    //! by the production store scan and resolved by the shared match policy
+    //! to the intended node — and to no other. The bundles are signed here
+    //! from a stub payload rather than a cross-compiled `rxe`: the scan and
+    //! the match decode only the manifest and its bind table, never the
+    //! program image, so a real payload adds nothing to what is exercised.
+    use super::*;
+
+    use rustos_abi::{DriverBindKey, Errno, HwMatchKey, SIMPLE_FRAMEBUFFER_COMPATIBLE};
+    use rustos_devmatch::{resolve, MatchResolution};
+    use rustos_drv_network_virtio_net::VIRTIO_NET_DEVICE_ID;
+    use rustos_drvhost::store::scan_store;
+    use rustos_drvhost::{DriverStore, ImageSource, Sink};
+    use rustos_log::Event;
+    use rustos_virtio_input::VIRTIO_INPUT_DEVICE_ID;
+
+    /// An arbitrary non-empty program image: the store scan and the match
+    /// policy never look at the payload, only the signed manifest and bind
+    /// table, so its exact bytes are irrelevant to these tests.
+    const STUB_PAYLOAD: &[u8] = b"payload-stub";
+
+    /// The `/`-joined string the store scanner addresses a bundle by,
+    /// derived from its single store-path definition so the scan address and
+    /// the plant path cannot drift.
+    fn path_str(components: &[&[u8]]) -> String {
+        let mut s = String::new();
+        for c in components {
+            s.push('/');
+            s.push_str(core::str::from_utf8(c).expect("store path components are ASCII"));
+        }
+        s
+    }
+
+    /// Sign a `kind = UserSpace` bundle carrying `bind_keys` — the exact table
+    /// the matching autoload builder signs into the shipped bundle.
+    fn sign(bind_keys: &[DriverBindKey]) -> Vec<u8> {
+        build_signed_driver_image(
+            &build_support::KERNEL_DRIVER_SIGNING_SEED,
+            DriverKind::UserSpace,
+            &[],
+            bind_keys,
+            rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+            STUB_PAYLOAD,
+        )
+        .image
+    }
+
+    /// The three signed bundles keyed by their store path, serving the
+    /// production store scanner's [`ImageSource`] reads.
+    struct BundleSource {
+        kbd: (String, Vec<u8>),
+        framebuffer: (String, Vec<u8>),
+        network: (String, Vec<u8>),
+    }
+
+    impl BundleSource {
+        fn new() -> Self {
+            Self {
+                kbd: (
+                    path_str(VIRTIO_KBD_STORE_PATH),
+                    sign(rustos_drv_input_virtio_input::BIND_KEYS),
+                ),
+                framebuffer: (
+                    path_str(FRAMEBUFFER_STORE_PATH),
+                    sign(rustos_drv_display_framebuffer::BIND_KEYS),
+                ),
+                network: (
+                    path_str(VIRTIO_NET_STORE_PATH),
+                    sign(rustos_drv_network_virtio_net::BIND_KEYS),
+                ),
+            }
+        }
+    }
+
+    impl ImageSource for BundleSource {
+        fn read(&self, path: &str, buf: &mut Vec<u8>) -> Result<(), Errno> {
+            for (store_path, bytes) in [&self.kbd, &self.framebuffer, &self.network] {
+                if store_path == path {
+                    buf.extend_from_slice(bytes);
+                    return Ok(());
+                }
+            }
+            Err(Errno::NotFound)
+        }
+    }
+
+    /// Discarding audit sink — these tests assert through the resolved match,
+    /// not the audit stream.
+    struct DiscardSink;
+
+    impl Sink for DiscardSink {
+        fn write_event(&self, _event: &Event<'_>) {}
+    }
+
+    /// Scan the three-bundle store, candidate indices pinned by scan order
+    /// (input 0, display 1, network 2).
+    fn scanned_store(source: &BundleSource) -> DriverStore {
+        scan_store(
+            source,
+            &[
+                source.kbd.0.as_str(),
+                source.framebuffer.0.as_str(),
+                source.network.0.as_str(),
+            ],
+            &DiscardSink,
+        )
+    }
+
+    #[test]
+    fn each_autoload_bundle_is_a_signed_userspace_driver_manifest() {
+        for bundle in [
+            sign(rustos_drv_input_virtio_input::BIND_KEYS),
+            sign(rustos_drv_display_framebuffer::BIND_KEYS),
+            sign(rustos_drv_network_virtio_net::BIND_KEYS),
+        ] {
+            // The same fail-closed structural check the image build applies
+            // to every planted bundle accepts each one.
+            verify_signed_bundle(&bundle).expect("the signed bundle is well-formed");
+        }
+    }
+
+    #[test]
+    fn the_store_scan_discovers_the_bundles_and_each_binds_its_node() {
+        // The production store scan decodes each bundle's bind table
+        // fail-closed, and the shared match policy resolves a discovered
+        // virtio-input node to the keyboard driver, a boot display node (the
+        // kernel's `simple-framebuffer` publication) to the display service,
+        // and a virtio-net node to the network driver — the exact autoload
+        // decisions the booted kernel makes off the mounted root, with no
+        // cross-binding.
+        let source = BundleSource::new();
+        let store = scanned_store(&source);
+        let candidates = store.candidates();
+        assert_eq!(
+            candidates.len(),
+            3,
+            "all three signed bundles are candidates"
+        );
+
+        let input_keys = [HwMatchKey::virtio(VIRTIO_INPUT_DEVICE_ID)];
+        match resolve(&input_keys, &candidates) {
+            MatchResolution::Winner { candidate, .. } => assert_eq!(candidate, 0),
+            other => panic!("the virtio-input node must bind the keyboard bundle, got {other:?}"),
+        }
+
+        let display_keys = [HwMatchKey::compatible(SIMPLE_FRAMEBUFFER_COMPATIBLE).expect("fits")];
+        match resolve(&display_keys, &candidates) {
+            MatchResolution::Winner { candidate, .. } => assert_eq!(candidate, 1),
+            other => panic!("the boot display node must bind the display bundle, got {other:?}"),
+        }
+
+        let network_keys = [HwMatchKey::virtio(VIRTIO_NET_DEVICE_ID)];
+        match resolve(&network_keys, &candidates) {
+            MatchResolution::Winner { candidate, .. } => assert_eq!(candidate, 2),
+            other => panic!("the virtio-net node must bind the network bundle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unrelated_node_binds_no_bundle() {
+        // A node advertising a different virtio device id matches nothing —
+        // each bundle binds only its declared device.
+        let source = BundleSource::new();
+        let store = scanned_store(&source);
+        let candidates = store.candidates();
+        let node_keys = [HwMatchKey::virtio(VIRTIO_INPUT_DEVICE_ID + 1)];
+        assert_eq!(resolve(&node_keys, &candidates), MatchResolution::Unmatched);
+    }
 }
