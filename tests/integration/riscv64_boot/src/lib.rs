@@ -23,8 +23,8 @@
 //! | `boot`    | Thin wrapper: publish, then delegate to `rustos_kernel::riscv64::boot` (freestanding). |
 //!
 //! The `kernel/irq` `IrqController` bridge over the arch port's PLIC register
-//! driver ([`PlicIrqController`]) is the production
-//! [`rustos_kernel::riscv64_plic_irq`] definition, re-exported here for the
+//! driver (`PlicIrqController`) is the production
+//! `rustos_kernel::riscv64_plic_irq` definition, re-exported here for the
 //! freestanding `virt`-board verticals (one definition, no duplication); its
 //! mask-before-wake / re-arm regression test lives with it and runs under
 //! `cargo test` on the CI host. `boot` / `publish` are gated to the

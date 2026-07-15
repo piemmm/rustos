@@ -25,35 +25,32 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use rustos_itest_harness::pie::PieArch;
+
 use crate::Context;
 
-/// Rust target triple of the freestanding aarch64 program builds — the
-/// architecture the Pi image and the aarch64 QEMU verticals boot.
-pub const AARCH64_TARGET: &str = "aarch64-unknown-none";
-
-/// The `CARGO_TARGET_<TRIPLE>_RUSTFLAGS` variable that scopes the PIE link
-/// recipe to [`AARCH64_TARGET`] (and to it alone, so a crate's own host
-/// build script is never affected).
-const AARCH64_RUSTFLAGS_VAR: &str = "CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS";
-
 /// Compile `package`'s binary `bin` position-independent for the
-/// freestanding aarch64 target against `crate_dir/Run.ld` and return the
+/// freestanding target `arch` against `crate_dir/Run.ld` and return the
 /// linked ELF bytes.
 ///
 /// `group` names the private target-directory family under the workspace
 /// `target/` (e.g. `image-drivers`, `image-apps`), keeping each pipeline's
-/// artefacts apart.
+/// artefacts apart; the arch's triple is a further segment so the same
+/// package cross-compiled for two architectures never shares a private
+/// target directory.
 ///
 /// # Errors
 ///
 /// A string describing a failed cross-compile or a missing ELF artefact.
 pub fn cross_compile_pie_elf(
     ctx: &Context,
+    arch: PieArch,
     group: &str,
     package: &str,
     bin: &str,
     crate_dir: &Path,
 ) -> Result<Vec<u8>, String> {
+    let triple = arch.target_triple();
     let run_ld = crate_dir.join("Run.ld");
     if !run_ld.is_file() {
         return Err(format!(
@@ -61,7 +58,7 @@ pub fn cross_compile_pie_elf(
             run_ld.display()
         ));
     }
-    let target_dir = ctx.target_dir().join(group).join(package);
+    let target_dir = ctx.target_dir().join(group).join(triple).join(package);
     wipe_target_dir_on_linker_change(&run_ld, &target_dir);
 
     let mut cmd = Command::new(&ctx.cargo);
@@ -74,7 +71,7 @@ pub fn cross_compile_pie_elf(
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTFLAGS")
         .env(
-            AARCH64_RUSTFLAGS_VAR,
+            arch.rustflags_env_var(),
             format!(
                 "-C relocation-model=pie -C link-arg=-pie -C link-arg=-T{}",
                 run_ld.display()
@@ -88,18 +85,15 @@ pub fn cross_compile_pie_elf(
             "--bin",
             bin,
             "--target",
-            AARCH64_TARGET,
+            triple,
             "-Z",
             "build-std=core,compiler_builtins,alloc",
             "--target-dir",
         ])
         .arg(&target_dir);
-    ctx.run(
-        &format!("image: program build ({package}, {AARCH64_TARGET})"),
-        cmd,
-    )?;
+    ctx.run(&format!("image: program build ({package}, {triple})"), cmd)?;
 
-    let elf_path = target_dir.join(AARCH64_TARGET).join("debug").join(bin);
+    let elf_path = target_dir.join(triple).join("debug").join(bin);
     std::fs::read(&elf_path)
         .map_err(|e| format!("image: cannot read program ELF {}: {e}", elf_path.display()))
 }

@@ -34,6 +34,7 @@ use rustos_itest_harness::app_image::{
     APP_MANIFEST_SOURCE,
 };
 use rustos_itest_harness::elf2rxe::elf_to_rxe;
+use rustos_itest_harness::pie::PieArch;
 use rustos_itest_harness::USER_IMAGE_BIAS;
 
 use super::image_drivers::build_support;
@@ -198,7 +199,14 @@ fn build_bundle(ctx: &Context, app: &DiscoveredApp) -> Result<BuiltAppBundle, St
     // back fail-closed, so a crate that breaks the convention fails the
     // build loudly.
     let bin = format!("{}-run", app.package);
-    let elf = cross_compile_pie_elf(ctx, "image-apps", &app.package, &bin, &app.crate_dir)?;
+    let elf = cross_compile_pie_elf(
+        ctx,
+        PieArch::Aarch64,
+        "image-apps",
+        &app.package,
+        &bin,
+        &app.crate_dir,
+    )?;
     let run = elf_to_rxe(
         &elf,
         &rustos_kernel_syscall::SYSCALL_TABLE_HASH,
