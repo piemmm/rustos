@@ -107,12 +107,14 @@ loopback fake whose "device" is a full peer `Stack` (v4 ARP + echo
 and v6 DAD + ND + echo round-trips through the real ring pump) and
 exercises the dispatcher's capability-refusal/audit matrix.
 
-The `netstack_autoload_qemu_aarch64` QEMU vertical
-(`plans/NETWORK.md` N4e-β) proves the service live in the **two-process**
-production boot: the autoloaded virtio-net driver runs in its own
-process, `devmgr` calls `BindDriver`, and `netstack` auto-configures the
-interface's EUI-64 IPv6 link-local (no IPv4) and answers a host peer's
-link-local echo — witnessed by `devmgr`'s `NETSTACK_BOUND`, the stack's
-`DRIVER_BOUND`, and the stack's `INBOUND_ECHO_SERVED` audit records (a
-provisioning failure now also reports its errno through
-`DRIVER_BIND_FAILED`, fail-loud).
+The `netstack_autoload_qemu_aarch64` and `netstack_autoload_qemu_riscv64`
+QEMU verticals (`plans/NETWORK.md` N4e-β / N4e-riscv64) prove the service
+live in the **two-process** production boot on both arches: the autoloaded
+virtio-net driver runs in its own process, `devmgr` calls `BindDriver`, and
+`netstack` auto-configures the interface's EUI-64 IPv6 link-local (no IPv4)
+and answers a host peer's link-local echo — witnessed by `devmgr`'s
+`NETSTACK_BOUND`, the stack's `DRIVER_BOUND`, and the stack's
+`INBOUND_ECHO_SERVED` audit records (a provisioning failure now also reports
+its errno through `DRIVER_BIND_FAILED`, fail-loud). The riscv64 vertical is
+the headless `virt`-board virtio-mmio / PLIC analogue; x86_64 (over virtio-PCI)
+is the remaining follow-up.

@@ -650,12 +650,13 @@ improvement, not test scaffolding):
   `mac` field threaded through the shared `net_device_arg` on all three arches.
 
 **Follow-up increments (not this change).**
-- **N4e-riscv64 / N4e-x86_64**: build the driver-autoload-into-user-process
-  production vertical on those arches (pioneering their autoload QEMU path),
-  then the same two-process netstack vertical. Scope reality: riscv64 and
-  x86_64 currently carry *none* of the autoload subsystem (no root mount, no
-  unlock kthread, no `devmgr`, no `driver_spawn_loader`) — pioneering it is
-  the `plans/WIRING.md` / `plans/ARCHSUPPORT.md` parity port, not a small
+- **N4e-x86_64**: build the driver-autoload-into-user-process production
+  vertical on x86_64 (pioneering its autoload QEMU path over the virtio-**PCI**
+  bus), then the same two-process netstack vertical. (aarch64 and riscv64 are
+  both landed two-process, so only x86_64 remains.) Scope reality: x86_64
+  currently carries *none* of the autoload subsystem (no root mount, no unlock
+  kthread, no `devmgr`, no `driver_spawn_loader`) — pioneering it is the
+  `plans/WIRING.md` / `plans/ARCHSUPPORT.md` parity port, not a small
   extension. Foundation in place: the synthetic node-id bases the probes emit
   from now live in one shared, disjoint-by-construction, compile-time-guarded
   map (`kernel/rustos-kernel/src/hwtree_node_ids.rs`) — a new arch's NIC-probe
@@ -743,10 +744,24 @@ improvement, not test scaffolding):
   `autoload_input_qemu_riscv64` now **passes end to end** (production boot →
   `/System` mount → autoload → user-space driver bring-up → injected key →
   `InputDelivered kind=key`) in a few seconds on TCG, budgeted at 60 s like the
-  other boot-then-fixed-work verticals. What remains for riscv64: the
-  two-process `netstack_autoload_qemu_riscv64`. x86_64 then repeats the whole
-  sequence over its virtio-**PCI** bus (its `irq_routing` / IO-APIC path
-  already exists).
+  other boot-then-fixed-work verticals. **The riscv64 two-process netstack
+  vertical (`tests/integration/netstack_autoload_qemu_riscv64`) is now landed
+  and passes a real guest boot**: the `virt`-board virtio-mmio / PLIC analogue
+  of the aarch64 N4e-β vertical, reduced to the headless boot world (no display;
+  the SBI/NULL-console encrypted-root unlock fails closed by design, but the
+  `/System` store binds independently of the passphrase and the virtio-net
+  driver still autoloads). It boots the production `boot_riscv64::boot`
+  pipeline against the shared per-arch `AutoloadRootDisk` (carrying the
+  riscv64-cross-compiled signed virtio-net bundle) with a virtio-net-device-mmio
+  attached (MAC pinned to `rustos_test_netstack_wire::GUEST_MAC`) and the
+  `netpeer` host peer in its v6-link-local-only campaign; `devmgr` autoloads the
+  driver into its own process, netstack binds the `netchan` channel and
+  auto-configures the EUI-64 link-local, and answers the peer's echo. PASS keys
+  on the same three log witnesses (`NETSTACK_BOUND`, `DRIVER_BOUND`,
+  `INBOUND_ECHO_SERVED`) plus the peer's own v6 echo verdict, at the 240 s
+  budget its aarch64 sibling uses. What remains: x86_64 repeats the whole
+  sequence over its virtio-**PCI** bus (its `irq_routing` / IO-APIC path already
+  exists).
 - **§18.5 scaffold removal** (once all three arches are two-process): delete the
   `register` shell in `drivers/network/virtio_net` (keeping `BIND_KEYS` +
   `VirtioNet`), `FixedSpawner`/`netstack_ping` in the support crate, and

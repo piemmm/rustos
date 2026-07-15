@@ -114,11 +114,14 @@ and v4+v6 echo campaign, then resolves and pings the peer over both
 families. The single-process `netstack_mmio_*` / `netstack_pci_*`
 verticals run the in-kernel scaffold; the **two-process** form is live
 on aarch64 (`netstack_autoload_qemu_aarch64`, `plans/NETWORK.md`
-N4e-β): the production boot's bootstrap-floor discovery enumerates the
-virtio-net node (`hwdiscovery::observe_virtio_mmio_network_devices`,
-the interrupt-driven-class sibling of the input probe), `devmgr`
-autoloads the signed driver bundle from `/System/Drivers/network/` into
-its own process, and it serves `netstack` — which auto-configures the
+N4e-β) and riscv64 (`netstack_autoload_qemu_riscv64`, over the
+`virt`-board virtio-mmio / PLIC path): the production boot's
+bootstrap-floor discovery enumerates the virtio-net node
+(`hwdiscovery::observe_virtio_mmio_network_devices`, the
+interrupt-driven-class sibling of the input probe), `devmgr` autoloads
+the signed driver bundle from `/System/Drivers/network/` into its own
+process, and it serves `netstack` — which auto-configures the
 interface's EUI-64 IPv6 link-local and answers a host peer's
-link-local echo across the two-process boundary. The riscv64 / x86_64
-two-process verticals and the scaffold removal are staged follow-ups.
+link-local echo across the two-process boundary. The x86_64
+two-process vertical (over its virtio-PCI bus) and the scaffold removal
+are staged follow-ups.

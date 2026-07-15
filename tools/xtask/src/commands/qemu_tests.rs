@@ -3994,6 +3994,52 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
+    // `plans/NETWORK.md` N4e-riscv64: the riscv64 **two-process** live-boot
+    // netstack vertical — the production-boot replacement for the
+    // single-process `netstack_mmio_riscv64` scaffold. It is the `virt`-board
+    // virtio-mmio / PLIC analogue of the aarch64
+    // `rustos-test-netstack-autoload-qemu-aarch64` vertical, reduced to the
+    // headless boot world (no `ramfb`, no display): riscv64's SBI/NULL console
+    // has no interactive input this slice, so the encrypted-root unlock fails
+    // closed by design, but the `/System` store binds independently of the
+    // passphrase and the network driver still autoloads. It boots the
+    // *production* riscv64 `rustos-kernel` pipeline against the shared
+    // `FsDisk::AutoloadRootDisk` whole-disk image — whose always-readable
+    // `/System` store carries the kernel-signed virtio-net driver bundle
+    // (cross-compiled for riscv64 by `image_drivers`) beside the input and
+    // display bundles — with a `virtio-net-device` attached (its MAC pinned to
+    // the wire constant so the guest's EUI-64 link-local is deterministic) and
+    // the harness-side `netpeer` link peer in its v6-link-local-only campaign
+    // mode. The production autoload path spawns the virtio-net driver into its
+    // own user process (it publishes a `netchan` node), the user-space
+    // `devmgr` service calls `netstack` `BindDriver`, and `netstack` provisions
+    // the channel and auto-configures the interface's EUI-64 link-local (no
+    // IPv4). PASS once the log sink has seen `devmgr`'s `NETSTACK_BOUND`,
+    // `netstack`'s `DRIVER_BOUND`, and `netstack`'s `INBOUND_ECHO_SERVED` — the
+    // last gating exit so the guest stays alive until a frame has crossed the
+    // two-process boundary and been answered; the peer's own v6 echo verdict is
+    // required too, so neither side can pass alone. Single CPU (PID 1, the
+    // unlock/store kthread, the autoloaded driver, `netstack`, and `devmgr`
+    // share the boot hart, alongside the NULL-console `login` fast-respawn),
+    // with the same 240-second budget as its aarch64 sibling covering boot +
+    // autoload + service bring-up + the bind + the paced echo campaign on QEMU
+    // TCG.
+    QemuTest {
+        package: "rustos-test-netstack-autoload-qemu-riscv64",
+        binary: "rustos-test-netstack-autoload-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(240),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::V6LinkLocal,
+        ramfb: false,
+        fs_disk: FsDisk::AutoloadRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // Stage W11-B (`plans/WIRING.md` §3): the aarch64 display vertical —
     // the EL1/GICv2 + ramfb analogue of the riscv64 framebuffer-display
     // vertical. `rustos-test-framebuffer-display-qemu-aarch64` brings the
