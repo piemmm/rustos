@@ -409,17 +409,22 @@ HAL *modules* compile). Docs:
   `mmu::conformance` vertical now asserts the full map → translate →
   double-map-refused → unmap → translate-none → unmap-`NotMapped`
   lifecycle.
-- Added the **`TlbShootdown`** HAL slice (`kernel/arch/api::tlb`): a
-  per-page local invalidation (`invlpg` / `tlbi vaae1is` + barriers /
-  `sfence.vma`), object-safe and infallible, with its own host
-  `tlb::conformance` vertical. Each bare-metal port implements it
-  (host build is a vacuous no-op; the real instruction is proven by the
-  spawn / `memory_isolation` QEMU verticals).
+- The **`TlbShootdown`** HAL slice (`kernel/arch/api::tlb`) provides
+  object-safe, infallible page and contiguous-range invalidation. The
+  universally correct range default loops over `flush_page`; aarch64 uses one
+  inner-shareable all-translation broadcast and riscv64 one local all-address
+  `sfence.vma`, while x86_64 retains `invlpg` per page. Its host conformance
+  vertical covers page, empty-range, and multi-page calls; the real
+  instructions are proven by the spawn / `memory_isolation` QEMU verticals.
 - Folded `kernel/mem`'s per-process `AddressSpace<P>` onto
   `P: mmu::AddressSpace + TlbShootdown` (the `PageTable` bound alias),
   **removing** its local `PageTableOps` trait; the façade bridges its
   `Page`/`Frame`/`MapFlags` currency to the HAL's `u64`/`PageFlags` at the
-  boundary and drives `flush_page` on every map/unmap. All consumer
+  boundary. Single-leaf map/unmap drives `flush_page`; a transactional
+  contiguous map validates the full extent, rolls back on any rejected leaf,
+  and drives one `flush_range`. Shared-memory windows map each buddy chunk
+  through that batch path, avoiding one serial barrier sequence per 4 KiB
+  display-buffer page. All consumer
   generics (`kernel/{sec,virtio,core}`, `rustos-kernel`) and the six
   `{spawn,c}_program_qemu_*` integration crates renamed onto `PageTable`;
   the per-test `*UserPageTable` adapters were deleted (the ports' real

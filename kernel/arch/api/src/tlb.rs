@@ -8,8 +8,8 @@
 //! deeply architecture-specific: x86_64 issues `invlpg`, aarch64 a
 //! `tlbi vae1is` + barrier, riscv64 an `sfence.vma vaddr`. The charter makes
 //! the architecture surface a closed set of traits on the HAL; this
-//! module is the "TLB shootdown" member of that set, so the per-page
-//! invalidation lives behind one vocabulary instead of being re-spelled
+//! module is the "TLB shootdown" member of that set, so page and range
+//! invalidation live behind one vocabulary instead of being re-spelled
 //! at every call site. The parallel per-arch
 //! implementations of this one trait are the deliberate shape of
 //! modularity, never collapsed behind `cfg` (carve-out).
@@ -17,8 +17,9 @@
 //! # Scope (the burn-down)
 //!
 //! This is the `plans/WIRING.md` **Stage W5b-2** slice: the *local*,
-//! single-CPU per-page invalidation the per-process map/unmap path in
-//! `kernel/mem` consumes through [`TlbShootdown::flush_page`]. The
+//! single-CPU invalidation the per-process map/unmap path in `kernel/mem`
+//! consumes through [`TlbShootdown::flush_page`] and
+//! [`TlbShootdown::flush_range`]. The
 //! *cross-CPU* shootdown — interrupting the other CPUs that may cache a
 //! translation and waiting for them to acknowledge the invalidation —
 //! depends on the aarch64 directed IPI landing in Stage W6, so it is a
@@ -38,8 +39,7 @@
 //! `memory_isolation` / spawn QEMU verticals, where a freshly mapped
 //! leaf must be reachable immediately after the flush.
 
-/// Per-CPU TLB maintenance: invalidate the calling CPU's cached
-/// translation for a single virtual page.
+/// Per-CPU TLB maintenance for one virtual page or a contiguous page range.
 ///
 /// The kernel calls [`Self::flush_page`] after editing a leaf so the
 /// next access to that page re-walks the (updated) table rather than
@@ -61,6 +61,23 @@ pub trait TlbShootdown {
     /// invalidation instruction (`invlpg` / `tlbi vae1is` / `sfence.vma`).
     /// Implementations must not panic for any `vaddr`.
     fn flush_page(&mut self, vaddr: u64);
+
+    /// Invalidate cached translations for `page_count` consecutive 4 KiB
+    /// pages beginning at the page containing `start_vaddr`.
+    ///
+    /// A zero page count is a no-op. The default is the universally-correct
+    /// per-page sequence; ports with an efficient range or whole-address-space
+    /// invalidation override it so a large transactional map pays one
+    /// synchronization boundary rather than one per leaf.
+    fn flush_range(&mut self, start_vaddr: u64, page_count: usize) {
+        const PAGE_BYTES: u64 = 4096;
+
+        let mut vaddr = start_vaddr & !(PAGE_BYTES - 1);
+        for _ in 0..page_count {
+            self.flush_page(vaddr);
+            vaddr = vaddr.wrapping_add(PAGE_BYTES);
+        }
+    }
 }
 
 /// The TLB-shootdown conformance vertical.
@@ -80,13 +97,16 @@ pub mod conformance {
     /// `vaddr` as a representative mapped page address.
     ///
     /// Flushes `vaddr`, a misaligned address in the same page, the zero
-    /// page, and the top page — proving the port accepts any address and
-    /// never panics.
+    /// page, the top page, an empty range, and a representative multi-page
+    /// range — proving the port accepts every contract shape and never
+    /// panics.
     pub fn run_all<T: TlbShootdown + ?Sized>(tlb: &mut T, vaddr: u64) {
         tlb.flush_page(vaddr);
         tlb.flush_page(vaddr | 0xFFF);
         tlb.flush_page(0);
         tlb.flush_page(0xFFFF_FFFF_FFFF_F000);
+        tlb.flush_range(vaddr, 0);
+        tlb.flush_range(vaddr, 3);
     }
 
     #[cfg(test)]
@@ -113,14 +133,14 @@ pub mod conformance {
         fn suite_drives_every_flush_over_a_faithful_tlb() {
             let mut tlb = CountingTlb::default();
             run_all(&mut tlb, 0x10_0000_0000);
-            assert_eq!(tlb.flushes, 4, "the suite issues four flushes");
+            assert_eq!(tlb.flushes, 7, "the default range issues per-page flushes");
 
             // And over the object-safe erasure the per-process façade and
             // the kernel registry both rely on.
             let mut dynamic = CountingTlb::default();
             let erased: &mut dyn TlbShootdown = &mut dynamic;
             run_all(erased, 0x10_0000_0000);
-            assert_eq!(dynamic.flushes, 4);
+            assert_eq!(dynamic.flushes, 7);
         }
     }
 }

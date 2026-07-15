@@ -116,8 +116,18 @@ so `kernel/mem` names only the HAL vocabulary (`AGENTS.md` §2.2,
 | `translate(vaddr)` | Read-only walk. Returns `Option`, never errors. |
 | `root_phys()` | Physical address of the root translation table. |
 | `flush_page(vaddr)` | Per-CPU TLB invalidation (no-op on host). |
+| `flush_range(vaddr, pages)` | Contiguous-range invalidation; zero pages is a no-op. |
 
-`flush_page` invalidates only the *calling* CPU. The system-wide
+`flush_page` and `flush_range` invalidate only the *calling* CPU unless a port's
+architecture makes a broadcast operation cheaper and equally sound (aarch64
+uses one inner-shareable all-translation invalidation for a range). The
+`AddressSpace::map_contiguous` façade validates a complete virtual/physical
+extent before editing it, rolls every leaf back on a backend refusal, and then
+issues one range synchronization. Shared-memory windows use this operation per
+physically contiguous buddy chunk, so a display frame containing hundreds of
+4 KiB pages does not pay hundreds of serial TLB barrier sequences.
+
+The system-wide
 counterpart — invalidating a stale translation on every other online CPU
 after a shared mapping is torn down — is a sibling Arch HAL slice,
 `rustos_arch_api::xtlb::CrossCpuTlbShootdown`, implemented on each port's

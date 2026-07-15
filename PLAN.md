@@ -172,7 +172,8 @@ Do **not** begin a stage before all its listed dependencies are complete.
       loom + proptest tests; decision tree in `docs/src/architecture/sync.md`.
 - [x] 2.2 — `kernel/mem`: buddy/bitmap `FrameAllocator` over a typed
       `BootMemoryMap`, per-process `AddressSpace<P: PageTable>` (Arch HAL
-      `mmu::AddressSpace + tlb::TlbShootdown` alias), guard-page kernel
+      `mmu::AddressSpace + tlb::TlbShootdown` alias, including transactional
+      contiguous maps with one range TLB synchronization), guard-page kernel
       `Slab`, `alloc_sensitive`/`free_sensitive` zero-on-free, and
       `Result<_, AllocError>` everywhere (no panic on OOM).
 - [x] 2.3 — `kernel/sched`: SMP scheduler — per-CPU Chase–Lev work-stealing
@@ -244,8 +245,9 @@ all four ports pass the conformance suite. Summary of what landed:
 - [x] W4 — `Timer` HAL slice (callback install/dispatch; arming stays per port).
 - [x] W5a — `ContextSwitch` HAL (`TaskContext` save area; wasm32 n/a).
 - [x] W5b — MMU/page-table HAL (`AddressSpace` map/translate/unmap, `PageFlags`,
-      `TlbShootdown` local-invalidation slice, `PageTableFrames` frame source;
-      `kernel/mem` `AddressSpace<P: PageTable>` rides the HAL; wasm32 n/a).
+      `TlbShootdown` page/range local-invalidation slice, `PageTableFrames`
+      frame source; `kernel/mem` `AddressSpace<P: PageTable>` rides the HAL;
+      wasm32 n/a).
 - [x] W6 — aarch64 SMP secondary bring-up via PSCI `CPU_ON` + real GICv2 SGI.
 - [x] W7 — live `kernel/sched` task switch on aarch64 (timer + IPI drive it).
 - [x] W8 — wasm32 multi-worker SMP + live cooperative scheduler (MessageChannel

@@ -758,6 +758,12 @@ impl TlbShootdown for AddressSpace {
     fn flush_page(&mut self, vaddr: u64) {
         invalidate_page_local(vaddr);
     }
+
+    fn flush_range(&mut self, _start_vaddr: u64, page_count: usize) {
+        if page_count != 0 {
+            invalidate_all_local();
+        }
+    }
 }
 
 /// Invalidate the *calling* hart's cached Sv39 translation for the 4 KiB
@@ -789,6 +795,24 @@ pub(crate) fn invalidate_page_local(vaddr: u64) {
     {
         // The host has no TLB to invalidate; a flush is vacuous.
         let _ = vaddr;
+    }
+}
+
+/// Invalidate every cached translation on the calling hart.
+///
+/// A multi-page transactional map uses one all-address `sfence.vma` instead
+/// of one instruction per leaf. The scheduler never runs one task's address
+/// space on two harts concurrently, so this has the same reach as the local
+/// per-page operation while avoiding linear fence cost.
+fn invalidate_all_local() {
+    #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+    {
+        // SAFETY: `sfence.vma zero, zero` invalidates all cached address
+        // translations on the calling hart. It touches no memory and only
+        // discards cached translation state.
+        unsafe {
+            core::arch::asm!("sfence.vma zero, zero", options(nostack, preserves_flags));
+        }
     }
 }
 
