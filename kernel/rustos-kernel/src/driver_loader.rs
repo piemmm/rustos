@@ -207,9 +207,11 @@ mod tests {
         let sink = NullSink;
         let loader = KernelDriverLoader::new(&sink).expect("embedded signer key is valid");
         // CAP_DRV_LOAD but not CAP_DRV_KERNEL: every registered manifest is
-        // `kind = InKernel`, so the gate refuses.
+        // `kind = InKernel`, so the gate refuses. Index 0 (virtio-blk) is a
+        // floor driver on every target, so this holds regardless of the
+        // per-architecture floor size.
         let err = loader
-            .admit(IN_KERNEL_DRIVERS[1].path, &caps(&[CapabilityId::DRV_LOAD]))
+            .admit(IN_KERNEL_DRIVERS[0].path, &caps(&[CapabilityId::DRV_LOAD]))
             .expect_err("InKernel without CAP_DRV_KERNEL must fail closed");
         assert!(matches!(err, HostError::KernelKindForbidden));
     }

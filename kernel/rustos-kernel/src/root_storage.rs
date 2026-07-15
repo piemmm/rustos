@@ -222,13 +222,24 @@ pub fn resolve_root_block_driver(tree: &[HwNode], audit: &dyn Sink) -> Option<Ro
 mod tests {
     use super::*;
     use core::cell::RefCell;
-    use rustos_abi::{DriverError, HwDeviceClass, HwMatchKey, HwNode, HwResource};
+    use rustos_abi::{DriverError, HwDeviceClass, HwMatchKey, HwNode};
+    // `HwResource` is used only by the aarch64-only `emmc2_node` fixture
+    // (the directly-described EMMC2 disk carries an MMIO grant request); on
+    // every other target the floor is virtio-blk alone and nothing here
+    // constructs a resource.
+    #[cfg(kernel_isa = "aarch64")]
+    use rustos_abi::HwResource;
     use rustos_arch_api::{DiscoveryError, HwNodeSink};
     use rustos_drv_storage_virtio_blk::VIRTIO_BLK_DEVICE_ID;
     use rustos_kernel_virtio::MAX_SLOTS;
 
     use crate::discovery_test_bus::FakeBus;
-    use crate::driver_catalog::{EMMC2_PATH, VIRTIO_BLK_PATH};
+    use crate::driver_catalog::VIRTIO_BLK_PATH;
+    // EMMC2 is a floor block driver only on aarch64 (the Pi 4 SD host), so
+    // its path const and the directly-described-EMMC2 fixtures below exist
+    // only there; every other target's floor is virtio-blk alone.
+    #[cfg(kernel_isa = "aarch64")]
+    use crate::driver_catalog::EMMC2_PATH;
     use crate::hwdiscovery::observe_virtio_mmio_block_devices;
     use crate::hwtree_node_ids::VIRTIO_BLOCK_PROBE_NODE_BASE_ID;
 
@@ -257,7 +268,9 @@ mod tests {
 
     /// The EMMC2 SD host the Pi 4 firmware tree describes directly: a node
     /// carrying the driver's own `compatible` bind key plus the MMIO window
-    /// it exposes as a capability-grant request.
+    /// it exposes as a capability-grant request. EMMC2 is a floor driver
+    /// only on aarch64, so this fixture is aarch64-only.
+    #[cfg(kernel_isa = "aarch64")]
     fn emmc2_node(id: u32) -> HwNode {
         let mut node = HwNode::new(id, 0, HwDeviceClass::Storage);
         node.push_match_key(HwMatchKey::compatible(b"brcm,bcm2711-emmc2").expect("fits"))
@@ -286,8 +299,9 @@ mod tests {
         node
     }
 
-    /// A non-storage device (a USB HID keyboard child) that binds a floor
-    /// driver, but not a *block* driver.
+    /// A non-storage device (a USB HID keyboard child): a node beside the
+    /// disk that is not a block device, so the root selection must ignore
+    /// it rather than treat it as a candidate.
     fn hid_node(id: u32) -> HwNode {
         let mut node = HwNode::new(id, 0, HwDeviceClass::Input);
         node.push_match_key(HwMatchKey::usb(0x3434, 0x0E21, 0x03_01_01))
@@ -295,6 +309,7 @@ mod tests {
         node
     }
 
+    #[cfg(kernel_isa = "aarch64")]
     #[test]
     fn a_directly_described_emmc2_node_binds_the_emmc2_driver() {
         let audit = RecordingSink::default();
@@ -359,23 +374,23 @@ mod tests {
     }
 
     #[test]
-    fn a_non_block_floor_node_alongside_the_disk_is_ignored() {
-        // A HID node binds a floor driver too, but it is not a block driver:
-        // the gate selects only the EMMC2 disk and is not made ambiguous by
-        // the keyboard.
+    fn a_non_block_node_alongside_the_disk_is_ignored() {
+        // A non-block node (a HID keyboard) beside the block disk must not
+        // make the selection ambiguous: only the block device is the root.
         let audit = RecordingSink::default();
-        let tree = [hid_node(1), emmc2_node(2)];
-        let binding = resolve_root_block_driver(&tree, &audit).expect("emmc2 binds");
-        assert_eq!(binding.driver_path, EMMC2_PATH);
+        let tree = [hid_node(1), virtio_blk_node(2)];
+        let binding = resolve_root_block_driver(&tree, &audit).expect("virtio-blk binds");
+        assert_eq!(binding.driver_path, VIRTIO_BLK_PATH);
     }
 
     #[test]
     fn two_distinct_block_devices_fail_closed_as_ambiguous() {
         // Which volume is the root is a policy decision needing a boot
         // descriptor, not a guess: the gate binds nothing and audits the
-        // ambiguity as an error.
+        // ambiguity as an error. Two distinct block nodes (here two
+        // virtio-blk disks) are ambiguous regardless of the driver.
         let audit = RecordingSink::default();
-        let tree = [virtio_blk_node(4), emmc2_node(7)];
+        let tree = [virtio_blk_node(4), virtio_blk_node(7)];
         assert!(resolve_root_block_driver(&tree, &audit).is_none());
         let (id, level) = audit.only();
         assert_eq!(id, ROOT_STORAGE_AUTOLOAD.0);
@@ -387,7 +402,7 @@ mod tests {
         // Idempotent re-emission of one device must not look like two.
         let audit = RecordingSink::default();
         let mut selection = RootBlockSelection::new();
-        let node = emmc2_node(9);
+        let node = virtio_blk_node(9);
         selection.observe(&node);
         selection.observe(&node);
         let binding = selection.finish(&audit).expect("still bound");
@@ -482,14 +497,14 @@ mod tests {
     }
 
     #[test]
-    fn a_probed_block_slot_beside_a_directly_described_emmc2_is_ambiguous() {
-        // The probed virtio-block child and a directly-described EMMC2 disk
+    fn a_probed_block_slot_beside_a_directly_described_disk_is_ambiguous() {
+        // The probed virtio-block child and a directly-described block disk
         // are two distinct block devices: ambiguous, fail closed. This also
         // proves the high probed-child id never collides with a low
         // firmware-node id in a way that hides the second device.
         let audit = RecordingSink::default();
         let mut selection = RootBlockSelection::new();
-        selection.observe(&emmc2_node(3));
+        selection.observe(&virtio_blk_node(3));
         let bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID]);
         observe_virtio_mmio_block_devices(&bus, &mut SelectionSink(&mut selection))
             .expect("enumerate");

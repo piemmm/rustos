@@ -692,11 +692,27 @@ improvement, not test scaffolding):
   `rustos_arch_riscv64::fdt::plic_device_source` (reads a `virtio,mmio` node's
   single `interrupts` cell — the QEMU `virt` PLIC is `#interrupt-cells = <1>`
   — and bounds it against the discovered `riscv,ndev`; a discovered value,
-  never a board constant, host-tested). What remains for the arch's autoload
-  tranche: the root mount + unlock kthread + `devmgr` + `driver_spawn_loader`
-  parity port, then the two-process netstack vertical (both QEMU-validated on
-  CI hardware — the live-boot TCG verticals are too slow to confirm on a
-  developer machine).
+  never a board constant, host-tested). Fifth foundation in place: **the
+  in-kernel bootstrap-floor driver catalogue is now per-architecture.**
+  `driver_catalog::IN_KERNEL_DRIVERS`/`IN_KERNEL_DRIVER_COUNT`/`EMMC2_PATH`
+  and `build.rs`'s signed-manifest set are gated on `kernel_isa`: the floor is
+  virtio-blk on every target, and the BCM2711 EMMC2 SD-host driver is floor
+  **only on aarch64** (`rustos-drv-storage-emmc2` is now an aarch64-only
+  runtime dependency). This fixed a live §2.20 defect — the Pi-only EMMC2
+  driver was compiled into the x86_64 image (and would have been in riscv64's)
+  — and lets the riscv64 autoload tranche join the drvhost-gated catalogue
+  with a virtio-blk-only floor, never dragging a foreign-silicon driver into
+  its image (host tests + all-three-arch builds green). What remains for the
+  arch's autoload tranche, in order: (1) **extract the arch-neutral
+  autoload/unlock orchestration** out of `aarch64/root_unlock.rs::finish_unlock`
+  into a shared module both arches call over injected console/IRQ/block-unlock/
+  `DriverProcessSpawn` seams (§2.21/§2.2), rewiring aarch64 in the same change;
+  (2) the riscv64 root mount + unlock kthread + `devmgr` + `driver_spawn_loader`
+  parity port over that shared orchestration (adding the `rustos-drvhost`
+  runtime dep the signed *load* gate needs — only the pure `hwdiscovery`
+  observers stay drvhost-free); then (3) the two-process netstack vertical
+  (all QEMU-validated on CI hardware — the live-boot TCG verticals are too slow
+  to confirm on a developer machine).
 - **§18.5 scaffold removal** (once all three arches are two-process): delete the
   `register` shell in `drivers/network/virtio_net` (keeping `BIND_KEYS` +
   `VirtioNet`), `FixedSpawner`/`netstack_ping` in the support crate, and

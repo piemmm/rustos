@@ -143,18 +143,20 @@ rustos-partition = { path = "../../lib/partition", version = "=0.0.0" }
 # retained writes — the same definitions the volmgr policy driver and the
 # filesystem drivers import, so probe and verifier can never disagree.
 rustos-fsprobe = { path = "../../lib/fsprobe", version = "=0.0.0" }
-# The bootstrap-floor storage path (`AGENTS.md` §18.6): the block drivers
+# The bootstrap-floor storage path (`AGENTS.md` §18.6): the block driver
 # that must be up before the signed driver store under `/System/Drivers/`
-# is reachable. They are compiled in (not discovered from the store) and
-# registered in `driver_catalog::IN_KERNEL_DRIVERS` as the floor's
-# discovery-match candidates — virtio-blk for the QEMU `virt` / x86_64
-# root volume, EMMC2 for the Raspberry Pi 4 SD card. `rustos-kernel`
-# (`Layer::Tooling`) is the one crate permitted to name driver crates
-# across strata (`AGENTS.md` §17.4 / §8); both engines are
-# architecture-neutral (they consume only `lib/abi` / `lib/virtio` seams),
-# so they are common dependencies and their host tests run on the CI host.
+# is reachable. It is compiled in (not discovered from the store) and
+# registered in `driver_catalog::IN_KERNEL_DRIVERS` as a floor
+# discovery-match candidate. virtio-blk backs the QEMU `virt` / x86_64 /
+# riscv64 root volume on **every** target, so it is a common dependency;
+# the Raspberry-Pi-4 EMMC2 SD-host driver is floor **only on aarch64** and
+# is therefore an aarch64-only dependency (below), never linked into an
+# x86_64 / riscv64 image that has no such controller (`AGENTS.md` §2.20).
+# `rustos-kernel` (`Layer::Tooling`) is the one crate permitted to name
+# driver crates across strata (`AGENTS.md` §17.4 / §8); the engine is
+# architecture-neutral (it consumes only `lib/abi` / `lib/virtio` seams),
+# so its host tests run on the CI host.
 rustos-drv-storage-virtio-blk = { path = "../../drivers/storage/virtio_blk", version = "=0.0.0" }
-rustos-drv-storage-emmc2 = { path = "../../drivers/storage/emmc2", version = "=0.0.0" }
 # The canonical virtio-input device id (`VIRTIO_INPUT_DEVICE_ID = 18`) the
 # bootstrap-floor discovery walk (`hwdiscovery::observe_virtio_mmio_input_devices`)
 # matches a probed `virtio,mmio` slot's `DeviceID` against to emit a
@@ -214,6 +216,14 @@ rustos-devmgr = { path = "../../userland/system/devmgr", version = "=0.0.0", def
 # discovery-fed `kernel_core` hand-off staged for P2–P4.
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 rustos-arch-aarch64 = { path = "../arch/aarch64", version = "=0.0.0" }
+# The Raspberry Pi 4 EMMC2 SD-host block driver is the aarch64 bootstrap
+# floor's second storage driver (`driver_catalog`, `#[cfg(kernel_isa =
+# "aarch64")]`). It backs the Pi 4 SD card, so it is compiled into the
+# aarch64 image alone — never into an x86_64 / riscv64 image that has no
+# such controller (`AGENTS.md` §2.20). Architecture-neutral in the sense
+# that it consumes only `lib/abi` seams; the aarch64 root-unlock bring-up
+# (`aarch64/root_unlock`) also names it.
+rustos-drv-storage-emmc2 = { path = "../../drivers/storage/emmc2", version = "=0.0.0" }
 # The user-space device manager's autoload policy (`AGENTS.md` §18.3): the
 # aarch64 `driver_spawn_loader` implements its `DriverLoader` seam to spawn a
 # discovered user-space driver with the matched node's device-resource

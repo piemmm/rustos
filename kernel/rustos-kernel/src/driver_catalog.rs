@@ -27,12 +27,17 @@
 //! same shared policy and shrinks toward the store, never grows.
 //!
 //! The legitimate floor here is **exactly the storage path** — the block
-//! drivers that read the volume holding the signed driver store
-//! ([`VIRTIO_BLK_PATH`] for the QEMU `virt` / x86_64 root, [`EMMC2_PATH`] for
-//! the Raspberry Pi 4 SD card). Nothing else is compiled in: the BCM2711 PCIe
-//! root complex, the VL805 USB host, and the USB boot keyboard are all
-//! installed as signed `/System/Drivers/` bundles and **autoloaded into user
-//! space** by `devmgr` against their discovered hardware-tree nodes
+//! drivers that read the volume holding the signed driver store — and it is
+//! **per architecture**, holding only the storage the target can actually
+//! boot from, never a driver for foreign silicon. [`VIRTIO_BLK_PATH`] is the
+//! floor on every target with a virtio-blk root (the QEMU `virt` / x86_64 /
+//! riscv64 boards); the BCM2711 SD-host EMMC2 driver is floor **only on
+//! aarch64** (the Raspberry Pi 4 SD card), so it is compiled into the aarch64
+//! image alone and never baked into an x86_64 or riscv64 build that has no
+//! such controller. Nothing else is compiled in: the BCM2711 PCIe root
+//! complex, the VL805 USB host, and the USB boot keyboard are all installed as
+//! signed `/System/Drivers/` bundles and **autoloaded into user space** by
+//! `devmgr` against their discovered hardware-tree nodes
 //! (`drivers/bus/pcie_brcm`, `drivers/bus/usb/vl805`, `drivers/input/usb_kbd`;
 //! `plans/PI.md` P10 D5d) — they sit *above* the store, not below it, so they
 //! belong in the discovered tier, never the floor.
@@ -59,6 +64,12 @@ pub const VIRTIO_BLK_PATH: &str = "/System/Drivers/storage/virtio_blk";
 /// The vendor / chip name (`brcm` / `bcm2711_emmc2`) appears only at the
 /// leaf — the directory that holds this one device's driver — while the
 /// class namespace above it (`storage`) stays vendor-neutral.
+///
+/// EMMC2 is the Raspberry Pi 4 SD host, so it is a floor driver **only on
+/// aarch64**; an x86_64 or riscv64 image has no such controller and never
+/// compiles it in (the charter forbids baking one platform's driver into
+/// another's image).
+#[cfg(kernel_isa = "aarch64")]
 pub const EMMC2_PATH: &str = "/System/Drivers/storage/brcm/bcm2711_emmc2";
 
 /// One in-kernel driver: every view of it the kernel needs, in a single
@@ -85,8 +96,21 @@ pub struct InKernelDriver {
     pub provides_root_block: bool,
 }
 
-/// The number of drivers the kernel hosts in-kernel.
+/// The number of drivers the kernel hosts in-kernel — the size of the
+/// per-architecture bootstrap floor.
+///
+/// aarch64 carries two floor block drivers (virtio-blk for the QEMU `virt`
+/// board, EMMC2 for the Raspberry Pi 4 SD card); x86_64 and riscv64 boot
+/// from a virtio-blk root and carry that one alone — the Pi SD-host driver
+/// is never compiled into an image for silicon that lacks the controller.
+#[cfg(kernel_isa = "aarch64")]
 pub const IN_KERNEL_DRIVER_COUNT: usize = 2;
+
+/// The number of drivers the kernel hosts in-kernel — the size of the
+/// per-architecture bootstrap floor (virtio-blk only on the non-aarch64
+/// targets; see the aarch64 definition for the rationale).
+#[cfg(not(kernel_isa = "aarch64"))]
+pub const IN_KERNEL_DRIVER_COUNT: usize = 1;
 
 /// The in-kernel driver registry — the single source of truth. Adding hardware support the kernel must host in-kernel is one
 /// entry here; the build signs the driver's manifest (`build.rs`) and the
@@ -95,9 +119,9 @@ pub static IN_KERNEL_DRIVERS: [InKernelDriver; IN_KERNEL_DRIVER_COUNT] = [
     // The bootstrap-floor storage path: a block driver
     // must be up before the signed driver store under `/System/Drivers/`
     // is reachable, so the root volume can be read. virtio-blk backs the
-    // QEMU `virt` / x86_64 root; EMMC2 backs the Raspberry Pi 4 SD card.
-    // Both genuinely sit *below* the store and so are floor, not
-    // discovered-tier, drivers.
+    // QEMU `virt` / x86_64 / riscv64 root on every target; it sits
+    // genuinely *below* the store and so is a floor, not discovered-tier,
+    // driver.
     InKernelDriver {
         path: VIRTIO_BLK_PATH,
         bind_keys: rustos_drv_storage_virtio_blk::BIND_KEYS,
@@ -105,6 +129,11 @@ pub static IN_KERNEL_DRIVERS: [InKernelDriver; IN_KERNEL_DRIVER_COUNT] = [
         register: rustos_drv_storage_virtio_blk::register,
         provides_root_block: true,
     },
+    // EMMC2 backs the Raspberry Pi 4 SD card, so it is floor **only on
+    // aarch64**. An x86_64 / riscv64 image has no such controller and never
+    // compiles it in — baking one platform's driver into another's image is
+    // the board coupling the charter forbids.
+    #[cfg(kernel_isa = "aarch64")]
     InKernelDriver {
         path: EMMC2_PATH,
         bind_keys: rustos_drv_storage_emmc2::BIND_KEYS,
@@ -171,16 +200,22 @@ mod tests {
     fn discovered_storage_nodes_bind_the_block_drivers() {
         // The bootstrap-floor storage path: a discovered
         // virtio node whose probed device id is `virtio-blk` (2) binds the
-        // virtio-blk driver, and the device-tree `brcm,bcm2711-emmc2` node
-        // binds the EMMC2 driver — each by the driver's own bind key,
-        // not a kernel guess.
+        // virtio-blk driver on every target — by the driver's own bind
+        // key, not a kernel guess.
         let virtio_blk = [HwMatchKey::virtio(2)];
         assert_eq!(
             winner_path(resolve_driver(&virtio_blk)),
             Some(VIRTIO_BLK_PATH)
         );
+        // The device-tree `brcm,bcm2711-emmc2` node binds the EMMC2 driver
+        // — but only on aarch64, the sole target whose floor carries the Pi
+        // SD host; on x86_64 / riscv64 that node matches nothing in the
+        // (virtio-blk-only) floor and is left unmatched.
         let emmc2 = [HwMatchKey::compatible(b"brcm,bcm2711-emmc2").expect("fits")];
+        #[cfg(kernel_isa = "aarch64")]
         assert_eq!(winner_path(resolve_driver(&emmc2)), Some(EMMC2_PATH));
+        #[cfg(not(kernel_isa = "aarch64"))]
+        assert_eq!(resolve_driver(&emmc2), MatchResolution::Unmatched);
     }
 
     #[test]
@@ -204,6 +239,10 @@ mod tests {
             IN_KERNEL_DRIVERS[0].bind_keys,
             rustos_drv_storage_virtio_blk::BIND_KEYS
         );
+        // The aarch64 floor's second entry is the EMMC2 SD-host driver,
+        // authored from its own crate's bind table; no other target's
+        // floor carries it.
+        #[cfg(kernel_isa = "aarch64")]
         assert_eq!(
             IN_KERNEL_DRIVERS[1].bind_keys,
             rustos_drv_storage_emmc2::BIND_KEYS
@@ -212,9 +251,10 @@ mod tests {
 
     #[test]
     fn only_the_storage_floor_entries_provide_the_root_block() {
-        // The bootstrap-floor block drivers are exactly
-        // virtio-blk and EMMC2 — the whole compiled-in floor today.
+        // virtio-blk is the floor block driver on every target.
         assert!(is_root_block_driver(VIRTIO_BLK_PATH));
+        // EMMC2 is a floor block driver only on aarch64 (the Pi SD host).
+        #[cfg(kernel_isa = "aarch64")]
         assert!(is_root_block_driver(EMMC2_PATH));
         // An unknown path is not a block driver (fail closed). A
         // user-space-autoloaded bus/input driver is never in the floor.
