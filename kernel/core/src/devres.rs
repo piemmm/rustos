@@ -33,6 +33,8 @@
 //! *mechanism* behind this trait keeps page-table knowledge out of
 //! `kernel/core`.
 
+use alloc::vec::Vec;
+
 use rustos_abi::hwtree::{HwResource, HwResourceKind};
 use rustos_abi::{Errno, MsiAllocation};
 
@@ -233,25 +235,44 @@ impl MsiAllocFacility for NullMsiAllocFacility {
 /// The shared [`NullMsiAllocFacility`] the syscall handler defaults to.
 pub static NULL_MSI_ALLOC_FACILITY: NullMsiAllocFacility = NullMsiAllocFacility;
 
+/// One physically-contiguous block of a shared region's backing.
+///
+/// A small region is a single chunk; a region larger than the frame
+/// allocator's single-block ceiling (8 MiB) is a *list* of chunks that
+/// [`SharedMemFacility::map_region`] maps into one contiguous virtual window,
+/// so the region size is bounded by available RAM rather than a fixed buddy
+/// order. The registry stores the list to free it at the last reference.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct SharedChunk {
+    /// Physical base of this contiguous block.
+    pub phys_base: u64,
+    /// Buddy order of the block (handed back to free it).
+    pub order: u32,
+    /// Block size in whole pages (`1 << order`).
+    pub pages: u64,
+}
+
 /// The kernel-side producer that backs the cross-process shared-memory
 /// syscalls (`shm_create` / `shm_map` / `shm_unmap`, `plans/USB.md`).
 ///
-/// A shared-memory region is a physically-contiguous block of kernel-owned
-/// RAM the kernel allocates once, zeroes, and maps (cacheable, `RW`,
-/// non-executable, guard-bracketed) into one or more processes' own live
-/// address spaces so they can exchange bulk data without a kernel copy. The
-/// *policy* — the per-region registry, reference counting, the per-region
-/// capability grant, and the capability gate — lives in `kernel/core`; this
-/// trait performs only the *mechanism* that needs the frame allocator and
-/// the running task's live space:
+/// A shared-memory region is a block of kernel-owned RAM the kernel
+/// allocates once, zeroes, and maps (cacheable, `RW`, non-executable,
+/// guard-bracketed) into one or more processes' own live address spaces so
+/// they can exchange bulk data without a kernel copy. The backing is a set of
+/// one or more physically-contiguous [`SharedChunk`]s mapped into one
+/// contiguous virtual window, so a region may exceed the single buddy-block
+/// ceiling. The *policy* — the per-region registry, reference counting, the
+/// per-region capability grant, and the capability gate — lives in
+/// `kernel/core`; this trait performs only the *mechanism* that needs the
+/// frame allocator and the running task's live space:
 ///
-/// * [`alloc_region`](Self::alloc_region) — allocate a contiguous,
-///   **zeroed** block of `pages` frames (no cross-process leak);
+/// * [`alloc_region`](Self::alloc_region) — allocate a **zeroed** chunk-set
+///   backing of `pages` frames (no cross-process leak);
 /// * [`map_region`](Self::map_region) — map an existing region into the
-///   **calling** task's own live space;
+///   **calling** task's own live space as one contiguous window;
 /// * [`unmap_region`](Self::unmap_region) — release the caller's mapping;
 /// * [`free_region`](Self::free_region) — zero (zero-on-free) and return a
-///   region's frames to the allocator at its last reference.
+///   region's chunks to the allocator at its last reference.
 ///
 /// Zeroing on allocation and on free is done through the kernel direct map
 /// of *whatever task is currently running* (the map is identical in every
@@ -260,28 +281,35 @@ pub static NULL_MSI_ALLOC_FACILITY: NullMsiAllocFacility = NullMsiAllocFacility;
 /// driver torn down by the device manager). Implementations must be [`Sync`]
 /// like [`MmioMapFacility`].
 pub trait SharedMemFacility: Sync {
-    /// Allocate a physically-contiguous, **zeroed** block of `pages` frames
-    /// the kernel owns, returning its physical base and the buddy `order`
-    /// the caller must hand back to [`Self::free_region`].
+    /// Allocate a **zeroed** backing of `pages` frames the kernel owns as a
+    /// set of one or more physically-contiguous chunks (each of order
+    /// `≤ MAX_ORDER`), returning the [`SharedChunk`] list the caller must hand
+    /// back to [`Self::free_region`].
+    ///
+    /// A region that fits one buddy block is a single chunk (the common small
+    /// case — e.g. a USB request buffer); a region larger than the 8 MiB
+    /// single-block ceiling spans several chunks, which [`Self::map_region`]
+    /// maps into one contiguous virtual window. The region size is therefore
+    /// bounded by available RAM, not a fixed buddy order.
     ///
     /// # Errors
     ///
-    /// [`Errno::OutOfMemory`] when no contiguous block is free (deterministic
-    /// OOM), [`Errno::OutOfRange`] when `pages` exceeds the maximum buddy
-    /// block, [`Errno::LengthOutOfRange`] when `pages` is zero, or
-    /// [`Errno::NotImplemented`] for the inert default.
-    fn alloc_region(&self, pages: u64) -> Result<(u64, u32), Errno>;
+    /// [`Errno::OutOfMemory`] when the backing cannot be allocated
+    /// (deterministic OOM), [`Errno::LengthOutOfRange`] when `pages` is zero,
+    /// or [`Errno::NotImplemented`] for the inert default.
+    fn alloc_region(&self, pages: u64) -> Result<Vec<SharedChunk>, Errno>;
 
-    /// Map the existing region of `pages` frames beginning at `phys_base`
-    /// into the calling task's own live space, returning its base user
-    /// virtual address.
+    /// Map the existing region backed by `chunks` into the calling task's own
+    /// live space as one contiguous window, returning its base user virtual
+    /// address. A single-chunk region maps one block; a multi-chunk region
+    /// maps every block back-to-back so the caller sees one flat buffer.
     ///
     /// # Errors
     ///
     /// [`Errno::OutOfMemory`] (no virtual slot), [`Errno::NotImplemented`]
     /// (no live space / inert default), or another stable code the platform
     /// reports.
-    fn map_region(&self, phys_base: u64, pages: u64) -> Result<u64, Errno>;
+    fn map_region(&self, chunks: &[SharedChunk]) -> Result<u64, Errno>;
 
     /// Release the calling task's shared mapping based at `base` (`len`
     /// bytes), tearing down only its page-table entries.
@@ -292,21 +320,25 @@ pub trait SharedMemFacility: Sync {
     /// the caller, or [`Errno::NotImplemented`] for the inert default.
     fn unmap_region(&self, base: u64, len: usize) -> Result<(), Errno>;
 
-    /// Zero the `pages` frames beginning at `phys_base` (zero-on-free) and
-    /// return the `order` buddy block to the allocator. Best-effort: a frame
-    /// that cannot be reached for scrubbing is dropped rather than panicking
-    /// (the inert default is a no-op).
-    fn free_region(&self, phys_base: u64, order: u32, pages: u64);
+    /// Zero (zero-on-free) and return every block in `chunks` to the
+    /// allocator. Best-effort: a frame that cannot be reached for scrubbing
+    /// is dropped rather than panicking (the inert default is a no-op).
+    fn free_region(&self, chunks: &[SharedChunk]);
 
-    /// Translate the `len` bytes beginning at a region's `phys_base` into a
+    /// Translate the `len` bytes of a region backed by `chunks` into a
     /// kernel-reachable pointer (the kernel direct map), for a **kernel**
     /// consumer of a shared region — the runtime volume attach path's block
     /// client, which drives a user-space block service through the region
     /// without a user mapping of its own.
     ///
-    /// Returns `None` when the kernel cannot reach the frames (the inert
-    /// default); the caller fails closed.
-    fn kernel_window(&self, _phys_base: u64, _len: usize) -> Option<core::ptr::NonNull<u8>> {
+    /// Only a **single-chunk** region is physically contiguous and thus
+    /// reachable as one window; a multi-chunk region (a large display frame
+    /// ring) returns `None` — no kernel consumer maps one, so the kernel hold
+    /// fails closed rather than fabricating a contiguous view of
+    /// discontiguous frames. Also returns `None` when the kernel cannot reach
+    /// the frames (the inert default); the caller fails closed.
+    fn kernel_window(&self, chunks: &[SharedChunk], len: usize) -> Option<core::ptr::NonNull<u8>> {
+        let _ = (chunks, len);
         None
     }
 }
@@ -322,16 +354,16 @@ pub trait SharedMemFacility: Sync {
 pub struct NullSharedMemFacility;
 
 impl SharedMemFacility for NullSharedMemFacility {
-    fn alloc_region(&self, _pages: u64) -> Result<(u64, u32), Errno> {
+    fn alloc_region(&self, _pages: u64) -> Result<Vec<SharedChunk>, Errno> {
         Err(Errno::NotImplemented)
     }
-    fn map_region(&self, _phys_base: u64, _pages: u64) -> Result<u64, Errno> {
+    fn map_region(&self, _chunks: &[SharedChunk]) -> Result<u64, Errno> {
         Err(Errno::NotImplemented)
     }
     fn unmap_region(&self, _base: u64, _len: usize) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
-    fn free_region(&self, _phys_base: u64, _order: u32, _pages: u64) {}
+    fn free_region(&self, _chunks: &[SharedChunk]) {}
 }
 
 /// The boot-installed production shared-memory facility, recorded once so

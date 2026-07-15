@@ -425,6 +425,23 @@ is the only difference).
   revocation*, so a session that lost its seat wakes, observes the typed
   `SeatRevoked` on its next drain, and tears down instead of parking
   forever or scribbling on.
+- **A full-screen frame ring exceeds the single buddy block.** A shared
+  region is backed by a *list* of buddy chunks (`SharedChunk`) mapped into
+  one guard-bracketed contiguous virtual window, so the double buffer is
+  bounded by RAM, not the 8 MiB single-block ceiling (`MAX_ORDER`). A small
+  region stays a single chunk (the USB path is unaffected); `kernel_hold`
+  refuses a multi-chunk region (fail closed — no kernel consumer maps one).
+  This is what makes `desktop` come up on a real display rather than failing
+  with `shared frame region refused`.
+
+**Staged next — driver-owned, exported frame buffer (DMA-BUF).** The frame
+ring is still *client-allocated* (`shm_create` + `shm_grant` up to the
+service). The approved next tranche inverts this so the **display driver**
+allocates/owns/exports the ring (VRAM when the card has its own memory, else a
+system chunked region) and the compositor imports it — the DRM/dma-buf shape.
+Design + slices are staged in `.junie/next-desktop-prompt.md` (a new IPC
+"peer-grant" primitive, VRAM sub-window export, and the `display_ipc` protocol
+inversion).
 
 Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
 

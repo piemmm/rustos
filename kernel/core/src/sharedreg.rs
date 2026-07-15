@@ -3,8 +3,10 @@
 //! A shared-memory region is a block of kernel-owned RAM two cooperating
 //! processes map to exchange bulk data without a kernel copy (the USB
 //! request-block data buffer). This registry owns the *policy* over those
-//! regions: the kernel-allocated unforgeable region id, the backing block's
-//! physical base and buddy order, the reference count across the owner and
+//! regions: the kernel-allocated unforgeable region id, the backing block
+//! set (each block's physical base and buddy order — one block for a small
+//! region, several mapped into one contiguous window for a large one), the
+//! reference count across the owner and
 //! every grantee mapping, and the per-task list of live mappings used to
 //! release the right region on `shm_unmap` and to reclaim a task's mappings
 //! on exit or driver-unload teardown.
@@ -31,15 +33,15 @@ use rustos_kernel_mem::PAGE_SIZE;
 use rustos_kernel_sec::TaskId;
 use rustos_sync::SpinLock;
 
-use crate::devres::SharedMemFacility;
+use crate::devres::{SharedChunk, SharedMemFacility};
 
 /// One live shared-memory region.
 struct Region {
-    /// Physical base of the contiguous backing block.
-    phys_base: u64,
-    /// Buddy order of the backing block (handed back to free it).
-    order: u32,
-    /// Region size in whole pages.
+    /// The region's physically-contiguous backing blocks: one for a small
+    /// region, several for one larger than the single-block ceiling. Handed
+    /// to the facility to map (into one contiguous window) and to free.
+    chunks: Vec<SharedChunk>,
+    /// Region size in whole pages (the sum of the chunks' pages).
     pages: u64,
     /// Live mappings of the region (owner map + every grantee map). The
     /// region's frames are freed when this reaches zero.
@@ -92,11 +94,11 @@ pub fn create(
     owner: TaskId,
     pages: u64,
 ) -> Result<(u64, u64), Errno> {
-    let (phys_base, order) = facility.alloc_region(pages)?;
-    let base_va = match facility.map_region(phys_base, pages) {
+    let chunks = facility.alloc_region(pages)?;
+    let base_va = match facility.map_region(&chunks) {
         Ok(va) => va,
         Err(err) => {
-            facility.free_region(phys_base, order, pages);
+            facility.free_region(&chunks);
             return Err(err);
         }
     };
@@ -106,8 +108,7 @@ pub fn create(
     state.regions.insert(
         id,
         Region {
-            phys_base,
-            order,
+            chunks,
             pages,
             refs: 1,
         },
@@ -130,12 +131,12 @@ pub fn create(
 /// [`Errno::NotFound`] if the region was torn down, or the facility error.
 pub fn map(facility: &dyn SharedMemFacility, task: TaskId, id: u64) -> Result<(u64, usize), Errno> {
     // Snapshot the backing under the lock; map outside it.
-    let (phys_base, pages) = {
+    let (chunks, pages) = {
         let state = REGIONS.lock();
         let region = state.regions.get(&id).ok_or(Errno::NotFound)?;
-        (region.phys_base, region.pages)
+        (region.chunks.clone(), region.pages)
     };
-    let base_va = facility.map_region(phys_base, pages)?;
+    let base_va = facility.map_region(&chunks)?;
     let mut state = REGIONS.lock();
     // The region could have been torn down between the two locks only if its
     // last reference dropped; but `task` holds the grant and no mapping was
@@ -198,21 +199,17 @@ fn release_ref(facility: &dyn SharedMemFacility, id: u64) {
             return;
         };
         region.refs -= 1;
-        if region.refs == 0 {
-            let Region {
-                phys_base,
-                order,
-                pages,
-                ..
-            } = *region;
-            state.regions.remove(&id);
-            Some((phys_base, order, pages))
+        let empty = region.refs == 0;
+        if empty {
+            // The `region` borrow ends above; removing the entry now yields
+            // its chunk list to free outside the lock.
+            state.regions.remove(&id).map(|region| region.chunks)
         } else {
             None
         }
     };
-    if let Some((phys_base, order, pages)) = free {
-        facility.free_region(phys_base, order, pages);
+    if let Some(chunks) = free {
+        facility.free_region(&chunks);
     }
 }
 
@@ -296,14 +293,16 @@ impl KernelHold {
 /// [`Errno::NotImplemented`] when the facility cannot reach the frames
 /// (fail closed; the reference is released again).
 pub fn kernel_hold(facility: &'static dyn SharedMemFacility, id: u64) -> Result<KernelHold, Errno> {
-    let (phys_base, pages) = {
+    let (chunks, pages) = {
         let mut state = REGIONS.lock();
         let region = state.regions.get_mut(&id).ok_or(Errno::NotFound)?;
         region.refs += 1;
-        (region.phys_base, region.pages)
+        (region.chunks.clone(), region.pages)
     };
     let len = region_len_bytes(pages);
-    if let Some(ptr) = facility.kernel_window(phys_base, len) {
+    // A multi-chunk region is not physically contiguous, so the facility
+    // returns `None` and the hold fails closed (no kernel consumer maps one).
+    if let Some(ptr) = facility.kernel_window(&chunks, len) {
         Ok(KernelHold {
             facility,
             id,
@@ -379,20 +378,35 @@ mod tests {
     }
 
     impl SharedMemFacility for FakeFacility {
-        fn alloc_region(&self, _pages: u64) -> Result<(u64, u32), Errno> {
+        fn alloc_region(&self, pages: u64) -> Result<Vec<SharedChunk>, Errno> {
+            // One chunk covering the whole request (the small, single-block
+            // case); `WindowFacility` overrides this to split into several.
             let phys = self.next_phys.fetch_add(0x10_0000, Ordering::Relaxed);
-            Ok((phys, 0))
+            Ok(alloc::vec![SharedChunk {
+                phys_base: phys,
+                order: 0,
+                pages,
+            }])
         }
-        fn map_region(&self, phys_base: u64, pages: u64) -> Result<u64, Errno> {
-            self.maps.lock().unwrap().push((phys_base, pages));
-            Ok(Self::va_for(phys_base))
+        fn map_region(&self, chunks: &[SharedChunk]) -> Result<u64, Errno> {
+            // Record the first chunk's base and the total page count, so a
+            // test can assert the mapped extent without knowing the split.
+            let total: u64 = chunks.iter().map(|c| c.pages).sum();
+            let first = chunks[0].phys_base;
+            self.maps.lock().unwrap().push((first, total));
+            Ok(Self::va_for(first))
         }
         fn unmap_region(&self, base: u64, len: usize) -> Result<(), Errno> {
             self.unmaps.lock().unwrap().push((base, len));
             Ok(())
         }
-        fn free_region(&self, phys_base: u64, order: u32, pages: u64) {
-            self.frees.lock().unwrap().push((phys_base, order, pages));
+        fn free_region(&self, chunks: &[SharedChunk]) {
+            for c in chunks {
+                self.frees
+                    .lock()
+                    .unwrap()
+                    .push((c.phys_base, c.order, c.pages));
+            }
         }
     }
 
@@ -472,19 +486,35 @@ mod tests {
     }
 
     impl SharedMemFacility for WindowFacility {
-        fn alloc_region(&self, pages: u64) -> Result<(u64, u32), Errno> {
-            self.inner.alloc_region(pages)
+        fn alloc_region(&self, pages: u64) -> Result<Vec<SharedChunk>, Errno> {
+            // One single-page chunk per page, so a `pages > 1` region is a
+            // genuine multi-chunk region (the kernel-hold fail-closed case).
+            let mut chunks = Vec::new();
+            for _ in 0..pages {
+                let phys = self.inner.next_phys.fetch_add(0x1000, Ordering::Relaxed);
+                chunks.push(SharedChunk {
+                    phys_base: phys,
+                    order: 0,
+                    pages: 1,
+                });
+            }
+            Ok(chunks)
         }
-        fn map_region(&self, phys_base: u64, pages: u64) -> Result<u64, Errno> {
-            self.inner.map_region(phys_base, pages)
+        fn map_region(&self, chunks: &[SharedChunk]) -> Result<u64, Errno> {
+            self.inner.map_region(chunks)
         }
         fn unmap_region(&self, base: u64, len: usize) -> Result<(), Errno> {
             self.inner.unmap_region(base, len)
         }
-        fn free_region(&self, phys_base: u64, order: u32, pages: u64) {
-            self.inner.free_region(phys_base, order, pages);
+        fn free_region(&self, chunks: &[SharedChunk]) {
+            self.inner.free_region(chunks);
         }
-        fn kernel_window(&self, _phys_base: u64, len: usize) -> Option<NonNull<u8>> {
+        fn kernel_window(&self, chunks: &[SharedChunk], len: usize) -> Option<NonNull<u8>> {
+            // Only a single-chunk (physically contiguous) region is reachable
+            // as one kernel window; a multi-chunk region fails closed.
+            if chunks.len() != 1 {
+                return None;
+            }
             let mut window = self.window.lock().unwrap();
             if window.len() < len {
                 window.resize(len, 0);
@@ -516,6 +546,28 @@ mod tests {
         assert_eq!(fac.inner.frees.lock().unwrap().len(), 1);
         // The region is gone: a later hold fails closed.
         assert_eq!(kernel_hold(fac, id).err(), Some(Errno::NotFound));
+    }
+
+    #[test]
+    fn kernel_hold_fails_closed_for_a_multi_chunk_region() {
+        let fac: &'static WindowFacility = Box::leak(Box::new(WindowFacility {
+            inner: FakeFacility::new(),
+            window: Mutex::new(Vec::new()),
+        }));
+        let owner = TaskId(0x5_0009);
+        // A two-page region is two single-page chunks: not physically
+        // contiguous, so no single kernel window can span it and the hold
+        // fails closed rather than fabricating a contiguous view.
+        let (va, id) = create(fac, owner, 2).expect("create");
+        assert_eq!(kernel_hold(fac, id).err(), Some(Errno::NotImplemented));
+        // The failed hold released its extra reference: the owner's unmap
+        // still frees the region exactly once (both chunks).
+        unmap(fac, owner, va).expect("unmap");
+        assert_eq!(
+            fac.inner.frees.lock().unwrap().len(),
+            2,
+            "both chunks freed at the last reference"
+        );
     }
 
     #[test]

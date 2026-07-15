@@ -317,6 +317,27 @@ pub trait LiveUserSpace: Send {
     /// guarded-window mechanism.
     fn map_shared(&mut self, phys_base: u64, len: usize) -> Result<u64, LiveSpaceError>;
 
+    /// Map an existing, kernel-owned **shared-memory region** whose backing
+    /// is a *list* of physically-contiguous chunks (`(phys_base, pages)`)
+    /// into this space as one contiguous, cacheable `RW|USER` (never
+    /// executable), guard-bracketed window, returning the kernel-chosen base
+    /// user virtual address.
+    ///
+    /// The chunked form of [`Self::map_shared`]: a region larger than the
+    /// frame allocator's single-block ceiling (8 MiB) is backed by several
+    /// blocks the shared-region registry allocated, and this maps them
+    /// back-to-back in virtual space so the process sees one flat buffer (the
+    /// display frame ring). As with [`Self::map_shared`] the frames belong to
+    /// the registry; this installs page-table entries only, released by
+    /// [`Self::unmap_shared`] or a space drop without freeing the frames.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveSpaceError::Mmio`] carrying the precise [`MmioError`] (an empty
+    /// or malformed chunk list, no free virtual run, a page-table refusal) —
+    /// the shared mapping reuses the guarded-window mechanism.
+    fn map_shared_chunks(&mut self, chunks: &[(u64, u64)]) -> Result<u64, LiveSpaceError>;
+
     /// Release the shared-region mapping based at `base_va` from this space,
     /// tearing down only its page-table entries (the registry owns the
     /// frames). `len` is advisory \u2014 the allocator releases exactly the pages
@@ -692,6 +713,18 @@ where
         let region = self
             .shared
             .map_cacheable_into(&mut self.space, phys_base, len)?;
+        Ok(region.virt().as_u64())
+    }
+
+    fn map_shared_chunks(&mut self, chunks: &[(u64, u64)]) -> Result<u64, LiveSpaceError> {
+        // Reuse the guarded-window mechanism, mapping the chunk list into one
+        // contiguous virtual window (cacheable RAM). The frames belong to the
+        // shared-region registry, so the space installs page-table entries
+        // only — released without freeing the frames (a second process may
+        // still map them).
+        let region = self
+            .shared
+            .map_cacheable_chunks_into(&mut self.space, chunks)?;
         Ok(region.virt().as_u64())
     }
 
@@ -1405,6 +1438,45 @@ mod tests {
             live.unmap_shared(base, len).is_err(),
             "double-unmap of a shared region fails closed"
         );
+    }
+
+    #[test]
+    fn map_shared_chunks_maps_a_multi_block_region_into_one_window() {
+        let mut live = live();
+        // Two physically-disjoint blocks in the sim window become one flat
+        // three-page shared window — the display frame ring a single buddy
+        // block could not hold.
+        let chunk_a = SIM_BASE; // 2 pages
+        let chunk_b = SIM_BASE + 4 * PAGE_SIZE as u64; // 1 page, past chunk_a
+        let base = live
+            .map_shared_chunks(&[(chunk_a, 2), (chunk_b, 1)])
+            .expect("chunk list maps into one window");
+        assert!(
+            base > SHARED_WINDOW_BASE
+                && base < SHARED_WINDOW_BASE + (SHARED_WINDOW_PAGES as u64) * PAGE_SIZE as u64,
+            "shared VA lies inside the configured window, past the leading guard"
+        );
+        assert_eq!(live.space().mapped_pages(), 3);
+
+        // The window is one flat buffer: a write into the page backed by the
+        // *second* block round-trips, proving the blocks are contiguous in
+        // virtual space and both reachable.
+        let sim = sim();
+        let payload = [0xA5u8; 16];
+        let second_block_va = VirtAddr::new(base + 2 * PAGE_SIZE as u64);
+        copy_out(live.space(), &sim, second_block_va, &payload).expect("writable user range");
+        let mut back = [0u8; 16];
+        copy_in(live.space(), &sim, second_block_va, &mut back).expect("readable user range");
+        assert_eq!(
+            back, payload,
+            "second-block page round-trips through the window"
+        );
+
+        // Unmapping by base tears down all three pages; the frames belong to
+        // the registry and are not freed here.
+        live.unmap_shared(base, 3 * PAGE_SIZE)
+            .expect("unmaps the whole window by base");
+        assert_eq!(live.space().mapped_pages(), 0);
     }
 
     #[test]

@@ -303,7 +303,6 @@ impl MmioWindowMap {
         let block_pages = data_pages.checked_add(2).ok_or(MmioError::NoVirtualSpace)?;
         let leading_guard_slot = self.alloc_free_run(block_pages)?;
         let first_data_slot = leading_guard_slot + 1;
-        let trailing_guard_slot = leading_guard_slot + 1 + data_pages;
 
         // Frame number = phys_base >> PAGE_SHIFT, converted without a
         // lossy `as` cast (a 32-bit target cannot address frames whose
@@ -333,10 +332,129 @@ impl MmioWindowMap {
         // on map would clobber live hardware state); for a shared-memory
         // region the owning registry already zeroed the frames on
         // allocation. The mapper only installs page-table entries.
+        Ok(self.finish_run(leading_guard_slot, data_pages, page_offset, phys_base, len))
+    }
+
+    /// Map an existing, kernel-owned **shared-memory region** whose backing
+    /// is a *list* of physically-contiguous chunks into one contiguous,
+    /// guard-bracketed virtual window, mapped **cacheable** `RW|USER` (never
+    /// executable). Returns the [`MmioRegion`] spanning the whole window.
+    ///
+    /// This is [`Self::map_cacheable_into`] generalised from a single block
+    /// to several: a region larger than the frame allocator's single-block
+    /// ceiling ([`crate::frame::MAX_ORDER`], 8 MiB) is backed by several
+    /// blocks (the display frame ring), and this maps them **contiguously in
+    /// virtual address space** so the process still sees one flat buffer.
+    /// Each `(phys_base, pages)` chunk is page-aligned kernel RAM owned by the
+    /// shared-region registry (which zeroed it on allocation and frees it at
+    /// the last reference); this installs page-table entries only, so
+    /// [`Self::unmap_at`] / a space drop releases the *mapping* without
+    /// touching the frames.
+    ///
+    /// # Errors
+    ///
+    /// * [`MmioError::InvalidRegion`] — the chunk list is empty, a chunk is
+    ///   zero-length or not page-aligned, or the total or a chunk's extent
+    ///   overflows.
+    /// * [`MmioError::NoVirtualSpace`] / [`MmioError::OutOfMemory`] — no free
+    ///   run of the required length, or the slot bookkeeping cannot grow.
+    /// * [`MmioError::PageTable`] — propagated from [`AddressSpace::map`]
+    ///   (a partial map is rolled back before the error returns).
+    pub fn map_cacheable_chunks_into<P: PageTable>(
+        &mut self,
+        space: &mut AddressSpace<P>,
+        chunks: &[(u64, u64)],
+    ) -> Result<MmioRegion, MmioError> {
+        if chunks.is_empty() {
+            return Err(MmioError::InvalidRegion);
+        }
+        // Sum the chunk page counts, validating each chunk is page-aligned,
+        // non-empty, and does not overflow the physical address space, before
+        // any slot is reserved or page mapped (validate every input).
+        let mut data_pages: usize = 0;
+        for &(phys_base, pages) in chunks {
+            if pages == 0 || phys_base & (PAGE_SIZE as u64 - 1) != 0 {
+                return Err(MmioError::InvalidRegion);
+            }
+            pages
+                .checked_mul(PAGE_SIZE as u64)
+                .and_then(|bytes| phys_base.checked_add(bytes))
+                .ok_or(MmioError::InvalidRegion)?;
+            let pages_usize = usize::try_from(pages).map_err(|_| MmioError::InvalidRegion)?;
+            data_pages = data_pages
+                .checked_add(pages_usize)
+                .ok_or(MmioError::InvalidRegion)?;
+        }
+        let len = data_pages
+            .checked_mul(PAGE_SIZE)
+            .ok_or(MmioError::InvalidRegion)?;
+
+        let block_pages = data_pages.checked_add(2).ok_or(MmioError::NoVirtualSpace)?;
+        let leading_guard_slot = self.alloc_free_run(block_pages)?;
+        let first_data_slot = leading_guard_slot + 1;
+
+        // Walk the chunk list, mapping each chunk's frames into the next
+        // consecutive virtual slots, so several non-contiguous physical
+        // blocks become one contiguous virtual window. `gi` is the running
+        // window page index across all chunks.
+        let mut gi = 0usize;
+        for &(phys_base, pages) in chunks {
+            // Both conversions were validated in the sizing pass above; the
+            // re-check keeps the mapping loop free of any lossy `as` cast.
+            let (Ok(start_frame_index), Ok(pages_usize)) = (
+                usize::try_from(phys_base >> PAGE_SHIFT),
+                usize::try_from(pages),
+            ) else {
+                self.rollback_partial_map(space, first_data_slot, gi);
+                return Err(MmioError::InvalidRegion);
+            };
+            for p in 0..pages_usize {
+                let virt = self.virt_of_slot(first_data_slot + gi);
+                let frame = Frame(start_frame_index + p);
+                let page = match Page::from_addr(virt) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        self.rollback_partial_map(space, first_data_slot, gi);
+                        return Err(MmioError::PageTable(e));
+                    }
+                };
+                if let Err(e) = space.map(
+                    page,
+                    frame,
+                    MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+                ) {
+                    self.rollback_partial_map(space, first_data_slot, gi);
+                    return Err(MmioError::PageTable(e));
+                }
+                gi += 1;
+            }
+        }
+
+        // The window's reported physical base is advisory (the first chunk's
+        // base); a chunked region is not physically contiguous, so it is
+        // never resolved through the direct map (`kernel_hold` refuses a
+        // multi-chunk region — no kernel consumer maps one).
+        Ok(self.finish_run(leading_guard_slot, data_pages, 0, chunks[0].0, len))
+    }
+
+    /// Mark the guard + data slots of a mapped run used, record it keyed by
+    /// its base virtual address (offset into the first data page included),
+    /// and build the [`MmioRegion`]. The single tail shared by
+    /// [`Self::map_with_flags`] and [`Self::map_cacheable_chunks_into`], so
+    /// the slot-bookkeeping / `Record` insertion has one definition.
+    fn finish_run(
+        &mut self,
+        leading_guard_slot: usize,
+        data_pages: usize,
+        page_offset: usize,
+        phys: u64,
+        len: usize,
+    ) -> MmioRegion {
+        let first_data_slot = leading_guard_slot + 1;
+        let trailing_guard_slot = leading_guard_slot + 1 + data_pages;
         for s in leading_guard_slot..=trailing_guard_slot {
             self.slot_used[s] = true;
         }
-
         let window_virt =
             VirtAddr::new(self.virt_of_slot(first_data_slot).as_u64() + page_offset as u64);
         self.regions.insert(
@@ -346,11 +464,11 @@ impl MmioWindowMap {
                 data_pages,
             },
         );
-        Ok(MmioRegion {
+        MmioRegion {
             virt: window_virt,
-            phys: phys_base,
+            phys,
             len,
-        })
+        }
     }
 
     /// Tear down a mapping previously returned by [`Self::map_into`] from the

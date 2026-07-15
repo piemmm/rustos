@@ -7,7 +7,7 @@
 //! through addresses the very (simulated) registers.
 
 use super::*;
-use crate::frame::{PhysAddr, PAGE_SIZE};
+use crate::frame::{Frame, PhysAddr, PAGE_SHIFT, PAGE_SIZE};
 use crate::phys::SimPhysMap;
 use crate::vmm::{AddressSpace, HostPageTable, MapFlags, Page, PageTableError, VirtAddr};
 
@@ -483,5 +483,89 @@ fn window_map_into_fails_closed_and_unwinds_on_page_table_conflict() {
     // No new mapping survived; the pre-existing page is untouched and the
     // mapper recorded no live region.
     assert_eq!(space.mapped_pages(), before);
+    assert_eq!(win.live(), 0);
+}
+
+#[test]
+fn window_map_cacheable_chunks_maps_blocks_into_one_contiguous_window() {
+    let mut space = borrowed_space();
+    let mut win = window(16);
+
+    // Two physically-disjoint blocks — a two-page block and a one-page block
+    // — become one flat three-page virtual window (the display frame ring a
+    // single buddy block could not hold).
+    let chunk_a: u64 = 0x1000_0000; // frame 0x10000
+    let chunk_b: u64 = 0x2000_0000; // frame 0x20000
+    let region = win
+        .map_cacheable_chunks_into(&mut space, &[(chunk_a, 2), (chunk_b, 1)])
+        .expect("chunk list maps");
+    assert_eq!(region.len(), 3 * PAGE_SIZE);
+    assert_eq!(win.live(), 1);
+    assert_eq!(space.mapped_pages(), 3);
+
+    // Each window page resolves to the expected frame, in order, so the
+    // blocks are laid out back-to-back in virtual space (one flat buffer).
+    let base = region.virt().as_u64();
+    let expect = [
+        chunk_a >> PAGE_SHIFT,
+        (chunk_a >> PAGE_SHIFT) + 1,
+        chunk_b >> PAGE_SHIFT,
+    ];
+    for (i, &want) in expect.iter().enumerate() {
+        let va = VirtAddr::new(base + (i as u64) * PAGE_SIZE as u64);
+        let (frame, flags) = space
+            .translate(Page::from_addr(va).unwrap())
+            .expect("window page mapped");
+        assert_eq!(
+            frame,
+            Frame(usize::try_from(want).unwrap()),
+            "page {i} frame"
+        );
+        // Shared RAM: cacheable (never device-ordered), RW, user, not exec.
+        assert!(!flags.contains(MapFlags::NO_CACHE));
+        assert!(flags.contains(MapFlags::READ | MapFlags::WRITE | MapFlags::USER));
+        assert!(!flags.contains(MapFlags::EXEC));
+    }
+
+    // The window is bracketed by unmapped guard pages, like the single-block
+    // path, so an over-run faults instead of reaching a neighbour.
+    let leading = VirtAddr::new(base - PAGE_SIZE as u64);
+    let trailing = VirtAddr::new(base + 3 * PAGE_SIZE as u64);
+    assert!(space.translate(Page::from_addr(leading).unwrap()).is_none());
+    assert!(space
+        .translate(Page::from_addr(trailing).unwrap())
+        .is_none());
+
+    // Releasing by base tears down every data page; the frames belong to the
+    // registry, so only the mapping goes.
+    win.unmap_at(&mut space, region.virt())
+        .expect("unmap by base");
+    assert_eq!(win.live(), 0);
+    assert_eq!(space.mapped_pages(), 0);
+}
+
+#[test]
+fn window_map_cacheable_chunks_rejects_a_bad_chunk_list() {
+    let mut space = borrowed_space();
+    let mut win = window(16);
+    // Empty list.
+    assert_eq!(
+        win.map_cacheable_chunks_into(&mut space, &[]).err(),
+        Some(MmioError::InvalidRegion)
+    );
+    // A zero-length chunk.
+    assert_eq!(
+        win.map_cacheable_chunks_into(&mut space, &[(0x1000_0000, 0)])
+            .err(),
+        Some(MmioError::InvalidRegion)
+    );
+    // A misaligned chunk base.
+    assert_eq!(
+        win.map_cacheable_chunks_into(&mut space, &[(0x1000_0800, 1)])
+            .err(),
+        Some(MmioError::InvalidRegion)
+    );
+    // Every refusal left the space and mapper untouched (fail closed).
+    assert_eq!(space.mapped_pages(), 0);
     assert_eq!(win.live(), 0);
 }
