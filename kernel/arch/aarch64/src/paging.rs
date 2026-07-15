@@ -1663,6 +1663,12 @@ impl TlbShootdown for AddressSpace {
     fn flush_page(&mut self, vaddr: u64) {
         invalidate_page_inner_shareable(vaddr);
     }
+
+    fn flush_range(&mut self, _start_vaddr: u64, page_count: usize) {
+        if page_count != 0 {
+            invalidate_all_inner_shareable();
+        }
+    }
 }
 
 /// Invalidate, on every PE in the inner-shareable domain, the stage-1
@@ -1700,6 +1706,32 @@ pub(crate) fn invalidate_page_inner_shareable(vaddr: u64) {
     {
         // The host has no TLB to invalidate; a flush is vacuous.
         let _ = vaddr;
+    }
+}
+
+/// Invalidate every stage-1 EL1&0 translation on every PE in the
+/// inner-shareable domain.
+///
+/// A large newly-installed range uses this broad operation once instead of
+/// issuing a barrier-bracketed `tlbi` for every 4 KiB leaf. Over-invalidation
+/// is safe, while the single broadcast keeps the range visible to every PE
+/// before execution continues.
+fn invalidate_all_inner_shareable() {
+    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+    {
+        // SAFETY: `tlbi vmalle1is` invalidates all stage-1 EL1&0
+        // translations in the inner-shareable domain. The barriers order
+        // prior page-table writes before invalidation and subsequent
+        // translations after completion. It only discards cached state.
+        unsafe {
+            core::arch::asm!(
+                "dsb ishst",
+                "tlbi vmalle1is",
+                "dsb ish",
+                "isb",
+                options(nostack, preserves_flags),
+            );
+        }
     }
 }
 

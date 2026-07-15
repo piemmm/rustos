@@ -395,8 +395,10 @@ impl MmioWindowMap {
 
         // Walk the chunk list, mapping each chunk's frames into the next
         // consecutive virtual slots, so several non-contiguous physical
-        // blocks become one contiguous virtual window. `gi` is the running
-        // window page index across all chunks.
+        // blocks become one contiguous virtual window. Each physically
+        // contiguous chunk is installed transactionally and synchronized as
+        // one TLB range rather than paying a barrier per 4 KiB leaf. `gi` is
+        // the running window page index across all chunks.
         let mut gi = 0usize;
         for &(phys_base, pages) in chunks {
             // Both conversions were validated in the sizing pass above; the
@@ -408,26 +410,24 @@ impl MmioWindowMap {
                 self.rollback_partial_map(space, first_data_slot, gi);
                 return Err(MmioError::InvalidRegion);
             };
-            for p in 0..pages_usize {
-                let virt = self.virt_of_slot(first_data_slot + gi);
-                let frame = Frame(start_frame_index + p);
-                let page = match Page::from_addr(virt) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        self.rollback_partial_map(space, first_data_slot, gi);
-                        return Err(MmioError::PageTable(e));
-                    }
-                };
-                if let Err(e) = space.map(
-                    page,
-                    frame,
-                    MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
-                ) {
+            let virt = self.virt_of_slot(first_data_slot + gi);
+            let page = match Page::from_addr(virt) {
+                Ok(page) => page,
+                Err(err) => {
                     self.rollback_partial_map(space, first_data_slot, gi);
-                    return Err(MmioError::PageTable(e));
+                    return Err(MmioError::PageTable(err));
                 }
-                gi += 1;
+            };
+            if let Err(err) = space.map_contiguous(
+                page,
+                Frame(start_frame_index),
+                pages_usize,
+                MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            ) {
+                self.rollback_partial_map(space, first_data_slot, gi);
+                return Err(MmioError::PageTable(err));
             }
+            gi += pages_usize;
         }
 
         // The window's reported physical base is advisory (the first chunk's

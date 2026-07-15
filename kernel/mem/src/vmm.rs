@@ -198,6 +198,9 @@ pub enum PageTableError {
     AlreadyMapped,
     /// The page is not currently mapped.
     NotMapped,
+    /// A contiguous virtual-page or physical-frame range overflowed its
+    /// address representation before any mapping was installed.
+    AddressOverflow,
     /// The flags are inconsistent (e.g. `EXEC | WRITE` for a process
     /// that requested W^X). Defensive — the trait implementation may
     /// also use this to surface MMU constraints.
@@ -353,6 +356,79 @@ impl<P: PageTable> AddressSpace<P> {
             .map_err(from_map_error)?;
         self.live.insert(page, flags);
         self.table.flush_page(vaddr);
+        Ok(())
+    }
+
+    /// Map `page_count` consecutive virtual pages to consecutive physical
+    /// frames and synchronize their TLB visibility as one range.
+    ///
+    /// The operation validates the complete range before editing the page
+    /// table. If a backend rejects a leaf after an earlier leaf was installed,
+    /// every leaf from this call is removed and the affected range is flushed
+    /// before the error returns, so callers never observe a partial mapping.
+    /// A zero page count is a successful no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PageTableError::AddressOverflow`] when either range cannot be
+    /// represented, [`PageTableError::AlreadyMapped`] when any destination
+    /// page is live, or the bridged backend error from
+    /// [`HalAddressSpace::map_page`].
+    pub fn map_contiguous(
+        &mut self,
+        start_page: Page,
+        start_frame: Frame,
+        page_count: usize,
+        flags: MapFlags,
+    ) -> Result<(), PageTableError> {
+        if page_count == 0 {
+            return Ok(());
+        }
+        let last_index = page_count - 1;
+        let last_byte_offset = u64::try_from(last_index)
+            .ok()
+            .and_then(|index| index.checked_mul(PAGE_SIZE as u64))
+            .ok_or(PageTableError::AddressOverflow)?;
+        start_page
+            .start()
+            .as_u64()
+            .checked_add(last_byte_offset)
+            .ok_or(PageTableError::AddressOverflow)?;
+        start_frame
+            .0
+            .checked_add(last_index)
+            .ok_or(PageTableError::AddressOverflow)?;
+
+        for offset in 0..page_count {
+            let vaddr = start_page.start().as_u64() + offset as u64 * PAGE_SIZE as u64;
+            let page = Page(VirtAddr::new(vaddr));
+            if self.live.contains_key(&page) {
+                return Err(PageTableError::AlreadyMapped);
+            }
+        }
+
+        let start_vaddr = start_page.start().as_u64();
+        for offset in 0..page_count {
+            let vaddr = start_vaddr + offset as u64 * PAGE_SIZE as u64;
+            let page = Page(VirtAddr::new(vaddr));
+            let frame = Frame(start_frame.0 + offset);
+            if let Err(err) = self
+                .table
+                .map_page(vaddr, frame.start().as_u64(), to_page_flags(flags))
+                .map_err(from_map_error)
+            {
+                for rollback in 0..offset {
+                    let rollback_vaddr = start_vaddr + rollback as u64 * PAGE_SIZE as u64;
+                    let rollback_page = Page(VirtAddr::new(rollback_vaddr));
+                    let _ = self.table.unmap(rollback_vaddr);
+                    self.live.remove(&rollback_page);
+                }
+                self.table.flush_range(start_vaddr, offset);
+                return Err(err);
+            }
+            self.live.insert(page, flags);
+        }
+        self.table.flush_range(start_vaddr, page_count);
         Ok(())
     }
 
@@ -615,6 +691,12 @@ impl TlbShootdown for HostPageTable {
     fn flush_page(&mut self, _vaddr: u64) {
         self.flush_count += 1;
     }
+
+    fn flush_range(&mut self, _start_vaddr: u64, page_count: usize) {
+        if page_count != 0 {
+            self.flush_count += 1;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -647,6 +729,44 @@ mod tests {
         assert!(fl.contains(MapFlags::READ));
         assert!(fl.contains(MapFlags::WRITE));
         assert!(!fl.contains(MapFlags::EXEC));
+    }
+
+    #[test]
+    fn contiguous_map_flushes_once_for_the_whole_range() {
+        let mut s = AddressSpace::new(HostPageTable::new());
+        s.map_contiguous(p(4), Frame(20), 3, MapFlags::READ | MapFlags::WRITE)
+            .unwrap();
+
+        assert_eq!(s.translate(p(4)).map(|entry| entry.0), Some(Frame(20)));
+        assert_eq!(s.translate(p(5)).map(|entry| entry.0), Some(Frame(21)));
+        assert_eq!(s.translate(p(6)).map(|entry| entry.0), Some(Frame(22)));
+        assert_eq!(s.mapped_pages(), 3);
+        assert_eq!(s.table.flush_count, 1);
+    }
+
+    #[test]
+    fn contiguous_map_rejects_a_live_destination_without_partial_changes() {
+        let mut s = AddressSpace::new(HostPageTable::new());
+        s.map(p(5), Frame(50), MapFlags::READ).unwrap();
+
+        assert_eq!(
+            s.map_contiguous(p(4), Frame(20), 3, MapFlags::READ),
+            Err(PageTableError::AlreadyMapped)
+        );
+        assert!(s.translate(p(4)).is_none());
+        assert_eq!(s.translate(p(5)).map(|entry| entry.0), Some(Frame(50)));
+        assert!(s.translate(p(6)).is_none());
+        assert_eq!(s.mapped_pages(), 1);
+        assert_eq!(s.table.flush_count, 1);
+    }
+
+    #[test]
+    fn empty_contiguous_map_is_a_noop() {
+        let mut s = AddressSpace::new(HostPageTable::new());
+        s.map_contiguous(p(4), Frame(20), 0, MapFlags::READ)
+            .unwrap();
+        assert_eq!(s.mapped_pages(), 0);
+        assert_eq!(s.table.flush_count, 0);
     }
 
     #[test]
