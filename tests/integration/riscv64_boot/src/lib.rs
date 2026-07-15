@@ -17,28 +17,28 @@
 //!
 //! # Module map
 //!
-//! | Module       | Role                                                                 |
-//! | ------------ | -------------------------------------------------------------------- |
-//! | [`plic_irq`] | [`PlicIrqController`] — the `kernel/irq` `IrqController` bridge.      |
-//! | `publish`    | Set-once firmware-map / DTB observers for the device verticals (freestanding). |
-//! | `boot`       | Thin wrapper: publish, then delegate to `rustos_kernel::riscv64::boot` (freestanding). |
+//! | Module    | Role                                                                 |
+//! | --------- | -------------------------------------------------------------------- |
+//! | `publish` | Set-once firmware-map / DTB observers for the device verticals (freestanding). |
+//! | `boot`    | Thin wrapper: publish, then delegate to `rustos_kernel::riscv64::boot` (freestanding). |
 //!
-//! [`plic_irq`] is host-buildable so its mask-before-wake regression
-//! test runs under `cargo test`; `boot` / `publish` are gated to the
+//! The `kernel/irq` `IrqController` bridge over the arch port's PLIC register
+//! driver ([`PlicIrqController`]) is the production
+//! [`rustos_kernel::riscv64_plic_irq`] definition, re-exported here for the
+//! freestanding `virt`-board verticals (one definition, no duplication); its
+//! mask-before-wake / re-arm regression test lives with it and runs under
+//! `cargo test` on the CI host. `boot` / `publish` are gated to the
 //! freestanding `virt`-board target because they drive the arch port's
-//! freestanding-only `halt_current_hart` / SBI console and are
-//! exercised by the QEMU boot vertical.
+//! freestanding-only `halt_current_hart` / SBI console and are exercised by
+//! the QEMU boot vertical.
 
 #![cfg_attr(freestanding, no_std)]
 #![deny(missing_docs)]
 
-// Host tests use `std` (the `plic_irq` mock register file). The crate
-// stays `no_std` for the freestanding build (no hacks).
+// Host tests use `std`. The crate stays `no_std` for the freestanding build
+// (no hacks).
 #[cfg(test)]
 extern crate std;
-
-pub mod plic_irq;
-pub use plic_irq::PlicIrqController;
 
 #[cfg(freestanding)]
 pub mod boot;
@@ -49,3 +49,10 @@ pub mod publish;
 pub use boot::{boot, try_boot, BootError, RiscvBinArch};
 #[cfg(freestanding)]
 pub use publish::{published_dtb, published_memory_map};
+
+// The single `PlicIrqController` definition lives in the production kernel
+// (`rustos_kernel::riscv64_plic_irq`); re-export it so the `virt`-board
+// virtio-MMIO verticals name it under the same path they always have. Only
+// the freestanding target links the kernel, so the re-export is gated to it.
+#[cfg(freestanding)]
+pub use rustos_kernel::riscv64_plic_irq::PlicIrqController;

@@ -2894,12 +2894,9 @@ dependencies = [
 name = "rustos-test-riscv64-boot"
 version = "0.0.0"
 dependencies = [
- "rustos-arch-riscv64",
  "rustos-itest-harness",
  "rustos-kernel",
- "rustos-kernel-irq",
  "rustos-kernel-mem",
- "rustos-kernel-sec",
  "rustos-log",
  "rustos-sync",
 ]

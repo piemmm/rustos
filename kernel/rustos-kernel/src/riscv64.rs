@@ -16,6 +16,10 @@ pub mod boot;
 #[cfg(freestanding)]
 pub mod init_spawn;
 #[cfg(freestanding)]
+pub mod irq;
+#[cfg(freestanding)]
+pub mod root_unlock;
+#[cfg(freestanding)]
 pub mod spawn_producer;
 
 /// First non-addressable user virtual address on this port.

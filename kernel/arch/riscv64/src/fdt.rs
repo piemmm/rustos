@@ -57,6 +57,25 @@ pub fn plic_ndev(fdt: &Fdt<'_>) -> Option<u32> {
     None
 }
 
+/// The physical base of the PLIC register block, read from the first PLIC
+/// node the tree describes (`riscv,plic0` / `sifive,plic-1.0.0`).
+///
+/// The `install_irq_dispatch` PLIC path maps the controller's registers at
+/// this discovered address — a value read from the firmware tree, never a
+/// board constant. [`None`] when the tree describes no PLIC node or its node
+/// carries no readable `reg` base (the caller then wires no external-IRQ
+/// dispatch and interrupt-driven bring-up fails closed).
+#[must_use]
+pub fn plic_base(fdt: &Fdt<'_>) -> Option<u64> {
+    for node in fdt.nodes() {
+        let node = node.ok()?;
+        if node.is_compatible("riscv,plic0") || node.is_compatible("sifive,plic-1.0.0") {
+            return node.property("reg")?.read_be_u64(0).ok();
+        }
+    }
+    None
+}
+
 /// Decode the PLIC interrupt source of the `virtio,mmio` node whose `reg`
 /// base equals `slot_base`.
 ///
@@ -107,7 +126,9 @@ pub(crate) mod tests {
     //! `[dev-dependencies]`.
     pub(crate) use rustos_fdt::fixture::{virt_like, virt_like_with_virtio};
 
-    use super::{plic_device_source, plic_ndev, plic_source_in_range, Fdt, PLIC_SOURCE_NONE};
+    use super::{
+        plic_base, plic_device_source, plic_ndev, plic_source_in_range, Fdt, PLIC_SOURCE_NONE,
+    };
 
     /// A `virt`-shaped tree with the given virtio-MMIO slots and PLIC
     /// source count, ready for the resolver assertions.
@@ -162,6 +183,24 @@ pub(crate) mod tests {
         let blob = tree_with(53, &[(0x1000_1000, 1)]);
         let fdt = Fdt::new(&blob).expect("valid fdt");
         assert_eq!(plic_ndev(&fdt), Some(53));
+    }
+
+    #[test]
+    fn plic_base_reads_the_controller_register_base() {
+        // The `virt`-shaped fixture places the PLIC at `plic@c000000`, so the
+        // resolver reads exactly that discovered register base.
+        let blob = tree_with(53, &[(0x1000_1000, 1)]);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(plic_base(&fdt), Some(0x0c00_0000));
+    }
+
+    #[test]
+    fn plic_base_on_a_tree_without_a_plic_is_none() {
+        // A bare board (no PLIC node) yields no base, so the caller wires no
+        // external-IRQ dispatch rather than guessing an address (fail closed).
+        let blob = virt_like(0x8000_0000, 0x1000_0000, 10_000_000);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(plic_base(&fdt), None);
     }
 
     #[test]

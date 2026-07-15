@@ -273,6 +273,28 @@ rustos-arch-riscv64 = { path = "../arch/riscv64", version = "=0.0.0" }
 # driver-bus crates (`AGENTS.md` §17.4 / §8), exactly as the aarch64 and
 # x86_64 boot paths name their bus crates.
 rustos-drv-bus-mmio = { path = "../../drivers/bus/mmio", version = "=0.0.0" }
+# The concrete virtio transport the in-kernel root-unlock service
+# (`riscv64/root_unlock`) provisions the bootstrap virtio-blk root device
+# on over the `virt`-board virtio-MMIO bus (`plans/NETWORK.md`
+# N4e-riscv64), exactly as the aarch64 root-unlock path names it.
+rustos-drv-bus-virtio = { path = "../../drivers/bus/virtio", version = "=0.0.0" }
+# The signed-manifest driver-load gate (`AGENTS.md` §8 / §9): the riscv64
+# root-unlock bring-up admits the bootstrap-floor virtio-blk driver through
+# `drvhost::Host::load` before it reads the volume, and the persistent
+# driver-store serve loop autoloads signed `/System` drivers through the
+# same gate — exactly as the aarch64 boot path does. `drvhost` stays free
+# of `kernel/*` deps (`AGENTS.md` §17.4); the in-kernel resource hosts live
+# in `kernel/virtio`.
+rustos-drvhost = { path = "../../userland/system/drvhost", version = "=0.0.0" }
+# The user-space device manager's autoload policy (`AGENTS.md` §18.3): the
+# riscv64 `driver_spawn_loader` implements its `DriverLoader` seam to spawn
+# a discovered user-space driver with the matched node's device-resource
+# grants (`plans/NETWORK.md` N4e-riscv64). `devmgr` stays on `lib/*` only
+# (§17.4); the kernel binary (`Layer::Tooling`) is the permitted
+# integration point. Linked with `default-features = false` so the device
+# manager's `program` feature (its `rustos-rt` userland runtime) never
+# enters the kernel image (`AGENTS.md` §17.4 / §1).
+rustos-devmgr = { path = "../../userland/system/devmgr", version = "=0.0.0", default-features = false }
 
 [build-dependencies]
 # The aarch64 build script embeds the `init` `Run` rxe so the boot path can
@@ -309,6 +331,14 @@ rustos-drv-storage-emmc2 = { path = "../../drivers/storage/emmc2", version = "=0
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
 
 [dev-dependencies]
+# The riscv64 PLIC `IrqController` bridge (`src/riscv64_plic_irq.rs`) is
+# generic over `PlicMmio` and host-buildable, so its mask-before-wake / re-arm
+# regression test drives the arch port's `plic::PlicController` against an
+# in-memory mock under `cargo test` on the CI host. The arch port is only a
+# production dependency under `cfg(target_arch = "riscv64")`; the host test
+# build needs it too, so it is also a dev-dependency (the same crate the
+# freestanding riscv64 image links, `AGENTS.md` §2.2).
+rustos-arch-riscv64 = { path = "../arch/riscv64", version = "=0.0.0" }
 # The transform-cache host tests capture the reclaim audit records
 # (`plans/SMARTRAM.md` SMART9) through `kernel/core`'s `TestSink`,
 # exposed by its host-only `test-arch` feature. Feature unification
