@@ -33,8 +33,13 @@ pub(crate) const SEED: [u8; 32] = [7u8; 32];
 /// An in-memory [`FilesystemService`] over a fixed file map. Read-only:
 /// every mutating operation fails closed, mirroring the read paths the
 /// bundle store actually exercises.
+///
+/// `read_calls` counts, per path, how many times [`FilesystemService::read`]
+/// was invoked, so a test can prove a file (e.g. `Run`) is read from disk
+/// the expected number of times.
 pub(crate) struct MemFs {
     pub(crate) files: BTreeMap<String, Vec<u8>>,
+    read_calls: std::sync::Mutex<BTreeMap<String, usize>>,
 }
 
 impl MemFs {
@@ -44,7 +49,18 @@ impl MemFs {
                 .iter()
                 .map(|(path, bytes)| ((*path).to_string(), bytes.to_vec()))
                 .collect(),
+            read_calls: std::sync::Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// How many times [`FilesystemService::read`] was called for `path`.
+    pub(crate) fn read_calls(&self, path: &str) -> usize {
+        self.read_calls
+            .lock()
+            .expect("read-call counter not poisoned")
+            .get(path)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// The immediate children of `dir`, derived from the file paths.
@@ -105,6 +121,12 @@ impl FilesystemService for MemFs {
         offset: u64,
         buf: &mut [u8],
     ) -> Result<usize, Errno> {
+        *self
+            .read_calls
+            .lock()
+            .expect("read-call counter not poisoned")
+            .entry(path.to_string())
+            .or_insert(0) += 1;
         let bytes = self.files.get(path).ok_or(Errno::NotFound)?;
         let start = usize::try_from(offset).map_err(|_| Errno::OutOfRange)?;
         if start >= bytes.len() {

@@ -42,6 +42,7 @@ pub fn run_all<S: SchedulerPolicy<TestArch>>() {
     spawn_parked_stays_parked_until_unpark::<S>();
     block_wake_roundtrip::<S>();
     unpark_before_park_is_not_lost::<S>();
+    cross_cpu_ipc_reply_wakes_the_caller_without_delay::<S>();
     lifecycle_error_codes::<S>();
     yield_current_semantics::<S>();
     running_cpu_agrees_with_current_task::<S>();
@@ -212,6 +213,98 @@ fn unpark_before_park_is_not_lost<S: SchedulerPolicy<TestArch>>() {
         sched.state_of(id),
         TaskState::Parked,
         "with no pending token, the next park takes effect"
+    );
+}
+
+/// A cross-core IPC round-trip wakes the parked caller **promptly**: the
+/// reply delivers an inter-processor interrupt to the exact core the woken
+/// caller lands on, so that core reschedules at once instead of waiting for
+/// its next timer tick.
+///
+/// This is the multicore IPC-latency property. A blocking `ipc_call` parks
+/// the caller off the run queue awaiting its reply; the server, running on
+/// a different core, issues `ipc_reply`, which wakes the caller via
+/// `scheduler.unpark(caller)`. If that `unpark` did not kick the caller's
+/// core, the reply would sit unseen until an unrelated event happened to
+/// reschedule that core (a timer tick, another wake) — an unduly long,
+/// load-dependent inter-process round-trip latency on an otherwise idle
+/// core. Every policy must deliver the wake IPI, and to exactly one core
+/// (wake-one, never a broadcast that would disturb unrelated cores), so the
+/// property is asserted here for all of them on an SMP topology, through the
+/// public trait surface only. The suite is deterministic (it counts IPIs
+/// rather than timing a wall clock), so this can never become a flaky
+/// load-dependent test.
+fn cross_cpu_ipc_reply_wakes_the_caller_without_delay<S: SchedulerPolicy<TestArch>>() {
+    // Four cores stand in for processes that may be pinned to different
+    // cores: the caller (client) blocks awaiting its reply; the server, on
+    // another core, issues the reply-wake.
+    let (arch, sched) = make::<S>(4, 64);
+    arch.set_current_cpu(0);
+
+    // The caller: a task that parks, exactly as a thread blocked in
+    // `ipc_call` awaiting the server's reply. Dispatch it once, wherever it
+    // was placed, so it commits to `Parked`.
+    let caller = sched
+        .spawn(1, Priority::Normal, |_| TaskAction::Park)
+        .expect("spawn caller");
+    let mut ran_on = None;
+    for cpu in 0..sched.cpu_count() {
+        if sched.step(cpu) == Ok(StepOutcome::Ran(caller)) {
+            ran_on = Some(cpu);
+            break;
+        }
+    }
+    assert!(
+        ran_on.is_some(),
+        "the caller ran once and blocked awaiting its reply"
+    );
+    assert_eq!(
+        sched.state_of(caller),
+        TaskState::Parked,
+        "the blocked caller is off the run queue awaiting the reply"
+    );
+
+    // Snapshot per-core IPI counts, then model the server's `ipc_reply`:
+    // wake the parked caller from another core. Everything after this point
+    // is attributable to the reply-wake alone.
+    let before: Vec<u64> = (0..sched.cpu_count()).map(|c| arch.ipi_count(c)).collect();
+    let strays_before = arch.stray_ipi_count();
+    sched
+        .unpark(caller)
+        .expect("the reply wakes the parked caller");
+
+    // Exactly one core — the one the woken caller was placed on — receives
+    // exactly one IPI; every other core is left undisturbed, and no IPI is
+    // ever sent to an out-of-range core.
+    let kicked: Vec<u32> = (0..sched.cpu_count())
+        .filter(|&c| arch.ipi_count(c) == before[c as usize] + 1)
+        .collect();
+    let undisturbed = (0..sched.cpu_count())
+        .filter(|&c| arch.ipi_count(c) == before[c as usize])
+        .count();
+    assert_eq!(
+        kicked.len(),
+        1,
+        "the reply kicks exactly the caller's core so it reschedules at once"
+    );
+    assert_eq!(
+        undisturbed,
+        (sched.cpu_count() - 1) as usize,
+        "no unrelated core is disturbed (wake-one, never a broadcast)"
+    );
+    assert_eq!(
+        arch.stray_ipi_count(),
+        strays_before,
+        "the wake never targets an out-of-range core"
+    );
+
+    // And the kicked core dispatches the woken caller immediately — the
+    // reply is picked up now, not deferred to some later tick.
+    let core = kicked[0];
+    assert_eq!(
+        sched.step(core),
+        Ok(StepOutcome::Ran(caller)),
+        "the kicked core runs the woken caller at once"
     );
 }
 

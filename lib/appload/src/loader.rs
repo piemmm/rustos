@@ -122,10 +122,13 @@ impl<'a> AppLoader<'a> {
 
         self.verify_manifest_signature(bundle, &bytes, &header)?;
 
-        let actual = self
-            .timed(&mut load_ns, || self.cfg.store.content_hash(bundle))
+        // One pass reads and hashes the bundle contents and hands back the
+        // entry-point `Run` image read during that same walk, so `Run` is
+        // read from disk once rather than twice.
+        let contents = self
+            .timed(&mut load_ns, || self.cfg.store.contents(bundle))
             .map_err(|e| self.store_error(bundle, e))?;
-        if ct_ne(&actual, &header.content_hash) {
+        if ct_ne(&contents.content_hash, &header.content_hash) {
             self.audit(
                 events::APP_CONTENT_MISMATCH,
                 Level::Warn,
@@ -138,7 +141,9 @@ impl<'a> AppLoader<'a> {
         let requested = self.requested_capabilities(&bytes, &header, bundle)?;
         let granted = requested.intersection(user_grants);
 
-        let (run_image, libraries) = self.validate_run_image(bundle, &mut load_ns)?;
+        // The `Run` bytes are already authenticated: they were part of the
+        // content the signed hash just matched.
+        let (run_image, libraries) = self.validate_run_image(bundle, contents.run_image)?;
 
         let run_path = join(bundle, "Run");
         // The two phases split the whole load: time spent inside the store
@@ -183,9 +188,13 @@ impl<'a> AppLoader<'a> {
         }
     }
 
-    /// Read and validate the entry-point `Run` binary and resolve the shared
-    /// libraries it declares it needs, returning the validated bytes so the
-    /// caller spawns exactly what was checked (no re-read).
+    /// Validate the entry-point `Run` binary (already read once during the
+    /// content-hash walk) and resolve the shared libraries it declares it
+    /// needs, returning the validated bytes so the caller spawns exactly what
+    /// was checked (no re-read).
+    ///
+    /// `run_bytes` were read and authenticated as part of the signed content
+    /// hash, so this method performs no further disk I/O.
     ///
     /// `LoadImage::parse` enforces the hardening invariants (PIE, W^X,
     /// and the syscall-hash CFI tag) on the binary; a malformed image or a
@@ -193,17 +202,13 @@ impl<'a> AppLoader<'a> {
     ///
     /// # Errors
     ///
-    /// [`AppError::Store`] if the binary cannot be read, [`AppError::RunImage`]
-    /// if it is not a valid `rxe` image, or [`AppError::Library`] if a needed
-    /// library violates the policy.
+    /// [`AppError::RunImage`] if the bytes are not a valid `rxe` image, or
+    /// [`AppError::Library`] if a needed library violates the policy.
     fn validate_run_image(
         &self,
         bundle: &str,
-        load_ns: &mut u64,
+        run_bytes: alloc::vec::Vec<u8>,
     ) -> Result<(alloc::vec::Vec<u8>, alloc::vec::Vec<ResolvedLibrary>), AppError> {
-        let run_bytes = self
-            .timed(load_ns, || self.cfg.store.read_run(bundle))
-            .map_err(|e| self.store_error(bundle, e))?;
         let image = LoadImage::parse(&run_bytes, &self.cfg.syscall_table_hash).map_err(|e| {
             self.audit(
                 events::APP_RUN_IMAGE_INVALID,
@@ -439,7 +444,7 @@ fn event_message(id: EventId) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{event_message, AppLoader, AppLoaderConfig};
-    use crate::bundle::{BundleStore, Verifier};
+    use crate::bundle::{BundleContents, BundleStore, Verifier};
     use crate::error::AppError;
     use crate::events;
     use alloc::string::{String, ToString};
@@ -566,6 +571,10 @@ mod tests {
         content: [u8; 32],
         run: Vec<u8>,
         entries_fail: bool,
+        /// How many times [`BundleStore::contents`] was called, so a test can
+        /// prove the load path reads (and so hashes) the bundle contents —
+        /// which carry the `Run` image — exactly once.
+        contents_calls: core::cell::Cell<usize>,
     }
     impl MockStore {
         fn good(caps: &[CapabilityId]) -> Self {
@@ -575,6 +584,7 @@ mod tests {
                 content: CONTENT_HASH,
                 run: build_run_image(&[RUNTIME_LIB], KERNEL_HASH),
                 entries_fail: false,
+                contents_calls: core::cell::Cell::new(0),
             }
         }
     }
@@ -588,11 +598,12 @@ mod tests {
         fn read_appinfo(&self, _bundle: &str) -> Result<Vec<u8>, Errno> {
             Ok(self.appinfo.clone())
         }
-        fn content_hash(&self, _bundle: &str) -> Result<[u8; 32], Errno> {
-            Ok(self.content)
-        }
-        fn read_run(&self, _bundle: &str) -> Result<Vec<u8>, Errno> {
-            Ok(self.run.clone())
+        fn contents(&self, _bundle: &str) -> Result<BundleContents, Errno> {
+            self.contents_calls.set(self.contents_calls.get() + 1);
+            Ok(BundleContents {
+                content_hash: self.content,
+                run_image: self.run.clone(),
+            })
         }
     }
 
@@ -700,12 +711,20 @@ mod tests {
         // so a spawner maps exactly what the pipeline checked.
         assert_eq!(
             app.run_image(),
-            store.read_run("/Apps/Example.app").expect("run").as_slice()
+            store
+                .contents("/Apps/Example.app")
+                .expect("contents")
+                .run_image
+                .as_slice()
         );
         assert!(app.granted().contains(CapabilityId::NET_RAW));
         assert!(!app.granted().contains(CapabilityId::FS_MOUNT));
         assert_eq!(app.granted().len(), 1);
         assert_eq!(sink.count(events::APP_LOADED), 1);
+        // The load path reads (and hashes) the bundle contents exactly once;
+        // the `Run` image comes back from that same pass rather than a
+        // second disk read. The extra `+ 1` is this test's own probe above.
+        assert_eq!(store.contents_calls.get(), 1 + 1);
     }
 
     /// Records the exact byte stream the loader asked to be verified, so a
@@ -826,6 +845,7 @@ mod tests {
             content: CONTENT_HASH,
             run: build_run_image(&[RUNTIME_LIB], KERNEL_HASH),
             entries_fail: false,
+            contents_calls: core::cell::Cell::new(0),
         };
         let verifier = AcceptVerifier;
         let sink = RecordingSink::new();
@@ -1029,11 +1049,14 @@ mod tests {
 
     #[test]
     fn app_loaded_records_load_and_verify_durations() {
-        // The clock advances 1000 ns per read; the pipeline makes four store
-        // reads (entries, AppInfo, content hash, Run), each opened and closed
-        // once, so the load phase is 4 × 1000 ns and the verify phase is the
-        // remaining elapsed span. Both must be present and non-zero on the
-        // successful-load record, so a slow first launch is diagnosable.
+        // The clock advances 1000 ns per read; the pipeline makes three timed
+        // store reads (entries, AppInfo, and the single contents pass that
+        // both hashes the bundle and returns the `Run` image), each opened and
+        // closed once, so the load phase is 3 × 1000 ns and the verify phase
+        // is the remaining elapsed span. Both must be present and non-zero on
+        // the successful-load record, so a slow first launch is diagnosable.
+        // (`Run` is no longer read a second time, so this is one span fewer
+        // than the old read-twice pipeline.)
         let store = MockStore::good(&[]);
         let verifier = AcceptVerifier;
         let sink = RecordingSink::new();
@@ -1049,7 +1072,7 @@ mod tests {
             .loaded_phases
             .borrow()
             .expect("APP_LOADED carries load and verify durations");
-        assert_eq!(load, rustos_abi::Duration64::from_nanos(4_000));
+        assert_eq!(load, rustos_abi::Duration64::from_nanos(3_000));
         assert!(
             verify > rustos_abi::Duration64::ZERO,
             "verification time must be recorded"

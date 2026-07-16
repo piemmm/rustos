@@ -27,17 +27,21 @@ Fails closed at the first problem (`AGENTS.md` §5.4):
    against the kernel's (`AppError::InterfaceHashMismatch`, §9 / §19.2).
 4. **Signature** — verify the Ed25519 signature over the manifest's signed
    range via the `Verifier` seam (`AppError::Signature`).
-5. **Contents** — constant-time compare of the bundle's content hash (from
-   the `BundleStore` seam) against the hash the signature covers
-   (`AppError::ContentHashMismatch`, §16.5).
+5. **Contents** — the `BundleStore::contents` seam hashes every file the
+   signature covers **and**, in that same walk, returns the entry-point
+   `Run` image (the `Run` binary is one of the hashed files, so it is read
+   from disk exactly once — never a second time for the entry image). The
+   content hash is compared constant-time against the hash the signature
+   covers (`AppError::ContentHashMismatch`, §16.5); the `Run` bytes are
+   thereby authenticated by that same signed hash.
 6. **Authority** — grant the **intersection** of the manifest's requested
    capabilities with the launching user's grants; ambient authority is
    forbidden (§4, §5.2), so a request is never widened.
-7. **Run image** — read the `Run` binary and validate it through
+7. **Run image** — validate the already-read `Run` bytes through
    `rustos_abi::rxe::LoadImage::parse` with the kernel's syscall hash as the
-   expected CFI tag. This enforces the §19.2 hardening invariants (PIE,
-   W^X, CFI tag) on the entry-point binary; a malformed image or a CFI-tag
-   mismatch is refused (`AppError::RunImage`).
+   expected CFI tag (no re-read). This enforces the §19.2 hardening
+   invariants (PIE, W^X, CFI tag) on the entry-point binary; a malformed
+   image or a CFI-tag mismatch is refused (`AppError::RunImage`).
 8. **Needed libraries** — resolve every shared library the `Run` image
    declares it needs (`LoadImage::needed_libraries`) under the §16.4 policy
    below. This binds the curated *System runtime / C ABI* library a non-Rust
@@ -61,8 +65,10 @@ component or one pointing anywhere else is refused (`AppError::Library`,
 
 Injected, so the security-relevant code is testable without a kernel:
 
-- `BundleStore` — `entries` / `read_appinfo` / `content_hash` / `read_run`.
-  Backed by the VFS on a running system.
+- `BundleStore` — `entries` / `read_appinfo` / `contents` (the single pass
+  that both hashes the bundle contents and returns the `Run` image, so the
+  entry binary is read from disk once). Backed by the VFS on a running
+  system.
 - `Verifier::verify(signed, signature, signer_pubkey)` — Ed25519
   verification. Backed by `lib/crypto` (§2.12).
 - `Clock::now_ns()` — monotonic nanoseconds, read only to time the load and
@@ -107,8 +113,14 @@ error; a truncated capability body; the in-policy and out-of-policy library
 resolutions; the C-bundle run-image needed-library resolution (runtime from
 `/System/Libraries/` + a private bundle library), capability intersection for
 a C bundle, an out-of-tree needed library, a run-image CFI mismatch, and a
-malformed run image; the `APP_LOADED` record carrying non-zero `load` and
-`verify` durations; plus the `EventId` range/uniqueness invariants.
+malformed run image; that the bundle contents (carrying the `Run` image) are
+read exactly once per load; the `APP_LOADED` record carrying non-zero `load`
+and `verify` durations; plus the `EventId` range/uniqueness invariants.
+
+The kernel-side single-read guarantee is additionally pinned by
+`rustos-kernel-core`'s `the_run_binary_is_read_from_disk_exactly_once`, which
+counts the `FilesystemService::read` calls the `FsBundleStore` makes for the
+`Run` path over a full load.
 
 ## Stability
 

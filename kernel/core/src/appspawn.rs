@@ -51,7 +51,7 @@ use rustos_abi::{
     APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_SUFFIX, MIME_ENTRY_LEN, SYSTEM_APP_STORE,
     SYSTEM_SERVICE_STORE,
 };
-use rustos_appload::{AppError, BundleStore, Clock, LoadedApp, Verifier};
+use rustos_appload::{AppError, BundleContents, BundleStore, Clock, LoadedApp, Verifier};
 use rustos_crypto::{Ed25519PublicKey, Ed25519Signature, Sha256Stream};
 use rustos_kernel_mem::{CacheBudget, MemoryPressure};
 use rustos_log::Sink;
@@ -351,7 +351,7 @@ impl BundleStore for FsBundleStore<'_> {
         self.read_file(&format!("{bundle}/AppInfo"), APPINFO_MAX)
     }
 
-    fn content_hash(&self, bundle: &str) -> Result<[u8; 32], Errno> {
+    fn contents(&self, bundle: &str) -> Result<BundleContents, Errno> {
         let mut files = Vec::new();
         let mut total = 0usize;
         self.collect_files(bundle, "", 0, &mut total, &mut files)?;
@@ -364,11 +364,21 @@ impl BundleStore for FsBundleStore<'_> {
             .collect();
         let mut hasher = Sha256Stream::new();
         digest_bundle_contents(&digests, &mut |chunk| hasher.update(chunk))?;
-        Ok(hasher.finalize())
-    }
-
-    fn read_run(&self, bundle: &str) -> Result<Vec<u8>, Errno> {
-        self.read_file(&format!("{bundle}/Run"), BUNDLE_FILE_MAX)
+        let content_hash = hasher.finalize();
+        drop(digests);
+        // The `Run` binary is one of the files the walk just read and
+        // hashed, so hand its bytes straight back rather than reading the
+        // whole file a second time. Its layout presence is guaranteed by the
+        // loader's layout check; a bundle missing it fails closed here too.
+        let run_image = files
+            .into_iter()
+            .find(|(path, _)| path == "Run")
+            .map(|(_, bytes)| bytes)
+            .ok_or(Errno::NotFound)?;
+        Ok(BundleContents {
+            content_hash,
+            run_image,
+        })
     }
 }
 
@@ -559,6 +569,25 @@ mod tests {
         assert_eq!(app.granted().len(), 2);
         // The spawnable image is byte-for-byte the on-disk `Run`.
         assert_eq!(app.run_image(), run.as_slice());
+    }
+
+    #[test]
+    fn the_run_binary_is_read_from_disk_exactly_once() {
+        // Regression: the load gate used to read `Run` twice — once in the
+        // content-hash walk and again to fetch the entry-point image — which
+        // doubled the disk I/O for the biggest file in a command bundle. The
+        // hash walk now hands the `Run` bytes back, so `Run` is read exactly
+        // as many times as any other single-pass bundle file (here the help
+        // document, read only during the walk), and never more.
+        let (fs, anchor, _) = composed_bundle(vec![]);
+        load(&fs, anchor).expect("loads");
+        let run_reads = fs.read_calls("/System/Apps/ps.app/Run");
+        let help_reads = fs.read_calls("/System/Apps/ps.app/Help/en-US/ps.md");
+        assert!(run_reads > 0, "the Run image must actually be read");
+        assert_eq!(
+            run_reads, help_reads,
+            "Run is read once (the content-hash walk), not a second time for the entry image"
+        );
     }
 
     #[test]

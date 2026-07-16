@@ -16,7 +16,7 @@ use rustos_abi::{Errno, LibraryScope};
 
 /// Reads an application bundle from storage.
 ///
-/// All three methods address a bundle by its root path (e.g.
+/// Every method addresses a bundle by its root path (e.g.
 /// `/Apps/Example.app`). The implementation enforces the filesystem's own
 /// permission checks; the loader treats every method as
 /// fallible and **never** assumes a trusted result.
@@ -37,24 +37,42 @@ pub trait BundleStore {
     /// Returns the store's [`Errno`] if the manifest cannot be read.
     fn read_appinfo(&self, bundle: &str) -> Result<Vec<u8>, Errno>;
 
-    /// The cryptographic digest of the bundle's contents, computed by the
-    /// store over every file the signature covers. The
-    /// loader compares it against the hash embedded in the signed manifest.
+    /// Hash every bundle file the signature covers **and** return the
+    /// entry-point `Run` image read during that same walk.
+    ///
+    /// The `Run` binary is one of the files the content hash covers, so a
+    /// store must already read it to compute the digest. Returning it here
+    /// means the load path reads `Run` from disk exactly **once** — the
+    /// content-hash pass and the entry-point read are the same pass — rather
+    /// than reading the whole file a second time. The loader compares the
+    /// returned [`BundleContents::content_hash`] against the hash embedded in
+    /// the signed manifest before it trusts [`BundleContents::run_image`],
+    /// so the bytes are authenticated by the same signed hash.
     ///
     /// # Errors
     ///
-    /// Returns the store's [`Errno`] if the contents cannot be hashed.
-    fn content_hash(&self, bundle: &str) -> Result<[u8; 32], Errno>;
+    /// Returns the store's [`Errno`] if the contents cannot be read or
+    /// hashed, or if the bundle carries no `Run` file.
+    fn contents(&self, bundle: &str) -> Result<BundleContents, Errno>;
+}
 
-    /// The raw bytes of the bundle's entry-point `Run` binary (an `rxe`
-    /// load image). The loader validates it through
-    /// [`rustos_abi::LoadImage::parse`] and resolves the shared libraries it
-    /// declares it needs.
-    ///
-    /// # Errors
-    ///
-    /// Returns the store's [`Errno`] if the `Run` binary cannot be read.
-    fn read_run(&self, bundle: &str) -> Result<Vec<u8>, Errno>;
+/// A bundle's verified contents: the content hash over every file the
+/// signature covers, paired with the entry-point `Run` image read out of
+/// that same hashing walk.
+///
+/// Produced by [`BundleStore::contents`]. Pairing the two is what lets the
+/// loader read `Run` from disk once instead of twice (once to hash, once to
+/// execute).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BundleContents {
+    /// The cryptographic digest over the canonical framing of every bundle
+    /// file the signature covers (every file except the top-level
+    /// `AppInfo`). Compared against the signed manifest's embedded hash.
+    pub content_hash: [u8; 32],
+    /// The raw bytes of the entry-point `Run` binary (an `rxe` load image),
+    /// as read during the content-hash walk. Authenticated by
+    /// `content_hash` once that hash matches the signed manifest.
+    pub run_image: Vec<u8>,
 }
 
 /// A monotonic clock the loader reads only to *measure* how long its two
