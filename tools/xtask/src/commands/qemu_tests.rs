@@ -11,10 +11,11 @@
 //! runner ([`super::parallel`]): each enrolment is independent (its own
 //! per-binary backing images, a `-serial stdio` console, and a unique unix
 //! monitor socket), so the only resource they contend for is host CPU. The
-//! runner weights each guest by its emulated-CPU count against a budget of
-//! the host's logical CPUs, so concurrent guest vCPUs never oversubscribe the
-//! host and no guest is starved past its wall-clock deadline ('s
-//! no-flaky-tests / no-retry rules hold). See [`run_once`].
+//! runner weights each guest by its emulated-CPU count plus one unit for
+//! emulator/I/O work against a budget of the host's logical CPUs. This keeps
+//! process-level QEMU work from competing with a matrix that already fills
+//! every host CPU with vCPU threads, so no guest is starved past its
+//! wall-clock deadline. See [`run_once`].
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -4548,6 +4549,17 @@ fn build_targets() -> Vec<&'static str> {
     targets
 }
 
+/// Host-capacity weight for one QEMU guest.
+///
+/// Each guest consumes its declared vCPU threads plus one unit for QEMU's
+/// emulator/I/O work. Charging only vCPUs lets a matrix of one-vCPU guests
+/// occupy every logical host CPU while their process-level work competes for
+/// the same cores, making otherwise reachable wall-clock deadlines flaky.
+#[must_use]
+pub(crate) fn qemu_job_weight(cpus: u32) -> usize {
+    usize::try_from(cpus).unwrap_or(1).max(1).saturating_add(1)
+}
+
 /// Execute every enrolled QEMU test once, running guests concurrently.
 ///
 /// The caller ([`super::run_test`]) owns the repeat loop so a duration
@@ -4559,8 +4571,8 @@ fn build_targets() -> Vec<&'static str> {
 /// whose QEMU monitor is a unique per-run unix socket, so two guests share
 /// no host resource except CPU. They are therefore run through the shared
 /// weighted-concurrency runner ([`super::parallel`]): each guest's weight is
-/// its emulated-CPU count and the budget is the host's logical-CPU count, so
-/// the sum of concurrently-running guest vCPUs never oversubscribes the host.
+/// its emulated-CPU count plus one emulator/I/O unit and the budget is the
+/// host's logical-CPU count, so QEMU's non-vCPU work retains host capacity.
 /// That keeps every guest's wall-clock deadline as reachable as it is for a
 /// solo run (no TCG starvation), so co-scheduling does not make a test flaky. On a single-core host the budget collapses to one and the matrix
 /// runs strictly sequentially.
@@ -4578,7 +4590,7 @@ pub fn run_once(ctx: &Context, only: Option<&str>) -> Result<(), String> {
         .into_iter()
         .map(|t| {
             let label = format!("test --qemu (run {}) cpus={}", t.package, t.cpus);
-            let weight = usize::try_from(t.cpus).unwrap_or(1);
+            let weight = qemu_job_weight(t.cpus);
             let target_dir = target_dir.clone();
             let stores = stores_for(ctx, t)?;
             Ok(Job::closure(label, weight, move || {
@@ -5417,7 +5429,7 @@ fn finish_run(t: &QemuTest, kernel: &Path, mut spec: Spec) -> Result<(), String>
 
 #[cfg(test)]
 mod tests {
-    use super::{build_targets, PrimePlan, MEMSOAK_PASS_PREFIX, TESTS};
+    use super::{build_targets, qemu_job_weight, PrimePlan, MEMSOAK_PASS_PREFIX, TESTS};
     use std::time::Duration;
 
     /// The memory-stability vertical's serial-script marker is the leading
@@ -5462,12 +5474,31 @@ mod tests {
         assert!(!lld_only.set_lld, "must not overwrite a pinned ld.lld");
     }
 
+    #[test]
+    fn qemu_weight_reserves_emulator_capacity_beyond_vcpus() {
+        assert_eq!(
+            qemu_job_weight(1),
+            2,
+            "one-vCPU guest needs process headroom"
+        );
+        assert_eq!(
+            qemu_job_weight(4),
+            5,
+            "SMP guest keeps one emulator/I/O unit"
+        );
+        assert_eq!(
+            qemu_job_weight(0),
+            2,
+            "invalid zero still fails safe to one vCPU"
+        );
+    }
+
     /// The smallest wall-clock budget any enrolment may carry.
     ///
     /// Every enrolled QEMU test is a boot-then-do-fixed-work vertical whose
     /// budget is sized to be reachable when the guest runs co-scheduled with
-    /// the rest of the matrix (the weighted-concurrency runner never
-    /// oversubscribes the host's vCPUs), not merely when it runs solo. This
+    /// the rest of the matrix (the weighted-concurrency runner charges vCPUs
+    /// plus one emulator/I/O unit), not merely when it runs solo. This
     /// floor is the reachable minimum the guard below enforces; the runner
     /// applies each enrolment's own [`super::QemuTest::timeout`] verbatim on
     /// both a developer machine and a CI runner, with no split that could

@@ -2056,8 +2056,10 @@ SDHCI-5.1 block driver implementing `rustos_abi::driver::block::Block`:
   multi-block transfer completes on a single transfer-complete interrupt
   instead of a per-block PIO handshake, larger requests looping over the
   chunk. Non-coherent ordering is handled with `dma_wmb`/`dma_rmb`
-  (`lib/dma-barrier`) around the doorbell — the region is Normal-NC, no
-  cache maintenance. With no DMA region the engine falls back to PIO
+  (`lib/dma-barrier`) around the doorbell plus `DmaSlab` range
+  synchronization: a coherent/Normal-NC host keeps the callback as a no-op,
+  while the cacheable aarch64 bootstrap slab performs `dc civac` maintenance
+  before device ownership and before CPU consumption. With no DMA region the engine falls back to PIO
   through the buffer data port (`CMD17`/`CMD18` reads, `CMD24`/`CMD25`
   writes) — no DMA capability needed. The command/transfer-mode encoding
   is shared between both paths (`read_command`/`write_command`, §2.2).
@@ -2071,7 +2073,8 @@ SDHCI-5.1 block driver implementing `rustos_abi::driver::block::Block`:
 - 46 host tests cover `CMDTM`/CSD decode, ADMA2 descriptor encoding, full
   identification + geometry, single/multi-block **and** DMA reads and
   writes (writes read back through the same mock card, neighbouring blocks
-  proven untouched), the multi-chunk DMA split/reassembly and round trip,
+  proven untouched), exact descriptor/data synchronization for one-block and
+  cross-64-KiB reads, the multi-chunk DMA split/reassembly and round trip,
   the ADMA2-select-on-bring-up (and PIO-only-stays-PIO) branch,
   shape/range rejection on both paths, the unsupported-card paths,
   command-error (read and write, DMA and PIO) and stalled-controller

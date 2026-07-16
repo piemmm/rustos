@@ -144,10 +144,14 @@ in a device-shared bounce region (`SdhciHost::dma_region`, `adma`), so a
 multi-block transfer completes on a single transfer-complete interrupt
 instead of a per-block buffer handshake and the CPU never moves data
 word-by-word through the slow uncached buffer data port; larger requests
-loop over the chunk. On a non-coherent interconnect the region is
-Normal-Non-Cacheable, so the engine orders its stores/loads around the
-doorbell with `dma_wmb`/`dma_rmb` (`lib/dma-barrier`) — no cache
-maintenance. When the host grants no DMA region the engine falls back to
+loop over the chunk. The engine supports both coherent/Normal-Non-Cacheable
+regions and cacheable slabs carrying a `DmaSlab` coherency callback. It
+synchronizes the data range and descriptor before `dma_wmb` plus the
+doorbell, then after a read completion performs `dma_rmb` and synchronizes
+the device-written data before consuming it. The Pi 4 bootstrap host's
+callback runs aarch64 `dc civac` cache maintenance because EMMC2 does not
+snoop the CPU caches; coherent hosts use the no-op path. When the host
+grants no DMA region the engine falls back to
 **programmed I/O** through the buffer data port (`CMD17`/`CMD18` reads,
 `CMD24`/`CMD25` writes), which needs no DMA capability — DMA where
 possible, correct everywhere (`plans/PI.md` P8). The command/transfer-mode
@@ -160,7 +164,8 @@ and runs on metal over a capability-gated `RegisterWindow` mapped by
 `wiring::open_discovered` from the device-tree-discovered
 `brcm,bcm2711-emmc2` node (`AGENTS.md` §2.2 / §18.3). There is no
 Pi-board QEMU vertical (QEMU does not model EMMC2, `plans/PI.md` §0.4);
-the emulation artefact is the host test and metal acceptance is the
+the emulation artefact is the host test, including exact single- and
+multi-chunk cache-synchronization ranges, and metal acceptance is the
 documented bring-up checklist. `Emmc2::open` runs the standard SD
 identification (`CMD0`/`CMD8`/`ACMD41`/`CMD2`/`CMD3`/`CMD9`/`CMD7`/`CMD16`)
 and derives geometry from the card CSD; only high-capacity,

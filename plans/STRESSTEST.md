@@ -741,7 +741,10 @@ implementation fixed):
   post-load `sysinfo pressure` (`reserve bytes:`) and `sysinfo reclaim`
   (`clean-file-data`) renders → clean prompt, PASS keyed on the
   controller's audited exit then the shell's (arm-then-exit). The
-  numeric counter-movement rows are the ST1 kernel/host tests;
+  QEMU matrix charges each guest its vCPU count plus one emulator/I/O unit
+  against host parallelism, so concurrent one-vCPU guests retain enough host
+  capacity for this vertical's fixed completion deadline. The numeric
+  counter-movement rows are the ST1 kernel/host tests;
   `RAMZIP_STATS` movement stays behind the §0 restartable-user-fault
   prerequisite.
 

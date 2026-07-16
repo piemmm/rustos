@@ -96,6 +96,7 @@ struct MockSdhci {
     dma_buf: Vec<u8>,
     dma_base: u64,
     adma_addr: u32,
+    dma_syncs: Vec<(usize, usize)>,
 
     // Fault injection.
     error_on_index: Option<u8>,
@@ -153,6 +154,7 @@ impl MockSdhci {
             dma_buf: vec![0u8; DMA_REGION_BYTES],
             dma_base: DMA_DEVICE_BASE,
             adma_addr: 0,
+            dma_syncs: Vec::new(),
             error_on_index: None,
             stall: false,
             defer: false,
@@ -476,6 +478,10 @@ impl SdhciHost for MockSdhci {
             bytes: &mut self.dma_buf,
             device_base,
         })
+    }
+
+    fn sync_dma_range(&mut self, offset: usize, len: usize) {
+        self.dma_syncs.push((offset, len));
     }
 
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), DriverError> {
@@ -900,6 +906,15 @@ fn dma_read_single_block_returns_card_data() {
     let mut buf = [0u8; BLOCK_SIZE as usize];
     dev.read_blocks(3, &mut buf).expect("dma read");
     assert_eq!(buf.as_slice(), MockSdhci::expected_block(0x40).as_slice());
+    assert_eq!(
+        dev.host().dma_syncs,
+        [
+            (0, BLOCK_SIZE as usize),
+            (DMA_DESC_OFFSET, adma::DESC_BYTES),
+            (0, BLOCK_SIZE as usize),
+        ],
+        "publish data+descriptor before DMA, then consume read data"
+    );
 }
 
 #[test]
@@ -995,6 +1010,19 @@ fn dma_transfer_larger_than_one_chunk_is_split_and_reassembled() {
             "block {n} reassembled from its chunk",
         );
     }
+    let tail_bytes = 40 * bs;
+    assert_eq!(
+        dev.host().dma_syncs,
+        [
+            (0, DMA_DATA_BYTES),
+            (DMA_DESC_OFFSET, adma::DESC_BYTES),
+            (0, DMA_DATA_BYTES),
+            (0, tail_bytes),
+            (DMA_DESC_OFFSET, adma::DESC_BYTES),
+            (0, tail_bytes),
+        ],
+        "each chunk has publication and read-consumption synchronization"
+    );
 }
 
 #[test]

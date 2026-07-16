@@ -378,12 +378,13 @@ deferred to later stages (not stubbed, §15.1).
   protocol lives once in `lib/fwcfg` (`rustos-fwcfg`, §2.2 — also the aarch64
   framebuffer boot console's QEMU `virt` ramfb backing). The Pi 4 EMMC2
   SD-host driver (`drivers/storage/emmc2`, an Arasan/SDHCI-5.1 SD block
-  driver: PIO data transfer, **interrupt-driven completion** — the
+  driver: ADMA2 DMA with a PIO fallback, **interrupt-driven completion** — the
   command/transfer waits park on the controller's bound GIC line through a
   `CompletionWait` seam rather than busy-spinning, §17.1/§2.16) ships its
   read and write paths host-tested against a register-level mock; it has no
-  QEMU vertical (QEMU models no Pi EMMC2); it is accepted on metal (reads the
-  FAT boot partition + RustFS root off a real Pi 4 SD card, `plans/PI.md` P8).
+  QEMU vertical (QEMU models no Pi EMMC2); its PIO path is accepted on metal
+  (reads the FAT boot partition + RustFS root off a real Pi 4 SD card), while
+  the cache-synchronized DMA path remains metal-gated (`plans/PI.md` P8).
 - DMA goes through `kernel/sec::dma` (`CAP_MMIO_MAP`/`MEM_DMA` checked, audited);
   MMIO is reached only through the capability-gated `KernelMmioMapper`.
 

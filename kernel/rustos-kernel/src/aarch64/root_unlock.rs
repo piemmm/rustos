@@ -20,7 +20,8 @@
 //! here, selected by which one [`crate::root_storage`] bound: the virtio-blk
 //! device over the production device-IRQ path (the QEMU `virt` / x86_64
 //! root, proven on `-M virt`), or the Raspberry Pi 4 EMMC2 SD host over
-//! programmed I/O ([`crate::driver_catalog::EMMC2_PATH`], the Pi-metal root
+//! cache-synchronized ADMA2 with a programmed-I/O fallback
+//! ([`crate::driver_catalog::EMMC2_PATH`], the Pi-metal root
 //! — `raspi4b` cannot model EMMC2, so it is host-tested at the driver level
 //! and metal-gated here, `plans/PI.md` P8/B4). The bring-up differs per
 //! device; the read-only `/System` autoload, the passphrase prompt, and the
@@ -33,6 +34,7 @@ use rustos_abi::driver::dma::{DmaHost, DmaSlab, PoolId};
 use rustos_abi::driver::sole_register_window;
 use rustos_abi::{CapabilityId, DriverError, DriverHost, DriverKind, IrqHandle, MmioMapper};
 use rustos_arch_aarch64::fdt::gic_device_intid;
+use rustos_arch_aarch64::kernel_arch::clean_invalidate_dcache_range;
 use rustos_arch_aarch64::paging::{
     configured_identity_gigapages, AddressSpace as ArchAddressSpace, PageTablePool,
 };
@@ -909,6 +911,12 @@ impl<'a, P: PageTable, S: Sink + Sync + ?Sized> Emmc2DmaHost<'a, P, S> {
     }
 }
 
+/// Synchronize cacheable EMMC2 DMA staging bytes with the non-coherent SD
+/// host before or after a DMA ownership hand-off.
+fn sync_emmc2_dma_range(base: *const u8, len: usize) {
+    clean_invalidate_dcache_range(base as usize, len);
+}
+
 impl<P: PageTable, S: Sink + Sync + ?Sized> DmaHost for Emmc2DmaHost<'_, P, S> {
     fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError> {
         if size == 0 {
@@ -927,14 +935,16 @@ impl<P: PageTable, S: Sink + Sync + ?Sized> DmaHost for Emmc2DmaHost<'_, P, S> {
         let phys = buf.phys().as_u64();
         let len = buf.len();
         // SAFETY: `alloc_dma` carved exactly `len` bytes of zeroed,
-        // physically-contiguous, coherent, guard-bracketed DMA memory; `base`
-        // is its non-null CPU base and `phys` its device-visible base. The
-        // buffer is exclusively this slab's (a fresh carve). The buffer is
-        // intentionally leaked (no free shim): this host and its pool are
+        // physically-contiguous, guard-bracketed DMA memory; `base` is its
+        // non-null cacheable CPU base and `phys` its device-visible base.
+        // The buffer is exclusively this slab's (a fresh carve). The buffer
+        // is intentionally leaked (no free shim): this host and its pool are
         // boot-leaked to `'static`, so the frames stay valid for the life of
-        // the kernel and are never reclaimed — the sanctioned "kernel state
-        // is never freed" pattern for the root device.
-        Ok(unsafe { DmaSlab::from_leaked(phys, base, len, self.id, 0) })
+        // the kernel and are never reclaimed. The attached coherency shim
+        // cleans and invalidates each range at the driver's ownership
+        // hand-offs, because BCM2711 EMMC2 does not snoop the CPU caches.
+        Ok(unsafe { DmaSlab::from_leaked(phys, base, len, self.id, 0) }
+            .with_coherency(sync_emmc2_dma_range))
     }
 }
 

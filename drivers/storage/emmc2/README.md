@@ -27,10 +27,14 @@ The command/transfer-mode encoding is shared between the two paths
 (`read_command`/`write_command`) so the DMA-enable, direction, block-count,
 and auto-CMD12 bits cannot drift.
 
-On a non-coherent interconnect the staging region is Normal-Non-Cacheable
-memory, so the engine orders its stores ahead of the controller doorbell
-with `dma_wmb` (`lib/dma-barrier`) and its reads of device-written data
-after completion with `dma_rmb`; no CPU cache maintenance is required.
+The engine supports both coherent/Normal-Non-Cacheable staging memory and a
+cacheable slab carrying `DmaSlab`'s coherency callback. Before each command
+it synchronizes the active data range plus the ADMA descriptor and then
+issues `dma_wmb` before the doorbell. After a read completion it issues
+`dma_rmb`, synchronizes the device-written data range, and only then copies
+the bytes out. The Raspberry Pi 4 bootstrap host uses the callback to run
+aarch64 `dc civac` maintenance because EMMC2 does not snoop the CPU caches;
+coherent hosts keep the callback as a no-op.
 
 **Stability tier:** `experimental`. The DMA and PIO read/write paths are
 both complete and host-tested, and the driver is wired into the aarch64
@@ -50,16 +54,17 @@ mapping:
   and — on the fast path — a `DmaSlab` for `dma_region`, all supplied by
   `wiring::open_discovered` from the discovered node. The kernel's
   `CompletionWait` re-arms and parks on the controller's GIC line, and the
-  DMA slab is carved from a `CAP_MEM_DMA`-gated kernel DMA pool
-  (`Emmc2DmaHost`); the driver crate is generic over `lib/abi` only
+  DMA slab is carved from a `CAP_MEM_DMA`-gated kernel DMA pool and carries
+  the platform cache-maintenance callback (`Emmc2DmaHost`); the driver crate
+  is generic over `lib/abi` only
   (`AGENTS.md` §3 / §17.4), so this inversion point keeps the kernel's
   IRQ-wait and DMA machinery out of the driver (mirrors the virtio host's
   `notify_wait`, `AGENTS.md` §2.2).
 - **Host tests** drive it over `MockSdhci`, a register-level model of the
   controller plus a backing card, which models the ADMA2 engine (it walks
-  the descriptor table the driver stages and moves the data) as well as
-  the PIO buffer port; its `await_irq` is a no-op because the model
-  surfaces completions inline.
+  the descriptor table the driver stages and moves the data), records every
+  DMA synchronization range, and models the PIO buffer port; its `await_irq`
+  is a no-op because the model surfaces completions inline.
 
 This mirrors the `rpi_hvs` mailbox seam (`AGENTS.md` §2.2): the protocol
 layer is proven host-side, the register block below it on metal. There is

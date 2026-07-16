@@ -2212,6 +2212,33 @@ entry body). x86_64 (`sfence`/`lfence`) and riscv64 (`fence iorw,iorw`) get
 the equivalent; host/wasm32 are a no-op. The live keyboard is the on-metal
 acceptance item.
 
+### In-kernel DMA coherency — the EMMC2 root-storage floor
+
+The BCM2711 EMMC2 SD host is a non-coherent DMA master driven by the
+in-kernel bootstrap-floor block driver. Its staging slab is reached through
+the Normal write-back boot identity map, so DMA barriers alone are
+insufficient: the controller can write fresh sectors to DRAM while the CPU
+continues reading stale cache lines. The resulting transfer reports success
+but returns corrupted filesystem data; programmed I/O is unaffected because
+it moves bytes through the Device-memory data register.
+
+The EMMC2 path keeps the identity mapping cacheable and uses the existing
+`DmaSlab` coherency callback for explicit ownership transfers. Before each
+ADMA2 command, the driver synchronizes the active data range and its 8-byte
+descriptor, then issues `dma_wmb()` before the MMIO command. After a read
+completion, it issues `dma_rmb()`, synchronizes the device-written data
+range, and only then copies bytes to the caller. The aarch64 bootstrap host
+attaches `clean_invalidate_dcache_range` to the slab, which performs `dc
+civac` over the cache lines followed by `dsb sy`; coherent and
+Normal-Non-Cacheable hosts retain the no-op callback.
+
+This avoids mixed-attribute aliases and avoids changing live block mappings
+after secondary CPUs are online. The register-level EMMC2 mock records every
+synchronization range: tests cover one block, a full 64 KiB ADMA2 chunk, and
+a request crossing into a second chunk. QEMU has no Pi EMMC2 model, so a real
+Pi 4 boot that reads the system volume without filesystem corruption remains
+the metal acceptance signal.
+
 ## Per-CPU storage (`TPIDR_EL1`)
 
 The aarch64 port implements the Arch HAL `PerCpu` slice (`AGENTS.md`

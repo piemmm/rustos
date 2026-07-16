@@ -185,6 +185,17 @@ pub trait SdhciHost {
     fn dma_region(&mut self) -> Option<DmaRegion<'_>> {
         None
     }
+
+    /// Synchronize a byte range of the DMA staging region between the CPU
+    /// cache and the controller.
+    ///
+    /// The engine calls this after publishing bytes the controller will read
+    /// and before consuming bytes the controller wrote. A coherent or
+    /// Normal-Non-Cacheable host needs no maintenance and keeps this default
+    /// no-op; a cacheable host forwards the range to its DMA slab's
+    /// coherency operation. Out-of-range requests fail closed inside the
+    /// slab and are never issued by the engine.
+    fn sync_dma_range(&mut self, _offset: usize, _len: usize) {}
 }
 
 /// A borrowed view of a host's device-shared DMA staging region.
@@ -194,11 +205,11 @@ pub trait SdhciHost {
 /// it, and reads inbound block data out of it after the transfer);
 /// `device_base` is the device-visible address of `bytes[0]` — the base
 /// the ADMA2 descriptor's data pointer and the controller's descriptor-
-/// table register are expressed relative to. On a non-coherent
-/// interconnect the region is Normal-Non-Cacheable memory, so the engine
-/// orders its stores ahead of the controller doorbell with
-/// [`dma_wmb`] and its loads after completion with [`dma_rmb`]; no cache
-/// maintenance is required.
+/// table register are expressed relative to. The engine brackets ownership
+/// hand-offs with [`SdhciHost::sync_dma_range`] and orders them against the
+/// controller doorbell/completion with [`dma_wmb`] / [`dma_rmb`], so the host
+/// may provide either coherent/Normal-Non-Cacheable memory or cacheable memory
+/// with explicit maintenance.
 pub struct DmaRegion<'a> {
     /// CPU-accessible staging bytes (descriptor table + data area).
     pub bytes: &'a mut [u8],
@@ -276,8 +287,9 @@ impl<W: CompletionWait> IrqSdhci<W> {
     ///
     /// The slab must be at least [`DMA_REGION_BYTES`] long (a shorter one
     /// yields fewer staged blocks, and a zero-length data area falls back
-    /// to programmed I/O); on a non-coherent interconnect it must be the
-    /// Normal-Non-Cacheable carve the kernel DMA allocator returns.
+    /// to programmed I/O). On a non-coherent interconnect the slab must
+    /// either be Normal-Non-Cacheable or carry the cache-maintenance shim
+    /// [`DmaSlab::sync_range`] invokes.
     #[must_use]
     pub fn with_dma(window: RegisterWindow, waiter: W, slab: DmaSlab) -> Self {
         Self {
@@ -312,6 +324,12 @@ impl<W: CompletionWait> SdhciHost for IrqSdhci<W> {
             bytes: slab.as_bytes_mut(),
             device_base,
         })
+    }
+
+    fn sync_dma_range(&mut self, offset: usize, len: usize) {
+        if let Some(slab) = self.dma.as_ref() {
+            slab.sync_range(offset, len);
+        }
     }
 }
 
@@ -1006,9 +1024,12 @@ impl<H: SdhciHost> Emmc2<H> {
         &mut self,
         lba: u32,
         chunk_blocks: u32,
+        chunk_bytes: usize,
         table_dev: u32,
         write: bool,
     ) -> Result<(), DriverError> {
+        self.host.sync_dma_range(0, chunk_bytes);
+        self.host.sync_dma_range(DMA_DESC_OFFSET, adma::DESC_BYTES);
         dma_wmb();
         self.host
             .write32(regs::REG_BLKSIZECNT, (chunk_blocks << 16) | BLOCK_SIZE)?;
@@ -1038,10 +1059,12 @@ impl<H: SdhciHost> Emmc2<H> {
             let chunk_blocks = u32::try_from(chunk_bytes / BLOCK_SIZE as usize)
                 .map_err(|_| DriverError::LengthOutOfRange)?;
             let table_dev = self.dma_stage_descriptor(chunk_bytes)?;
-            self.dma_issue_chunk(lba, chunk_blocks, table_dev, false)?;
+            self.dma_issue_chunk(lba, chunk_blocks, chunk_bytes, table_dev, false)?;
             // Order the reads of device-written data after the completion,
-            // then copy the staged bytes out.
+            // discard any stale cacheable copy through the host coherency
+            // seam, then copy the staged bytes out.
             dma_rmb();
+            self.host.sync_dma_range(0, chunk_bytes);
             let region = self.host.dma_region().ok_or(DriverError::DeviceFault)?;
             buf[offset..offset + chunk_bytes].copy_from_slice(&region.bytes[..chunk_bytes]);
             offset += chunk_bytes;
@@ -1074,7 +1097,7 @@ impl<H: SdhciHost> Emmc2<H> {
                 let region = self.host.dma_region().ok_or(DriverError::DeviceFault)?;
                 region.bytes[..chunk_bytes].copy_from_slice(&buf[offset..offset + chunk_bytes]);
             }
-            self.dma_issue_chunk(lba, chunk_blocks, table_dev, true)?;
+            self.dma_issue_chunk(lba, chunk_blocks, chunk_bytes, table_dev, true)?;
             offset += chunk_bytes;
             lba = lba
                 .checked_add(chunk_blocks)
