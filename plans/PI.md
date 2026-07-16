@@ -311,7 +311,7 @@ the production binary and the existing aarch64 verticals.
 - Discovery alone leaves real silicon silent: `uart_init::init_from_fdt`
   runs right after it, muxing GPIO 14/15 to the PL011 (`GPFSEL1` ALT0 +
   pull-none, gated on a discovered `brcm,bcm2711-gpio` node) and
-  programming the PL011 line (TRM order, 9600 8N1 + FIFOs from the
+  programming the PL011 line (TRM order, 115200 8N1 + FIFOs from the
   `config.txt`-pinned 48 MHz `init_uart_clock`) — QEMU's powered-up
   PL011 masked the omission; the metal Pi 4B booted with a permanently
   silent UART0 without it. Pure, host-tested register arithmetic; the
@@ -2117,7 +2117,8 @@ user mode (operator metal acceptance).
 - Boot partition: the verified firmware blobs (the `disable-bt` overlay
   planted at its firmware-fixed `overlays/` path), a generated
   `config.txt` (`arm_64bit=1`, `kernel=kernel8.img`, `enable_uart=1`,
-  `dtoverlay=disable-bt`, `init_uart_baud=9600`;
+  `dtoverlay=disable-bt`, `init_uart_baud=115200` from the architecture
+  port's shared console-rate constant;
   `armstub=armstub8.bin` only when the optional stub is staged), and
   `kernel8.img` — the P1 release ELF flattened by `mkimage`'s fail-closed
   converter (`elfflat`: ELF64/LE/`ET_EXEC`/aarch64 only, `PT_LOAD` layout

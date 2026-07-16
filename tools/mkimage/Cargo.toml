@@ -26,6 +26,7 @@ path = "src/main.rs"
 # (`tests/integration/{fat32,rustfs}_image`) author their backing disks.
 [dependencies]
 rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
+rustos-arch-aarch64 = { path = "../../kernel/arch/aarch64", version = "=0.0.0" }
 rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 rustos-drv-fs-fat32 = { path = "../../drivers/filesystem/fat32", version = "=0.0.0" }
 rustos-drv-fs-rustfs = { path = "../../drivers/filesystem/rustfs", version = "=0.0.0" }

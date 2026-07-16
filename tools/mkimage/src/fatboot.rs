@@ -46,11 +46,9 @@ pub use rustos_drv_fs_rustfs::ROOT_UNLOCK_NAME;
 /// `console_baud` line rate (8 data bits, no parity, 1 stop bit — 8,N,1 is
 /// the firmware's fixed PL011 framing).
 ///
-/// `console_baud` is the early-boot `init_uart_baud`; the caller derives it
-/// from the image profile (`rustos_mkimage::console_baud_for`) so it matches
-/// the kernel's reprogrammed `CONSOLE_BAUD` for that build — the debug image
-/// runs the line faster (57600) to drain its verbose boot log, the shippable
-/// image keeps the conservative 9600.
+/// `console_baud` is the early-boot `init_uart_baud`; the caller supplies the
+/// kernel architecture port's `CONSOLE_BAUD`, so the firmware and the
+/// kernel's reprogrammed line share one definition.
 /// `armstub=armstub8.bin` is emitted only when the (optional) stub is
 /// among the build inputs.
 #[must_use]
@@ -224,9 +222,14 @@ mod tests {
             name: "armstub8.bin".into(),
             bytes: vec![0x55; 256],
         });
-        let bytes =
-            build_boot_partition(TEST_SECTORS, &firmware, &[0x44u8; 16], &[0x66u8; 28], 9600)
-                .expect("boot partition builds");
+        let bytes = build_boot_partition(
+            TEST_SECTORS,
+            &firmware,
+            &[0x44u8; 16],
+            &[0x66u8; 28],
+            crate::CONSOLE_BAUD,
+        )
+        .expect("boot partition builds");
 
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
         let mut fs = Fat32::open(dev).expect("mounts");
@@ -239,8 +242,13 @@ mod tests {
     #[test]
     fn fails_closed_when_the_partition_cannot_hold_the_content() {
         // A device too small to even format must error, never panic.
-        assert!(
-            build_boot_partition(8, &test_firmware(), &[0x44u8; 16], &[0x66u8; 28], 9600).is_err()
-        );
+        assert!(build_boot_partition(
+            8,
+            &test_firmware(),
+            &[0x44u8; 16],
+            &[0x66u8; 28],
+            crate::CONSOLE_BAUD,
+        )
+        .is_err());
     }
 }

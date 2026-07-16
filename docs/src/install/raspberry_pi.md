@@ -48,19 +48,17 @@ of record in [aarch64](../platform/aarch64.md). The generated
 `dtoverlay=disable-bt` (the PL011 `UART0` on the GPIO 14/15 header — the
 overlay itself is a pinned firmware input staged on the partition at
 `overlays/disable-bt.dtbo`), `init_uart_clock=48000000` (the PL011
-reference clock the kernel's baud divisors assume), and a profile-keyed
-`init_uart_baud` (`rustos_mkimage::console_baud_for`) — **57600** for the
-`debug` image, **9600** for the `installer` image. The kernel then programs
-the serial console itself to the matching rate, 8N1, at boot
-(`rustos_arch_aarch64::uart_init`: GPIO 14/15 pin mux plus PL011 line
-registers; its `CONSOLE_BAUD` is gated to the same 57600/9600 split so the
-firmware's early line and the reprogrammed line agree; plus
-`armstub=armstub8.bin` only when that optional stub is staged). The debug
-image runs the line faster because it streams a verbose per-syscall boot
-log, and the serial log is **best-effort**: logging never blocks the kernel
-on the UART, so a burst that outruns the line drops log bytes rather than
-stalling drivers (the debug build also uses a larger in-RAM serial ring to
-make that rare).
+reference clock the kernel's baud divisors assume), and
+`init_uart_baud=115200`. The image builder imports
+`rustos_arch_aarch64::uart_init::CONSOLE_BAUD` when it writes that firmware
+setting, so both image profiles and the kernel share one line-rate
+definition. The kernel programs the serial console to that same 115200 8N1
+setting at boot (`rustos_arch_aarch64::uart_init`: GPIO 14/15 pin mux plus
+PL011 line registers; plus `armstub=armstub8.bin` only when that optional
+stub is staged). The serial log is **best-effort**: logging never blocks the
+kernel on the UART, so a burst that outruns the line drops log bytes rather
+than stalling drivers (the debug build also uses a larger in-RAM serial ring
+to make that rare).
 
 ## The firmware blobs
 
@@ -144,8 +142,8 @@ destroys its contents):
 sudo dd if=images/rustos-aarch64-rpi-debug.img of=/dev/sdX bs=4M conv=fsync
 ```
 
-Connect a 3.3 V serial adapter to the Pi's UART header (GPIO 14/15, 8N1 —
-**57600** baud for a `debug` image, **9600** for an `installer` image),
+Connect a 3.3 V serial adapter to the Pi's UART header (GPIO 14/15,
+**115200 8N1** for both image profiles),
 insert the card, and power on. The firmware loads
 `kernel8.img` at `0x8_0000` and enters it at EL2 with the DTB pointer in
 `x0`; the kernel discovers the PL011 console, GIC, timer, and memory map

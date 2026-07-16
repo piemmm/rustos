@@ -129,8 +129,8 @@
 //! UART** (`enqueue_byte`): it pushes only what the transmit FIFO accepts
 //! right now and drops the overflow, because logging is best-effort and must
 //! never stall the calling task at the line's byte rate. A 4 KiB ring drained
-//! at 9600 baud takes ~4.3 s to flush, so a *blocking* full-ring flush froze
-//! the kernel for seconds during a logging burst — long enough to leave the
+//! at 115200 baud takes about 356 ms to flush, so a *blocking* full-ring flush
+//! froze the kernel during a logging burst — long enough to leave the
 //! USB interrupt endpoint un-armed and silently swallow typed keystrokes — and
 //! is exactly the hot-path stall the charter forbids. The transmit ISR and the
 //! dispatch-loop pump drain the backlog at the device's real throughput. The
@@ -168,8 +168,9 @@ use crate::console::{tx_wait, TxOutcome, TX_POLL_BUDGET};
 /// The **debug** image (which streams a verbose per-syscall boot log to a
 /// slow UART) gets a large ring so a bursty driver bring-up rarely has to drop
 /// a line; the shippable **release** image logs sparingly, so a small ring
-/// bounds its `.bss` footprint. At 9600 baud even the large ring drains in
-/// well under a second of real console time once the burst ends.
+/// bounds its `.bss` footprint. At 115200 baud the 4 KiB ring drains in about
+/// 356 ms and the 256 KiB debug ring drains in about 22.8 s when completely
+/// full; draining remains interrupt-driven and never blocks the producer.
 #[cfg(all(debug_assertions, target_os = "none"))]
 const SERIAL_RING_CAP: usize = 256 * 1024;
 /// See the debug freestanding variant above; the release image and the
@@ -496,7 +497,7 @@ fn flush_n(ring: &mut SerialRing, max: usize) {
 /// ([`drain_ready`], a single non-spinning sweep) to make room, then retries
 /// the push once; if the ring is still full the console genuinely cannot keep
 /// up, so the byte is **dropped** rather than block-flushed. Block-flushing a
-/// full 4 KiB ring at 9600 baud froze the kernel for ~4.3 s during a logging
+/// full 4 KiB ring at 115200 baud froze the kernel for about 356 ms during a logging
 /// burst — long enough to leave the USB interrupt endpoint un-armed and lose
 /// typed keystrokes — and a hot path must never wait on the slow console;
 /// best-effort log output is the correct trade. The transmit ISR and the
@@ -1192,7 +1193,8 @@ mod tests {
         // `drain_ready` inside `enqueue_byte` frees nothing — the call must
         // still return promptly, leaving the ring full and the queued bytes
         // intact (the dropped byte never displaces an existing one). A
-        // block-flush here would have spun ~4 s draining 4 KiB at 9600 baud,
+        // block-flush here would have spun about 356 ms draining 4 KiB at
+        // 115200 baud,
         // the stall that swallowed keystrokes.
         let mut ring = SerialRing::new();
         for _ in 0..SERIAL_RING_CAP {

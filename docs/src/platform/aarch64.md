@@ -92,7 +92,7 @@ a-time regardless.
 | `enable_uart` | `1` | hold the core clock so the PL011/mini-UART baud is stable; route the debug UART |
 | `dtoverlay` | `disable-bt` | detach Bluetooth from the PL011 so `UART0` is the primary UART on the GPIO 14/15 header |
 | `init_uart_clock` | `48000000` | pin the PL011 reference clock to the 48 MHz the kernel's baud-divisor arithmetic assumes (`uart_init::UART_CLOCK_HZ`) |
-| `init_uart_baud` | `57600` (debug) / `9600` (installer) | profile-keyed (`rustos_mkimage::console_baud_for`) so the firmware's own early output matches the kernel's line setting — the kernel then programs the PL011 itself to the same rate, 8 data bits, no parity, 1 stop bit (`uart_init::CONSOLE_BAUD`, gated to the same split). The debug image runs the line faster to drain its verbose boot log; logging is best-effort and never blocks on the UART |
+| `init_uart_baud` | `115200` | the image builder imports `uart_init::CONSOLE_BAUD`, so firmware output and the kernel-programmed 8N1 line share one definition for every image profile; logging is best-effort and never blocks on the UART |
 | `armstub` | `armstub8.bin` | optional PSCI-providing secondary-core stub (enables the `smc`-conduit PSCI `CPU_ON` path of P5) |
 
 The PSCI conduit on the Pi is **`smc`** (via `armstub8.bin`), versus `hvc` on
@@ -384,11 +384,11 @@ boot path runs `uart_init::init_from_fdt`:
    transmitter must not hang the boot), and the line registers are
    rewritten in the TRM order: `ICR` clear, `IBRD`/`FBRD` divisors for
    `uart_init::CONSOLE_BAUD` from the pinned 48 MHz reference clock
-   (release/installer 9600 → 312 + 32/64; debug 57600 → 52 + 5/64),
+   (115200 → 26 + 3/64),
    `LCR_H` 8N1 + FIFOs (which latches the divisors), `IMSC` all-masked
-   (the console polls), then `CR` re-enable (`UARTEN|TXE|RXE`). The debug
-   build runs the faster rate to drain its verbose boot log; the firmware
-   `init_uart_baud` is set to the matching rate so the two agree.
+   (the console polls), then `CR` re-enable (`UARTEN|TXE|RXE`). The image
+   builder imports that same constant for firmware `init_uart_baud`, so the
+   two cannot drift.
 
 The register arithmetic — divisor maths with fail-closed range checks,
 the `GPFSEL1`/pull read-modify-write — is pure and host-unit-tested; the

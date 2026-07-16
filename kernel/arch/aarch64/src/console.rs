@@ -601,13 +601,13 @@ pub fn configure_from_fdt(fdt: &Fdt<'_>) -> Option<DiscoveredConsole> {
 /// declared wedged and the byte dropped ([`tx_wait`]).
 ///
 /// Sized for the slowest healthy drain the console supports: a full
-/// 16-deep PL011 FIFO at 9600 baud empties in ≈ 17 ms, and an MMIO
+/// 16-deep PL011 FIFO at 115200 baud empties in about 1.4 ms, and an MMIO
 /// status poll on the BCM2711 costs well over 100 ns, so the budget
 /// covers that drain with generous headroom. A transmitter that is
 /// still not ready after the budget is not draining at all — on the Pi
 /// 4 this is the BT-attached PL011 whose CTS flow control never opens —
-/// and waiting longer would hang the boot (: an
-/// unbounded wait stalls the kernel before its first log line).
+/// and waiting longer would hang the boot: an
+/// unbounded wait stalls the kernel before its first log line.
 pub const TX_POLL_BUDGET: u32 = 200_000;
 
 /// Verdict of one bounded transmit-readiness wait ([`tx_wait`]).

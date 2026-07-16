@@ -118,20 +118,12 @@ pub const UART_CLOCK_HZ: u32 = 48_000_000;
 /// The boot console line rate (8N1), the documented serial configuration of
 /// the Pi image (`docs/src/install/raspberry_pi.md`).
 ///
-/// The **debug** image streams a verbose per-syscall boot log to this UART,
-/// so it runs the line faster (57600 baud) to drain bursts sooner; the
-/// shippable **release** image keeps the conservative 9600. This value must
-/// match the firmware's early-boot `init_uart_baud` the image author writes
-/// into `config.txt` (`tools/mkimage`'s `config_txt`, keyed off the same
-/// image profile), so the firmware's early beacons and the kernel's
-/// reprogrammed line agree — exactly the cross-boundary pairing
-/// `init_uart_clock` / [`UART_CLOCK_HZ`] already keep in step.
-#[cfg(all(debug_assertions, target_os = "none"))]
-pub const CONSOLE_BAUD: u32 = 57_600;
-/// See the debug freestanding variant above; the release image and the host
-/// build keep the conservative 9600 baud.
-#[cfg(not(all(debug_assertions, target_os = "none")))]
-pub const CONSOLE_BAUD: u32 = 9600;
+/// The image author imports this value when it writes the firmware's
+/// early-boot `init_uart_baud`, so the firmware's early beacons and the
+/// kernel's reprogrammed line cannot diverge. This is the same
+/// cross-boundary pairing that `init_uart_clock` and [`UART_CLOCK_HZ`] keep
+/// in step.
+pub const CONSOLE_BAUD: u32 = 115_200;
 
 /// Compute the PL011 `(IBRD, FBRD)` divisor pair for `baud` from
 /// `clock_hz` (divider = clock / (16 × baud); `FBRD` is the fraction in
@@ -215,7 +207,7 @@ pub fn find_gpio(fdt: &Fdt<'_>) -> Option<DiscoveredGpio> {
 /// Bring the discovered console's line up from `fdt` facts: mux
 /// GPIO 14/15 to the PL011 and release their pulls when the tree carries
 /// a BCM2711 GPIO controller, then program the PL011 line registers
-/// (9600 8N1, FIFOs, polled) and enable it.
+/// (115200 8N1, FIFOs, polled) and enable it.
 ///
 /// Must run after [`console::configure_from_fdt`] has pointed the
 /// console at the discovered UART, and before the first log byte.
@@ -319,6 +311,12 @@ mod tests {
         assert_eq!(pl011_divisors(48_000_000, 115_200), Some((26, 3)));
         // QEMU-typical 24 MHz clock still programs cleanly.
         assert_eq!(pl011_divisors(24_000_000, 9600), Some((156, 16)));
+    }
+
+    #[test]
+    fn console_uses_the_standard_115200_line_rate() {
+        assert_eq!(CONSOLE_BAUD, 115_200);
+        assert_eq!(pl011_divisors(UART_CLOCK_HZ, CONSOLE_BAUD), Some((26, 3)));
     }
 
     #[test]

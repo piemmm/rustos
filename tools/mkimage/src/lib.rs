@@ -49,6 +49,8 @@
 use std::fmt;
 use std::io::Read;
 
+use rustos_arch_aarch64::uart_init::CONSOLE_BAUD;
+
 pub mod device;
 pub mod elfflat;
 pub mod fatboot;
@@ -255,33 +257,6 @@ pub const fn passphrase_for(profile: ImageProfile) -> &'static [u8] {
     match profile {
         ImageProfile::Debug => DEBUG_PASSPHRASE,
         ImageProfile::Installer => INSTALLER_PASSPHRASE,
-    }
-}
-
-/// Early-boot serial line rate (`config.txt` `init_uart_baud`) the **debug**
-/// image is built with.
-///
-/// The debug image streams a verbose per-syscall boot log to the UART, so it
-/// runs the line faster to drain bursts sooner. This MUST match the debug
-/// kernel's `rustos_arch_aarch64::uart_init::CONSOLE_BAUD` (the kernel
-/// reprograms the PL011 to that rate after early boot), so the firmware's
-/// early beacons and the kernel's reprogrammed line agree — the same
-/// cross-boundary pairing `init_uart_clock` / `UART_CLOCK_HZ` already keep in
-/// step.
-pub const DEBUG_CONSOLE_BAUD: u32 = 57_600;
-
-/// Early-boot serial line rate the shippable **installer** image is built
-/// with — the conservative 9600 the release kernel also keeps.
-pub const INSTALLER_CONSOLE_BAUD: u32 = 9600;
-
-/// The early-boot `init_uart_baud` each [`ImageProfile`] is built with, keyed
-/// off the profile exactly as [`passphrase_for`] is so the firmware line rate
-/// cannot diverge from the matching kernel build (one source of truth).
-#[must_use]
-pub const fn console_baud_for(profile: ImageProfile) -> u32 {
-    match profile {
-        ImageProfile::Debug => DEBUG_CONSOLE_BAUD,
-        ImageProfile::Installer => INSTALLER_CONSOLE_BAUD,
     }
 }
 
@@ -512,7 +487,7 @@ pub fn build_rpi_image(
         firmware,
         &kernel8,
         &descriptor,
-        console_baud_for(profile),
+        CONSOLE_BAUD,
     )?;
     let system =
         rootfs::build_system_partition(u64::from(SYSTEM_PART_SECTORS), entropy, drivers, apps)?;
@@ -1121,18 +1096,9 @@ mod tests {
     }
 
     #[test]
-    fn each_profile_maps_to_its_console_baud() {
-        // The debug image runs the serial line faster (57600) to drain its
-        // verbose boot log without stalling; the shippable image keeps 9600.
-        // These must match the matching kernel build's `CONSOLE_BAUD` so the
-        // firmware's early beacons and the reprogrammed line agree.
-        assert_eq!(console_baud_for(ImageProfile::Debug), 57_600);
-        assert_eq!(console_baud_for(ImageProfile::Installer), 9_600);
-        assert_eq!(console_baud_for(ImageProfile::Debug), DEBUG_CONSOLE_BAUD);
-        assert_eq!(
-            console_baud_for(ImageProfile::Installer),
-            INSTALLER_CONSOLE_BAUD
-        );
+    fn generated_config_uses_the_architecture_console_baud() {
+        assert_eq!(CONSOLE_BAUD, 115_200);
+        assert!(fatboot::config_txt(false, CONSOLE_BAUD).contains("init_uart_baud=115200\n"));
     }
 
     #[test]
