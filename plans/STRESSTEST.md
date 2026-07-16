@@ -749,7 +749,10 @@ implementation fixed):
   to the dispatcher with IRQs masked and starve the same service-progress
   assertion under SMP. `kthread_switch_qemu_aarch64` pins the lower-level
   invariant with two continuations carrying opposite IRQ-mask states across
-  repeated switches. The numeric
+  repeated switches. Scheduler park completion also preserves an early
+  waker's already-enqueued `Ready` transition, and sleeping disk-lock release
+  wakes FIFO one-at-a-time so the driver-store service cannot starve behind a
+  thundering herd of bundle reads. The numeric
   counter-movement rows are the ST1 kernel/host tests;
   `RAMZIP_STATS` movement stays behind the §0 restartable-user-fault
   prerequisite.

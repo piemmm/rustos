@@ -201,6 +201,23 @@ impl WaitQueue {
         }
     }
 
+    /// Wake the oldest registered waiter, returning whether one existed.
+    ///
+    /// Registration order is FIFO and re-registration updates a waiter in
+    /// place, so repeated contention cannot move an older task behind newer
+    /// arrivals. The waiter remains registered until it resumes and
+    /// deregisters itself; this preserves the register-before-retest lost-wake
+    /// discipline while avoiding a thundering herd.
+    pub fn wake_one(&self, arch: &dyn WaitQueueArch) -> bool {
+        let task = self.waiters.lock().first().map(|waiter| waiter.task);
+        if let Some(task) = task {
+            arch.unpark(task);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Wake exactly `task` if it is currently registered, returning whether
     /// it was (the wake-one discipline — an addressed event such as a
     /// posted request or a ticket's reply wakes its one target, never the
@@ -825,6 +842,22 @@ mod tests {
         let mut got = arch.unparked.borrow().clone();
         got.sort_unstable();
         assert_eq!(got, alloc::vec![1, 2], "both waiters woken");
+    }
+
+    #[test]
+    fn wake_one_preserves_fifo_registration_order() {
+        let arch = MockArch::new();
+        let q = WaitQueue::new();
+        q.register(7, NO_DEADLINE);
+        q.register(3, NO_DEADLINE);
+
+        assert!(q.wake_one(&arch));
+        assert_eq!(*arch.unparked.borrow(), alloc::vec![7]);
+        q.deregister(7);
+        assert!(q.wake_one(&arch));
+        assert_eq!(*arch.unparked.borrow(), alloc::vec![7, 3]);
+        q.deregister(3);
+        assert!(!q.wake_one(&arch));
     }
 
     #[test]

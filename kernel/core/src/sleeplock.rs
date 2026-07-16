@@ -43,10 +43,9 @@
 //!
 //! # Fairness
 //!
-//! Release wakes *every* parked contender; they re-contend and exactly one
-//! wins while the rest re-park. For the low-contention per-mount use this is
-//! simplest and strands no waiter. A future fair hand-off can wake one
-//! waiter without changing the public contract.
+//! Waiters retain FIFO registration order and release wakes the oldest one.
+//! This avoids a thundering herd and prevents a long-waiting disk operation
+//! from being perpetually displaced by newer contenders.
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
@@ -207,17 +206,17 @@ impl<T: ?Sized> SleepLock<T> {
         self.waiters.deregister(task);
     }
 
-    /// Release the lock and wake every parked contender.
+    /// Release the lock and wake the oldest parked contender.
     ///
     /// Called only by [`SleepGuard`]'s `Drop`. The `Release` store publishes
     /// the critical section's writes to the next holder's `Acquire`; the wake
-    /// then re-readies the parked contenders, each of which re-tests and
-    /// either acquires or re-parks. A fail-safe no-op wake before the arch
+    /// then re-readies the oldest parked contender, which re-tests and either
+    /// acquires or re-parks. A fail-safe no-op wake before the arch
     /// hook is installed (no task can be parked then).
     fn release(&self) {
         self.locked.store(false, Ordering::Release);
         if let Some(hook) = wait_arch() {
-            self.waiters.wake_all(hook);
+            self.waiters.wake_one(hook);
         }
     }
 }

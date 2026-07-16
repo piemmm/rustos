@@ -8451,7 +8451,7 @@ mod tests {
     #[test]
     fn park_current_task_fails_closed_for_a_vanished_task() {
         let past_resume_table =
-            u32::try_from(crate::kthread::KTHREAD_MAX_CPUS).expect("resume-table bound fits u32");
+            u32::try_from(crate::cpu_state::TEST_CPUS).expect("test CPU count fits u32");
         let arch = Arc::new(TestArch::with_cpus(past_resume_table + 1));
         arch.set_current_cpu(past_resume_table);
         let sched = make_sched(Arc::clone(&arch));
@@ -8467,7 +8467,7 @@ mod tests {
     #[test]
     fn park_current_task_parks_a_ready_task_via_yield_fallback() {
         let past_resume_table =
-            u32::try_from(crate::kthread::KTHREAD_MAX_CPUS).expect("resume-table bound fits u32");
+            u32::try_from(crate::cpu_state::TEST_CPUS).expect("test CPU count fits u32");
         let arch = Arc::new(TestArch::with_cpus(past_resume_table + 1));
         arch.set_current_cpu(past_resume_table);
         let sched = make_sched(Arc::clone(&arch));

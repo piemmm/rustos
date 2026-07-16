@@ -194,8 +194,12 @@ next dispatch — **no separate EL0-frame save area and no new HAL trait**
   cpu }` plus a self-contained `RescheduleAction { Yield, Park, Exit }`
   (kept off `kernel/sched`'s vocabulary; mapped to `TaskAction` at one
   boundary, §2.2). Re-exported from the crate root.
-- `kthread`: a `KTHREAD_MAX_CPUS`-sized per-CPU resume table
-  (`SpinLock<Option<UserResumeHandle>>`, never cross-CPU contended), the
+- `cpu_state`: one fallibly allocated table sized from the validated
+  scheduler CPU count, owning each CPU's resume handle, live address-space
+  pointer, preemption latch, and preemption counter. Its set-once owned-slice
+  publication gives interrupt paths O(1) lock-free lookup with no
+  compile-time CPU ceiling; each resume/live-space slot remains independently
+  locked and never cross-CPU contended. `kthread` supplies the
   `C,S`-monomorphised suspend thunks over one shared `suspend_with` body
   (reuses `Yielder::suspend`, §2.2) — `suspend_thunk_syscall` (brackets
   the port's cooperative-park convention, the user mid-handler path) and

@@ -12,10 +12,10 @@
 //! per-binary backing images, a `-serial stdio` console, and a unique unix
 //! monitor socket), so the only resource they contend for is host CPU. The
 //! runner weights each guest by its emulated-CPU count plus one unit for
-//! emulator/I/O work against a budget of the host's logical CPUs. This keeps
-//! process-level QEMU work from competing with a matrix that already fills
-//! every host CPU with vCPU threads, so no guest is starved past its
-//! wall-clock deadline. See [`run_once`].
+//! emulator/I/O work against half the host's effective logical capacity.
+//! Reserving SMT/headroom keeps process-level QEMU work from competing with a
+//! matrix that fills every reported thread with TCG vCPUs, so no guest is
+//! starved past its wall-clock deadline. See [`run_once`].
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -4560,6 +4560,23 @@ pub(crate) fn qemu_job_weight(cpus: u32) -> usize {
     usize::try_from(cpus).unwrap_or(1).max(1).saturating_add(1)
 }
 
+/// QEMU matrix capacity derived from effective logical host parallelism.
+///
+/// TCG vCPU threads are sustained compute workloads, so two SMT siblings do
+/// not provide the same wall-clock capacity as two independent cores. Use at
+/// most half the reported logical capacity; the weighted runner still lets a
+/// heavier guest run alone when its weight exceeds this budget.
+#[must_use]
+pub(crate) fn qemu_host_budget_for(logical_cpus: usize) -> usize {
+    logical_cpus.max(1).div_ceil(2)
+}
+
+/// QEMU matrix capacity for this host.
+#[must_use]
+pub(crate) fn qemu_host_budget() -> usize {
+    qemu_host_budget_for(parallel::host_parallelism())
+}
+
 /// Execute every enrolled QEMU test once, running guests concurrently.
 ///
 /// The caller ([`super::run_test`]) owns the repeat loop so a duration
@@ -4571,8 +4588,9 @@ pub(crate) fn qemu_job_weight(cpus: u32) -> usize {
 /// whose QEMU monitor is a unique per-run unix socket, so two guests share
 /// no host resource except CPU. They are therefore run through the shared
 /// weighted-concurrency runner ([`super::parallel`]): each guest's weight is
-/// its emulated-CPU count plus one emulator/I/O unit and the budget is the
-/// host's logical-CPU count, so QEMU's non-vCPU work retains host capacity.
+/// its emulated-CPU count plus one emulator/I/O unit and the budget is half
+/// the host's effective logical-CPU count, so QEMU's non-vCPU work retains
+/// capacity without treating SMT siblings as full independent TCG cores.
 /// That keeps every guest's wall-clock deadline as reachable as it is for a
 /// solo run (no TCG starvation), so co-scheduling does not make a test flaky. On a single-core host the budget collapses to one and the matrix
 /// runs strictly sequentially.
@@ -4581,7 +4599,7 @@ pub(crate) fn qemu_job_weight(cpus: u32) -> usize {
 pub fn run_once(ctx: &Context, only: Option<&str>) -> Result<(), String> {
     let selected = enrolled(only)?;
     let target_dir = ctx.target_dir();
-    let budget = parallel::host_parallelism();
+    let budget = qemu_host_budget();
     // Resolve each enrolment's memoised (`'static`) `/System`-store bundle
     // set for its own target arch before the jobs are built, so the `'static`
     // job closures capture the resolved [`StoreSet`] (plain slices) by value
@@ -5429,7 +5447,9 @@ fn finish_run(t: &QemuTest, kernel: &Path, mut spec: Spec) -> Result<(), String>
 
 #[cfg(test)]
 mod tests {
-    use super::{build_targets, qemu_job_weight, PrimePlan, MEMSOAK_PASS_PREFIX, TESTS};
+    use super::{
+        build_targets, qemu_host_budget_for, qemu_job_weight, PrimePlan, MEMSOAK_PASS_PREFIX, TESTS,
+    };
     use std::time::Duration;
 
     /// The memory-stability vertical's serial-script marker is the leading
@@ -5491,6 +5511,15 @@ mod tests {
             2,
             "invalid zero still fails safe to one vCPU"
         );
+    }
+
+    #[test]
+    fn qemu_budget_reserves_smt_headroom() {
+        assert_eq!(qemu_host_budget_for(0), 1);
+        assert_eq!(qemu_host_budget_for(1), 1);
+        assert_eq!(qemu_host_budget_for(2), 1);
+        assert_eq!(qemu_host_budget_for(8), 4);
+        assert_eq!(qemu_host_budget_for(9), 5);
     }
 
     /// The smallest wall-clock budget any enrolment may carry.

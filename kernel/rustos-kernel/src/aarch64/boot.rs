@@ -556,16 +556,22 @@ pub fn boot(
     let counter_hz = discovered.timer_hz;
     // Dense `CpuId` → `MPIDR_EL1` map from the discovered `/cpus` list,
     // validated and ordered with the running boot core at dense id 0
-    // (a malformed list fails closed to a single-CPU boot), capped at
-    // the kernel core's per-CPU table bound. Every per-CPU backing —
+    // (a malformed list fails closed to a single-CPU boot). Every per-CPU backing —
     // the arch handle's slots, the preemption slices, the secondary
     // stacks, and the scheduler's run queues — is sized from this one
     // list, exactly to the machine (no compile-time core ceiling).
-    let cpu_mpidrs = crate::cpu_topology::order_cpus(
-        &discovered.cpu_mpidrs,
-        smp::current_affinity(),
-        rustos_kernel_core::kthread::KTHREAD_MAX_CPUS,
-    );
+    let cpu_mpidrs =
+        match crate::cpu_topology::order_cpus(&discovered.cpu_mpidrs, smp::current_affinity()) {
+            Ok(cpus) => cpus,
+            Err(crate::cpu_topology::CpuTopologyError::AllocationFailed) => {
+                serial::beacon("pi-boot: CPU topology allocation FAILED, parking");
+                halt_current_cpu()
+            }
+            Err(crate::cpu_topology::CpuTopologyError::TooManyCpus) => {
+                serial::beacon("pi-boot: CPU topology exceeds CpuId, parking");
+                halt_current_cpu()
+            }
+        };
     let arch = build_arch_handle(&cpu_mpidrs, counter_hz);
     // Discover each core's static class (`capacity-dmips-mhz`) so the
     // scheduler can place background work on efficiency cores. A
@@ -595,10 +601,16 @@ pub fn boot(
             "psci",
         ),
         None => {
-            let release_addrs = crate::cpu_topology::align_release_addrs(
+            let release_addrs = match crate::cpu_topology::align_release_addrs(
                 &cpu_mpidrs,
                 &discovered.cpu_spin_releases,
-            );
+            ) {
+                Ok(addrs) => addrs,
+                Err(_) => {
+                    serial::beacon("pi-boot: spin-table map allocation FAILED, parking");
+                    halt_current_cpu()
+                }
+            };
             if release_addrs.iter().any(|&addr| addr != 0) {
                 let release_addrs: &'static [u64] = Box::leak(release_addrs.into_boxed_slice());
                 (
@@ -843,18 +855,20 @@ pub fn boot(
 /// Leak a zeroed `&'static [AtomicU64]` of `count` slots for the arch
 /// handle's per-CPU bookkeeping, alive for the kernel's lifetime like
 /// the leaked console grids.
-fn leak_u64_slots(count: usize) -> &'static [AtomicU64] {
-    let mut slots = Vec::with_capacity(count);
+fn leak_u64_slots(count: usize) -> Option<&'static [AtomicU64]> {
+    let mut slots = Vec::new();
+    slots.try_reserve_exact(count).ok()?;
     slots.resize_with(count, || AtomicU64::new(0));
-    Box::leak(slots.into_boxed_slice())
+    Some(Box::leak(slots.into_boxed_slice()))
 }
 
 /// Leak a zeroed `&'static [AtomicU8]` of `count` slots (the per-CPU
 /// core-class table).
-fn leak_u8_slots(count: usize) -> &'static [AtomicU8] {
-    let mut slots = Vec::with_capacity(count);
+fn leak_u8_slots(count: usize) -> Option<&'static [AtomicU8]> {
+    let mut slots = Vec::new();
+    slots.try_reserve_exact(count).ok()?;
     slots.resize_with(count, || AtomicU8::new(0));
-    Box::leak(slots.into_boxed_slice())
+    Some(Box::leak(slots.into_boxed_slice()))
 }
 
 /// Build the [`Aarch64Arch`] handle over leaked per-CPU slices sized
@@ -867,10 +881,22 @@ fn leak_u8_slots(count: usize) -> &'static [AtomicU8] {
 /// beacon rather than continuing over per-CPU state of the wrong shape.
 fn build_arch_handle(cpu_mpidrs: &[u64], counter_hz: u64) -> Aarch64Arch {
     let count = cpu_mpidrs.len();
+    let Some(cpu_to_mpidr) = leak_u64_slots(count) else {
+        serial::beacon("pi-boot: CPU affinity slots allocation FAILED, parking");
+        halt_current_cpu()
+    };
+    let Some(host_ipi_count) = leak_u64_slots(count) else {
+        serial::beacon("pi-boot: IPI counter slots allocation FAILED, parking");
+        halt_current_cpu()
+    };
+    let Some(core_classes) = leak_u8_slots(count) else {
+        serial::beacon("pi-boot: core-class slots allocation FAILED, parking");
+        halt_current_cpu()
+    };
     match Aarch64Arch::with_cpu_slices(
-        leak_u64_slots(count),
-        leak_u64_slots(count),
-        leak_u8_slots(count),
+        cpu_to_mpidr,
+        host_ipi_count,
+        core_classes,
         BOOT_CPU,
         counter_hz,
         cpu_mpidrs,
@@ -936,7 +962,12 @@ fn prepare_secondary_bringup(cpu_mpidrs: &[u64]) -> bool {
     if smp::register_secondary_stacks(stacks).is_err() {
         return false;
     }
-    let affinities: &'static [u64] = Box::leak(cpu_mpidrs.to_vec().into_boxed_slice());
+    let mut affinities = Vec::new();
+    if affinities.try_reserve_exact(cpu_count).is_err() {
+        return false;
+    }
+    affinities.extend_from_slice(cpu_mpidrs);
+    let affinities: &'static [u64] = Box::leak(affinities.into_boxed_slice());
     if smp::register_secondary_affinities(affinities).is_err() {
         return false;
     }

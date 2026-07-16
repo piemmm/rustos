@@ -43,13 +43,14 @@
 //! scheduler round-trip and is never wrong; a *missed* expiry is the
 //! starvation defect this module exists to prevent.
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
 
 use rustos_kernel_sched_api::CpuId;
 use rustos_sync::once::OnceCell;
 
+use crate::cpu_state;
 use crate::dispatch_slot::RescheduleAction;
-use crate::kthread::{reschedule_current, KTHREAD_MAX_CPUS};
+use crate::kthread::reschedule_current;
 
 /// A scheduler-backed query the policy-neutral preempt path uses to decide
 /// whether a fired tick actually owes a context switch: does `cpu` have a
@@ -133,16 +134,6 @@ fn keep_periodic_tick(cpu: CpuId) {
     }
 }
 
-/// Slot `cpu` is `true` while a timer tick taken on that CPU awaits its
-/// preemption point.
-///
-/// Sized like the sibling per-CPU kthread tables ([`KTHREAD_MAX_CPUS`]).
-/// Plain atomics, no lock: the setter runs in timer-IRQ context on the
-/// same CPU the consumer runs on, where taking any lock could deadlock
-/// against the interrupted holder.
-static PREEMPT_PENDING: [AtomicBool; KTHREAD_MAX_CPUS] =
-    [const { AtomicBool::new(false) }; KTHREAD_MAX_CPUS];
-
 /// Record that `cpu`'s one-shot timer fired, so the task running there
 /// owes the scheduler a reschedule at its next preemption point.
 ///
@@ -152,8 +143,8 @@ static PREEMPT_PENDING: [AtomicBool; KTHREAD_MAX_CPUS] =
 /// context with the kernel mid-operation. An out-of-range `cpu` is
 /// dropped rather than indexing out of bounds (fail closed).
 pub fn note_preempt_tick(cpu: CpuId) {
-    if let Some(slot) = PREEMPT_PENDING.get(cpu as usize) {
-        slot.store(true, Ordering::Release);
+    if let Some(state) = cpu_state::get(cpu) {
+        state.preempt_pending.store(true, Ordering::Release);
     }
 }
 
@@ -167,9 +158,7 @@ pub fn note_preempt_tick(cpu: CpuId) {
 /// (fail closed: no phantom reschedule for a CPU with no slot).
 #[must_use]
 pub fn take_preempt_pending(cpu: CpuId) -> bool {
-    PREEMPT_PENDING
-        .get(cpu as usize)
-        .is_some_and(|slot| slot.swap(false, Ordering::AcqRel))
+    cpu_state::get(cpu).is_some_and(|state| state.preempt_pending.swap(false, Ordering::AcqRel))
 }
 
 /// Discard any tick latched on `cpu` before the scheduler's current
@@ -181,29 +170,10 @@ pub fn take_preempt_pending(cpu: CpuId) -> bool {
 /// without inheriting a stale reschedule obligation. An out-of-range
 /// `cpu` is a no-op.
 pub(crate) fn clear_preempt_pending(cpu: CpuId) {
-    if let Some(slot) = PREEMPT_PENDING.get(cpu as usize) {
-        slot.store(false, Ordering::Release);
+    if let Some(state) = cpu_state::get(cpu) {
+        state.preempt_pending.store(false, Ordering::Release);
     }
 }
-
-/// Count of involuntary preemptions performed on each CPU: the number of
-/// times a running user task was suspended back to the scheduler by
-/// [`preempt_current`] because its turn was over (a quantum expiry, a
-/// cross-CPU reschedule IPI, or a device IRQ that woke higher-priority
-/// work).
-///
-/// This is the preemption-mechanism's own statistic, distinct from any
-/// scheduler policy's internal timer-tick observation: it counts real
-/// context switches driven off the interrupt-return-to-user preempt
-/// point, so it moves under load on a tickless policy (EEVDF) exactly as
-/// it does on a tick-driven one. It is read only for the System
-/// Information per-CPU load feed; no scheduling decision consults it.
-///
-/// Sized and indexed like [`PREEMPT_PENDING`]; relaxed ordering is
-/// sufficient for a monotonic observation counter never used to
-/// synchronise other state.
-static PREEMPT_COUNT: [AtomicU64; KTHREAD_MAX_CPUS] =
-    [const { AtomicU64::new(0) }; KTHREAD_MAX_CPUS];
 
 /// Honour `cpu`'s pending-preemption latch by suspending the user task
 /// currently running there back to the scheduler, counting the
@@ -225,6 +195,7 @@ static PREEMPT_COUNT: [AtomicU64; KTHREAD_MAX_CPUS] =
 /// `cpu` (the fail-closed [`reschedule_current`] return, e.g. a stray
 /// invocation with none switched in). The counter advances only on a real
 /// suspension, never on a spurious call.
+#[must_use]
 pub fn preempt_current(cpu: CpuId) -> bool {
     if !take_preempt_pending(cpu) {
         return false;
@@ -262,8 +233,8 @@ pub fn preempt_current(cpu: CpuId) -> bool {
         keep_periodic_tick(cpu);
         return false;
     }
-    if let Some(slot) = PREEMPT_COUNT.get(cpu as usize) {
-        slot.fetch_add(1, Ordering::Relaxed);
+    if let Some(state) = cpu_state::get(cpu) {
+        state.preemptions.fetch_add(1, Ordering::Relaxed);
     }
     true
 }
@@ -274,32 +245,28 @@ pub fn preempt_current(cpu: CpuId) -> bool {
 /// CPU with no slot).
 #[must_use]
 pub fn preemption_count(cpu: CpuId) -> u64 {
-    PREEMPT_COUNT
-        .get(cpu as usize)
-        .map_or(0, |slot| slot.load(Ordering::Relaxed))
+    cpu_state::get(cpu).map_or(0, |state| state.preemptions.load(Ordering::Relaxed))
 }
 
 /// The sum of [`preemption_count`] across every CPU slot.
 #[must_use]
 pub fn total_preemption_count() -> u64 {
-    PREEMPT_COUNT
-        .iter()
-        .map(|c| c.load(Ordering::Relaxed))
-        .sum()
+    cpu_state::total_preemptions()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::sync::atomic::AtomicU64;
 
     struct TestCompetitorGate {
-        periodic_rearms: [AtomicU64; KTHREAD_MAX_CPUS],
+        periodic_rearms: [AtomicU64; crate::cpu_state::TEST_CPUS],
     }
 
     impl TestCompetitorGate {
         const fn new() -> Self {
             Self {
-                periodic_rearms: [const { AtomicU64::new(0) }; KTHREAD_MAX_CPUS],
+                periodic_rearms: [const { AtomicU64::new(0) }; crate::cpu_state::TEST_CPUS],
             }
         }
 
@@ -382,7 +349,7 @@ mod tests {
 
     #[test]
     fn an_out_of_range_cpu_fails_closed() {
-        let beyond = u32::try_from(KTHREAD_MAX_CPUS).unwrap_or(u32::MAX);
+        let beyond = u32::try_from(crate::cpu_state::TEST_CPUS).expect("test CPU count fits u32");
         note_preempt_tick(beyond);
         assert!(!take_preempt_pending(beyond));
         clear_preempt_pending(beyond);

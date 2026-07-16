@@ -67,8 +67,8 @@ use rustos_kernel_sched_api::{
     CpuId, Priority, SchedResult, SchedulerArch, SchedulerPolicy, TaskAction, TaskId,
 };
 use rustos_sync::once::OnceCell;
-use rustos_sync::SpinLock;
 
+use crate::cpu_state::{self, LiveSpacePtr, ResumeHandle as UserResumeHandle};
 use crate::dispatch_slot::RescheduleAction;
 
 /// Default per-kthread kernel-stack size, in bytes — a **release-tuned
@@ -420,84 +420,6 @@ impl<C: ContextSwitch + Copy> YieldHandle for YielderHandle<'_, C> {
 /// object-safe boundary's signature stays readable.
 pub type KernelServiceBody = Box<dyn FnMut(&mut dyn YieldHandle) + Send>;
 
-/// Upper bound on the number of CPUs the per-CPU EL0 resume table is
-/// sized for.
-///
-/// `kernel/core` cannot name an architecture's `MAX_CPUS` (it is a
-/// concrete-port constant); this is the core-owned
-/// bound for the EL0-task resume seam. It is comfortably above every
-/// Tier-1 port's own `MAX_CPUS` (x86_64 = 16, aarch64 = 8); a `cpu`
-/// index at or beyond it makes [`reschedule_current`] fail closed rather
-/// than index out of bounds.
-pub const KTHREAD_MAX_CPUS: usize = 64;
-
-/// A published handle to the kthread currently switched in on a CPU,
-/// through which its own control flow — a user task's syscall trap, or a
-/// kernel service kthread's body — suspends it back to the scheduler
-/// ([`reschedule_current`]).
-///
-/// `data` is the address of the running task's `ThreadControl<C, S>` and
-/// `thunk` is the `C, S`-monomorphised suspend thunk that knows how to
-/// reinterpret it ([`suspend_thunk_syscall`] for a user task,
-/// [`suspend_thunk_body`] for a kernel kthread); the pair is `Copy` so
-/// [`reschedule_current`] can lift it out from under the per-CPU lock
-/// *before* performing the (suspending) switch, never holding the lock
-/// across the hand-off.
-#[derive(Copy, Clone)]
-struct UserResumeHandle {
-    data: usize,
-    thunk: unsafe fn(usize, TaskAction),
-}
-
-/// Per-CPU resume table: slot `cpu` holds the handle for the kthread
-/// currently switched in on that CPU, or `None` when the dispatcher (or
-/// pre-dispatch boot flow) is running there.
-///
-/// [`dispatch_step`] publishes a slot immediately before switching into
-/// *any* kthread — user or kernel — and clears it the instant the task
-/// switches back, so a slot is `Some` exactly while that CPU is executing
-/// the task (in EL0, in one of its syscall traps, or in a kernel kthread's
-/// body). It is reached only through [`reschedule_current`]. Each CPU
-/// touches only its own slot, so the `SpinLock` never contends across CPUs
-/// — it is the minimum interior mutability + memory-ordering primitive for
-/// the publish/observe, not a contention point.
-static USER_RESUME: [SpinLock<Option<UserResumeHandle>>; KTHREAD_MAX_CPUS] =
-    [const { SpinLock::new(None) }; KTHREAD_MAX_CPUS];
-
-/// A published pointer to the live, mutable user address space of the task
-/// currently switched in on a CPU.
-///
-/// A raw pointer is not `Send`, so it is wrapped here with a hand-written
-/// `unsafe impl Send` justified by the same single-CPU exclusivity that
-/// makes [`UserResumeHandle`]'s `data` sound: the pointer is published
-/// `Some` only between [`dispatch_step`]'s switch-into-task and the task's
-/// switch-back, it is reached only from that task's own synchronous syscall
-/// trap (via [`with_current_live_space`]), and a task runs on at most one
-/// CPU at a time — so the pointee is never accessed concurrently or
-/// cross-CPU, and the `&mut` [`with_current_live_space`] hands out is
-/// genuinely exclusive.
-#[derive(Copy, Clone)]
-struct LiveSpacePtr(*mut (dyn LiveUserSpace + Send));
-
-// SAFETY: see the type's documentation — the pointer is observed only by the
-// one CPU running its owning task, from that task's serialised syscall path,
-// never concurrently, so handing it between the publishing dispatcher and the
-// observing handler across the per-CPU slot is sound.
-unsafe impl Send for LiveSpacePtr {}
-
-/// Per-CPU table of the live address space of the user kthread currently
-/// switched in on each CPU, the `mem_map` / `mmio_map` producers' target.
-///
-/// Published by [`dispatch_step`] immediately before switching into a user
-/// kthread that carries a retained live space, and cleared the instant the
-/// task switches back — the exact lifecycle as [`USER_RESUME`], so a slot is
-/// `Some` exactly while that CPU is executing the task (in EL0 or one of its
-/// syscall traps). Each CPU touches only its own slot, so the `SpinLock`
-/// never contends across CPUs; it is the minimum interior
-/// mutability + memory-ordering primitive for the publish/observe.
-static USER_LIVE_SPACE: [SpinLock<Option<LiveSpacePtr>>; KTHREAD_MAX_CPUS] =
-    [const { SpinLock::new(None) }; KTHREAD_MAX_CPUS];
-
 /// Map the dispatch-callback ABI's [`RescheduleAction`] onto the
 /// scheduler's own `TaskAction` at the one boundary that needs it
 /// (the two vocabularies meet here, nowhere else).
@@ -631,17 +553,14 @@ where
 /// rather than perform an unsound switch.
 #[must_use = "a false return means no user task was suspended; the caller must fall back to an ordinary syscall return"]
 pub fn reschedule_current(cpu: CpuId, action: RescheduleAction) -> bool {
-    let Ok(idx) = usize::try_from(cpu) else {
-        return false;
-    };
-    let Some(slot) = USER_RESUME.get(idx) else {
+    let Some(state) = cpu_state::get(cpu) else {
         return false;
     };
     // Lift the handle out from under the lock and release it *before*
     // switching: the switch suspends this task, and holding the slot lock
     // across it would deadlock the dispatcher-side clear that runs when the
     // task resumes (no lock held across a hand-off).
-    let handle = *slot.lock();
+    let handle = *state.resume.lock();
     let Some(handle) = handle else {
         return false;
     };
@@ -696,7 +615,7 @@ struct ThreadControl<C: ContextSwitch + Copy, S: KernelStack> {
     /// The task's retained live, mutable user address space, or `None` for a
     /// task that has none (a kernel kthread, or a user task whose producer
     /// is not wired). When `Some`, [`dispatch_step`] publishes a pointer to
-    /// it in [`USER_LIVE_SPACE`] for the running CPU so the `mem_map` /
+    /// it in the discovered per-CPU state for the running CPU so `mem_map` /
     /// `mmio_map` syscall producers can mutate the caller's own space
     /// (`plans/PI.md` 5d-0-ii (b′)). Owned here for the task's whole life, so
     /// the published pointer stays valid while the task exists and the space
@@ -946,7 +865,7 @@ where
 /// `mem_map` / `mmio_map` syscalls must mutate its own address space
 /// (`plans/PI.md` 5d-0-ii (b′)): the boxed [`LiveUserSpace`] is owned by the
 /// task's control block for its whole life, and the dispatcher publishes a
-/// pointer to it in the per-CPU `USER_LIVE_SPACE` table while the task is
+/// pointer to it in the discovered per-CPU state while the task is
 /// switched in, so the syscall producers reach it through
 /// [`with_current_live_space`]. The space (and its page-table frames) is
 /// reclaimed when the task exits and the control block is dropped.
@@ -1020,6 +939,9 @@ where
     S: KernelStack + Send + 'static,
     W: FnMut(&mut Yielder<C>) + Send + 'static,
 {
+    if !cpu_state::ensure(scheduler.cpu_count(), home_cpu) {
+        return Err(rustos_kernel_sched_api::SchedError::NoSuchCpu);
+    }
     let mut control: Box<ThreadControl<C, S>> = Box::new(ThreadControl {
         cs,
         task_ctx: TaskContext::empty(),
@@ -1220,23 +1142,19 @@ fn publish_resume<C, S>(
     C: ContextSwitch + Copy,
     S: KernelStack,
 {
-    if let Ok(idx) = usize::try_from(cpu) {
-        if let Some(slot) = USER_RESUME.get(idx) {
-            *slot.lock() = Some(UserResumeHandle {
-                data: ctl as usize,
-                thunk,
-            });
-        }
+    if let Some(state) = cpu_state::get(cpu) {
+        *state.resume.lock() = Some(UserResumeHandle {
+            data: ctl as usize,
+            thunk,
+        });
     }
 }
 
 /// Clear the per-CPU resume handle for `cpu` once its user kthread has
 /// switched back to the dispatcher (the counterpart of [`publish_resume`]).
 fn clear_resume(cpu: CpuId) {
-    if let Ok(idx) = usize::try_from(cpu) {
-        if let Some(slot) = USER_RESUME.get(idx) {
-            *slot.lock() = None;
-        }
+    if let Some(state) = cpu_state::get(cpu) {
+        *state.resume.lock() = None;
     }
 }
 
@@ -1263,10 +1181,8 @@ where
             .map(|space| space as *mut (dyn LiveUserSpace + Send))
     };
     if let Some(ptr) = ptr {
-        if let Ok(idx) = usize::try_from(cpu) {
-            if let Some(slot) = USER_LIVE_SPACE.get(idx) {
-                *slot.lock() = Some(LiveSpacePtr(ptr));
-            }
+        if let Some(state) = cpu_state::get(cpu) {
+            *state.live_space.lock() = Some(LiveSpacePtr(ptr));
         }
     }
 }
@@ -1274,10 +1190,8 @@ where
 /// Clear the per-CPU live-address-space pointer for `cpu` once its user
 /// kthread has switched back (the counterpart of [`publish_live_space`]).
 fn clear_live_space(cpu: CpuId) {
-    if let Ok(idx) = usize::try_from(cpu) {
-        if let Some(slot) = USER_LIVE_SPACE.get(idx) {
-            *slot.lock() = None;
-        }
+    if let Some(state) = cpu_state::get(cpu) {
+        *state.live_space.lock() = None;
     }
 }
 
@@ -1302,14 +1216,13 @@ pub fn with_current_live_space<R>(
     cpu: CpuId,
     f: impl FnOnce(&mut dyn LiveUserSpace) -> R,
 ) -> Option<R> {
-    let idx = usize::try_from(cpu).ok()?;
-    let slot = USER_LIVE_SPACE.get(idx)?;
+    let state = cpu_state::get(cpu)?;
     // Lift the (Copy) pointer out from under the lock, then release the lock
     // before the (possibly lengthy, page-table-walking) `f` — the per-CPU
     // slot is only ever touched by this CPU, so nothing can change it while
     // the task is trapped here (mirrors `reschedule_current`'s lift-then-act).
     let ptr = {
-        let guard = slot.lock();
+        let guard = state.live_space.lock();
         *guard
     }?;
     // SAFETY: see the function's borrow argument — exclusive while the task
@@ -1341,10 +1254,8 @@ pub(crate) fn publish_live_space_for_test(
     cpu: CpuId,
     space: &'static mut (dyn LiveUserSpace + Send),
 ) -> LiveSpacePublishGuard {
-    if let Ok(idx) = usize::try_from(cpu) {
-        if let Some(slot) = USER_LIVE_SPACE.get(idx) {
-            *slot.lock() = Some(LiveSpacePtr(space as *mut (dyn LiveUserSpace + Send)));
-        }
+    if let Some(state) = cpu_state::get(cpu) {
+        *state.live_space.lock() = Some(LiveSpacePtr(space as *mut (dyn LiveUserSpace + Send)));
     }
     LiveSpacePublishGuard { cpu }
 }
@@ -1429,8 +1340,8 @@ mod tests {
             // Record whether CPU 62's resume slot is published at switch
             // time (the kernel-kthread publish assertion; other tests use
             // other CPU indices, so this never cross-talks).
-            if let Some(slot) = USER_RESUME.get(62) {
-                if slot.lock().is_some() {
+            if let Some(state) = cpu_state::get(62) {
+                if state.resume.lock().is_some() {
                     PUBLISHED_DURING_SWITCH.store(true, Ordering::SeqCst);
                 }
             }
@@ -1762,9 +1673,8 @@ mod tests {
 
     #[test]
     fn reschedule_current_out_of_range_cpu_is_false() {
-        // A CPU index far beyond the table bound never indexes out of
-        // bounds; it fails closed like an unpublished slot.
-        assert!(KTHREAD_MAX_CPUS < CpuId::MAX as usize);
+        // A CPU index beyond the test table never indexes out of bounds; it
+        // fails closed like an unpublished slot.
         assert!(!reschedule_current(CpuId::MAX, RescheduleAction::Yield));
     }
 

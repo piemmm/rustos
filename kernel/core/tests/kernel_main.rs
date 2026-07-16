@@ -123,6 +123,8 @@ fn happy_path_runs_documented_init_order_and_halts() {
     assert_eq!(
         audit_ids.last().copied(),
         Some(AuditEvent::BootCompleted.id().0),
+        "boot audit trail: {:#?}",
+        audit_sink.snapshot(),
     );
     assert!(
         !audit_ids.contains(&AuditEvent::PhaseFailed.id().0),

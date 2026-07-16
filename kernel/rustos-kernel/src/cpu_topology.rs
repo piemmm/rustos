@@ -12,36 +12,58 @@
 
 use alloc::vec::Vec;
 
+/// Failure to construct a dense CPU topology from firmware discovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuTopologyError {
+    /// Temporary storage for validation or the result could not be allocated.
+    AllocationFailed,
+    /// The discovered count cannot be represented by the kernel's CPU id.
+    TooManyCpus,
+}
+
+fn reserve<T>(slots: &mut Vec<T>, count: usize) -> Result<(), CpuTopologyError> {
+    slots
+        .try_reserve_exact(count)
+        .map_err(|_| CpuTopologyError::AllocationFailed)
+}
+
+fn boot_only(boot_affinity: u64) -> Result<Vec<u64>, CpuTopologyError> {
+    let mut ordered = Vec::new();
+    reserve(&mut ordered, 1)?;
+    ordered.push(boot_affinity);
+    Ok(ordered)
+}
+
 /// Validate the discovered CPU affinity list and order it with the
 /// running boot CPU first, returning the dense-id → affinity map.
 ///
 /// * The boot CPU (identified by `boot_affinity`, the value the running
 ///   core reads from its own identity register) is moved to dense id
 ///   `0`; the remaining CPUs keep their discovery order.
-/// * The result is capped at `max_cpus` entries (the kernel core's
-///   per-CPU table bound); surplus CPUs are dropped from the tail. The
-///   caller logs the clamp — silently ignoring cores is not an option
-///   it may take quietly.
 /// * A list that cannot be trusted fails closed to just the boot CPU:
 ///   an empty discovery, a duplicate affinity (two CPUs cannot share
 ///   one), or a list that does not contain the running core at all (a
 ///   tree describing some *other* machine must not size this one's
 ///   bring-up).
-#[must_use]
-pub fn order_cpus(discovered: &[u64], boot_affinity: u64, max_cpus: usize) -> Vec<u64> {
-    let boot_only = || alloc::vec![boot_affinity];
-    if discovered.is_empty() || max_cpus == 0 {
-        return boot_only();
+pub fn order_cpus(discovered: &[u64], boot_affinity: u64) -> Result<Vec<u64>, CpuTopologyError> {
+    if u32::try_from(discovered.len()).is_err() {
+        return Err(CpuTopologyError::TooManyCpus);
+    }
+    if discovered.is_empty() {
+        return boot_only(boot_affinity);
     }
     let Some(boot_index) = discovered.iter().position(|&a| a == boot_affinity) else {
-        return boot_only();
+        return boot_only(boot_affinity);
     };
-    for (i, &a) in discovered.iter().enumerate() {
-        if discovered[i + 1..].contains(&a) {
-            return boot_only();
-        }
+    let mut sorted = Vec::new();
+    reserve(&mut sorted, discovered.len())?;
+    sorted.extend_from_slice(discovered);
+    sorted.sort_unstable();
+    if sorted.windows(2).any(|pair| pair[0] == pair[1]) {
+        return boot_only(boot_affinity);
     }
-    let mut ordered = Vec::with_capacity(discovered.len().min(max_cpus));
+    let mut ordered = Vec::new();
+    reserve(&mut ordered, discovered.len())?;
     ordered.push(boot_affinity);
     ordered.extend(
         discovered
@@ -50,8 +72,7 @@ pub fn order_cpus(discovered: &[u64], boot_affinity: u64, max_cpus: usize) -> Ve
             .filter(|&(i, _)| i != boot_index)
             .map(|(_, &a)| a),
     );
-    ordered.truncate(max_cpus.max(1));
-    ordered
+    Ok(ordered)
 }
 
 /// Align the discovered per-CPU spin-table release addresses with the
@@ -64,17 +85,19 @@ pub fn order_cpus(discovered: &[u64], boot_affinity: u64, max_cpus: usize) -> Ve
 /// affinity with no declared pair (or a duplicate — first declaration
 /// wins, matching the duplicate-free dense map) takes `0`, so a start
 /// request for it fails closed rather than writing an invented word.
-#[must_use]
-pub fn align_release_addrs(ordered: &[u64], declared: &[(u64, u64)]) -> Vec<u64> {
-    ordered
-        .iter()
-        .map(|&affinity| {
-            declared
-                .iter()
-                .find(|&&(a, _)| a == affinity)
-                .map_or(0, |&(_, addr)| addr)
-        })
-        .collect()
+pub fn align_release_addrs(
+    ordered: &[u64],
+    declared: &[(u64, u64)],
+) -> Result<Vec<u64>, CpuTopologyError> {
+    let mut aligned = Vec::new();
+    reserve(&mut aligned, ordered.len())?;
+    aligned.extend(ordered.iter().map(|&affinity| {
+        declared
+            .iter()
+            .find(|&&(a, _)| a == affinity)
+            .map_or(0, |&(_, addr)| addr)
+    }));
+    Ok(aligned)
 }
 
 #[cfg(test)]
@@ -83,48 +106,41 @@ mod tests {
 
     #[test]
     fn boot_core_is_moved_to_dense_id_zero_preserving_the_rest() {
-        assert_eq!(order_cpus(&[0, 1, 2, 3], 0, 64), &[0, 1, 2, 3]);
-        assert_eq!(order_cpus(&[2, 1, 0, 3], 0, 64), &[0, 2, 1, 3]);
+        assert_eq!(order_cpus(&[0, 1, 2, 3], 0).unwrap(), &[0, 1, 2, 3]);
+        assert_eq!(order_cpus(&[2, 1, 0, 3], 0).unwrap(), &[0, 2, 1, 3]);
     }
 
     #[test]
     fn a_list_missing_the_running_core_fails_closed_to_single_cpu() {
-        assert_eq!(order_cpus(&[1, 2, 3], 0, 64), &[0]);
+        assert_eq!(order_cpus(&[1, 2, 3], 0).unwrap(), &[0]);
     }
 
     #[test]
     fn an_empty_discovery_fails_closed_to_single_cpu() {
-        assert_eq!(order_cpus(&[], 7, 64), &[7]);
+        assert_eq!(order_cpus(&[], 7).unwrap(), &[7]);
     }
 
     #[test]
     fn a_duplicate_affinity_fails_closed_to_single_cpu() {
-        assert_eq!(order_cpus(&[0, 1, 1, 3], 0, 64), &[0]);
-    }
-
-    #[test]
-    fn the_list_is_capped_at_the_per_cpu_table_bound() {
-        assert_eq!(order_cpus(&[0, 1, 2, 3], 0, 2), &[0, 1]);
-        // A pathological zero bound still yields the boot CPU.
-        assert_eq!(order_cpus(&[0, 1], 0, 0), &[0]);
+        assert_eq!(order_cpus(&[0, 1, 1, 3], 0).unwrap(), &[0]);
     }
 
     #[test]
     fn pi_4_shaped_affinities_survive_intact() {
         // The Pi 4's DT lists cpu@0..cpu@3 with Aff0 = 0..3 and the boot
         // core is affinity 0 — the common case is a straight pass-through.
-        assert_eq!(order_cpus(&[0, 1, 2, 3], 0, 64), &[0, 1, 2, 3]);
+        assert_eq!(order_cpus(&[0, 1, 2, 3], 0).unwrap(), &[0, 1, 2, 3]);
     }
 
     #[test]
     fn release_addrs_follow_the_dense_order() {
         // The Pi 4 shape: no release word for the boot CPU, one per
         // secondary, aligned to the dense ids whatever the tree order.
-        let ordered = order_cpus(&[2, 1, 0, 3], 0, 64);
+        let ordered = order_cpus(&[2, 1, 0, 3], 0).unwrap();
         assert_eq!(ordered, &[0, 2, 1, 3]);
         let declared = [(1, 0xe0), (2, 0xe8), (3, 0xf0)];
         assert_eq!(
-            align_release_addrs(&ordered, &declared),
+            align_release_addrs(&ordered, &declared).unwrap(),
             &[0, 0xe8, 0xe0, 0xf0]
         );
     }
@@ -133,15 +149,18 @@ mod tests {
     fn an_undeclared_affinity_gets_no_release_word() {
         // CPU 2 declared no `cpu-release-addr`: its slot is 0 so a start
         // request for it fails closed.
-        assert_eq!(align_release_addrs(&[0, 1, 2], &[(1, 0xe0)]), &[0, 0xe0, 0]);
+        assert_eq!(
+            align_release_addrs(&[0, 1, 2], &[(1, 0xe0)]).unwrap(),
+            &[0, 0xe0, 0]
+        );
         // No declarations at all: every slot is 0.
-        assert_eq!(align_release_addrs(&[0, 1], &[]), &[0, 0]);
+        assert_eq!(align_release_addrs(&[0, 1], &[]).unwrap(), &[0, 0]);
     }
 
     #[test]
     fn a_duplicate_declaration_takes_the_first() {
         assert_eq!(
-            align_release_addrs(&[0, 1], &[(1, 0xe0), (1, 0xf0)]),
+            align_release_addrs(&[0, 1], &[(1, 0xe0), (1, 0xf0)]).unwrap(),
             &[0, 0xe0]
         );
     }

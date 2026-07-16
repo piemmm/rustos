@@ -388,7 +388,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         // allocator if the boot path has not already done so — either
         // way there is a single hysteresis history. Reading it takes a
         // fresh sample, exactly as every cache consumer reads it.
-        let gauge = crate::memstats::MEM_STATS.system_pressure(&self.state.frame_allocator);
+        let gauge = crate::memstats::MEM_STATS.system_pressure(self.state.frame_allocator);
         let band = gauge.sample();
         let thresholds = gauge.thresholds();
         let to_u64 = |v: usize| v as u64;

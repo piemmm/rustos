@@ -609,6 +609,20 @@ timed-out wait returns rather than parking forever. The shared
 `SchedulerPolicy` conformance suite's `unpark_before_park_is_not_lost`
 case asserts this for every policy.
 
+There is a second valid ordering: `park()` may publish `Parked` while the
+stackful task body is still switching back. If `unpark()` then changes the
+task to `Ready` and enqueues it, the old body's eventual `Park` result is
+stale. Dispatch preserves the waker-owned `Ready` transition without
+re-enqueuing it; otherwise the stale result could undo the wake while leaving
+an unusable queue entry. CFQ's
+`a_wake_after_park_publication_survives_the_stale_body_return` regression pins
+that transition.
+
+`SleepLock` builds fair mutex contention on the same wait queue. Contenders
+retain FIFO registration order and release wakes only the oldest waiter,
+avoiding a thundering herd and preventing a long-waiting storage operation
+from being displaced indefinitely by newer app-load reads.
+
 ## Current-task slot
 
 `Scheduler<A>` owns a per-CPU **current-task slot** — one

@@ -329,6 +329,9 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         BOOT_CPU,
         counter_hz,
     ));
+    if rustos_kernel_core::initialize_cpu_state(1).is_err() {
+        qemu_exit::exit_failure(FAIL_SCHED_NEW);
+    }
     let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(1), arch) else {
         qemu_exit::exit_failure(FAIL_SCHED_NEW);
     };

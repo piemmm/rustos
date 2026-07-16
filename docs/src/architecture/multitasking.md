@@ -118,7 +118,13 @@ The arch-neutral half lives in `kernel/core` and is host-proven:
   boot flow or a host test — so the caller falls back (an ordinary syscall
   return, or a bounded CPU park) rather than an unsound switch (§2.9,
   §5.4).
-* **The per-CPU resume table + `pre_resume` hook.** `dispatch_step`
+* **Discovered-sized per-CPU state + `pre_resume` hook.** Scheduler
+  initialization fallibly allocates one `cpu_state` slot per validated
+  discovered CPU; there is no compile-time CPU ceiling. Each slot owns the
+  resume handle, current live address-space pointer, preemption latch, and
+  preemption counter. A set-once cell publishes the owned slice as one
+  immutable object, giving interrupt paths O(1) lookup without allocation or
+  a global lock on the hot path. `dispatch_step`
   publishes a resume handle for *every* kthread it is about to switch
   into — user and kernel alike — and clears it the instant the task
   switches back, so a handle is valid exactly while that CPU runs the task

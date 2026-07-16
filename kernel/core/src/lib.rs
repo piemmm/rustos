@@ -77,6 +77,7 @@ pub mod boot_id;
 pub mod bootinfo;
 pub mod callreg;
 pub mod console;
+mod cpu_state;
 pub mod devres;
 pub mod dispatch_slot;
 pub mod driver_store;
@@ -162,6 +163,7 @@ pub use console::{
     NullConsole, NullConsoleInput, NullConsoleRead, SecretFeedback, CONSOLE_INPUT_QUEUE_CAPACITY,
     NO_CONSOLES, NULL_CONSOLE, NULL_CONSOLE_INPUT, NULL_CONSOLE_READ,
 };
+pub use cpu_state::{install as initialize_cpu_state, CpuStateInitError};
 pub use devres::{
     dma_constraint, mappable_subwindow, translate_device_addr, DmaAllocFacility, DmaCarve,
     DmaConstraint, MmioMapFacility, MsiAllocFacility, NullDmaAllocFacility, NullMmioMapFacility,
@@ -194,7 +196,7 @@ pub use kthread::{
     reschedule_current, spawn_kthread, spawn_kthread_with_stack, spawn_user_kthread,
     spawn_user_kthread_with_stack, spawn_user_kthread_with_stack_live, with_current_live_space,
     BoxStack, KernelServiceBody, KernelStack, YieldHandle, Yielder, YielderHandle,
-    KTHREAD_MAX_CPUS, KTHREAD_STACK_BYTES,
+    KTHREAD_STACK_BYTES,
 };
 pub use kthread_irq::{CooperativeYield, KthreadIrqWaiter};
 pub use launch_cache::LaunchCache;

@@ -154,7 +154,7 @@ fn host_units(ctx: &Context, reps: u32) -> Vec<FlakeUnit<'_>> {
 /// process-level scheduling capacity and never manufacture a load-dependent
 /// timeout (see the module docs).
 fn qemu_units(ctx: &Context) -> Vec<FlakeUnit<'_>> {
-    let budget = parallel::host_parallelism();
+    let budget = qemu_tests::qemu_host_budget();
     qemu_tests::enrolments()
         .into_iter()
         .map(|enrol| {

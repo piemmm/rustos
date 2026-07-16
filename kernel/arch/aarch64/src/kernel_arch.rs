@@ -51,6 +51,10 @@ use crate::fdt::PsciMethod;
 /// collides with a populated entry.
 const NO_MPIDR: u64 = u64::MAX;
 
+fn cpu_count_from_len(len: usize) -> Option<u32> {
+    u32::try_from(len).ok()
+}
+
 /// Caller-owned, `&'static` per-CPU backing for an [`Aarch64Arch`]
 /// handle (per-CPU bookkeeping is sized by the
 /// caller from discovered hardware, never a fixed `const` ceiling baked
@@ -271,6 +275,7 @@ impl Aarch64Arch {
     ) -> Option<Self> {
         let count = mpidrs.len();
         if count == 0
+            || cpu_count_from_len(count).is_none()
             || cpu_to_mpidr.len() != count
             || host_ipi_count.len() != count
             || core_classes.len() != count
@@ -304,7 +309,7 @@ impl Aarch64Arch {
     /// exactly-sized backing (a single-CPU handle reports `1`).
     #[must_use]
     pub fn cpu_count(&self) -> u32 {
-        u32::try_from(self.cpu_to_mpidr.len()).unwrap_or(u32::MAX)
+        cpu_count_from_len(self.cpu_to_mpidr.len()).unwrap_or(0)
     }
 
     /// Populate dense `cpu`'s map slot with `mpidr`. An out-of-range
@@ -948,6 +953,15 @@ pub fn halt_current_cpu() -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_count_conversion_rejects_values_outside_cpu_id() {
+        assert_eq!(cpu_count_from_len(0), Some(0));
+        assert_eq!(cpu_count_from_len(u32::MAX as usize), Some(u32::MAX));
+        if usize::BITS > u32::BITS {
+            assert_eq!(cpu_count_from_len(u32::MAX as usize + 1), None);
+        }
+    }
 
     #[test]
     fn monotonic_ns_uses_the_handle_frequency() {

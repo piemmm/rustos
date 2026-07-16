@@ -658,6 +658,16 @@ impl<A: SchedulerArch> Scheduler<A> {
         task.set_vruntime(charged);
 
         let observed = task.load_state();
+        if observed == TaskState::Ready && action == TaskAction::Park {
+            // `park()` may publish `Parked` while this body is still
+            // unwinding toward its context-switch return. A concurrent
+            // `unpark()` then owns the Parked -> Ready transition and has
+            // already enqueued the task. The returning body's Park action is
+            // stale: applying it would undo the wake and strand a stale queue
+            // entry; treating it as Yield would enqueue a duplicate. Preserve
+            // the waker's single, already-admitted Ready transition exactly.
+            return StepOutcome::Ran(id);
+        }
         let effective = match (observed, action) {
             (TaskState::Exited, _) | (_, TaskAction::Exit) => TaskAction::Exit,
             (TaskState::Parked, _) | (_, TaskAction::Park) => TaskAction::Park,
@@ -1195,6 +1205,37 @@ mod tests {
         // The task is runnable again and finishes on the next step.
         assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)));
         assert_eq!(sched.live_task_count(), 0);
+    }
+
+    #[test]
+    fn a_wake_after_park_publication_survives_the_stale_body_return() {
+        let (arch, scheduler) = mk(1);
+        arch.set_current_cpu(0);
+        let scheduler = Arc::new(scheduler);
+        let task_id = Arc::new(AtomicU64::new(0));
+        let runs = Arc::new(AtomicU64::new(0));
+        let body_scheduler = Arc::clone(&scheduler);
+        let body_id = Arc::clone(&task_id);
+        let body_runs = Arc::clone(&runs);
+        let id = scheduler
+            .spawn(0, Priority::Normal, move |_| {
+                if body_runs.fetch_add(1, Ordering::Relaxed) == 0 {
+                    let id = body_id.load(Ordering::Acquire);
+                    body_scheduler.park(id).expect("publish parked");
+                    body_scheduler.unpark(id).expect("early wake");
+                    TaskAction::Park
+                } else {
+                    TaskAction::Exit
+                }
+            })
+            .expect("spawn");
+        task_id.store(id, Ordering::Release);
+
+        assert_eq!(scheduler.step(0), Ok(StepOutcome::Ran(id)));
+        assert_eq!(scheduler.state_of(id), TaskState::Ready);
+        assert_eq!(scheduler.step(0), Ok(StepOutcome::Ran(id)));
+        assert_eq!(runs.load(Ordering::Relaxed), 2);
+        assert_eq!(scheduler.live_task_count(), 0);
     }
 
     #[test]

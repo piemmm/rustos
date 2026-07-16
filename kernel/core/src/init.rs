@@ -140,6 +140,12 @@ pub enum InitError {
     Sec(rustos_abi::Errno),
     /// `kernel/sched` rejected the scheduler configuration.
     Sched(SchedError),
+    /// The scheduler reported zero CPUs while installing per-CPU state.
+    CpuStateZeroCpus,
+    /// Per-CPU state allocation failed during scheduler initialization.
+    CpuStateAllocationFailed,
+    /// Per-CPU state was already installed during scheduler initialization.
+    CpuStateAlreadyInstalled,
     /// The bin-crate [`crate::DispatchCallbackSlot`] already held a
     /// hook when the `Syscall` phase attempted to publish ours.
     ///
@@ -161,7 +167,10 @@ impl InitError {
             InitError::BadBootInfo(_) => Phase::Log,
             InitError::Mem(_) => Phase::Mem,
             InitError::Sec(_) => Phase::Sec,
-            InitError::Sched(_) => Phase::Sched,
+            InitError::Sched(_)
+            | InitError::CpuStateZeroCpus
+            | InitError::CpuStateAllocationFailed
+            | InitError::CpuStateAlreadyInstalled => Phase::Sched,
             InitError::DispatcherAlreadyInstalled(_) => Phase::Syscall,
         }
     }
@@ -180,6 +189,9 @@ impl InitError {
             InitError::Mem(_) => "mem_unknown",
             InitError::Sec(_) => "sec_identity_rejected",
             InitError::Sched(_) => "sched_construction_failed",
+            InitError::CpuStateZeroCpus => "sched_cpu_state_zero_cpus",
+            InitError::CpuStateAllocationFailed => "sched_cpu_state_allocation_failed",
+            InitError::CpuStateAlreadyInstalled => "sched_cpu_state_already_installed",
             InitError::DispatcherAlreadyInstalled(_) => "syscall_dispatcher_already_installed",
         }
     }
@@ -331,7 +343,7 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
         // immaterial; on success it diverges and the context lives for the
         // running kernel's lifetime, exactly like the state it borrows.
         let ctx: &'static (dyn InitSpawnCtx + Sync) = Box::leak(Box::new(KernelInitSpawner::new(
-            &state.frame_allocator,
+            state.frame_allocator,
             audit_sink,
             &state.scheduler,
             &state.caps,
@@ -339,7 +351,7 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
             state.arch.as_ref(),
             process_wait,
             &state.irq,
-            build_shared_mem_facility(state.arch.as_ref(), &state.frame_allocator),
+            build_shared_mem_facility(state.arch.as_ref(), state.frame_allocator),
         )));
         init.spawn_init(ctx);
     }
@@ -1503,7 +1515,16 @@ fn run_phases<A: KernelArch>(
 
     // Phase 2 — Mem.
     phase_started(log_sink, Phase::Mem);
-    let frame_allocator = FrameAllocator::new(&memory_map).map_err(InitError::Mem)?;
+    let frame_allocator: &'static FrameAllocator = Box::leak(Box::new(
+        FrameAllocator::new(&memory_map).map_err(InitError::Mem)?,
+    ));
+    // Activate growable kernel-heap backing at the first point both required
+    // components exist. Scheduler/runtime initialization allocates from the
+    // heap, so deferring this until after those allocations can exhaust the
+    // fixed bootstrap region on a valid discovered-sized topology.
+    if let Some(physmap) = arch.direct_phys_map() {
+        crate::kheap::install_frame_heap_source(frame_allocator, physmap);
+    }
     phase_ready(log_sink, Phase::Mem);
 
     // Phase 3 — Sec. Build the compiled-in system identity (the OS-owned
@@ -1532,6 +1553,11 @@ fn run_phases<A: KernelArch>(
     phase_started(log_sink, Phase::Sched);
     let scheduler =
         Scheduler::new(scheduler_config, Arc::clone(&arch)).map_err(InitError::Sched)?;
+    crate::initialize_cpu_state(scheduler_config.cpus).map_err(|error| match error {
+        crate::CpuStateInitError::ZeroCpus => InitError::CpuStateZeroCpus,
+        crate::CpuStateInitError::AllocationFailed => InitError::CpuStateAllocationFailed,
+        crate::CpuStateInitError::AlreadyInstalled => InitError::CpuStateAlreadyInstalled,
+    })?;
     // Install the port's park-translation hook before any user task can
     // be dispatched: every user-task suspend then re-parks the CPU on the
     // permanent boot root, the invariant a dead task's page-table
@@ -1734,20 +1760,7 @@ fn run_phases<A: KernelArch>(
     // `Box::leak`'d for the same one-shot-publish reason as the hook, arch-
     // generic so this names no concrete port.
     let (mem_map, file_map, mmio_map_facility, dma_alloc_facility, shared_mem_facility) =
-        live_producers(state.arch.as_ref(), &state.frame_allocator);
-
-    // Let the kernel global heap grow past its `.bss` bootstrap region now
-    // that the frame allocator and the arch direct physical map both exist
-    // and are `'static`. A bin that registered its `#[global_allocator]`
-    // (via `kheap::register_global_heap`) and a port that wires a direct map
-    // together enable growth; a port with no direct map, or a host harness
-    // with no registered heap, leaves the heap capped at its bootstrap
-    // region — fail closed, never a panic. This must be the frame-drawing
-    // growth source (heap-independent by construction) so a heap-growth miss
-    // never re-enters the heap's own lock.
-    if let Some(physmap) = state.arch.direct_phys_map() {
-        crate::kheap::install_frame_heap_source(&state.frame_allocator, physmap);
-    }
+        live_producers(state.arch.as_ref(), state.frame_allocator);
 
     // Publish the discovered physical-RAM size so every reclaimable cache
     // sizes its budget against the RAM the machine actually has, not the
@@ -1806,12 +1819,12 @@ fn run_phases<A: KernelArch>(
             &state.aspaces,
             &state.rng,
             consoles,
-            &state.frame_allocator,
+            state.frame_allocator,
             // The same leaked-`'static` allocator, handed to the spawn
             // producer as a `'static` page-table frame source so a child's
             // page tables come from reclaimable RAM that scales with the
             // machine rather than a fixed `.bss` pool.
-            &state.frame_allocator,
+            state.frame_allocator,
             programs,
             spawn_service,
             process_wait,
@@ -2018,7 +2031,7 @@ fn build_shared_mem_facility<A: KernelArch>(
 /// the scheduler dispatch loop.
 pub(crate) struct KernelState<A: KernelArch> {
     #[allow(dead_code)] // Stage 4 will wire the allocator into the driver host.
-    pub(crate) frame_allocator: FrameAllocator,
+    pub(crate) frame_allocator: &'static FrameAllocator,
     pub(crate) scheduler: Scheduler<A>,
     /// Per-task capability registry. The `KernelDispatchHook` reads
     /// this on every syscall; future `cap_delegate` / `cap_revoke`
@@ -2267,7 +2280,7 @@ mod tests {
         let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
 
         let ctx = KernelInitSpawner::new(
-            &state.frame_allocator,
+            state.frame_allocator,
             audit_sink,
             &state.scheduler,
             &state.caps,
@@ -2382,7 +2395,7 @@ mod tests {
         let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
 
         let ctx = KernelInitSpawner::new(
-            &state.frame_allocator,
+            state.frame_allocator,
             audit_sink,
             &state.scheduler,
             &state.caps,
@@ -2486,7 +2499,7 @@ mod tests {
         let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
 
         let ctx = KernelInitSpawner::new(
-            &state.frame_allocator,
+            state.frame_allocator,
             audit_sink,
             &state.scheduler,
             &state.caps,
@@ -2563,7 +2576,7 @@ mod tests {
         let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
 
         let ctx = KernelInitSpawner::new(
-            &state.frame_allocator,
+            state.frame_allocator,
             audit_sink,
             &state.scheduler,
             &state.caps,
