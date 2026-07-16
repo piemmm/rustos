@@ -93,15 +93,28 @@ pub fn install_competitor_gate(gate: &'static dyn PreemptCompetitor) {
     let _ = COMPETITOR_GATE.set(gate);
 }
 
+/// The competitor gate the preempt path currently consults.
+///
+/// In production this is the boot-installed [`COMPETITOR_GATE`]. Under
+/// `cfg(test)` a per-thread override (installed by a test that must
+/// observe gate routing) takes precedence, so the process-wide set-once
+/// gate a *parallel* boot-phase test may have installed cannot mask the
+/// gate the current test is exercising. The override is thread-local, so
+/// it never perturbs a gate any other test thread is using.
+fn active_gate() -> Option<&'static dyn PreemptCompetitor> {
+    #[cfg(test)]
+    if let Some(gate) = tests::test_gate() {
+        return Some(gate);
+    }
+    COMPETITOR_GATE.get().ok().flatten().copied()
+}
+
 /// Whether `cpu` currently owes a reschedule when a tick fires: a runnable
 /// competitor exists, or interrupt-context work (a device-IRQ deferred
 /// wake, a queued foreground signal) is waiting for the dispatch loop to
 /// drain it. Absent the gate, defaults to `true` (always reschedule).
 fn reschedule_owed(cpu: CpuId) -> bool {
-    let competitor = match COMPETITOR_GATE.get() {
-        Ok(Some(gate)) => gate.has_runnable_competitor(cpu),
-        _ => true,
-    };
+    let competitor = active_gate().map_or(true, |gate| gate.has_runnable_competitor(cpu));
     competitor
         || crate::waitq::has_pending_deferred_wake()
         || crate::waitq::timed_wake_due()
@@ -115,7 +128,7 @@ fn reschedule_owed(cpu: CpuId) -> bool {
 /// no-op before the gate is wired (early boot / host tests), where the
 /// dispatch loop still re-arms on its next step.
 fn keep_periodic_tick(cpu: CpuId) {
-    if let Ok(Some(gate)) = COMPETITOR_GATE.get() {
+    if let Some(gate) = active_gate() {
         gate.keep_periodic_tick(cpu);
     }
 }
@@ -307,6 +320,28 @@ mod tests {
 
     static TEST_COMPETITOR_GATE: TestCompetitorGate = TestCompetitorGate::new();
 
+    // Per-thread competitor-gate override. The process-wide
+    // `COMPETITOR_GATE` is set-once, so a parallel boot-phase test that
+    // installs the real gate would otherwise make a later
+    // `install_competitor_gate` here a no-op and leave this test observing
+    // the wrong gate. A thread-local override, consulted first by
+    // `active_gate`, isolates each test thread's gate from every other's.
+    std::thread_local! {
+        static TEST_GATE: core::cell::Cell<Option<&'static dyn PreemptCompetitor>> =
+            const { core::cell::Cell::new(None) };
+    }
+
+    /// The current thread's competitor-gate override, if one was installed
+    /// by [`set_test_gate`]. Read by [`super::active_gate`].
+    pub(super) fn test_gate() -> Option<&'static dyn PreemptCompetitor> {
+        TEST_GATE.with(core::cell::Cell::get)
+    }
+
+    /// Install a competitor gate for the current test thread only.
+    fn set_test_gate(gate: &'static dyn PreemptCompetitor) {
+        TEST_GATE.with(|g| g.set(Some(gate)));
+    }
+
     /// Tests share the process-wide per-CPU slots; each test uses its own
     /// CPU index so parallel test threads never observe each other.
     #[test]
@@ -377,15 +412,12 @@ mod tests {
     #[test]
     fn failed_suspension_keeps_the_periodic_tick_alive() {
         const CPU: CpuId = 46;
-        install_competitor_gate(&TEST_COMPETITOR_GATE);
+        set_test_gate(&TEST_COMPETITOR_GATE);
         let rearms_before = TEST_COMPETITOR_GATE.periodic_rearms(CPU);
         note_preempt_tick(CPU);
         assert!(!preempt_current(CPU));
         assert_eq!(preemption_count(CPU), 0);
-        assert_eq!(
-            TEST_COMPETITOR_GATE.periodic_rearms(CPU),
-            rearms_before + 1
-        );
+        assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(CPU), rearms_before + 1);
         // The latch was taken even though no switch happened.
         assert!(!take_preempt_pending(CPU));
     }

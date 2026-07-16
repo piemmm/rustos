@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use rustos_rng::{FastRng, RandU64};
 use rustos_sync::{RwLock, SpinLock};
 
-use crate::loom_compat::{AtomicU64, Ordering};
+use crate::loom_compat::{fence, AtomicU64, Ordering};
 use crate::runqueue::{RunDeque, Steal};
 use crate::task::{TaskBody, TaskInner};
 use crate::{
@@ -450,29 +450,53 @@ impl<A: SchedulerArch> Scheduler<A> {
             .ok_or(SchedError::NoSuchTask)?;
         match task.load_state() {
             TaskState::Exited => return Err(SchedError::InvalidState),
-            // Not yet committed to park: a `cas` to Ready would be a no-op,
-            // so record the wake as a pending token instead. The dispatch
-            // loop's `Park` commit consumes it and re-readies the task
-            // rather than sleeping it (no lost wake-ups).
-            TaskState::Ready | TaskState::Running => {
-                task.set_wake_pending();
-                return Ok(());
-            }
-            TaskState::Parked => {}
+            // Already committed to park: re-admit it directly.
+            TaskState::Parked => return self.wake_from_parked(&task),
+            // Not yet committed to park (running its body, or already
+            // queued): fall through to the token handshake below.
+            TaskState::Ready | TaskState::Running => {}
         }
+        // Record the wake token, then re-read the state. This store then
+        // load, paired with the store-`Parked`-then-take-token sequence in
+        // the `step` Park commit and a `SeqCst` fence on each side, forbids
+        // the store-buffering outcome where the waker sees the task
+        // not-yet-parked *and* the parker misses the token — one side
+        // always observes the other. The earlier shape read the other
+        // side's flag *before* writing its own on both sides, which could
+        // drop the wake and park the task forever.
+        task.set_wake_pending();
+        fence(Ordering::SeqCst);
+        if task.load_state() == TaskState::Parked {
+            // The task committed to `Parked` concurrently and may not have
+            // observed our token. Reclaim it and, if the token is still
+            // owed, re-admit it; the `take` here and the CAS inside
+            // `wake_from_parked` make the re-admission single even when
+            // both racing sides reach it.
+            if task.take_wake_pending() {
+                return self.wake_from_parked(&task);
+            }
+        }
+        Ok(())
+    }
+
+    /// Re-admit a task that is currently [`TaskState::Parked`], steering it
+    /// onto a CPU of the class its priority calls for and re-enqueuing it
+    /// at its current band (a wake is not a voluntary yield, so no
+    /// demotion). The one definition of the wake-from-parked transition,
+    /// shared by [`Self::unpark`] and the `step` Park-commit token
+    /// re-check. Fails closed with [`SchedError::InvalidState`] when the
+    /// task is no longer `Parked` (a concurrent waker already re-readied
+    /// it), so a racing second caller never enqueues the same task twice.
+    fn wake_from_parked(&self, task: &Arc<TaskInner>) -> SchedResult<()> {
         task.cas_state(TaskState::Parked, TaskState::Ready)
             .map_err(|_| SchedError::InvalidState)?;
-        // A wake is the moment a previously-idle task "needs power":
-        // steer it onto a CPU of the class its priority calls for before
-        // re-enqueuing. On a homogeneous machine this is its old home.
-        // Overflow falls back as in `spawn`.
         let prio = task.load_priority();
         let home = task.home_cpu.load(Ordering::Acquire);
         let target = self.preferred_home(prio, home);
         task.home_cpu.store(target, Ordering::Release);
         let cpu = self.cpu_state(target)?;
-        if cpu.push_priority(prio, id).is_err() {
-            self.overflow.lock().push(id);
+        if cpu.push_priority(prio, task.id).is_err() {
+            self.overflow.lock().push(task.id);
         }
         self.arch.send_ipi(target);
         Ok(())
@@ -812,24 +836,19 @@ impl<A: SchedulerArch> Scheduler<A> {
                 self.tasks.write().remove(&id);
             }
             TaskAction::Park => {
-                // Close the park/unpark lost-wakeup race: an `unpark` that
-                // arrived while the body ran left a token (it could not
-                // move a non-parked task). Consume it and re-ready the task
-                // at its current band — no demotion, this is not a
-                // voluntary yield — rather than sleeping it. Otherwise park as usual.
+                // Publish `Parked`, then consume any wake token *after* the
+                // store (the store-then-load pair matching `unpark`,
+                // SeqCst-fenced on each side). A wake that raced this commit
+                // is never lost: the waker either set the token before this
+                // take (consumed here, task re-admitted at its current band
+                // — no demotion, this is not a voluntary yield) or observed
+                // `Parked` and re-admitted the task itself. The CAS inside
+                // `wake_from_parked` keeps the re-admission single when both
+                // sides run.
+                task.store_state(TaskState::Parked);
+                fence(Ordering::SeqCst);
                 if task.take_wake_pending() {
-                    task.store_state(TaskState::Ready);
-                    let dest = self.preferred_home(prio, cpu);
-                    task.home_cpu.store(dest, Ordering::Release);
-                    let target = self
-                        .cpus
-                        .get(dest as usize)
-                        .unwrap_or(&self.cpus[cpu as usize]);
-                    if target.push_priority(prio, id).is_err() {
-                        self.overflow.lock().push(id);
-                    }
-                } else {
-                    task.store_state(TaskState::Parked);
+                    let _ = self.wake_from_parked(&task);
                 }
             }
             TaskAction::Yield => {

@@ -177,6 +177,42 @@ fn spawn_unpark_send_ipi_to_home_cpu() {
 }
 
 #[test]
+fn wake_arriving_before_the_park_commit_is_not_lost() {
+    // A wake (unpark) that lands while the task has not yet committed to
+    // park records a token; the dispatch loop's Park commit must consume
+    // it *after* publishing `Parked` and re-ready the task rather than
+    // sleep it. Guards the store-then-load + SeqCst-fence handshake that
+    // closed the cross-CPU lost-wakeup race (a deferred device-IRQ wake
+    // landing between the waiter's re-test and its park commit stranded
+    // the root-unlock kthread on four cores).
+    let (arch, sched) = mk(1);
+    arch.set_current_cpu(0);
+    let runs = Arc::new(AtomicU32::new(0));
+    let rc = runs.clone();
+    let id = sched
+        .spawn(0, Priority::Normal, move |_| {
+            if rc.fetch_add(1, Ordering::Relaxed) == 0 {
+                TaskAction::Park
+            } else {
+                TaskAction::Exit
+            }
+        })
+        .expect("spawn");
+    // The wake arrives before the task has committed to park.
+    sched.unpark(id).expect("unpark");
+    // Run 1: the body asks to park, but the pending wake cancels it.
+    let _ = sched.step(0).expect("step");
+    assert_eq!(
+        sched.state_of(id),
+        TaskState::Ready,
+        "the pending wake must re-ready the task, never leave it parked"
+    );
+    // The task is runnable again and finishes on the next step.
+    let _ = sched.step(0).expect("step");
+    assert_eq!(sched.live_task_count(), 0);
+}
+
+#[test]
 fn starvation_freedom_via_priority_boost() {
     // A High-priority task and a Low-priority task share a single CPU.
     // The High task yields forever (would normally starve the Low one).

@@ -9,7 +9,7 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{fence, AtomicU64, Ordering};
 
 use rustos_rng::{FastRng, RandU64};
 use rustos_sync::{RwLock, SpinLock};
@@ -412,32 +412,56 @@ impl<A: SchedulerArch> Scheduler<A> {
         let task = self.lookup(id)?;
         match task.load_state() {
             TaskState::Exited => return Err(SchedError::InvalidState),
-            // The task has not committed to park yet (it is running its
-            // body, or already queued). A `cas` to Ready would be a no-op
-            // here, so the wake would be *lost* if the task then parked.
-            // Record the wake as a pending token instead; the dispatch
-            // loop's `Park` commit consumes it and re-readies the task
-            // rather than sleeping it (no lost wake-ups).
-            TaskState::Ready | TaskState::Running => {
-                task.set_wake_pending();
-                return Ok(());
-            }
-            TaskState::Parked => {}
+            // Already committed to park: re-admit it directly.
+            TaskState::Parked => return self.wake_from_parked(&task),
+            // Not yet committed to park (running its body, or already
+            // queued): fall through to the token handshake below.
+            TaskState::Ready | TaskState::Running => {}
         }
+        // Record the wake token, then re-read the state. This store then
+        // load, paired with the store-`Parked`-then-take-token sequence in
+        // the `step` Park commit and a `SeqCst` fence on each side, forbids
+        // the store-buffering outcome where the waker sees the task
+        // not-yet-parked *and* the parker misses the token — one side
+        // always observes the other. The earlier shape read the other
+        // side's flag *before* writing its own on both sides, which could
+        // drop the wake and park the task forever.
+        task.set_wake_pending();
+        fence(Ordering::SeqCst);
+        if task.load_state() == TaskState::Parked {
+            // The task committed to `Parked` concurrently and may not have
+            // observed our token. Reclaim it and, if the token is still
+            // owed, re-admit it; the `take` here and the CAS inside
+            // `wake_from_parked` make the re-admission single even when
+            // both racing sides reach it.
+            if task.take_wake_pending() {
+                return self.wake_from_parked(&task);
+            }
+        }
+        Ok(())
+    }
+
+    /// Re-admit a task that is currently [`TaskState::Parked`] to a fresh
+    /// home CPU and send the placement IPI. The one definition of the
+    /// wake-from-parked transition, shared by [`Self::unpark`] and the
+    /// `step` Park-commit token re-check. A wake is the moment a
+    /// previously-idle task "needs power": it re-places the task onto the
+    /// least-loaded CPU of its priority's class before re-admitting its
+    /// weight, so a woken task fills an idle core rather than queueing
+    /// behind its old home's backlog. Fails closed with
+    /// [`SchedError::InvalidState`] when the task is no longer `Parked`
+    /// (a concurrent waker already re-readied it), so a racing second
+    /// caller never admits the same task twice.
+    fn wake_from_parked(&self, task: &Arc<TaskInner>) -> SchedResult<()> {
         task.cas_state(TaskState::Parked, TaskState::Ready)
             .map_err(|_| SchedError::InvalidState)?;
-        // A wake is the moment a previously-idle task "needs power":
-        // re-place it onto the least-loaded CPU of the class its
-        // priority calls for before re-admitting its weight there, so a
-        // woken task fills an idle core (whose IPI below un-parks it)
-        // rather than queueing behind its old home's backlog.
         let home = task.home_cpu.load(Ordering::Acquire);
         let target = self.placement_for(task.load_priority(), home);
         task.home_cpu.store(target, Ordering::Release);
         let cpu = self.cpu_state(target)?;
-        let entry = Self::admit(&task, &cpu.queue);
+        let entry = Self::admit(task, &cpu.queue);
         if cpu.queue.push(entry).is_err() {
-            self.overflow.lock().push(id);
+            self.overflow.lock().push(task.id);
         }
         self.arch.send_ipi(target);
         Ok(())
@@ -682,20 +706,11 @@ impl<A: SchedulerArch> Scheduler<A> {
         self.cpus[cpu as usize].queue.advance(SERVICE_PER_DISPATCH);
 
         let observed = task.load_state();
-        let mut effective = match (observed, action) {
+        let effective = match (observed, action) {
             (TaskState::Exited, _) | (_, TaskAction::Exit) => TaskAction::Exit,
             (TaskState::Parked, _) | (_, TaskAction::Park) => TaskAction::Park,
             _ => TaskAction::Yield,
         };
-        // Close the park/unpark lost-wakeup race: if an `unpark` arrived
-        // while this task was running its body (it could not move a
-        // non-parked task, so it left a token), cancel the park and
-        // re-ready the task so the wake is honoured rather than dropped. Consume the token exactly when we would have
-        // parked, so a token left by an earlier already-honoured wake never
-        // suppresses a genuine later park.
-        if effective == TaskAction::Park && task.take_wake_pending() {
-            effective = TaskAction::Yield;
-        }
 
         match effective {
             TaskAction::Exit => {
@@ -712,6 +727,18 @@ impl<A: SchedulerArch> Scheduler<A> {
                 let prev = task.swap_state(TaskState::Parked);
                 if matches!(prev, TaskState::Ready | TaskState::Running) {
                     self.cpus[cpu as usize].queue.remove_weight(task.weight());
+                }
+                // Consume any wake token *after* publishing `Parked`, the
+                // store-then-load pair matching `unpark` (SeqCst-fenced on
+                // each side). A wake that raced this commit is never lost:
+                // the waker either set the token before this take (consumed
+                // here, task re-admitted) or observed `Parked` and
+                // re-admitted the task itself. The CAS inside
+                // `wake_from_parked` keeps the re-admission single when
+                // both sides run.
+                fence(Ordering::SeqCst);
+                if task.take_wake_pending() {
+                    let _ = self.wake_from_parked(&task);
                 }
             }
             TaskAction::Yield => {
@@ -1162,6 +1189,42 @@ mod tests {
         assert_eq!(sched.state_of(id), TaskState::Parked);
         sched.unpark(id).expect("unpark");
         assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)));
+    }
+
+    #[test]
+    fn a_wake_arriving_before_the_park_commit_is_not_lost() {
+        // A wake (unpark) that lands while the task has not yet committed
+        // to park records a token; the dispatch loop's Park commit must
+        // consume it *after* publishing `Parked` and re-ready the task
+        // rather than sleep it. Guards the store-then-load + SeqCst-fence
+        // handshake that closed the cross-CPU lost-wakeup race (a deferred
+        // device-IRQ wake landing between the waiter's re-test and its park
+        // commit stranded the root-unlock kthread on four cores).
+        let (arch, sched) = mk(1);
+        arch.set_current_cpu(0);
+        let runs = Arc::new(AtomicU32::new(0));
+        let rc = runs.clone();
+        let id = sched
+            .spawn(0, Priority::Normal, move |_| {
+                if rc.fetch_add(1, Ordering::Relaxed) == 0 {
+                    TaskAction::Park
+                } else {
+                    TaskAction::Exit
+                }
+            })
+            .expect("spawn");
+        // The wake arrives before the task has committed to park.
+        sched.unpark(id).expect("unpark");
+        // Run 1: the body asks to park, but the pending wake cancels it.
+        assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)));
+        assert_eq!(
+            sched.state_of(id),
+            TaskState::Ready,
+            "the pending wake must re-ready the task, never leave it parked"
+        );
+        // The task is runnable again and finishes on the next step.
+        assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)));
+        assert_eq!(sched.live_task_count(), 0);
     }
 
     /// Tickless preemption arming: a CPU running a
