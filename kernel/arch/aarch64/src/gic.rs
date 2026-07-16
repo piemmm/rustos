@@ -285,6 +285,22 @@ pub trait GicMmio {
     fn gicc_read(&self, off: usize) -> u32;
     /// Write the CPU-interface register at byte offset `off`.
     fn gicc_write(&self, off: usize, val: u32);
+    /// Publish every store this CPU has issued so far to the
+    /// inner-shareable domain, so another PE observes them before it acts
+    /// on a subsequently-raised interrupt.
+    ///
+    /// [`Gicv2::send_sgi`] calls this immediately before the `GICD_SGIR`
+    /// write. Raising a reschedule IPI is a cross-CPU hand-off: the waker
+    /// enqueues the woken task (a normal-memory store) and *then* signals
+    /// the target. On a weakly-ordered PE the enqueue is not guaranteed
+    /// observable to the target before the target takes the SGI, so
+    /// without this barrier the target's next dispatch can read an empty
+    /// run queue and re-park — stranding the woken task (a lost wake-up
+    /// that hangs the system). The barrier is the store analogue of the
+    /// mask-before-wake fence [`GicController`]'s `mask` already issues:
+    /// on the freestanding target it is a `dsb ishst`; the host mock
+    /// records it so the publish-before-signal ordering is unit-tested.
+    fn publish_barrier(&self);
 }
 
 /// Low-level GICv2 register driver over a [`GicMmio`] seam.
@@ -354,11 +370,19 @@ impl<M: GicMmio> Gicv2<M> {
     }
 
     /// Raise SGI INTID 0 on the CPUs named in `target`'s target-list bit.
+    ///
+    /// Publishes this CPU's prior stores ([`GicMmio::publish_barrier`])
+    /// before the `GICD_SGIR` write, so the run-queue enqueue the waker
+    /// performed before raising the reschedule IPI is observable to the
+    /// target PE before it takes the SGI — otherwise the target could
+    /// dispatch against a stale, empty run queue and strand the woken task
+    /// (a lost wake-up).
     pub fn send_sgi(&self, target: CpuId) {
         let bit = u8::try_from(target)
             .ok()
             .and_then(|c| 1u8.checked_shl(u32::from(c)));
         if let Some(target_list) = bit {
+            self.mmio.publish_barrier();
             self.mmio.gicd_write(GICD_SGIR, sgir_value(0, target_list));
         }
     }
@@ -473,6 +497,15 @@ impl GicMmio for VolatileGicMmio {
     fn gicc_write(&self, off: usize, val: u32) {
         // SAFETY: as `gicc_read`, but a 32-bit store.
         unsafe { core::ptr::write_volatile((current().1 + off) as *mut u32, val) }
+    }
+    fn publish_barrier(&self) {
+        // SAFETY: `dsb ishst` is an unprivileged data-synchronisation
+        // barrier that completes this PE's outstanding stores to the
+        // inner-shareable domain before the following `GICD_SGIR` write;
+        // it touches no memory and has no effect beyond ordering.
+        unsafe {
+            core::arch::asm!("dsb ishst", options(nostack, preserves_flags));
+        }
     }
 }
 
@@ -628,12 +661,26 @@ mod tests {
         assert_eq!(gic.mmio.gicd_read(itargetsr_offset(30)), 0);
     }
 
+    /// One recorded mock operation, in issue order, so a test can assert
+    /// the publish-before-signal ordering the SGI hand-off requires.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum MockOp {
+        /// A `publish_barrier` (the `dsb ishst` on metal).
+        Barrier,
+        /// A distributor write to the `GICD_SGIR` register (raising the SGI).
+        SgirWrite,
+    }
+
     /// In-memory GICv2 register file: distributor and CPU-interface
     /// windows are independent, so the mock keeps a map per window and
     /// serves the last value written to a register on a subsequent read.
+    /// It also records the barrier / `GICD_SGIR`-write sequence in
+    /// [`MockGicMmio::ops`] so the publish-before-signal ordering is
+    /// unit-tested without hardware.
     struct MockGicMmio {
         gicd: std::sync::Mutex<std::collections::HashMap<usize, u32>>,
         gicc: std::sync::Mutex<std::collections::HashMap<usize, u32>>,
+        ops: std::sync::Mutex<std::vec::Vec<MockOp>>,
     }
 
     impl MockGicMmio {
@@ -641,7 +688,13 @@ mod tests {
             Self {
                 gicd: std::sync::Mutex::new(std::collections::HashMap::new()),
                 gicc: std::sync::Mutex::new(std::collections::HashMap::new()),
+                ops: std::sync::Mutex::new(std::vec::Vec::new()),
             }
+        }
+
+        /// The barrier / SGIR-write operations recorded so far, in order.
+        fn ops(&self) -> std::vec::Vec<MockOp> {
+            self.ops.lock().unwrap().clone()
         }
     }
 
@@ -650,6 +703,9 @@ mod tests {
             *self.gicd.lock().unwrap().get(&off).unwrap_or(&0)
         }
         fn gicd_write(&self, off: usize, val: u32) {
+            if off == GICD_SGIR {
+                self.ops.lock().unwrap().push(MockOp::SgirWrite);
+            }
             self.gicd.lock().unwrap().insert(off, val);
         }
         fn gicd_write_byte(&self, off: usize, val: u8) {
@@ -661,6 +717,39 @@ mod tests {
         fn gicc_write(&self, off: usize, val: u32) {
             self.gicc.lock().unwrap().insert(off, val);
         }
+        fn publish_barrier(&self) {
+            self.ops.lock().unwrap().push(MockOp::Barrier);
+        }
+    }
+
+    #[test]
+    fn send_sgi_publishes_prior_stores_before_raising_the_interrupt() {
+        // The cross-CPU wake hand-off enqueues the woken task and *then*
+        // raises the reschedule IPI. On a weakly-ordered PE the enqueue
+        // must be published before the target can act on the SGI, or the
+        // target dispatches against a stale run queue and strands the task
+        // (a lost wake-up that hangs the system). `send_sgi` must issue the
+        // publish barrier strictly before the `GICD_SGIR` write.
+        let gic = Gicv2::new(MockGicMmio::new());
+        gic.send_sgi(1);
+        assert_eq!(
+            gic.mmio.ops(),
+            std::vec![MockOp::Barrier, MockOp::SgirWrite],
+            "the publish barrier must precede the SGIR write"
+        );
+        // The SGI was actually raised (INTID 0 to CPU 1's target-list bit).
+        assert_eq!(gic.mmio.gicd_read(GICD_SGIR), sgir_value(0, 0b0000_0010));
+    }
+
+    #[test]
+    fn send_sgi_to_an_unrepresentable_target_neither_barriers_nor_writes() {
+        // A target whose bit does not fit the 8-bit target list raises no
+        // SGI, so it must not touch the SGIR — and, having nothing to
+        // publish for, issues no barrier either (fail closed, no partial
+        // hand-off).
+        let gic = Gicv2::new(MockGicMmio::new());
+        gic.send_sgi(8);
+        assert!(gic.mmio.ops().is_empty());
     }
 
     #[test]
