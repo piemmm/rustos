@@ -21,9 +21,10 @@
 //      other registers are caller-saved and carry no live state across
 //      the call boundary. The exception trampoline separately preserves
 //      complete q0..q31 user state across an involuntary switch.
-//   5. Interrupts may be enabled; this routine makes no atomic guarantee
-//      about interrupt *delivery* across the switch. A caller needing an
-//      uninterruptible switch masks `DAIF` around the call.
+//   5. DAIF is saved with each suspended continuation and restored only
+//      after the inbound stack and registers are complete. The all-ones
+//      marker in a synthesised first-run frame means inherit the dispatcher's
+//      current DAIF; every subsequent frame contains an exact saved value.
 
 .section .text
 .balign 4
@@ -32,9 +33,9 @@
 
 rustos_arch_aarch64_switch:
     // --- Suspend half ---
-    // Reserve a 176-byte frame and save x19..x30, x0, and d8..d15 in
+    // Reserve a 192-byte frame and save x19..x30, x0, d8..d15, and DAIF in
     // ascending address order so the resume half restores matching offsets.
-    sub     sp, sp, #176
+    sub     sp, sp, #192
     stp     x19, x20, [sp, #0]
     stp     x21, x22, [sp, #16]
     stp     x23, x24, [sp, #32]
@@ -49,6 +50,8 @@ rustos_arch_aarch64_switch:
     stp     d10, d11, [sp, #128]
     stp     d12, d13, [sp, #144]
     stp     d14, d15, [sp, #160]
+    mrs     x9, DAIF
+    str     x9, [sp, #176]
 
     // Record outgoing sp into prev.sp. x0 still holds `prev`.
     mov     x9, sp
@@ -72,7 +75,15 @@ rustos_arch_aarch64_switch:
     ldp     d10, d11, [sp, #128]
     ldp     d12, d13, [sp, #144]
     ldp     d14, d15, [sp, #160]
-    add     sp, sp, #176
+    // Restore the inbound continuation's interrupt mask last. A fresh
+    // frame carries UINT64_MAX and inherits the dispatcher's current DAIF.
+    ldr     x9, [sp, #176]
+    add     sp, sp, #192
+    cmn     x9, #1
+    b.eq    1f
+    msr     DAIF, x9
+    isb
+1:
 
     // `ret` jumps to x30 — a synthesised `entry` (first run) or the
     // address after the inbound task's suspend-time call site.

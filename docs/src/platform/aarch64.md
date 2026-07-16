@@ -1012,7 +1012,13 @@ system-register/assembly/MMIO operations to the freestanding target.
   coherency.
 - **Context switch** (`context` + `context.s`). `TaskCtx { sp }` plus
   `rustos_arch_aarch64_switch`, saving the AAPCS64 callee-saved registers
-  (`x19`–`x28`, `x29`/FP, `x30`/LR) and the first-run argument `x0`.
+  (`x19`–`x28`, `x29`/FP, `x30`/LR), the first-run argument `x0`, the
+  callee-saved FP/SIMD halves `d8`–`d15`, and the continuation's `DAIF`.
+  The interrupt mask is restored only after the inbound stack and register
+  frame are complete. A first-run frame inherits the dispatcher's current
+  mask; every suspended continuation restores its own exact mask, so a
+  blocking syscall cannot leave the dispatcher IRQ-masked or resume kernel
+  code with another CPU's interrupt state after migration.
 - **Generic-timer preemption** (`preempt`). The EL1 physical timer
   (`CNTP_*_EL0`) and its GIC PPI (INTID 30): a set-once tick callback,
   `init_local_preempt` (enable the PPI, arm `CNTP_TVAL_EL0`, enable the
@@ -1028,7 +1034,8 @@ system-register/assembly/MMIO operations to the freestanding target.
   synchronous exception to the installed `fault` handler. `gic` is a
   GICv2 distributor / CPU-interface / SGI driver. The common trampoline
   saves the interrupted GP registers **and** the per-exception return
-  state (`ELR_EL1`/`SPSR_EL1`/`SP_EL0`) into a 288-byte frame, writing
+  state (`ELR_EL1`/`SPSR_EL1`/`SP_EL0`), FPCR/FPSR, and `q0`–`q31` into
+  an 816-byte frame, writing
   them back before `eret`. Saving the return state — not relying on the
   live system registers — is what lets a task that is suspended
   mid-handler resume correctly after a cooperative context switch ran

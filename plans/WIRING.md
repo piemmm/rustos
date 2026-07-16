@@ -364,7 +364,14 @@ build `unreachable!`. Each carries a host `passes_context_switch_
 conformance` test. wasm32 is an honest **n/a** (no register file/stack to
 swap; each "CPU" is a separate Web Worker module instance), no
 `ContextSwitchHal` (§2.1). The switch itself, like `enter_user`, is proven
-only under QEMU (the scheduler-drive verticals). Docs:
+only under QEMU (the scheduler-drive verticals). The aarch64 native frame
+also carries the continuation's exact `DAIF`: first entry inherits the
+dispatcher's mask, while every resumed task/dispatcher restores its own
+saved mask after the stack and register restore. The
+`kthread_switch_qemu_aarch64` vertical runs two continuations with opposite
+IRQ-mask states through repeated real switches, preventing a blocking
+syscall from leaving a dispatcher IRQ-masked or inheriting another CPU's
+mask after migration. Docs:
 `docs/src/architecture/modularity.md`,
 `docs/src/platform/{x86_64,aarch64,riscv64,wasm32}.md`, `PLAN.md`.
 

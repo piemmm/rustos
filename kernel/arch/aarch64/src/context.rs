@@ -10,12 +10,16 @@
 //! # Layout
 //!
 //! Only the kernel-stack pointer needs persisting in [`TaskCtx`]; the
-//! callee-saved registers live on the outgoing task's stack in a fixed
-//! prologue layout owned by `switch`. AAPCS64 (the ARM Procedure Call
+//! callee-saved registers and the interrupt mask live on the outgoing
+//! task's stack in a fixed prologue layout owned by `switch`. AAPCS64 (the ARM Procedure Call
 //! Standard) lists `x19`–`x28`, the frame pointer `x29`, the link register
 //! `x30`, and the low 64 bits of `v8`–`v15` as state that must survive a
 //! call; `switch` saves those plus the first argument register `x0` so the
-//! first-run frame can deliver the task's argument.
+//! first-run frame can deliver the task's argument. `DAIF` is processor
+//! continuation state rather than call-preserved state, but must follow the
+//! suspended continuation: otherwise a syscall park can return to a
+//! dispatcher with IRQs masked, or resume kernel code with IRQs unexpectedly
+//! enabled after migration.
 //!
 //! The `repr(C)` layout pins the field order so the assembly in
 //! `context.s` can address the save slot by a fixed offset (`+0x00`).
@@ -102,6 +106,7 @@ impl TaskCtx {
         //   [sp + 0x60] x0    (first-run argument, seeded to `arg`)
         //   [sp + 0x70] d8    (callee-saved FP/SIMD, seeded to 0)
         //   ...               (d9..d15, seeded to 0)
+        //   [sp + 0xb0] DAIF  (`u64::MAX` means inherit on first entry)
         let sp = stack_top - FRAME_BYTES;
         // SAFETY: `stack_top` is non-zero, 16-byte aligned, and at least
         // `FRAME_BYTES` above zero by the checks above. The caller's
@@ -118,6 +123,10 @@ impl TaskCtx {
             core::ptr::write(p.add(11), entry as usize as u64);
             // x0 <- arg (index 12, offset 0x60)
             core::ptr::write(p.add(12), arg as u64);
+            // A never-run task has no suspended processor state. Inherit the
+            // dispatcher's current DAIF on first entry; every later suspend
+            // overwrites this slot with the task continuation's exact value.
+            core::ptr::write(p.add(22), INITIAL_DAIF_INHERIT);
         }
         self.sp = sp;
         Ok(())
@@ -136,11 +145,15 @@ pub enum PrepareError {
 }
 
 /// Byte size of the initial resume frame [`TaskCtx::prepare`] writes:
-/// the twelve callee-saved general registers (`x19`–`x30`), `x0`, and the
-/// eight callee-saved FP/SIMD halves (`d8`–`d15`), padded to the AAPCS64
-/// 16-byte stack alignment. Kept in step with `context.s` by the
-/// const-asserts below.
-const FRAME_BYTES: u64 = 176;
+/// the twelve callee-saved general registers (`x19`–`x30`), `x0`, the
+/// eight callee-saved FP/SIMD halves (`d8`–`d15`), and `DAIF`, padded to
+/// the AAPCS64 16-byte stack alignment. Kept in step with `context.s` by
+/// the const-asserts below.
+const FRAME_BYTES: u64 = 192;
+
+/// Initial-frame marker telling the switch primitive to preserve the
+/// dispatcher's current DAIF on a task's first entry.
+const INITIAL_DAIF_INHERIT: u64 = u64::MAX;
 
 /// Compile-time pinning of the [`TaskCtx`] layout. The `switch`
 /// assembly addresses `TaskCtx::sp` by the constant offset `0x00`.
@@ -183,8 +196,8 @@ extern "C" {
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub unsafe fn switch(prev: *mut TaskCtx, next: *mut TaskCtx) {
     // SAFETY: forwarded from the caller's contract. The assembly saves
-    // x19..x30/x0 and d8..d15 to `*prev`'s stack, swaps `sp`, and restores
-    // from `*next`'s stack.
+    // x19..x30/x0, d8..d15, and DAIF to `*prev`'s stack, swaps `sp`, and
+    // restores from `*next`'s stack.
     unsafe { rustos_arch_aarch64_switch(prev, next) }
 }
 
@@ -260,8 +273,10 @@ mod tests {
         // x0 <- arg (index 12)
         assert_eq!(frame[12], 0xCAFE);
         // Alignment padding and d8..d15 are deterministic on first entry.
-        for slot in &frame[13..] {
+        for slot in &frame[13..22] {
             assert_eq!(*slot, 0);
         }
+        assert_eq!(frame[22], INITIAL_DAIF_INHERIT);
+        assert_eq!(frame[23], 0);
     }
 }

@@ -17,9 +17,10 @@
 //! 1. **Discovered GICv2 + timer rate (PI Stage P4).** It reads the GICv2
 //!    base and the generic-timer frequency from the embedded canonical
 //!    `virt` device tree and brings up the EL1 vectors + GICv2 so the
-//!    scheduler's spawn IPIs target a configured controller. Interrupts
-//!    stay **masked**: dispatch here is the cooperative `step` loop, not a
-//!    timer, so the kthread switches are the only thing under test.
+//!    scheduler's spawn IPIs target a configured controller. The two
+//!    kthreads deliberately hold opposite IRQ-mask states across each yield,
+//!    proving processor continuation state follows the task rather than
+//!    leaking between task and dispatcher.
 //! 2. **Live scheduler + two kthreads.** It builds a real
 //!    `rustos_kernel_sched_eevdf::Scheduler` over `Aarch64Arch` and spawns
 //!    two kthreads through `rustos_kernel_core::spawn_kthread`. Each
@@ -113,6 +114,9 @@ mod kernel {
     /// Failure finisher code: a kthread's run count disagreed with the
     /// expected ping-pong count.
     const FAIL_COUNT: u16 = 6;
+    /// Failure finisher code: a resumed kthread inherited another
+    /// continuation's IRQ mask.
+    const FAIL_DAIF: u16 = 7;
 
     /// A deliberately-wrong GICv2 base installed before discovery runs, so
     /// reaching the `virt` distributor base can only mean discovery
@@ -157,6 +161,20 @@ mod kernel {
         );
     }
 
+    /// Whether the calling continuation currently has IRQ taking masked.
+    fn irq_is_masked() -> bool {
+        let daif: u64;
+        // SAFETY: reading DAIF is side-effect free at EL1.
+        unsafe {
+            core::arch::asm!(
+                "mrs {}, DAIF",
+                out(reg) daif,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+        daif & (1 << 7) != 0
+    }
+
     /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
     /// calls (via `rustos_arch_aarch64_main`).
     #[no_mangle]
@@ -174,9 +192,9 @@ mod kernel {
 
         // Prove the GICv2 base is *discovered*, not assumed, then bring up
         // the vectors + GICv2 so the scheduler's spawn IPIs target a
-        // configured controller. Interrupts stay masked — dispatch is the
-        // cooperative `step` loop below, so the kthread context switches
-        // are the only mechanism under test.
+        // configured controller. Dispatch is the cooperative `step` loop
+        // below; each kthread controls its own IRQ mask to prove the context
+        // switch preserves processor continuation state.
         gic::configure(POISON_GIC_BASE, POISON_GIC_BASE);
         if gic::configure_from_fdt(&fdt).is_none() || gic::current().0 != gic::DEFAULT_GICD_BASE {
             qemu_exit::exit_failure(FAIL_GIC_NOT_DISCOVERED);
@@ -208,8 +226,21 @@ mod kernel {
                 Priority::Normal,
                 move |yielder| {
                     for _ in 0..PING_PONGS {
+                        // Give the two continuations opposite IRQ-mask state.
+                        // The vector table and GIC are live, so unmasking is
+                        // safe; no periodic timer source is armed.
+                        unsafe {
+                            if index == 0 {
+                                exceptions::mask_irq();
+                            } else {
+                                exceptions::enable_irq();
+                            }
+                        }
                         RUNS[index].fetch_add(1, Ordering::SeqCst);
                         yielder.yield_now();
+                        if irq_is_masked() != (index == 0) {
+                            qemu_exit::exit_failure(FAIL_DAIF);
+                        }
                     }
                 },
             );

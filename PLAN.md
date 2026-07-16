@@ -4904,6 +4904,9 @@ codec, sizing, load units over a scratch seam, every controller teardown
 path) and the `stress_qemu_aarch64` full-boot vertical (login → a
 `--cpu/--vm/--io --timeout 2s` run → dispatch + successful-completion lines
 → post-load `sysinfo pressure`/`reclaim` renders → intact prompt); the
+four-CPU blocking-service path relies on the aarch64 context frame preserving
+each continuation's `DAIF`, covered directly by the repeated opposite-mask
+`kthread_switch_qemu_aarch64` vertical; the
 `RAMZIP_STATS` movement assertion stays behind the §0
 restartable-user-fault prerequisite. ST6 is the combined QEMU vertical,
 benchmarks, and docs sweep. See `plans/STRESSTEST.md` for the binding design
