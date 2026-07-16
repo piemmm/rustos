@@ -1967,7 +1967,11 @@ console".
   up one line (a real terminal scroll), not a ring wrap; the pixels are
   repainted once per write, never copied per scrolled line — the per-line
   framebuffer copy made a large listing burst monopolise the CPU for
-  seconds on metal, starving the buffered serial drain.
+  seconds on metal, starving the buffered serial drain. Program-output
+  newline processing is applied inside that retained-grid batch, so one
+  `stream_write` remains one repaint and one cache clean rather than being
+  fragmented at every line feed; scheduling relies on preemption between
+  syscalls, not an output-path yield.
 - Bring-up runs in the **pre-MMU** phase of
   `rustos-kernel::boot_aarch64` (caches off ⇒ the property exchange is
   DMA-coherent with no maintenance; the state cell is written by the

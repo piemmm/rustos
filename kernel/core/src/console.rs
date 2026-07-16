@@ -43,10 +43,12 @@ use crate::kthread::reschedule_current;
 /// A byte sink for the privileged system console.
 ///
 /// Implemented by the architecture-port-installed console device (a
-/// UART or a framebuffer text console). The trait is deliberately
-/// minimal — one method that takes already-copied-in kernel bytes —
-/// so `kernel/core` stays free of any device knowledge and the syscall handler owns the user-memory copy and the
-/// capability check, never the device implementation.
+/// UART or a framebuffer text console). The two write operations distinguish
+/// verbatim bytes from program output that needs terminal newline processing,
+/// so a retained console can apply that processing without fragmenting one
+/// batch into repeated repaints. `kernel/core` stays free of device knowledge,
+/// and the syscall handler owns the user-memory copy and capability check,
+/// never the device implementation.
 ///
 /// Implementations must be [`Sync`]: the single installed console is
 /// shared by the per-CPU syscall handlers, exactly like the audit
@@ -68,6 +70,66 @@ pub trait ConsoleWrite: Sync {
     /// bytes. The default sink ([`NullConsole`]) returns
     /// [`Errno::NotImplemented`] to mark an inert interface.
     fn write(&self, bytes: &[u8]) -> Result<usize, Errno>;
+
+    /// Write program-output `bytes` with the console line discipline's
+    /// `LF` → `CR LF` translation, returning the number of input bytes
+    /// consumed.
+    ///
+    /// Byte-stream devices keep this default implementation, which preserves
+    /// exact short-write accounting across the expanded line-feed pair. A
+    /// retained framebuffer console may override it to apply the translation
+    /// while updating its cell grid and repaint once for the whole batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns the backing device's [`Errno`] when it rejects the first byte.
+    /// Once some input has been consumed, a later device error is reported as
+    /// a short write so retrying cannot duplicate bytes.
+    fn write_output(&self, bytes: &[u8]) -> Result<usize, Errno> {
+        let mut consumed = 0usize;
+        let mut index = 0usize;
+        while index < bytes.len() {
+            let run_start = index;
+            while index < bytes.len() && bytes[index] != control::LF {
+                index += 1;
+            }
+            if index > run_start {
+                let run = &bytes[run_start..index];
+                match self.write(run) {
+                    Ok(0) => return Ok(consumed),
+                    Ok(written) => {
+                        let written = written.min(run.len());
+                        consumed += written;
+                        if written < run.len() {
+                            return Ok(consumed);
+                        }
+                    }
+                    Err(err) if consumed == 0 => return Err(err),
+                    Err(_) => return Ok(consumed),
+                }
+            }
+            if index < bytes.len() {
+                match self.write(b"\r\n") {
+                    Ok(0) => return Ok(consumed),
+                    Ok(written) if written >= 2 => {
+                        consumed += 1;
+                        index += 1;
+                    }
+                    Ok(written) => {
+                        if write_all_bytes(self, &b"\r\n"[written.min(2)..]) {
+                            consumed += 1;
+                            index += 1;
+                        } else {
+                            return Ok(consumed);
+                        }
+                    }
+                    Err(err) if consumed == 0 => return Err(err),
+                    Err(_) => return Ok(consumed),
+                }
+            }
+        }
+        Ok(consumed)
+    }
 
     /// This console's character-cell grid, when the device knows it
     /// (`terminal_size`).
@@ -831,55 +893,7 @@ impl ConsoleDevice {
     /// Returns the backing device's [`Errno`] when it rejects the first
     /// byte (an inert [`NullConsole`] returns [`Errno::NotImplemented`]).
     pub fn write_output(&self, bytes: &[u8]) -> Result<usize, Errno> {
-        let mut consumed = 0usize;
-        let mut index = 0usize;
-        while index < bytes.len() {
-            // Emit the next run of pass-through bytes (everything up to the
-            // next line feed) in one device write, so ordinary text still
-            // costs one round-trip per chunk.
-            let run_start = index;
-            while index < bytes.len() && bytes[index] != control::LF {
-                index += 1;
-            }
-            if index > run_start {
-                let run = &bytes[run_start..index];
-                match self.write.write(run) {
-                    Ok(0) => return Ok(consumed),
-                    Ok(written) => {
-                        let written = written.min(run.len());
-                        consumed += written;
-                        if written < run.len() {
-                            return Ok(consumed);
-                        }
-                    }
-                    Err(err) if consumed == 0 => return Err(err),
-                    Err(_) => return Ok(consumed),
-                }
-            }
-            // A line feed becomes `CR LF`. The input byte is counted
-            // consumed only once both bytes have reached the device, so a
-            // retried `stream_write` never re-emits a half-written pair.
-            if index < bytes.len() {
-                match self.write.write(b"\r\n") {
-                    Ok(0) => return Ok(consumed),
-                    Ok(written) if written >= 2 => {
-                        consumed += 1;
-                        index += 1;
-                    }
-                    Ok(written) => {
-                        if write_all_bytes(self.write, &b"\r\n"[written.min(2)..]) {
-                            consumed += 1;
-                            index += 1;
-                        } else {
-                            return Ok(consumed);
-                        }
-                    }
-                    Err(err) if consumed == 0 => return Err(err),
-                    Err(_) => return Ok(consumed),
-                }
-            }
-        }
-        Ok(consumed)
+        self.write.write_output(bytes)
     }
 }
 
@@ -978,7 +992,7 @@ fn flush_run(write: &dyn ConsoleWrite, run: &[u8], run_len: &mut usize) {
 /// Write every byte of `bytes` to the console output, looping over short
 /// writes and stopping on a closed/erroring device (never spin). Returns
 /// whether every byte reached the device.
-fn write_all_bytes(write: &dyn ConsoleWrite, mut bytes: &[u8]) -> bool {
+fn write_all_bytes<W: ConsoleWrite + ?Sized>(write: &W, mut bytes: &[u8]) -> bool {
     while !bytes.is_empty() {
         match write.write(bytes) {
             Ok(0) | Err(_) => return false,
@@ -1598,6 +1612,40 @@ mod tests {
                 .extend_from_slice(&bytes[..take]);
             Ok(take)
         }
+    }
+
+    /// A framebuffer-like sink that counts each backing write as one repaint.
+    struct RepaintRecorder {
+        writes: core::sync::atomic::AtomicUsize,
+    }
+
+    impl RepaintRecorder {
+        const fn new() -> Self {
+            Self {
+                writes: core::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl ConsoleWrite for RepaintRecorder {
+        fn write(&self, bytes: &[u8]) -> Result<usize, Errno> {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            Ok(bytes.len())
+        }
+
+        fn write_output(&self, bytes: &[u8]) -> Result<usize, Errno> {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            Ok(bytes.len())
+        }
+    }
+
+    #[test]
+    fn write_output_batches_a_scrolling_burst_into_one_backing_write() {
+        static W: RepaintRecorder = RepaintRecorder::new();
+        let device = ConsoleDevice::new(&W, &NULL_CONSOLE_READ);
+
+        assert_eq!(device.write_output(b"one\ntwo\nthree\nfour\n"), Ok(19));
+        assert_eq!(W.writes.load(Ordering::Relaxed), 1);
     }
 
     #[test]

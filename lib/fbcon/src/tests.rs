@@ -554,6 +554,30 @@ fn a_scrolling_burst_reports_the_full_region_dirty() {
     assert_eq!(dirty, Some((0, 3 * CELL_HEIGHT)));
 }
 
+#[test]
+fn program_output_cooks_a_scrolling_burst_in_one_batch() {
+    let (mut cooked, mut cooked_pixels) = console_of(1, 3);
+    let dirty = cooked.write_output_bytes(&mut cooked_pixels, b"a\nb\nc\nd\ne");
+
+    let (mut explicit, mut explicit_pixels) = console_of(1, 3);
+    explicit.write_bytes(&mut explicit_pixels, b"a\r\nb\r\nc\r\nd\r\ne");
+
+    assert_eq!(dirty, Some((0, 3 * CELL_HEIGHT)));
+    assert_eq!(cooked_pixels, explicit_pixels);
+}
+
+#[test]
+fn program_output_keeps_parser_state_across_writes() {
+    let (mut cooked, mut cooked_pixels) = console_of(2, 2);
+    cooked.write_output_bytes(&mut cooked_pixels, b"\x1b[3");
+    cooked.write_output_bytes(&mut cooked_pixels, b"1mA\nB");
+
+    let (mut explicit, mut explicit_pixels) = console_of(2, 2);
+    explicit.write_bytes(&mut explicit_pixels, b"\x1b[31mA\r\nB");
+
+    assert_eq!(cooked_pixels, explicit_pixels);
+}
+
 /// Adjacent blank runs with different backgrounds each keep their own
 /// colour: the flush's span-fill fast path must break a run at a
 /// background change, never bleed one background across it.

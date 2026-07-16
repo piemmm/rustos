@@ -17,7 +17,9 @@ scrolling up like a real terminal rather than wrapping ring-style.
 Every architecture port (`kernel/arch/<target>`) drives its display console
 through this crate, so the terminal emulation lives in exactly one place; a
 port supplies only the board-specific surface (MMIO base, geometry, pixel
-format) discovered at runtime and calls `TextConsole::write_bytes`.
+format) discovered at runtime. Verbatim streams use `TextConsole::write_bytes`;
+program output uses `TextConsole::write_output_bytes`, which applies terminal
+`LF` → `CR LF` processing while retaining the same one-repaint batch.
 
 ## Design
 
@@ -28,9 +30,10 @@ format) discovered at runtime and calls `TextConsole::write_bytes`.
   pixels to that single repaint bounds a write's render cost: a burst that
   scrolls the screen many times moves only the small, cache-resident grid per
   line and touches the framebuffer once — never one whole-framebuffer copy per
-  scrolled line, which made a large console write monopolise the CPU for
-  seconds on real hardware. Runs of blank cells are span-filled rather than
-  glyph-blitted, and the framebuffer is never read, only written.
+  scrolled line. Program-output newline processing feeds the same retained-grid
+  batch without splitting at each line feed. Runs of blank cells are
+  span-filled rather than glyph-blitted, and the framebuffer is never read,
+  only written.
 - **Allocator-free.** The engine is `no_std` and never allocates (the grids
   are borrowed `&mut [Cell]`), so a freestanding boot console with no global
   allocator links it directly. It

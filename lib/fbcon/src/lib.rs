@@ -967,6 +967,12 @@ pub struct TextConsole<'a> {
     screen: Screen<'a>,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum LineFeedMode {
+    Verbatim,
+    CarriageReturnLineFeed,
+}
+
 impl<'a> TextConsole<'a> {
     /// A console at the top-left of a `geometry`-sized surface, backed by the
     /// borrowed `main` and `alt` cell grids (each at least
@@ -1006,11 +1012,47 @@ impl<'a> TextConsole<'a> {
     /// position afterwards, so the console shows a live cursor without the
     /// overlay ever mixing into the cell grid.
     pub fn write_bytes(&mut self, pixels: &mut [u32], bytes: &[u8]) -> Option<DirtyBand> {
+        self.write_bytes_with_mode(pixels, bytes, LineFeedMode::Verbatim)
+    }
+
+    /// Interpret program-output `bytes` as an ANSI/VT/xterm stream with the
+    /// terminal line discipline's `LF` → `CR LF` translation, rendering the
+    /// result onto `pixels` in one batch.
+    ///
+    /// Translation is applied while feeding the retained grid, before its
+    /// single flush. It therefore needs no expanded staging buffer and a
+    /// multi-line scrolling burst still repaints the surface only once.
+    pub fn write_output_bytes(&mut self, pixels: &mut [u32], bytes: &[u8]) -> Option<DirtyBand> {
+        self.write_bytes_with_mode(pixels, bytes, LineFeedMode::CarriageReturnLineFeed)
+    }
+
+    fn write_bytes_with_mode(
+        &mut self,
+        pixels: &mut [u32],
+        bytes: &[u8],
+        line_feed_mode: LineFeedMode,
+    ) -> Option<DirtyBand> {
         let Self { parser, screen } = self;
         let mut dirty = screen.undraw_cursor();
-        parser.feed(bytes, |op| {
-            dirty = merge_rects(dirty, screen.apply(pixels, &op));
-        });
+        let mut feed = |chunk: &[u8]| {
+            parser.feed(chunk, |op| {
+                dirty = merge_rects(dirty, screen.apply(pixels, &op));
+            });
+        };
+        match line_feed_mode {
+            LineFeedMode::Verbatim => feed(bytes),
+            LineFeedMode::CarriageReturnLineFeed => {
+                let mut start = 0usize;
+                for (index, byte) in bytes.iter().enumerate() {
+                    if *byte == b'\n' {
+                        feed(&bytes[start..index]);
+                        feed(b"\r\n");
+                        start = index + 1;
+                    }
+                }
+                feed(&bytes[start..]);
+            }
+        }
         let band = dirty.map(|rect| screen.flush(pixels, rect));
         merge_bands(band, screen.draw_cursor(pixels))
     }

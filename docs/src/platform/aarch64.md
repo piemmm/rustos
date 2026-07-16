@@ -563,7 +563,12 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   UART is then the debug log line only, with no console and no session
   that would draw over the log stream — else `[UartConsole]`.
   `VideoConsole` writes through
-  `video::write_bytes`; its input half is the shared `VIDEO_KEYBOARD`
+  `video::write_output_bytes`, which applies the console line discipline's
+  `LF` → `CR LF` translation while updating the retained grid and performs one
+  repaint plus one cache clean for the whole `stream_write` batch. It does not
+  split a scrolling burst into one render-lock hold per line; preemption, not
+  a cooperative output yield, schedules other work between syscalls. Raw log
+  writes continue through `video::write_bytes`. The input half is the shared `VIDEO_KEYBOARD`
   queue (`rustos_kernel_core::ConsoleInputQueue`), which is both the
   console's `ConsoleRead` half (drained by a video-login `stream_read`)
   and its `ConsoleInput` half (fed by the `console_input` syscall a

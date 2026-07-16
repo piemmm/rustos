@@ -194,13 +194,20 @@ pub struct DiscoveredVideo {
 }
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-pub use metal::{attach_console, configure_from_fdt, text_cell_count, text_grid, write_bytes};
+pub use metal::{
+    attach_console, configure_from_fdt, text_cell_count, text_grid, write_bytes, write_output_bytes,
+};
 
 /// Host stand-in for the freestanding writer: rendering needs the
 /// firmware surface, so on the host this is inert (the renderer itself
 /// is host-tested directly through [`rustos_fbcon::TextConsole`]).
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 pub fn write_bytes(_bytes: &[u8]) {}
+
+/// Host stand-in for the freestanding program-output writer: no firmware
+/// surface exists, so rendering is inert on the host.
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+pub fn write_output_bytes(_bytes: &[u8]) {}
 
 /// Host stand-in for the freestanding `text_grid`: no firmware surface exists
 /// on the host, so no video console is active and the grid is unknown.
@@ -334,6 +341,12 @@ mod metal {
         geometry: Geometry,
         /// The renderer (geometry + cursor + cell grids), once attached.
         console: Option<TextConsole<'static>>,
+    }
+
+    #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+    enum WriteMode {
+        Verbatim,
+        ProgramOutput,
     }
 
     /// The video-console slot.
@@ -602,6 +615,20 @@ mod metal {
     /// first logs after the MMU is on): the render lock's atomic CAS
     /// requires it. A call with no configured console is a no-op.
     pub fn write_bytes(bytes: &[u8]) {
+        render_bytes(bytes, WriteMode::Verbatim);
+    }
+
+    /// Render program-output `bytes` onto the configured surface with the
+    /// console line discipline's `LF` → `CR LF` translation.
+    ///
+    /// The full payload is parsed under one render-lock hold and repainted
+    /// once, so a scrolling burst never turns each line into a framebuffer
+    /// repaint. A call with no configured console is a no-op.
+    pub fn write_output_bytes(bytes: &[u8]) {
+        render_bytes(bytes, WriteMode::ProgramOutput);
+    }
+
+    fn render_bytes(bytes: &[u8], mode: WriteMode) {
         if !super::is_active() {
             return;
         }
@@ -621,7 +648,10 @@ mod metal {
         // validated at configure time, identity-mapped RAM; the render
         // lock makes this the only live reference.
         let pixels = unsafe { core::slice::from_raw_parts_mut(fb_base as *mut u32, pixel_count) };
-        let dirty = console.write_bytes(pixels, bytes);
+        let dirty = match mode {
+            WriteMode::Verbatim => console.write_bytes(pixels, bytes),
+            WriteMode::ProgramOutput => console.write_output_bytes(pixels, bytes),
+        };
         if let Some((row_start, row_end)) = dirty {
             let stride_bytes = console.geometry().stride_px as usize * 4;
             clean_dcache_range(

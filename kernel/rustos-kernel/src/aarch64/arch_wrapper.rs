@@ -460,6 +460,14 @@ impl ConsoleWrite for VideoConsole {
         Ok(bytes.len())
     }
 
+    fn write_output(&self, bytes: &[u8]) -> Result<usize, rustos_abi::Errno> {
+        if !rustos_arch_aarch64::video::is_active() {
+            return Err(rustos_abi::Errno::NotImplemented);
+        }
+        rustos_arch_aarch64::video::write_output_bytes(bytes);
+        Ok(bytes.len())
+    }
+
     fn geometry(&self) -> Option<rustos_abi::TerminalSize> {
         // The framebuffer console's grid is a function of the firmware
         // panel resolution and the font, known at runtime; report it so a
