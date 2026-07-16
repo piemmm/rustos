@@ -964,7 +964,17 @@ fn run_dispatch_loop<A: KernelArch>(
         // and the switch to user mode, leaving a CPU-bound task with no
         // armed timer and no pending reschedule.
         crate::preempt::clear_preempt_pending(cpu);
-        match scheduler.step(cpu) {
+        let outcome = scheduler.step(cpu);
+        // A user task can suspend back to this dispatcher directly from a
+        // timer exception. Native exception entry masks device interrupts,
+        // and that per-CPU mask is not part of the task context, so the
+        // switch hands the masked state to us. Restore delivery only after
+        // `step` has returned — no task or scheduler critical section is in
+        // flight here — before draining deferred work or dispatching again.
+        // Without this restoration each CPU eventually remains masked under
+        // preemptive load and the whole system loses timer/device progress.
+        arch.set_device_irqs(true);
+        match outcome {
             // A task ran. On the boot CPU, stop once every task has
             // exited so `kernel_main` halts; keep dispatching otherwise.
             Ok(StepOutcome::Ran(_)) => {
@@ -1004,6 +1014,51 @@ fn run_dispatch_loop<A: KernelArch>(
         }
     }
     arch.set_device_irqs(false);
+}
+
+#[cfg(test)]
+mod dispatch_loop_tests {
+    use super::{run_dispatch_loop, DispatchRole};
+    use crate::sched::{Scheduler, SchedulerConfig};
+    use crate::test_arch::TestArch;
+    use crate::KernelArch;
+    use alloc::sync::Arc;
+    use rustos_kernel_sched_api::{Priority, TaskAction};
+
+    /// A task may suspend the dispatcher from an exception context whose
+    /// architecture mask still blocks device interrupts. Once the scheduler
+    /// step returns, the dispatcher must restore delivery before it handles
+    /// deferred wakes or chooses more work; otherwise every CPU can
+    /// eventually become permanently interrupt-masked under preemptive load.
+    #[test]
+    fn dispatcher_restores_device_irqs_after_a_task_step() {
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let scheduler = Scheduler::new(
+            SchedulerConfig {
+                cpus: 1,
+                queue_capacity_per_band: 8,
+                yields_before_demotion: 1,
+                boost_interval_ticks: 10,
+            },
+            arch.clone(),
+        )
+        .expect("scheduler builds");
+        let task_arch = arch.clone();
+        scheduler
+            .spawn(0, Priority::Normal, move |_| {
+                task_arch.set_device_irqs(false);
+                TaskAction::Exit
+            })
+            .expect("task spawns");
+
+        run_dispatch_loop(&scheduler, arch.as_ref(), 0, DispatchRole::Boot);
+
+        assert_eq!(
+            arch.irq_enable_count(),
+            2,
+            "initial enable plus post-step restoration must both occur"
+        );
+    }
 }
 
 impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {

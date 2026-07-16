@@ -1910,6 +1910,17 @@ order (one fully-gated increment each):
                    finisher code or the harness timeout, §7). The debug-only
                    `pcie_brcm` MISC read-backs the metal stall blamed are already
                    deleted (metal bring-up confirmed, §2.14).
+                 - **Post-preemption IRQ restoration — DONE.** A timer exception
+                   masks interrupt delivery before suspending an EL0 task. The
+                   CPU mask is not task context, so switching directly back to
+                   the dispatcher used to leave that CPU permanently masked;
+                   under four-core user load every CPU could eventually lose
+                   timer/device progress and freeze service startup. The shared
+                   dispatch loop now restores device IRQ delivery immediately
+                   after every returned scheduler step, at the lock-free safe
+                   boundary before deferred wakes or another dispatch. A host
+                   regression models the masked return deterministically, and
+                   the four-core stress vertical is the production coverage.
                  - **Remaining (metal only):** metal re-confirmation on a real Pi 4
                    that boot stays responsive through the slow PCIe read-back *and*
                    that the debug log keeps flowing past the passphrase prompt

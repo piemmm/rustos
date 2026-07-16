@@ -91,6 +91,9 @@ pub struct TestArch {
     ticks: AtomicU64,
     halts: AtomicU64,
     ipis: AtomicU64,
+    /// Number of [`KernelArch::set_device_irqs(true)`](KernelArch::set_device_irqs)
+    /// calls observed.
+    irq_enables: AtomicU64,
     /// Number of [`KernelArch::pump_console_tx`] calls observed.
     ///
     /// The dispatch loop calls the buffered-console-transmit hook on every
@@ -126,6 +129,7 @@ impl TestArch {
             ticks: AtomicU64::new(0),
             halts: AtomicU64::new(0),
             ipis: AtomicU64::new(0),
+            irq_enables: AtomicU64::new(0),
             pump_tx_calls: AtomicU64::new(0),
             monotonic_ns: AtomicU64::new(0),
             wakeup_calls: AtomicU64::new(0),
@@ -155,6 +159,12 @@ impl TestArch {
     #[must_use]
     pub fn ipi_count(&self) -> u64 {
         self.ipis.load(Ordering::Relaxed)
+    }
+
+    /// Number of times device interrupt delivery was enabled.
+    #[must_use]
+    pub fn irq_enable_count(&self) -> u64 {
+        self.irq_enables.load(Ordering::Relaxed)
     }
 
     /// Number of times [`KernelArch::pump_console_tx`] was reached.
@@ -266,6 +276,12 @@ impl KernelArch for TestArch {
         // discovers no CPU model, stating an honest `None` rather than
         // fabricating a name.
         None
+    }
+
+    fn set_device_irqs(&self, enabled: bool) {
+        if enabled {
+            self.irq_enables.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn pump_console_tx(&self) {

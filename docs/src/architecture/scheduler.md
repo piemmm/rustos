@@ -432,12 +432,17 @@ host `TestArch` records each call so the wait syscalls' re-arm epilogues
 are asserted directly.
 
 The dispatch loop runs with **device interrupts enabled** — RustOS is a
-fully preemptive kernel (`AGENTS.md` §17.1). `admit_init` calls
-[`KernelArch::set_device_irqs(true)`] once before steady-state dispatching,
-so every in-kernel task and kthread it runs executes with interrupts
-deliverable: a long in-kernel operation can no longer mask interrupts for
-its whole span and starve the preemption one-shot, the buffered-serial
-transmit drain (§20), or an interrupt-driven waiter. The kernel stays
+fully preemptive kernel (`AGENTS.md` §17.1). It calls
+[`KernelArch::set_device_irqs(true)`] before steady-state dispatching **and
+again whenever a scheduler step returns**. The second edge is required
+because a timer exception masks interrupt delivery before it preempts a user
+task, and the per-CPU mask is not part of the task context: switching directly
+from that handler back to the dispatcher otherwise leaves the dispatcher
+masked permanently. Restoration occurs only after the step has returned, when
+no task or scheduler critical section is in flight. Every in-kernel task and
+kthread therefore runs with interrupts deliverable: a long in-kernel operation
+cannot mask interrupts for its whole span and starve the preemption one-shot,
+the buffered-serial transmit drain (§20), or an interrupt-driven waiter. The kernel stays
 **non-preemptible** (§4): a device IRQ taken while an in-kernel task runs
 services its source and returns to the *same* task; only a timer tick taken
 from EL0/U-mode/ring 3 context-switches *immediately* (each port gates the
@@ -449,6 +454,13 @@ span (the EL1 tick callback fires), yet the EL0-preemption callback fires
 zero times and the kthread runs to its voluntary completion — under the old
 cooperative loop (device IRQs masked across the whole task run) no tick
 would be taken and it would spin forever.
+
+The host dispatch-loop regression models an exception return by masking
+device IRQs inside one task step and proves the dispatcher performs the
+post-step restore before shutdown. The four-core
+`stress_qemu_aarch64` vertical covers the production consequence: sustained
+EL0 preemption cannot leave every CPU masked and freeze service startup,
+device completion, and timer wakeups.
 
 A tick the non-preemptible kernel cannot act on is **never lost**: the
 per-tick callback latches it as the CPU's pending preemption
