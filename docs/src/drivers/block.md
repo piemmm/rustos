@@ -101,7 +101,7 @@ driving the device from an arbitrary caller's context.
 | Driver                                   | Crate                                | Supported buses     | Status                                   |
 |------------------------------------------|--------------------------------------|---------------------|------------------------------------------|
 | [virtio-blk](./virtio.md)                | `rustos-drv-storage-virtio-blk`      | virtio (PCI / MMIO) | host-side tests + mock transport only    |
-| Raspberry Pi 4 EMMC2                      | `rustos-drv-storage-emmc2`           | Pi 4 SDHCI (MMIO)   | read + write host-tested; interrupt-driven; wired into root-unlock; metal acceptance pending (Pi 4) |
+| Raspberry Pi 4 EMMC2                      | `rustos-drv-storage-emmc2`           | Pi 4 SDHCI (MMIO)   | ADMA2 DMA + PIO read/write host-tested; interrupt-driven; wired into root-unlock over DMA; DMA metal acceptance pending (Pi 4) |
 | USB mass storage (BOT / CBI / UAS)        | `rustos-drv-storage-usb-msd`         | any USB host via the URB transport | shared SCSI layer + three wire transports (incl. UFI floppies) host-tested over scripted doubles; metal acceptance pending (Pi 4) |
 
 QEMU integration on real PCI / MMIO virtio devices depends on the
@@ -137,11 +137,22 @@ store, never grows.
 
 `rustos-drv-storage-emmc2` brings up the Pi 4 (BCM2711) EMMC2
 controller — an Arasan / SDHCI-5.1 SD host — and exposes the card
-through `Block`. The transfer path is programmed-I/O: the SDHCI
-command/response and block-transfer state machine moves one 512-byte
-block at a time through the buffer data port in both directions
-(`CMD17`/`CMD18` reads, `CMD24`/`CMD25` writes), so neither path needs
-a DMA capability (`plans/PI.md` P8).
+through `Block`. The fast transfer path is **32-bit ADMA2 DMA**: the
+controller masters a whole 64 KiB chunk (`DMA_STAGE_BLOCKS` = 128 blocks)
+over the DAT lines through a one-entry ADMA2 descriptor the engine stages
+in a device-shared bounce region (`SdhciHost::dma_region`, `adma`), so a
+multi-block transfer completes on a single transfer-complete interrupt
+instead of a per-block buffer handshake and the CPU never moves data
+word-by-word through the slow uncached buffer data port; larger requests
+loop over the chunk. On a non-coherent interconnect the region is
+Normal-Non-Cacheable, so the engine orders its stores/loads around the
+doorbell with `dma_wmb`/`dma_rmb` (`lib/dma-barrier`) — no cache
+maintenance. When the host grants no DMA region the engine falls back to
+**programmed I/O** through the buffer data port (`CMD17`/`CMD18` reads,
+`CMD24`/`CMD25` writes), which needs no DMA capability — DMA where
+possible, correct everywhere (`plans/PI.md` P8). The command/transfer-mode
+encoding is shared between both paths (`read_command`/`write_command`,
+§2.2).
 
 The state machine (`Emmc2`) is written against the `SdhciHost` register
 seam, so it is proven host-side against a register-level mock controller
@@ -218,8 +229,9 @@ The driver is **wired into the root-unlock path** (`plans/PI.md` B4): when
 the root-storage bind gate binds the `brcm,bcm2711-emmc2` node, the aarch64
 root-unlock kthread (`crate::aarch64::root_unlock::emmc2_unlock`) maps the
 node's sole SDHCI register window under `CAP_MMIO_MAP` through a minimal
-in-kernel MMIO-only DriverHost, admits the driver through the signed §8
-load gate, **discovers the controller's GIC SPI from the firmware device
+in-kernel `DriverHost` that also carves the ADMA2 staging slab from a
+`CAP_MEM_DMA`-gated per-driver DMA pool (`Emmc2DmaHost`), admits the driver
+through the signed §8 load gate, **discovers the controller's GIC SPI from the firmware device
 tree (`emmc2_spi`) and binds, routes, and arms it on the published IRQ
 table** — supplying the driver a `CompletionWait` (`Emmc2Completion`) that
 blocks on that line through the same task-parking waiter the virtio

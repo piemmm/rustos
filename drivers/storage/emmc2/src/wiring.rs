@@ -10,14 +10,19 @@
 //!
 //! This is the only seam that maps memory: [`open_discovered`] checks
 //! [`CapabilityId::MMIO_MAP`], maps the window through the host's
-//! [`MmioMapper`] (never a pointer the driver synthesises), and brings the card up over it. Everything below — the SDHCI
-//! command/response and block-transfer state machine — is the
-//! host-provable [`Emmc2`] engine driven over the register seam.
+//! [`MmioMapper`] (never a pointer the driver synthesises), and — when the
+//! host exposes a DMA facility — allocates one device-shared staging slab
+//! through the host's [`DmaHost`](rustos_abi::driver::dma::DmaHost) so the
+//! card runs on the fast ADMA2 transfer path; a host with no DMA facility
+//! falls back to programmed I/O. It then brings the card up over the
+//! register seam. Everything below — the SDHCI command/response and
+//! block-transfer state machine — is the host-provable [`Emmc2`] engine
+//! driven over that seam.
 
 use rustos_abi::driver::mmio::MmioMapError;
 use rustos_abi::{CapabilityId, DriverError, DriverHost, MmioMapper};
 
-use crate::{regs, BringUpFault, BringUpStage, CompletionWait, Emmc2, IrqSdhci};
+use crate::{regs, BringUpFault, BringUpStage, CompletionWait, Emmc2, IrqSdhci, DMA_REGION_BYTES};
 
 /// Map the discovered EMMC2 register window and bring the card online.
 ///
@@ -25,6 +30,11 @@ use crate::{regs, BringUpFault, BringUpStage, CompletionWait, Emmc2, IrqSdhci};
 /// reported by the hardware-tree `brcm,bcm2711-emmc2` node. The window is
 /// mapped read/write under [`CapabilityId::MMIO_MAP`] and handed to
 /// [`Emmc2::open`], which runs the SD identification sequence.
+///
+/// If the host exposes a [`DmaHost`](rustos_abi::driver::dma::DmaHost),
+/// this allocates one [`crate::DMA_REGION_BYTES`] staging slab and drives
+/// the card by ADMA2; if it does not, or the DMA carve is refused, the
+/// engine uses programmed I/O (DMA where possible).
 ///
 /// # Errors
 ///
@@ -45,7 +55,10 @@ use crate::{regs, BringUpFault, BringUpStage, CompletionWait, Emmc2, IrqSdhci};
 /// # Capabilities
 ///
 /// Requires [`CapabilityId::MMIO_MAP`] in addition to the load-time
-/// [`CapabilityId::DRV_LOAD`] [`crate::register`] checked.
+/// [`CapabilityId::DRV_LOAD`] [`crate::register`] checked. The DMA fast
+/// path additionally uses [`CapabilityId::MEM_DMA`] (through the host's
+/// `DmaHost`); without it the DMA carve is refused and the engine falls
+/// back to programmed I/O rather than failing the bring-up.
 ///
 /// `waiter` is the completion seam the engine parks on instead of
 /// busy-spinning a status register: the metal kernel
@@ -72,5 +85,20 @@ pub fn open_discovered<W: CompletionWait>(
             stage: BringUpStage::MapWindow,
             error: MmioMapError::as_driver_error(e),
         })?;
-    Emmc2::open(IrqSdhci::new(window, waiter))
+
+    // Take the fast path when the host can grant a device-shared DMA
+    // staging region: allocate one [`DMA_REGION_BYTES`] slab and drive the
+    // card by ADMA2. A host with no DMA facility, or a DMA carve that is
+    // refused, falls back to programmed I/O — DMA where possible, correct
+    // everywhere (the engine also re-checks the region at bring-up and
+    // degrades to PIO if it is unusable). The slab lives inside the
+    // returned [`Emmc2`], so it is released with the device on unload.
+    let engine_host = match host
+        .dma_host()
+        .and_then(|dma| dma.alloc_dma_zeroed(DMA_REGION_BYTES).ok())
+    {
+        Some(slab) => IrqSdhci::with_dma(window, waiter, slab),
+        None => IrqSdhci::new(window, waiter),
+    };
+    Emmc2::open(engine_host)
 }

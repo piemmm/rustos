@@ -7,8 +7,10 @@
 
 /// SDHCI standard register block length, in bytes. The Pi 4 device tree
 /// advertises a `0x100`-byte window for the `brcm,bcm2711-emmc2` node;
-/// the driver maps at least the standard block.
-pub const REGS_LEN_BYTES: usize = 0x40;
+/// the driver maps at least the standard block up to and including the
+/// 32-bit ADMA2 system-address register at [`REG_ADMA_ADDR`] (`0x58`),
+/// so the DMA transfer path can program the descriptor-table base.
+pub const REGS_LEN_BYTES: usize = 0x60;
 
 // --- Register byte offsets (SDHCI standard block) -------------------------
 
@@ -41,6 +43,12 @@ pub const REG_INTERRUPT: usize = 0x30;
 pub const REG_IRPT_MASK: usize = 0x34;
 /// `IRPT_EN`: interrupt-signal (to-CPU) enable bits.
 pub const REG_IRPT_EN: usize = 0x38;
+/// `ADMA_ADDR` (low 32 bits): the ARM-physical base of the 32-bit ADMA2
+/// descriptor table the controller walks for a DMA transfer. Only the
+/// low word is programmed; the driver drives 32-bit ADMA2, whose device
+/// addresses fit the low 32 bits (the discovered DMA constraint bounds
+/// them). The upper word (`0x5C`) is left zero.
+pub const REG_ADMA_ADDR: usize = 0x58;
 
 // --- `STATUS` (present state) bits ----------------------------------------
 
@@ -66,6 +74,16 @@ pub const CONTROL0_BUS_VOLTAGE_3V3: u32 = 0b111 << 9;
 /// four DAT lines: a 4× transfer-rate improvement over the 1-bit reset
 /// default. Cleared means the 1-bit bus.
 pub const CONTROL0_DATA_WIDTH_4BIT: u32 = 1 << 1;
+
+/// DMA Select field (`CONTROL0[4:3]`, SDHCI Host Control 1). The value
+/// `0b10` selects 32-bit ADMA2, so a data command issued with
+/// [`TM_DMA_EN`] makes the controller master the DAT-line data through
+/// the ADMA2 descriptor table at [`REG_ADMA_ADDR`] rather than the
+/// programmed-I/O buffer data port.
+pub const CONTROL0_DMA_SELECT_ADMA2: u32 = 0b10 << 3;
+/// Mask of the whole 2-bit DMA Select field (`CONTROL0[4:3]`), so the
+/// field is cleared before the ADMA2 value is set in a read-modify-write.
+pub const CONTROL0_DMA_SELECT_MASK: u32 = 0b11 << 3;
 
 // --- `CONTROL1` bits ------------------------------------------------------
 
@@ -138,6 +156,11 @@ pub const RESP_48_BUSY: u32 = 0b11;
 
 // --- `CMDTM` transfer-mode fields (lower half) ----------------------------
 
+/// DMA-enable (`CMDTM` transfer mode `[0]`): the data phase is mastered
+/// by the controller's DMA engine (ADMA2, selected by
+/// [`CONTROL0_DMA_SELECT_ADMA2`]) instead of the programmed-I/O buffer
+/// data port.
+pub const TM_DMA_EN: u32 = 1 << 0;
 /// Block-count-enable (multi-block transfers).
 pub const TM_BLKCNT_EN: u32 = 1 << 1;
 /// Auto-CMD12 enable (issue `STOP_TRANSMISSION` after a multi-block

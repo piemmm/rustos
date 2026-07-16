@@ -2,10 +2,25 @@
 //!
 //! The Pi 4's EMMC2 controller is an Arasan / SDHCI-5.1 SD host. This
 //! driver brings an SD card up over the standard SDHCI register block and
-//! exposes it through [`rustos_abi::driver::block::Block`]. The transfer path is programmed-I/O (PIO): blocks move one
-//! 512-byte block at a time through the buffer data port in both
-//! directions (`CMD17`/`CMD18` reads, `CMD24`/`CMD25` writes), which
-//! needs no DMA capability and is the correct first bring-up path
+//! exposes it through [`rustos_abi::driver::block::Block`].
+//!
+//! # Transfer paths
+//!
+//! The fast path is **32-bit ADMA2 DMA**: the controller masters a whole
+//! transfer chunk over the DAT lines through a one-entry descriptor table
+//! the engine stages in a device-shared bounce region ([`adma`],
+//! [`DMA_STAGE_BLOCKS`] blocks per chunk), so a multi-block transfer
+//! completes with a **single** completion interrupt instead of a per-block
+//! buffer handshake, and the CPU never copies data word-by-word through the
+//! slow uncached buffer data port. A larger request is split into
+//! successive chunks. The engine selects this path at bring-up when the
+//! host grants a device-shared DMA staging region (through
+//! [`SdhciHost::dma_region`]).
+//!
+//! The fallback path is **programmed I/O** (PIO): blocks move one 512-byte
+//! block at a time through the buffer data port (`CMD17`/`CMD18` reads,
+//! `CMD24`/`CMD25` writes). It needs no DMA capability and is used when the
+//! host grants no DMA region — DMA where possible, correct everywhere
 //! (`plans/PI.md` P8).
 //!
 //! # Layered seam
@@ -37,11 +52,14 @@
 #![deny(missing_docs)]
 
 use rustos_abi::driver::block::{Block, BlockGeometry};
+use rustos_abi::driver::dma::DmaSlab;
 use rustos_abi::driver::mmio::WindowError;
 use rustos_abi::{
     CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey, RegisterWindow,
 };
+use rustos_dma_barrier::{dma_rmb, dma_wmb};
 
+pub mod adma;
 pub mod command;
 pub mod regs;
 pub mod wiring;
@@ -147,6 +165,45 @@ pub trait SdhciHost {
     /// interrupt at all; the engine fails the transfer closed on it (see
     /// [`CompletionWait::await_irq`]).
     fn await_irq(&mut self) -> CompletionSignal;
+
+    /// The device-shared DMA staging region this host provides, or `None`
+    /// for a programmed-I/O-only host.
+    ///
+    /// A host that returns `Some` lets the engine move whole transfer
+    /// chunks by ADMA2: the engine stages the descriptor table and the
+    /// block data in the returned [`DmaRegion`] and hands the controller
+    /// its device-visible base, so the CPU never copies data through the
+    /// slow buffer data port. A host that returns `None` (no DMA grant, or
+    /// an interconnect the platform cannot DMA over) makes the engine fall
+    /// back to the block-at-a-time programmed-I/O path — DMA where
+    /// possible, correct everywhere.
+    ///
+    /// The region is re-borrowed per call so it never aliases a concurrent
+    /// [`read32`](Self::read32) / [`write32`](Self::write32): the engine
+    /// stages into it, drops the borrow, then programs the controller.
+    /// The default implementation is PIO-only.
+    fn dma_region(&mut self) -> Option<DmaRegion<'_>> {
+        None
+    }
+}
+
+/// A borrowed view of a host's device-shared DMA staging region.
+///
+/// `bytes` is the CPU-accessible staging buffer (the engine writes the
+/// ADMA2 descriptor table and, for a write, the outbound block data into
+/// it, and reads inbound block data out of it after the transfer);
+/// `device_base` is the device-visible address of `bytes[0]` — the base
+/// the ADMA2 descriptor's data pointer and the controller's descriptor-
+/// table register are expressed relative to. On a non-coherent
+/// interconnect the region is Normal-Non-Cacheable memory, so the engine
+/// orders its stores ahead of the controller doorbell with
+/// [`dma_wmb`] and its loads after completion with [`dma_rmb`]; no cache
+/// maintenance is required.
+pub struct DmaRegion<'a> {
+    /// CPU-accessible staging bytes (descriptor table + data area).
+    pub bytes: &'a mut [u8],
+    /// Device-visible base address of `bytes[0]`.
+    pub device_base: u64,
 }
 
 /// Park-until-completion seam the metal [`IrqSdhci`] host drives
@@ -195,14 +252,39 @@ pub enum CompletionSignal {
 pub struct IrqSdhci<W: CompletionWait> {
     window: RegisterWindow,
     waiter: W,
+    /// The device-shared DMA staging slab, when the host granted one.
+    /// `Some` selects the ADMA2 transfer path; `None` keeps the driver on
+    /// the programmed-I/O path (`plans/PI.md` P8 — DMA where possible).
+    dma: Option<DmaSlab>,
 }
 
 impl<W: CompletionWait> IrqSdhci<W> {
     /// Pair a mapped register `window` with the completion `waiter` that
-    /// parks on the controller's interrupt line.
+    /// parks on the controller's interrupt line, on the programmed-I/O
+    /// path (no DMA staging region).
     #[must_use]
     pub fn new(window: RegisterWindow, waiter: W) -> Self {
-        Self { window, waiter }
+        Self {
+            window,
+            waiter,
+            dma: None,
+        }
+    }
+
+    /// As [`Self::new`], but with a device-shared DMA staging `slab` so the
+    /// engine moves transfers by ADMA2 rather than the buffer data port.
+    ///
+    /// The slab must be at least [`DMA_REGION_BYTES`] long (a shorter one
+    /// yields fewer staged blocks, and a zero-length data area falls back
+    /// to programmed I/O); on a non-coherent interconnect it must be the
+    /// Normal-Non-Cacheable carve the kernel DMA allocator returns.
+    #[must_use]
+    pub fn with_dma(window: RegisterWindow, waiter: W, slab: DmaSlab) -> Self {
+        Self {
+            window,
+            waiter,
+            dma: Some(slab),
+        }
     }
 }
 
@@ -221,6 +303,15 @@ impl<W: CompletionWait> SdhciHost for IrqSdhci<W> {
 
     fn await_irq(&mut self) -> CompletionSignal {
         self.waiter.await_irq()
+    }
+
+    fn dma_region(&mut self) -> Option<DmaRegion<'_>> {
+        let slab = self.dma.as_mut()?;
+        let device_base = slab.phys();
+        Some(DmaRegion {
+            bytes: slab.as_bytes_mut(),
+            device_base,
+        })
     }
 }
 
@@ -250,10 +341,39 @@ const DATA_CLOCK_DIVISOR: u32 = IDENT_CLOCK_DIVISOR / 32;
 /// maximum data-line timeout, the conservative bring-up setting.
 const DATA_TIMEOUT_VALUE: u32 = 0x0E;
 
-/// Largest number of blocks one PIO transfer may carry. The SDHCI
+/// Largest number of blocks one transfer command may carry. The SDHCI
 /// 16-bit block-count field bounds a single transfer (a format-fixed bound, not a scalable capacity); a caller
 /// asking for more is rejected fail-closed.
 const MAX_BLOCKS_PER_TRANSFER: usize = 0xFFFF;
+
+/// Number of 512-byte blocks the ADMA2 DMA path stages per transfer chunk.
+///
+/// The staging buffer is a bounce region the whole chunk moves through in
+/// one DMA command, so a transfer larger than this is split into
+/// successive chunks by the engine — the value caps the *staging window*,
+/// not the total transfer, so it is not a scaling ceiling. 128 blocks is
+/// 64 KiB, the largest a single 32-bit ADMA2 descriptor's 16-bit length
+/// field can carry ([`adma::MAX_DESC_BYTES`]), so one descriptor covers a
+/// full chunk. A read/write of an arbitrary number of blocks loops over
+/// this window; each 64 KiB chunk completes with a single command and a
+/// single completion interrupt instead of 128 per-block PIO buffer
+/// handshakes.
+pub const DMA_STAGE_BLOCKS: usize = 128;
+
+/// Byte length of the DMA data-staging area (`DMA_STAGE_BLOCKS` blocks).
+const DMA_DATA_BYTES: usize = DMA_STAGE_BLOCKS * BLOCK_SIZE as usize;
+
+/// Byte offset of the one-entry ADMA2 descriptor table within the DMA
+/// region: immediately after the data-staging area.
+const DMA_DESC_OFFSET: usize = DMA_DATA_BYTES;
+
+/// Minimum byte length of the DMA staging slab a host must grant for the
+/// ADMA2 path: the data-staging area plus the one-entry descriptor table.
+///
+/// The metal wiring sizes its DMA carve to exactly this. A host that
+/// grants a shorter region is treated as programmed-I/O-only (the engine
+/// falls back rather than staging past the region — fail closed).
+pub const DMA_REGION_BYTES: usize = DMA_DATA_BYTES + adma::DESC_BYTES;
 
 /// The step of the SD identification sequence a bring-up reached before
 /// failing.
@@ -360,6 +480,10 @@ pub struct Emmc2<H: SdhciHost> {
     /// `[31:16]` for use as an addressed-command argument.
     rca: u32,
     poll_budget: u32,
+    /// Blocks the ADMA2 DMA path stages per chunk, or `0` when the host
+    /// granted no DMA region (the engine then uses programmed I/O). Set
+    /// once during [`Emmc2::init`] from the host's [`SdhciHost::dma_region`].
+    dma_stage_blocks: usize,
 }
 
 impl<H: SdhciHost> Emmc2<H> {
@@ -401,6 +525,7 @@ impl<H: SdhciHost> Emmc2<H> {
             },
             rca: 0,
             poll_budget,
+            dma_stage_blocks: 0,
         };
         dev.init()?;
         Ok(dev)
@@ -689,6 +814,46 @@ impl<H: SdhciHost> Emmc2<H> {
             .map_err(|e| BringUpFault::new(BringUpStage::SetBusWidth, e))?;
         self.raise_data_clock()
             .map_err(|e| BringUpFault::new(BringUpStage::RaiseClock, e))?;
+
+        // Select the fast path: move transfers by ADMA2 when the host
+        // granted a staging region that is (a) at least DMA_REGION_BYTES
+        // long and (b) wholly addressable by the 32-bit ADMA2 descriptor
+        // fields. Otherwise stay on programmed I/O — DMA where possible,
+        // correct everywhere. This 32-bit-addressability precondition is
+        // checked once here so the transfer path never has to fail a
+        // request on an out-of-range device address. Enabling ADMA2 is a
+        // pure controller-mode step the read/write path then inherits, so
+        // it runs once here rather than per transfer.
+        self.dma_stage_blocks = match self.host.dma_region() {
+            Some(region)
+                if region.bytes.len() >= DMA_REGION_BYTES
+                    && region
+                        .device_base
+                        .checked_add(DMA_REGION_BYTES as u64)
+                        .is_some_and(|end| u32::try_from(end).is_ok()) =>
+            {
+                DMA_STAGE_BLOCKS
+            }
+            _ => 0,
+        };
+        if self.dma_stage_blocks != 0 {
+            self.enable_adma2()
+                .map_err(|e| BringUpFault::new(BringUpStage::RaiseClock, e))?;
+        }
+        Ok(())
+    }
+
+    /// Select 32-bit ADMA2 as the controller's DMA mode.
+    ///
+    /// A read-modify-write of `CONTROL0` (SDHCI Host Control 1) that clears
+    /// the DMA-select field and sets the ADMA2 value, preserving the SD-bus
+    /// power/voltage and 4-bit-width bits the same register holds. Called
+    /// once at the end of bring-up when a DMA staging region is present.
+    fn enable_adma2(&mut self) -> Result<(), DriverError> {
+        let control0 = self.host.read32(regs::REG_CONTROL0)?;
+        let control0 =
+            (control0 & !regs::CONTROL0_DMA_SELECT_MASK) | regs::CONTROL0_DMA_SELECT_ADMA2;
+        self.host.write32(regs::REG_CONTROL0, control0)?;
         Ok(())
     }
 
@@ -737,6 +902,186 @@ impl<H: SdhciHost> Emmc2<H> {
         }
         Ok(())
     }
+
+    /// The read command and `CMDTM` transfer-mode word for a `multi`-block
+    /// (vs single-block) read, on the `dma` (ADMA2) or programmed-I/O path.
+    ///
+    /// One definition shared by both transfer paths so the direction /
+    /// block-count / auto-CMD12 / DMA-enable bits cannot drift between
+    /// them.
+    fn read_command(multi: bool, dma: bool) -> (SdCommand, u32) {
+        let dma_bit = if dma { regs::TM_DMA_EN } else { 0 };
+        if multi {
+            (
+                command::READ_MULTIPLE_BLOCK,
+                regs::TM_DAT_DIR_READ
+                    | regs::TM_BLKCNT_EN
+                    | regs::TM_MULTI_BLOCK
+                    | regs::TM_AUTO_CMD12
+                    | dma_bit,
+            )
+        } else {
+            (command::READ_SINGLE_BLOCK, regs::TM_DAT_DIR_READ | dma_bit)
+        }
+    }
+
+    /// The write command and `CMDTM` transfer-mode word for a `multi`-block
+    /// (vs single-block) write, on the `dma` (ADMA2) or programmed-I/O
+    /// path. Host-to-card is the cleared direction bit.
+    fn write_command(multi: bool, dma: bool) -> (SdCommand, u32) {
+        let dma_bit = if dma { regs::TM_DMA_EN } else { 0 };
+        if multi {
+            (
+                command::WRITE_MULTIPLE_BLOCK,
+                regs::TM_BLKCNT_EN | regs::TM_MULTI_BLOCK | regs::TM_AUTO_CMD12 | dma_bit,
+            )
+        } else {
+            (command::WRITE_BLOCK, dma_bit)
+        }
+    }
+
+    /// Read `buf` (a whole number of blocks) from the card starting at
+    /// `block_addr` over the programmed-I/O buffer data port.
+    fn read_blocks_pio(&mut self, block_addr: u32, buf: &mut [u8]) -> Result<(), DriverError> {
+        let block_count = u32::try_from(buf.len() / BLOCK_SIZE as usize)
+            .map_err(|_| DriverError::LengthOutOfRange)?;
+        self.host
+            .write32(regs::REG_BLKSIZECNT, (block_count << 16) | BLOCK_SIZE)?;
+        let (cmd, transfer_mode) = Self::read_command(block_count != 1, false);
+        self.issue(cmd, block_addr, transfer_mode)?;
+        for block in buf.chunks_mut(BLOCK_SIZE as usize) {
+            self.read_block_pio(block)?;
+        }
+        self.wait_interrupt(regs::INT_DATA_DONE)?;
+        Ok(())
+    }
+
+    /// Write `buf` (a whole number of blocks) to the card starting at
+    /// `block_addr` over the programmed-I/O buffer data port.
+    fn write_blocks_pio(&mut self, block_addr: u32, buf: &[u8]) -> Result<(), DriverError> {
+        let block_count = u32::try_from(buf.len() / BLOCK_SIZE as usize)
+            .map_err(|_| DriverError::LengthOutOfRange)?;
+        self.host
+            .write32(regs::REG_BLKSIZECNT, (block_count << 16) | BLOCK_SIZE)?;
+        let (cmd, transfer_mode) = Self::write_command(block_count != 1, false);
+        self.issue(cmd, block_addr, transfer_mode)?;
+        for block in buf.chunks(BLOCK_SIZE as usize) {
+            self.write_block_pio(block)?;
+        }
+        self.wait_interrupt(regs::INT_DATA_DONE)?;
+        Ok(())
+    }
+
+    /// Stage the one-entry ADMA2 descriptor covering the first `chunk_bytes`
+    /// of the data-staging area into the device-shared region, returning the
+    /// device-visible base of the descriptor table.
+    ///
+    /// The data buffer is at region offset 0 and the descriptor table at
+    /// [`DMA_DESC_OFFSET`] (both fit the region — `init` proved it is at
+    /// least [`DMA_REGION_BYTES`]). Fails closed if the region is gone or a
+    /// device address does not fit the 32-bit ADMA2 field.
+    fn dma_stage_descriptor(&mut self, chunk_bytes: usize) -> Result<u32, DriverError> {
+        let region = self.host.dma_region().ok_or(DriverError::DeviceFault)?;
+        let data_dev = u32::try_from(region.device_base).map_err(|_| DriverError::DeviceFault)?;
+        let desc = adma::encode_tran(data_dev, chunk_bytes);
+        region.bytes[DMA_DESC_OFFSET..DMA_DESC_OFFSET + adma::DESC_BYTES].copy_from_slice(&desc);
+        region
+            .device_base
+            .checked_add(DMA_DESC_OFFSET as u64)
+            .and_then(|a| u32::try_from(a).ok())
+            .ok_or(DriverError::DeviceFault)
+    }
+
+    /// Issue one staged ADMA2 chunk and wait for its single completion.
+    ///
+    /// The caller has already staged the descriptor (and, for a write, the
+    /// outbound data) into the region. This orders those Normal-Non-
+    /// Cacheable stores ahead of the MMIO doorbell with [`dma_wmb`],
+    /// programs the block count and descriptor-table base, issues the
+    /// `read`/write command, and parks on the **single** transfer-complete
+    /// interrupt — the controller masters every block over the DAT lines,
+    /// so there is no per-block buffer handshake. One definition shared by
+    /// the read and write chunk loops.
+    fn dma_issue_chunk(
+        &mut self,
+        lba: u32,
+        chunk_blocks: u32,
+        table_dev: u32,
+        write: bool,
+    ) -> Result<(), DriverError> {
+        dma_wmb();
+        self.host
+            .write32(regs::REG_BLKSIZECNT, (chunk_blocks << 16) | BLOCK_SIZE)?;
+        self.host.write32(regs::REG_ADMA_ADDR, table_dev)?;
+        let multi = chunk_blocks != 1;
+        let (cmd, transfer_mode) = if write {
+            Self::write_command(multi, true)
+        } else {
+            Self::read_command(multi, true)
+        };
+        self.issue(cmd, lba, transfer_mode)?;
+        self.wait_interrupt(regs::INT_DATA_DONE)
+    }
+
+    /// Read `buf` (a whole number of blocks) from the card starting at
+    /// `block_addr` by ADMA2, one [`DMA_STAGE_BLOCKS`]-block chunk per
+    /// command.
+    ///
+    /// After each chunk's completion the engine orders its loads with
+    /// [`dma_rmb`] and copies the device-written staging bytes into `buf`.
+    fn read_blocks_dma(&mut self, block_addr: u32, buf: &mut [u8]) -> Result<(), DriverError> {
+        let stage_bytes = self.dma_stage_blocks * BLOCK_SIZE as usize;
+        let mut lba = block_addr;
+        let mut offset = 0usize;
+        while offset < buf.len() {
+            let chunk_bytes = (buf.len() - offset).min(stage_bytes);
+            let chunk_blocks = u32::try_from(chunk_bytes / BLOCK_SIZE as usize)
+                .map_err(|_| DriverError::LengthOutOfRange)?;
+            let table_dev = self.dma_stage_descriptor(chunk_bytes)?;
+            self.dma_issue_chunk(lba, chunk_blocks, table_dev, false)?;
+            // Order the reads of device-written data after the completion,
+            // then copy the staged bytes out.
+            dma_rmb();
+            let region = self.host.dma_region().ok_or(DriverError::DeviceFault)?;
+            buf[offset..offset + chunk_bytes].copy_from_slice(&region.bytes[..chunk_bytes]);
+            offset += chunk_bytes;
+            lba = lba
+                .checked_add(chunk_blocks)
+                .ok_or(DriverError::LengthOutOfRange)?;
+        }
+        Ok(())
+    }
+
+    /// Write `buf` (a whole number of blocks) to the card starting at
+    /// `block_addr` by ADMA2, one [`DMA_STAGE_BLOCKS`]-block chunk per
+    /// command.
+    ///
+    /// The engine copies each chunk of `buf` into the staging region before
+    /// issuing the command, so the caller's buffer is never mutated (the
+    /// `Block` write contract).
+    fn write_blocks_dma(&mut self, block_addr: u32, buf: &[u8]) -> Result<(), DriverError> {
+        let stage_bytes = self.dma_stage_blocks * BLOCK_SIZE as usize;
+        let mut lba = block_addr;
+        let mut offset = 0usize;
+        while offset < buf.len() {
+            let chunk_bytes = (buf.len() - offset).min(stage_bytes);
+            let chunk_blocks = u32::try_from(chunk_bytes / BLOCK_SIZE as usize)
+                .map_err(|_| DriverError::LengthOutOfRange)?;
+            let table_dev = self.dma_stage_descriptor(chunk_bytes)?;
+            {
+                // Stage the outbound data after the descriptor; the shared
+                // issue step's `dma_wmb` orders both ahead of the doorbell.
+                let region = self.host.dma_region().ok_or(DriverError::DeviceFault)?;
+                region.bytes[..chunk_bytes].copy_from_slice(&buf[offset..offset + chunk_bytes]);
+            }
+            self.dma_issue_chunk(lba, chunk_blocks, table_dev, true)?;
+            offset += chunk_bytes;
+            lba = lba
+                .checked_add(chunk_blocks)
+                .ok_or(DriverError::LengthOutOfRange)?;
+        }
+        Ok(())
+    }
 }
 
 impl<H: SdhciHost> Block for Emmc2<H> {
@@ -745,57 +1090,20 @@ impl<H: SdhciHost> Block for Emmc2<H> {
     }
 
     fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
-        let (block_addr, block_count) = self.validate_transfer(lba, buf.len())?;
-
-        self.host.write32(
-            regs::REG_BLKSIZECNT,
-            (u32::from(block_count) << 16) | BLOCK_SIZE,
-        )?;
-
-        let (cmd, transfer_mode) = if block_count == 1 {
-            (command::READ_SINGLE_BLOCK, regs::TM_DAT_DIR_READ)
+        let (block_addr, _block_count) = self.validate_transfer(lba, buf.len())?;
+        if self.dma_stage_blocks != 0 {
+            self.read_blocks_dma(block_addr, buf)
         } else {
-            (
-                command::READ_MULTIPLE_BLOCK,
-                regs::TM_DAT_DIR_READ
-                    | regs::TM_BLKCNT_EN
-                    | regs::TM_MULTI_BLOCK
-                    | regs::TM_AUTO_CMD12,
-            )
-        };
-        self.issue(cmd, block_addr, transfer_mode)?;
-
-        for block in buf.chunks_mut(BLOCK_SIZE as usize) {
-            self.read_block_pio(block)?;
+            self.read_blocks_pio(block_addr, buf)
         }
-        self.wait_interrupt(regs::INT_DATA_DONE)?;
-        Ok(())
     }
 
     fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
-        let (block_addr, block_count) = self.validate_transfer(lba, buf.len())?;
-
-        self.host.write32(
-            regs::REG_BLKSIZECNT,
-            (u32::from(block_count) << 16) | BLOCK_SIZE,
-        )?;
-
-        // Host-to-card direction is the cleared direction bit; only the
-        // multi-block transfer sets the count/auto-CMD12 machinery.
-        let (cmd, transfer_mode) = if block_count == 1 {
-            (command::WRITE_BLOCK, 0)
+        let (block_addr, _block_count) = self.validate_transfer(lba, buf.len())?;
+        if self.dma_stage_blocks != 0 {
+            self.write_blocks_dma(block_addr, buf)
         } else {
-            (
-                command::WRITE_MULTIPLE_BLOCK,
-                regs::TM_BLKCNT_EN | regs::TM_MULTI_BLOCK | regs::TM_AUTO_CMD12,
-            )
-        };
-        self.issue(cmd, block_addr, transfer_mode)?;
-
-        for block in buf.chunks(BLOCK_SIZE as usize) {
-            self.write_block_pio(block)?;
+            self.write_blocks_pio(block_addr, buf)
         }
-        self.wait_interrupt(regs::INT_DATA_DONE)?;
-        Ok(())
     }
 }

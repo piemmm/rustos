@@ -32,6 +32,12 @@ const STORE_BYTES: usize = STORE_BLOCKS * BLOCK_SIZE as usize;
 /// RCA the model publishes in its `CMD3` (R6) response.
 const TEST_RCA: u32 = 0xAAAA;
 
+/// Synthetic device-visible base the DMA-capable model reports for its
+/// staging region. Non-zero (a real mapping never bases at 0) and well
+/// within the 32-bit ADMA2 address field so the descriptor/table addresses
+/// the engine programs are representable.
+const DMA_DEVICE_BASE: u64 = 0x8000_0000;
+
 /// A register-level SDHCI controller model with a small backing card.
 ///
 /// The flags below model independent hardware/card conditions a test
@@ -70,14 +76,26 @@ struct MockSdhci {
     acmd41_ready_after: u32,
     acmd41_count: u32,
 
+    // Backing card.
+    store: Vec<u8>,
+
     // PIO transfer state.
-    store: [u8; STORE_BYTES],
     read_start: usize,
     read_cursor: usize,
     read_end: usize,
     write_start: usize,
     write_cursor: usize,
     write_end: usize,
+
+    // ADMA2 DMA model. `dma_capable` makes `dma_region` hand the engine a
+    // staging region so it drives the DMA path; `dma_buf` is that region
+    // (data area then one-entry descriptor table, `DMA_REGION_BYTES`),
+    // `dma_base` its synthetic device-visible base, and `adma_addr` the
+    // descriptor-table address the engine last programmed.
+    dma_capable: bool,
+    dma_buf: Vec<u8>,
+    dma_base: u64,
+    adma_addr: u32,
 
     // Fault injection.
     error_on_index: Option<u8>,
@@ -124,13 +142,17 @@ impl MockSdhci {
             if_cond_echo: true,
             acmd41_ready_after: 2,
             acmd41_count: 0,
-            store: [0u8; STORE_BYTES],
+            store: vec![0u8; STORE_BYTES],
             read_start: 0,
             read_cursor: 0,
             read_end: 0,
             write_start: 0,
             write_cursor: 0,
             write_end: 0,
+            dma_capable: false,
+            dma_buf: vec![0u8; DMA_REGION_BYTES],
+            dma_base: DMA_DEVICE_BASE,
+            adma_addr: 0,
             error_on_index: None,
             stall: false,
             defer: false,
@@ -150,6 +172,86 @@ impl MockSdhci {
             defer: true,
             ..Self::healthy(c_size)
         }
+    }
+
+    /// A healthy high-capacity v2 card that offers the engine a DMA staging
+    /// region, so bring-up selects the ADMA2 transfer path. The backing
+    /// card is `store_blocks` blocks so a transfer larger than one DMA
+    /// chunk ([`DMA_STAGE_BLOCKS`]) can be exercised.
+    fn healthy_dma(c_size: u32, store_blocks: usize) -> Self {
+        Self {
+            dma_capable: true,
+            store: vec![0u8; store_blocks * BLOCK_SIZE as usize],
+            ..Self::healthy(c_size)
+        }
+    }
+
+    /// Fill `count` consecutive blocks from `lba` with the per-block
+    /// pattern `expected_block(seed + n)` gives, so a multi-block DMA read
+    /// can be checked against a known pattern.
+    fn fill_blocks(&mut self, lba: usize, count: usize, seed: u8) {
+        for n in 0..count {
+            self.fill_block(
+                lba + n,
+                seed.wrapping_add(u8::try_from(n % 256).unwrap_or(0)),
+            );
+        }
+    }
+
+    /// Perform one ADMA2 transfer: walk the one-entry descriptor table the
+    /// engine programmed at `adma_addr` and move its `Length` bytes between
+    /// the backing store (at the block address in `arg`) and the descriptor's
+    /// data address, then raise transfer-complete.
+    ///
+    /// This is the register-level model of the controller's DMA engine: it
+    /// reads the descriptor the driver staged in `dma_buf`, so a bug in the
+    /// driver's descriptor encoding, block count, or address arithmetic
+    /// shows up as wrong or missing data rather than passing silently.
+    fn process_dma_transfer(&mut self, is_read: bool) {
+        // The controller must have been switched to ADMA2 before a DMA
+        // command — the driver's `enable_adma2` does this at bring-up.
+        assert_eq!(
+            self.control0 & regs::CONTROL0_DMA_SELECT_MASK,
+            regs::CONTROL0_DMA_SELECT_ADMA2,
+            "a DMA command requires ADMA2 selected in CONTROL0",
+        );
+        let table_off = usize::try_from(u64::from(self.adma_addr) - self.dma_base)
+            .expect("descriptor-table offset fits usize");
+        let desc = &self.dma_buf[table_off..table_off + adma::DESC_BYTES];
+        let attr = u16::from_le_bytes([desc[0], desc[1]]);
+        assert_ne!(attr & 0x1, 0, "descriptor Valid");
+        assert_ne!(attr & 0x2, 0, "descriptor End (one-entry table)");
+        assert_eq!(attr & (0b11 << 4), 0b10 << 4, "descriptor Act = Tran");
+        let length = u16::from_le_bytes([desc[2], desc[3]]);
+        let len_bytes = if length == 0 {
+            adma::MAX_DESC_BYTES
+        } else {
+            length as usize
+        };
+        let data_addr = u32::from_le_bytes([desc[4], desc[5], desc[6], desc[7]]);
+        let data_off =
+            usize::try_from(u64::from(data_addr) - self.dma_base).expect("data offset fits usize");
+
+        // The block count the engine programmed must match the descriptor.
+        let block_count = ((self.blksizecnt >> 16) & 0xFFFF) as usize;
+        assert_eq!(
+            len_bytes,
+            block_count * BLOCK_SIZE as usize,
+            "descriptor length matches the programmed block count",
+        );
+
+        let card_off = self.arg as usize * BLOCK_SIZE as usize;
+        if is_read {
+            let (data, store) = (&mut self.dma_buf, &self.store);
+            data[data_off..data_off + len_bytes]
+                .copy_from_slice(&store[card_off..card_off + len_bytes]);
+        } else {
+            let data = &self.dma_buf[data_off..data_off + len_bytes];
+            self.store[card_off..card_off + len_bytes].copy_from_slice(data);
+        }
+        // A DMA transfer completes with a single transfer-complete
+        // interrupt — no per-block buffer-ready handshake.
+        self.raise(regs::INT_DATA_DONE);
     }
 
     /// Raise completion `bits`: visible immediately in normal mode, or
@@ -290,22 +392,32 @@ impl MockSdhci {
             9 => self.resp = self.csd_words(),
             7 | 16 => self.resp[0] = 0,
             17 | 18 => {
-                let block_count = ((self.blksizecnt >> 16) & 0xFFFF) as usize;
-                let start = self.arg as usize * BLOCK_SIZE as usize;
-                self.read_start = start;
-                self.read_cursor = start;
-                self.read_end = start + block_count * BLOCK_SIZE as usize;
                 self.resp[0] = 0;
-                self.raise(regs::INT_READ_RDY);
+                if cmdtm & regs::TM_DMA_EN != 0 {
+                    // ADMA2 read: the controller masters the whole transfer.
+                    self.process_dma_transfer(true);
+                } else {
+                    let block_count = ((self.blksizecnt >> 16) & 0xFFFF) as usize;
+                    let start = self.arg as usize * BLOCK_SIZE as usize;
+                    self.read_start = start;
+                    self.read_cursor = start;
+                    self.read_end = start + block_count * BLOCK_SIZE as usize;
+                    self.raise(regs::INT_READ_RDY);
+                }
             }
             24 | 25 => {
-                let block_count = ((self.blksizecnt >> 16) & 0xFFFF) as usize;
-                let start = self.arg as usize * BLOCK_SIZE as usize;
-                self.write_start = start;
-                self.write_cursor = start;
-                self.write_end = start + block_count * BLOCK_SIZE as usize;
                 self.resp[0] = 0;
-                self.raise(regs::INT_WRITE_RDY);
+                if cmdtm & regs::TM_DMA_EN != 0 {
+                    // ADMA2 write: the controller masters the whole transfer.
+                    self.process_dma_transfer(false);
+                } else {
+                    let block_count = ((self.blksizecnt >> 16) & 0xFFFF) as usize;
+                    let start = self.arg as usize * BLOCK_SIZE as usize;
+                    self.write_start = start;
+                    self.write_cursor = start;
+                    self.write_end = start + block_count * BLOCK_SIZE as usize;
+                    self.raise(regs::INT_WRITE_RDY);
+                }
             }
             _ => {}
         }
@@ -355,6 +467,17 @@ impl SdhciHost for MockSdhci {
         CompletionSignal::Fired
     }
 
+    fn dma_region(&mut self) -> Option<DmaRegion<'_>> {
+        if !self.dma_capable {
+            return None;
+        }
+        let device_base = self.dma_base;
+        Some(DmaRegion {
+            bytes: &mut self.dma_buf,
+            device_base,
+        })
+    }
+
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), DriverError> {
         match offset {
             // The host-controller reset bit self-clears once reset is
@@ -379,6 +502,7 @@ impl SdhciHost for MockSdhci {
             regs::REG_INTERRUPT => self.interrupt &= !value,
             regs::REG_ARG1 => self.arg = value,
             regs::REG_BLKSIZECNT => self.blksizecnt = value,
+            regs::REG_ADMA_ADDR => self.adma_addr = value,
             regs::REG_CMDTM => self.process_command(value),
             regs::REG_DATA => self.accept_data_word(value),
             regs::REG_IRPT_EN if self.assert_irpt_en => {
@@ -730,6 +854,191 @@ fn a_silent_controller_fails_closed_instead_of_hanging() {
         panic!("a silent controller cannot identify")
     };
     assert_eq!(DriverError::from(fault), DriverError::DeviceFault);
+}
+
+// --- ADMA2 DMA transfer path ----------------------------------------------
+
+#[test]
+fn bring_up_selects_adma2_when_a_dma_region_is_present() {
+    // A host that offers a DMA staging region makes bring-up select the
+    // ADMA2 fast path: the controller's DMA-select field is programmed to
+    // ADMA2, and the read-modify-write preserves SD bus power and the
+    // 4-bit width the same CONTROL0 register holds.
+    let dev = Emmc2::open(MockSdhci::healthy_dma(7, STORE_BLOCKS)).expect("identification");
+    assert_eq!(
+        dev.host().control0 & regs::CONTROL0_DMA_SELECT_MASK,
+        regs::CONTROL0_DMA_SELECT_ADMA2,
+        "DMA-capable bring-up selects ADMA2"
+    );
+    assert!(dev.host().power_on, "ADMA2 select preserved SD bus power");
+    assert_ne!(
+        dev.host().control0 & regs::CONTROL0_DATA_WIDTH_4BIT,
+        0,
+        "ADMA2 select preserved the 4-bit bus width"
+    );
+}
+
+#[test]
+fn a_pio_only_host_stays_on_the_pio_path() {
+    // A host that grants no DMA region leaves the controller on programmed
+    // I/O: the DMA-select field is never set to ADMA2 (DMA where possible,
+    // PIO otherwise).
+    let dev = Emmc2::open(MockSdhci::healthy(7)).expect("identification");
+    assert_ne!(
+        dev.host().control0 & regs::CONTROL0_DMA_SELECT_MASK,
+        regs::CONTROL0_DMA_SELECT_ADMA2,
+        "a PIO-only host is never switched to ADMA2"
+    );
+}
+
+#[test]
+fn dma_read_single_block_returns_card_data() {
+    let mut mock = MockSdhci::healthy_dma(7, STORE_BLOCKS);
+    mock.fill_block(3, 0x40);
+    let mut dev = Emmc2::open(mock).expect("identification");
+
+    let mut buf = [0u8; BLOCK_SIZE as usize];
+    dev.read_blocks(3, &mut buf).expect("dma read");
+    assert_eq!(buf.as_slice(), MockSdhci::expected_block(0x40).as_slice());
+}
+
+#[test]
+fn dma_read_multiple_blocks_returns_contiguous_data() {
+    let mut mock = MockSdhci::healthy_dma(7, STORE_BLOCKS);
+    mock.fill_block(1, 0x10);
+    mock.fill_block(2, 0x50);
+    mock.fill_block(3, 0x90);
+    let mut dev = Emmc2::open(mock).expect("identification");
+
+    let mut buf = [0u8; 3 * BLOCK_SIZE as usize];
+    dev.read_blocks(1, &mut buf).expect("dma read");
+    let bs = BLOCK_SIZE as usize;
+    assert_eq!(&buf[0..bs], MockSdhci::expected_block(0x10).as_slice());
+    assert_eq!(&buf[bs..2 * bs], MockSdhci::expected_block(0x50).as_slice());
+    assert_eq!(
+        &buf[2 * bs..3 * bs],
+        MockSdhci::expected_block(0x90).as_slice()
+    );
+}
+
+#[test]
+fn dma_write_single_block_persists_to_card() {
+    let mut dev = Emmc2::open(MockSdhci::healthy_dma(7, STORE_BLOCKS)).expect("identification");
+    let payload = MockSdhci::expected_block(0x40);
+    dev.write_blocks(3, &payload).expect("dma write");
+
+    let mut buf = [0u8; BLOCK_SIZE as usize];
+    dev.read_blocks(3, &mut buf).expect("dma read back");
+    assert_eq!(buf.as_slice(), payload.as_slice());
+}
+
+#[test]
+fn dma_write_multiple_blocks_persist_contiguously() {
+    let mut dev = Emmc2::open(MockSdhci::healthy_dma(7, STORE_BLOCKS)).expect("identification");
+    let bs = BLOCK_SIZE as usize;
+    let mut payload = MockSdhci::expected_block(0x10);
+    payload.extend_from_slice(&MockSdhci::expected_block(0x50));
+    payload.extend_from_slice(&MockSdhci::expected_block(0x90));
+    dev.write_blocks(1, &payload).expect("dma write");
+
+    let mut buf = [0u8; 3 * BLOCK_SIZE as usize];
+    dev.read_blocks(1, &mut buf).expect("dma read back");
+    assert_eq!(&buf[0..bs], MockSdhci::expected_block(0x10).as_slice());
+    assert_eq!(&buf[bs..2 * bs], MockSdhci::expected_block(0x50).as_slice());
+    assert_eq!(
+        &buf[2 * bs..3 * bs],
+        MockSdhci::expected_block(0x90).as_slice()
+    );
+}
+
+#[test]
+fn dma_write_leaves_neighbouring_blocks_untouched() {
+    let mut mock = MockSdhci::healthy_dma(7, STORE_BLOCKS);
+    mock.fill_block(2, 0x20);
+    mock.fill_block(4, 0x60);
+    let mut dev = Emmc2::open(mock).expect("identification");
+    dev.write_blocks(3, &MockSdhci::expected_block(0xA0))
+        .expect("dma write");
+
+    let mut buf = [0u8; 3 * BLOCK_SIZE as usize];
+    dev.read_blocks(2, &mut buf).expect("dma read back");
+    let bs = BLOCK_SIZE as usize;
+    assert_eq!(&buf[0..bs], MockSdhci::expected_block(0x20).as_slice());
+    assert_eq!(&buf[bs..2 * bs], MockSdhci::expected_block(0xA0).as_slice());
+    assert_eq!(
+        &buf[2 * bs..3 * bs],
+        MockSdhci::expected_block(0x60).as_slice()
+    );
+}
+
+#[test]
+fn dma_transfer_larger_than_one_chunk_is_split_and_reassembled() {
+    // A transfer of more than DMA_STAGE_BLOCKS blocks must be split into
+    // successive DMA commands (each a staging-window chunk) and reassembled
+    // in order — the chunk loop's LBA/offset arithmetic. Read a span that
+    // spills into a second chunk and check every block against its pattern.
+    let total = DMA_STAGE_BLOCKS + 40;
+    let store_blocks = total + 8;
+    // c_size 0 → 1024-block geometry, larger than the span read below.
+    let mut mock = MockSdhci::healthy_dma(0, store_blocks);
+    mock.fill_blocks(0, total, 0x01);
+    let mut dev = Emmc2::open(mock).expect("identification");
+
+    let bs = BLOCK_SIZE as usize;
+    let mut buf = vec![0u8; total * bs];
+    dev.read_blocks(0, &mut buf).expect("dma read");
+    for n in 0..total {
+        assert_eq!(
+            &buf[n * bs..(n + 1) * bs],
+            MockSdhci::expected_block(0x01u8.wrapping_add(u8::try_from(n % 256).unwrap_or(0)))
+                .as_slice(),
+            "block {n} reassembled from its chunk",
+        );
+    }
+}
+
+#[test]
+fn dma_write_then_read_round_trips_across_chunks() {
+    // Write a multi-chunk payload by DMA and read it back by DMA: proves
+    // the write chunk loop stages each chunk from the right buffer offset
+    // and the round trip is lossless across the chunk boundary.
+    let total = DMA_STAGE_BLOCKS + 5;
+    let store_blocks = total + 8;
+    let mut dev = Emmc2::open(MockSdhci::healthy_dma(0, store_blocks)).expect("identification");
+    let bs = BLOCK_SIZE as usize;
+    let mut payload = vec![0u8; total * bs];
+    for (n, block) in payload.chunks_mut(bs).enumerate() {
+        block.copy_from_slice(
+            MockSdhci::expected_block(0x80u8.wrapping_add(u8::try_from(n % 256).unwrap_or(0)))
+                .as_slice(),
+        );
+    }
+    dev.write_blocks(0, &payload).expect("dma write");
+
+    let mut buf = vec![0u8; total * bs];
+    dev.read_blocks(0, &mut buf).expect("dma read back");
+    assert_eq!(buf, payload, "multi-chunk DMA round trip is lossless");
+}
+
+#[test]
+fn dma_read_command_error_fails_closed() {
+    let mut mock = MockSdhci::healthy_dma(7, STORE_BLOCKS);
+    // Inject an error response on the single-block read command.
+    mock.error_on_index = Some(17);
+    let mut dev = Emmc2::open(mock).expect("identification");
+    let mut buf = [0u8; BLOCK_SIZE as usize];
+    assert_eq!(dev.read_blocks(0, &mut buf), Err(DriverError::DeviceFault));
+}
+
+#[test]
+fn dma_read_rejects_out_of_range_lba() {
+    // c_size 0 → 1024 blocks; validation happens before any DMA staging.
+    let mut dev = Emmc2::open(MockSdhci::healthy_dma(0, STORE_BLOCKS)).expect("identification");
+    let mut buf = [0u8; BLOCK_SIZE as usize];
+    assert_eq!(
+        dev.read_blocks(1024, &mut buf),
+        Err(DriverError::LengthOutOfRange)
+    );
 }
 
 // --- `wiring` capability gate ---------------------------------------------

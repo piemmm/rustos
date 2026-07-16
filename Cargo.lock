@@ -1001,6 +1001,7 @@ name = "rustos-drv-storage-emmc2"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-dma-barrier",
 ]
 
 [[package]]

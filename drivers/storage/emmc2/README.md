@@ -2,16 +2,42 @@
 
 `plans/PI.md` P8 deliverable. Implements `rustos_abi::driver::block::Block`
 for the Raspberry Pi 4 (BCM2711) EMMC2 controller, an Arasan /
-SDHCI-5.1 SD host. The transfer path is programmed-I/O (PIO): blocks move
-one 512-byte block at a time through the SDHCI buffer data port in both
-directions (`CMD17`/`CMD18` reads, `CMD24`/`CMD25` writes), so neither
-path needs a DMA capability.
+SDHCI-5.1 SD host.
 
-**Stability tier:** `experimental`. The read and write paths are both
-complete and host-tested, and the driver is wired into the aarch64
-root-unlock bring-up (`plans/PI.md` B4 — `crate::aarch64::root_unlock::
-emmc2_unlock`); metal acceptance on a real Pi 4 is the remaining P8/B4
-item (`raspi4b` cannot model EMMC2, `plans/PI.md` §0.4).
+## Transfer paths — DMA where possible
+
+The fast path is **32-bit ADMA2 DMA**. The controller masters a whole
+transfer chunk over the DAT lines through a one-entry ADMA2 descriptor
+table the engine stages in a device-shared bounce region
+(`DMA_STAGE_BLOCKS` = 128 blocks / 64 KiB per chunk, one descriptor), so a
+multi-block transfer completes with a **single** transfer-complete
+interrupt instead of a per-block buffer handshake, and the CPU never moves
+data word-by-word through the slow uncached buffer data port. Larger
+requests are split into successive 64 KiB chunks. The engine selects this
+path at bring-up when the host grants a device-shared DMA staging region
+(through `SdhciHost::dma_region`) that is at least `DMA_REGION_BYTES` long
+and wholly 32-bit-addressable; enabling ADMA2 is a single `CONTROL0`
+read-modify-write (`enable_adma2`).
+
+The fallback path is **programmed I/O** (PIO): blocks move one 512-byte
+block at a time through the SDHCI buffer data port (`CMD17`/`CMD18` reads,
+`CMD24`/`CMD25` writes). It needs no DMA capability and runs whenever the
+host grants no usable DMA region — DMA where possible, correct everywhere.
+The command/transfer-mode encoding is shared between the two paths
+(`read_command`/`write_command`) so the DMA-enable, direction, block-count,
+and auto-CMD12 bits cannot drift.
+
+On a non-coherent interconnect the staging region is Normal-Non-Cacheable
+memory, so the engine orders its stores ahead of the controller doorbell
+with `dma_wmb` (`lib/dma-barrier`) and its reads of device-written data
+after completion with `dma_rmb`; no CPU cache maintenance is required.
+
+**Stability tier:** `experimental`. The DMA and PIO read/write paths are
+both complete and host-tested, and the driver is wired into the aarch64
+root-unlock bring-up over the DMA fast path (`plans/PI.md` B4 —
+`crate::aarch64::root_unlock::emmc2_unlock`); metal acceptance on a real
+Pi 4 is the remaining P8/B4 item (`raspi4b` cannot model EMMC2,
+`plans/PI.md` §0.4).
 
 ## Layered seam
 
@@ -21,14 +47,19 @@ mapping:
 
 - **Metal** drives it over `IrqSdhci`: a capability-gated `RegisterWindow`
   for `read32`/`write32` paired with a `CompletionWait` for `await_irq`,
-  both supplied by `wiring::open_discovered` from the discovered node. The
-  kernel's `CompletionWait` re-arms and parks on the controller's GIC line;
-  the driver crate is generic over `lib/abi` only (`AGENTS.md` §3 / §17.4),
-  so this inversion point keeps the kernel's IRQ-wait machinery out of the
-  driver (mirrors the virtio host's `notify_wait`, `AGENTS.md` §2.2).
+  and — on the fast path — a `DmaSlab` for `dma_region`, all supplied by
+  `wiring::open_discovered` from the discovered node. The kernel's
+  `CompletionWait` re-arms and parks on the controller's GIC line, and the
+  DMA slab is carved from a `CAP_MEM_DMA`-gated kernel DMA pool
+  (`Emmc2DmaHost`); the driver crate is generic over `lib/abi` only
+  (`AGENTS.md` §3 / §17.4), so this inversion point keeps the kernel's
+  IRQ-wait and DMA machinery out of the driver (mirrors the virtio host's
+  `notify_wait`, `AGENTS.md` §2.2).
 - **Host tests** drive it over `MockSdhci`, a register-level model of the
-  controller plus a small backing card; its `await_irq` is a no-op because
-  the model surfaces completions inline.
+  controller plus a backing card, which models the ADMA2 engine (it walks
+  the descriptor table the driver stages and moves the data) as well as
+  the PIO buffer port; its `await_irq` is a no-op because the model
+  surfaces completions inline.
 
 This mirrors the `rpi_hvs` mailbox seam (`AGENTS.md` §2.2): the protocol
 layer is proven host-side, the register block below it on metal. There is
@@ -102,7 +133,7 @@ the §8 `DriverError` drops the stage with `?` / `DriverError::from`
 
 | Device                | Board   | Status                              |
 |-----------------------|---------|-------------------------------------|
-| `brcm,bcm2711-emmc2`  | Pi 4    | read + write paths (host-tested); metal pending |
+| `brcm,bcm2711-emmc2`  | Pi 4    | ADMA2 DMA + PIO read/write (host-tested); metal pending |
 
 The aarch64 `FdtDiscovery` walk emits the `brcm,bcm2711-emmc2` node into
 `rustos_abi::hwtree` (Storage class, translated MMIO window) from a
@@ -125,6 +156,10 @@ through the same shared `lib/devmatch` policy the user-space `devmgr` uses
   (`wiring::open_discovered`); the window is reached only through the
   host's `MmioMapper`, never a pointer the driver synthesises
   (`AGENTS.md` §4 — no ambient authority).
+- `CAP_MEM_DMA` (fast path only) to carve the ADMA2 staging region through
+  the host's `DmaHost`; the memory is reached only through that carve,
+  never a synthesised address. Without it the DMA carve is refused and the
+  driver runs on PIO rather than failing the bring-up (DMA where possible).
 
 ## Completion waits
 
@@ -163,6 +198,15 @@ wakes the parked task (`crate::aarch64::root_unlock::emmc2_unlock`).
 - Single-block and multi-block reads returning the card's data.
 - Single-block and multi-block writes read back through the same mock
   card, with neighbouring blocks proven untouched.
+- The ADMA2 fast path over the DMA-capable mock: bring-up selects ADMA2 in
+  `CONTROL0` (preserving bus power and the 4-bit width) while a PIO-only
+  host is never switched to ADMA2; single- and multi-block DMA reads and
+  writes move the right data; a transfer larger than one 64 KiB chunk is
+  split into successive DMA commands and reassembled in order, and a
+  multi-chunk write/read DMA round trip is lossless; a DMA command error
+  and an out-of-range LBA fail closed.
+- 32-bit ADMA2 descriptor encoding (`Valid`/`End`/`Tran`, the 65536-as-0
+  length convention) (`adma`).
 - Range / shape validation (`BufferTooSmall`, `LengthOutOfRange`) on
   both the read and write paths.
 - Byte-addressed, pre-v2, and CSD-v1 cards rejected `Unsupported`, each
@@ -203,3 +247,11 @@ type is re-exported so the driver host can construct an instance through
 `Block` trait surface. `BringUpStage` and `BringUpFault` are public only as
 the error surface of `Emmc2::open` / `wiring::open_discovered`, so a metal
 caller can log the failing stage; the §8 `register` contract is unchanged.
+
+The DMA seam is public only where the metal host must implement or feed it:
+`SdhciHost::dma_region` and its `DmaRegion` view (the host supplies the
+device-shared staging bytes + device base), `IrqSdhci::with_dma` (pair the
+window and waiter with a `DmaSlab`), and the `DMA_STAGE_BLOCKS` /
+`DMA_REGION_BYTES` sizing constants the kernel wiring uses to size its DMA
+carve. The `adma` module exposes the 32-bit descriptor encoder. None of
+this widens the `register` contract.
