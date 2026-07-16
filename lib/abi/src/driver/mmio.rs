@@ -234,6 +234,45 @@ impl RegisterWindow {
         unsafe { ptr.cast::<u32>().write_volatile(value) };
         Ok(())
     }
+
+    /// Bulk-copy `src` into the window starting at `offset` — the fast path
+    /// for a **linear framebuffer scan-out**, where the whole surface is
+    /// written at once.
+    ///
+    /// This is a single wide copy under **one** bounds check, not a volatile
+    /// per-element write: a framebuffer is bulk pixel memory (the kernel maps
+    /// it non-cacheable Normal, not Device registers with per-access side
+    /// effects), so filling it a register at a time through [`Self::write_u32`]
+    /// is pathologically slow — millions of separately-checked accesses per
+    /// frame. A single copy is correct for such memory, and the display engine
+    /// reads the whole frame back afterwards. Do **not** use it for a device
+    /// register block, whose accesses must stay individually ordered.
+    ///
+    /// # Errors
+    ///
+    /// [`WindowError::OutOfBounds`] if `offset + src.len()` overruns the
+    /// window (or the addition overflows).
+    pub fn write_bytes(&self, offset: usize, src: &[u8]) -> Result<(), WindowError> {
+        let end = offset
+            .checked_add(src.len())
+            .ok_or(WindowError::OutOfBounds)?;
+        if end > self.len {
+            return Err(WindowError::OutOfBounds);
+        }
+        if src.is_empty() {
+            return Ok(());
+        }
+        // SAFETY: `end <= len` proves `[offset, offset + src.len())` lies
+        // within the single mapped allocation the construction invariant
+        // guarantees. `src` is a distinct caller-owned buffer and the window
+        // has unique access to its byte range, so the copy cannot overlap or
+        // alias.
+        unsafe {
+            let dst = self.base.as_ptr().add(offset);
+            core::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
+        }
+        Ok(())
+    }
 }
 
 /// Failure modes of [`MmioMapper::map_window`].
@@ -353,6 +392,33 @@ mod tests {
         assert_eq!(w.read_u16(2).expect("in bounds"), 0xBEEF);
         w.write_u8(0, 0x5A).expect("in bounds");
         assert_eq!(w.read_u8(0).expect("in bounds"), 0x5A);
+    }
+
+    #[test]
+    fn write_bytes_copies_a_span_at_offset() {
+        let mut buf = Aligned([0u8; 16]);
+        let w = window_over(&mut buf.0, 0);
+        w.write_bytes(4, &[1, 2, 3, 4, 5, 6]).expect("in bounds");
+        // The span landed at the offset; bytes outside it are untouched.
+        assert_eq!(w.read_u8(3).expect("in bounds"), 0);
+        for (i, want) in [1u8, 2, 3, 4, 5, 6].into_iter().enumerate() {
+            assert_eq!(w.read_u8(4 + i).expect("in bounds"), want);
+        }
+        assert_eq!(w.read_u8(10).expect("in bounds"), 0);
+    }
+
+    #[test]
+    fn write_bytes_fails_closed_out_of_bounds() {
+        let mut buf = Aligned([0u8; 8]);
+        let w = window_over(&mut buf.0, 0);
+        // A span that runs past the window is refused as a whole (no partial
+        // write): offset 4 + 5 bytes = 9 > 8.
+        assert_eq!(w.write_bytes(4, &[0; 5]), Err(WindowError::OutOfBounds));
+        // Exactly filling the window is fine.
+        assert!(w.write_bytes(0, &[0xAB; 8]).is_ok());
+        assert_eq!(w.read_u8(7).expect("in bounds"), 0xAB);
+        // An empty span is a no-op success even at the very end.
+        assert!(w.write_bytes(8, &[]).is_ok());
     }
 
     #[test]

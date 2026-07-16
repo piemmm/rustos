@@ -40,10 +40,10 @@ use crate::anon::{map_anonymous, unmap_anonymous, zero_frame, AnonError};
 use crate::anon_window::AnonWindowMap;
 use crate::dma::{DmaError, DmaWindowMap};
 use crate::filemap::{map_file_page, unmap_file_region};
-use crate::frame::FrameAllocator;
+use crate::frame::{Frame, FrameAllocator};
 use crate::mmio::{MmioError, MmioWindowMap};
 use crate::phys::PhysMap;
-use crate::vmm::{AddressSpace, FrozenAddressSpace, PageTable, VirtAddr};
+use crate::vmm::{AddressSpace, FrozenAddressSpace, MapFlags, Page, PageTable, VirtAddr};
 
 /// Why a [`LiveUserSpace`] operation failed.
 ///
@@ -253,6 +253,27 @@ pub trait LiveUserSpace: Send {
     /// page-table refusal, …).
     fn map_device_window(&mut self, phys_base: u64, len: usize) -> Result<u64, LiveSpaceError>;
 
+    /// Map `len` bytes of a **linear framebuffer** beginning at `phys_base`
+    /// into this space, returning the kernel-chosen base user virtual address
+    /// of the new, guard-bracketed, non-executable window.
+    ///
+    /// Identical guard-bracketed slot mechanism as [`Self::map_device_window`],
+    /// but the scan-out pages are mapped non-cacheable **Normal** memory
+    /// instead of Device-strongly-ordered: a framebuffer is bulk pixel memory
+    /// the CPU fills a whole frame at a time and the display engine reads back
+    /// as a DMA master, so the slow per-access Device ordering registers need
+    /// is exactly wrong for it (a full-frame blit of Device memory costs tens
+    /// of seconds under emulation). The producer has already resolved and
+    /// validated the framebuffer grant the window comes from (owner-checked,
+    /// kind, length); this only performs the page-table mechanism.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveSpaceError::Mmio`] carrying the precise [`MmioError`] (no free
+    /// virtual slot, page-table refusal, …).
+    fn map_framebuffer_window(&mut self, phys_base: u64, len: usize)
+        -> Result<u64, LiveSpaceError>;
+
     /// Carve a physically-contiguous, zeroed, coherent DMA buffer of `len`
     /// bytes into this space, returning its CPU virtual base and its
     /// physically-contiguous base ([`DmaMapping`]).
@@ -365,6 +386,16 @@ pub trait LiveUserSpace: Send {
     /// snapshot without naming the concrete page-table backend `P`
     /// (one freeze definition).
     fn freeze(&self) -> FrozenAddressSpace;
+
+    /// Translate a single `page` to the `(frame, flags)` the backend
+    /// resolves it to, or `None` when it is not mapped.
+    ///
+    /// The O(1) counterpart to [`Self::freeze`]: after the demand-fault
+    /// resolver backs one page it reads that page's mapping through here and
+    /// applies it to the registry snapshot as a single-page delta, instead of
+    /// re-freezing the whole space per fault (which is O(N²) over a large
+    /// mapping). Object-safe so `kernel/core` needs no concrete backend `P`.
+    fn translate_page(&self, page: Page) -> Option<(Frame, MapFlags)>;
 }
 
 /// The generic concrete live address space retained per task.
@@ -686,6 +717,17 @@ where
         Ok(region.virt().as_u64())
     }
 
+    fn map_framebuffer_window(
+        &mut self,
+        phys_base: u64,
+        len: usize,
+    ) -> Result<u64, LiveSpaceError> {
+        let region = self
+            .mmio
+            .map_framebuffer_into(&mut self.space, phys_base, len)?;
+        Ok(region.virt().as_u64())
+    }
+
     fn alloc_dma(&mut self, len: usize, addr_limit: u64) -> Result<DmaMapping, LiveSpaceError> {
         let buf =
             self.dma
@@ -743,6 +785,10 @@ where
         // One freeze definition lives on `AddressSpace`; this only erases the
         // backend `P` for the registry.
         self.space.freeze()
+    }
+
+    fn translate_page(&self, page: Page) -> Option<(Frame, MapFlags)> {
+        self.space.translate(page)
     }
 }
 

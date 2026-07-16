@@ -546,6 +546,18 @@ impl UserAddressSpace for FrozenAddressSpace {
     fn mapped_pages(&self) -> usize {
         self.mappings.len()
     }
+
+    fn apply_page_delta(&mut self, page: Page, mapping: Option<(Frame, MapFlags)>) -> bool {
+        match mapping {
+            Some(entry) => {
+                self.mappings.insert(page, entry);
+            }
+            None => {
+                self.mappings.remove(&page);
+            }
+        }
+        true
+    }
 }
 
 /// Object-safe, read-only view of a task's user address space.
@@ -585,6 +597,26 @@ pub trait UserAddressSpace {
     /// [`AddressSpace::mapped_pages`] so there is one counting
     /// definition, not two.
     fn mapped_pages(&self) -> usize;
+
+    /// Apply a **single-page** mapping delta to a stored snapshot: record
+    /// `page → mapping` (`Some` on a fresh backing, `None` on an unmap),
+    /// returning `true` if the snapshot could absorb the delta in place.
+    ///
+    /// This is the one narrow write the kernel's demand-fault resolver needs
+    /// and it is **not** a copy-path operation: the [`crate::uaccess`] page
+    /// walk calls only [`Self::translate`] / [`Self::mapped_pages`], never
+    /// this, so a caller can still never mutate its own mappings through the
+    /// copy path. Demand-faulting a large mapping backs one page per fault;
+    /// without this the resolver would re-freeze the *entire* address space
+    /// per fault, turning an N-page touch into O(N²) work (a multi-megabyte
+    /// buffer then costs tens of seconds under emulation). A snapshot that
+    /// cannot absorb an in-place delta returns `false` (the default), and the
+    /// resolver falls back to a full re-freeze — so the fast path is an
+    /// optimisation, never a correctness dependency.
+    fn apply_page_delta(&mut self, page: Page, mapping: Option<(Frame, MapFlags)>) -> bool {
+        let _ = (page, mapping);
+        false
+    }
 }
 
 impl<P: PageTable> UserAddressSpace for AddressSpace<P> {
@@ -868,6 +900,51 @@ mod tests {
         let s = AddressSpace::new(HostPageTable::new());
         let frozen = s.freeze();
         assert!(frozen.translate(p(0)).is_none());
+    }
+
+    #[test]
+    fn apply_page_delta_updates_the_frozen_snapshot_in_place() {
+        // The demand-fault resolver's fast path: after a fault backs one
+        // page, the snapshot is updated with that single page instead of
+        // being re-frozen from scratch (which would be O(N²) over a large
+        // mapping). The result must be identical to a full re-freeze.
+        let mut s = AddressSpace::new(HostPageTable::new());
+        s.map(p(1), Frame(9), MapFlags::READ | MapFlags::USER)
+            .unwrap();
+        let mut frozen = s.freeze();
+        assert!(frozen.translate(p(4)).is_none());
+
+        // Back a new page in the source, then apply just its delta.
+        s.map(
+            p(4),
+            Frame(12),
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+        )
+        .unwrap();
+        assert!(frozen.apply_page_delta(p(4), s.translate(p(4))));
+        let (frame, flags) = frozen.translate(p(4)).expect("delta page resolves");
+        assert_eq!(frame, Frame(12));
+        assert!(flags.contains(MapFlags::WRITE));
+        // The incremental snapshot equals a full re-freeze of the source.
+        let full = s.freeze();
+        assert_eq!(frozen.mapped_pages(), full.mapped_pages());
+        assert_eq!(frozen.translate(p(1)), full.translate(p(1)));
+
+        // A `None` delta removes the page (the unmap case).
+        assert!(frozen.apply_page_delta(p(1), None));
+        assert!(frozen.translate(p(1)).is_none());
+    }
+
+    #[test]
+    fn apply_page_delta_defaults_to_false_on_a_non_snapshot_space() {
+        // A live `AddressSpace` is never registry-stored, so it keeps the
+        // trait's default no-op delta: the resolver then falls back to a full
+        // re-freeze rather than silently dropping the update.
+        let mut s = AddressSpace::new(HostPageTable::new());
+        s.map(p(1), Frame(9), MapFlags::READ | MapFlags::USER)
+            .unwrap();
+        let erased: &mut dyn UserAddressSpace = &mut s;
+        assert!(!erased.apply_page_delta(p(2), Some((Frame(2), MapFlags::READ))));
     }
 
     /// A `FrozenAddressSpace` is `Send + Sync` (it owns only POD), so it can

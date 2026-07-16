@@ -31,7 +31,9 @@ use rustos_kernel_mem::{
 };
 use rustos_kernel_sched_api::SchedulerArch;
 
-use crate::devres::{DmaAllocFacility, DmaCarve, MmioMapFacility, SharedChunk, SharedMemFacility};
+use crate::devres::{
+    DmaAllocFacility, DmaCarve, MmioMapFacility, MmioMemoryKind, SharedChunk, SharedMemFacility,
+};
 use crate::filemap::FileMap;
 use crate::kthread::with_current_live_space;
 use crate::memmap::MemMap;
@@ -257,11 +259,14 @@ impl<A> MmioMapFacility for LiveMmioMap<A>
 where
     A: SchedulerArch + Send + Sync + 'static,
 {
-    fn map_window(&self, phys_base: u64, len: usize) -> Result<u64, Errno> {
+    fn map_window(&self, phys_base: u64, len: usize, kind: MmioMemoryKind) -> Result<u64, Errno> {
         let cpu = self.arch.current_cpu();
-        with_current_live_space(cpu, |space| space.map_device_window(phys_base, len))
-            .ok_or(Errno::NotImplemented)?
-            .map_err(live_errno)
+        with_current_live_space(cpu, |space| match kind {
+            MmioMemoryKind::Device => space.map_device_window(phys_base, len),
+            MmioMemoryKind::Framebuffer => space.map_framebuffer_window(phys_base, len),
+        })
+        .ok_or(Errno::NotImplemented)?
+        .map_err(live_errno)
     }
 }
 
@@ -502,6 +507,7 @@ mod tests {
         anon_reserves_at: Vec<(u64, u64)>,
         anon_unmaps: Vec<(u64, u64)>,
         device_maps: Vec<(u64, usize)>,
+        framebuffer_maps: Vec<(u64, usize)>,
         dma_allocs: Vec<(usize, u64)>,
         dma_frees: Vec<u64>,
         file_reserves: Vec<u64>,
@@ -605,6 +611,27 @@ mod tests {
                 Some(err) => Err(err),
                 None => Ok(0x9000_1000),
             }
+        }
+
+        fn map_framebuffer_window(
+            &mut self,
+            phys_base: u64,
+            len: usize,
+        ) -> Result<u64, LiveSpaceError> {
+            self.framebuffer_maps.push((phys_base, len));
+            match self.next.take() {
+                Some(err) => Err(err),
+                None => Ok(0x9000_2000),
+            }
+        }
+
+        fn translate_page(
+            &self,
+            _page: rustos_kernel_mem::Page,
+        ) -> Option<(rustos_kernel_mem::Frame, rustos_kernel_mem::MapFlags)> {
+            // The routing double models no page table; fault-resolution
+            // translation is covered by the real `LiveSpace` in `kernel/mem`.
+            None
         }
 
         fn alloc_dma(&mut self, len: usize, addr_limit: u64) -> Result<DmaMapping, LiveSpaceError> {
@@ -864,18 +891,39 @@ mod tests {
         let _guard = publish_live_space_for_test(6, fake);
 
         let producer = LiveMmioMap::new(arch_at(6));
-        let va = producer.map_window(0xFE98_0000, 0x4000);
+        let va = producer.map_window(0xFE98_0000, 0x4000, MmioMemoryKind::Device);
         assert_eq!(va, Ok(0x9000_1000));
         // SAFETY: see above.
         let recorded = unsafe { &*ptr };
         assert_eq!(recorded.device_maps, std::vec![(0xFE98_0000, 0x4000)]);
+        // A device window never takes the framebuffer (non-cacheable) path.
+        assert!(recorded.framebuffer_maps.is_empty());
+    }
+
+    #[test]
+    fn mmio_map_routes_a_framebuffer_to_the_non_cacheable_scanout_path() {
+        let (fake, ptr) = leak_fake();
+        let _guard = publish_live_space_for_test(9, fake);
+
+        let producer = LiveMmioMap::new(arch_at(9));
+        let va = producer.map_window(0x8000_0000, 0x30_0000, MmioMemoryKind::Framebuffer);
+        assert_eq!(va, Ok(0x9000_2000));
+        // SAFETY: the producer's `&mut` has ended; single-threaded read.
+        let recorded = unsafe { &*ptr };
+        // A framebuffer grant takes the scan-out (Normal-NC) path, never the
+        // strongly-ordered device path.
+        assert_eq!(
+            recorded.framebuffer_maps,
+            std::vec![(0x8000_0000, 0x30_0000)]
+        );
+        assert!(recorded.device_maps.is_empty());
     }
 
     #[test]
     fn mmio_map_with_no_published_space_fails_closed() {
         let producer = LiveMmioMap::new(arch_at(7));
         assert_eq!(
-            producer.map_window(0xFE98_0000, 0x4000),
+            producer.map_window(0xFE98_0000, 0x4000, MmioMemoryKind::Device),
             Err(Errno::NotImplemented)
         );
     }
@@ -890,7 +938,7 @@ mod tests {
 
         let producer = LiveMmioMap::new(arch_at(8));
         assert_eq!(
-            producer.map_window(0xFE98_0000, 0x4000),
+            producer.map_window(0xFE98_0000, 0x4000, MmioMemoryKind::Device),
             Err(Errno::OutOfMemory)
         );
     }

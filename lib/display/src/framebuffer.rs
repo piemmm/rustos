@@ -159,33 +159,19 @@ impl<'h> Framebuffer<'h> {
     /// Copy `frame[offset..offset + len]` into the window at `offset` —
     /// the one write path both the full and the region blit share.
     ///
-    /// The bulk of the span is written as naturally-aligned `u32`
-    /// scan-out words; unaligned head and tail bytes are written
-    /// individually. Every write is bounds-checked by the window, so a
-    /// miscomputed offset fails closed instead of escaping the mapping.
+    /// A scan-out surface is bulk pixel memory (the kernel maps it
+    /// non-cacheable Normal, not Device registers), so the span is copied in
+    /// one bounds-checked bulk write rather than a register at a time: filling
+    /// a whole frame one word at a time through per-access checked volatile
+    /// writes is pathologically slow (tens of seconds per frame under
+    /// emulation). A miscomputed offset still fails closed — the single bounds
+    /// check rejects a span that would escape the mapping.
     fn blit_span(&self, frame: &[u8], offset: usize, len: usize) -> Result<(), DriverError> {
-        let end = offset + len;
-        let head_end = end.min(offset.next_multiple_of(4));
-        for (off, &byte) in frame.iter().enumerate().take(head_end).skip(offset) {
-            self.window
-                .write_u8(off, byte)
-                .map_err(WindowError::as_driver_error)?;
-        }
-        let mut off = head_end;
-        while off + 4 <= end {
-            let value =
-                u32::from_le_bytes([frame[off], frame[off + 1], frame[off + 2], frame[off + 3]]);
-            self.window
-                .write_u32(off, value)
-                .map_err(WindowError::as_driver_error)?;
-            off += 4;
-        }
-        for (tail, &byte) in frame.iter().enumerate().take(end).skip(off) {
-            self.window
-                .write_u8(tail, byte)
-                .map_err(WindowError::as_driver_error)?;
-        }
-        Ok(())
+        let end = offset.checked_add(len).ok_or(DriverError::BufferTooSmall)?;
+        let src = frame.get(offset..end).ok_or(DriverError::BufferTooSmall)?;
+        self.window
+            .write_bytes(offset, src)
+            .map_err(WindowError::as_driver_error)
     }
 }
 

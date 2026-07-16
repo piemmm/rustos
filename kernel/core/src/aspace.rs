@@ -52,7 +52,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use rustos_abi::hwtree::{GrantedResource, HwResource};
 use rustos_abi::{DescriptorTable, Errno, LimitKind, OpenFlags, ResourceLimit, STD_STREAM_COUNT};
 use rustos_caps::CapabilitySet;
-use rustos_kernel_mem::{PhysMap, UserAddressSpace, PAGE_SIZE};
+use rustos_kernel_mem::{Frame, MapFlags, Page, PhysMap, UserAddressSpace, PAGE_SIZE};
 use rustos_kernel_sec::TaskId;
 
 use crate::pipe::PipeEnd;
@@ -646,6 +646,30 @@ impl AddressSpaceRegistry {
                 entry.space = space;
                 true
             }
+            None => false,
+        }
+    }
+
+    /// Apply a single-page mapping delta to `task`'s stored snapshot in
+    /// place — record `page → mapping` (`Some` on a fresh backing, `None`
+    /// on an unmap) — returning `true` when the snapshot absorbed it.
+    ///
+    /// This is the demand-fault resolver's fast path: it backs one page per
+    /// fault, so updating the one entry keeps per-fault work O(log n) instead
+    /// of re-freezing the whole address space (which would make touching a
+    /// large mapping O(N²), tens of seconds under emulation). A snapshot that
+    /// cannot absorb an in-place delta (the host double), or a task with no
+    /// entry, returns `false` and the caller falls back to a full re-freeze —
+    /// so this is a pure optimisation, never a correctness dependency. The
+    /// physical map is untouched (it is the shared kernel direct map).
+    pub fn note_faulted_page(
+        &mut self,
+        task: TaskId,
+        page: Page,
+        mapping: Option<(Frame, MapFlags)>,
+    ) -> bool {
+        match self.tasks.get_mut(&task) {
+            Some(entry) => entry.space.apply_page_delta(page, mapping),
             None => false,
         }
     }
@@ -1508,6 +1532,18 @@ mod tests {
         Box::new(SimPhysMap::new(PhysAddr::new(0), PAGE_SIZE))
     }
 
+    /// A **frozen** snapshot mapping one user-readable page `n` → `frame`,
+    /// boxed behind the object-safe trait — the form the registry really
+    /// stores in production (unlike [`user_space`]'s live `AddressSpace`,
+    /// which keeps the default no-op delta).
+    fn frozen_space(n: u64, frame: usize) -> Box<dyn UserAddressSpace + Send + Sync> {
+        let mut space = AddressSpace::new(HostPageTable::new());
+        space
+            .map(page(n), Frame(frame), MapFlags::READ | MapFlags::USER)
+            .expect("mapped");
+        Box::new(space.freeze())
+    }
+
     #[test]
     fn new_registry_is_empty() {
         let reg = AddressSpaceRegistry::new();
@@ -1572,6 +1608,45 @@ mod tests {
         assert!(flags.contains(MapFlags::USER));
         // The physical map survived the swap (its window still translates).
         assert!(physmap.translate(PhysAddr::new(0), PAGE_SIZE).is_some());
+    }
+
+    #[test]
+    fn note_faulted_page_updates_a_frozen_snapshot_in_place() {
+        let mut reg = AddressSpaceRegistry::new();
+        // The stored snapshot sees only page 1 (the spawn-time view).
+        reg.register(TaskId(6), frozen_space(1, 100), sim())
+            .expect("registration succeeds");
+        assert!(reg
+            .resolve(TaskId(6))
+            .expect("registered")
+            .0
+            .translate(page(2))
+            .is_none());
+
+        // A demand fault backs page 2; the resolver applies just that page as
+        // a delta (no whole-space re-freeze) and the snapshot absorbs it.
+        assert!(reg.note_faulted_page(TaskId(6), page(2), Some((Frame(200), MapFlags::USER))));
+
+        let (space, _) = reg.resolve(TaskId(6)).expect("still registered");
+        let (frame, flags) = space.translate(page(2)).expect("delta page resolves");
+        assert_eq!(frame, Frame(200));
+        assert!(flags.contains(MapFlags::USER));
+        // The original page is untouched.
+        assert_eq!(space.translate(page(1)).expect("page 1").0, Frame(100));
+    }
+
+    #[test]
+    fn note_faulted_page_falls_back_when_the_snapshot_cannot_absorb_a_delta() {
+        let mut reg = AddressSpaceRegistry::new();
+        // A live `AddressSpace` entry keeps the default no-op delta, so the
+        // registry reports `false` and the caller full-re-freezes instead.
+        reg.register(TaskId(7), user_space(1, 1), sim())
+            .expect("registration succeeds");
+        assert!(!reg.note_faulted_page(TaskId(7), page(2), Some((Frame(2), MapFlags::USER))));
+        // A task with no entry also reports `false` (fail closed), never a
+        // silently-created entry.
+        assert!(!reg.note_faulted_page(TaskId(99), page(0), None));
+        assert!(!reg.contains(TaskId(99)));
     }
 
     #[test]

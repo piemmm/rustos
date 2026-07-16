@@ -270,11 +270,46 @@ impl MmioWindowMap {
         )
     }
 
+    /// Map `len` bytes of a **linear framebuffer** beginning at `phys_base`
+    /// into the borrowed `space` as guard-bracketed, `RW|USER`, never
+    /// executable, non-cacheable **Normal** memory, returning the
+    /// [`MmioRegion`].
+    ///
+    /// A scan-out surface is not a register block: it is bulk pixel memory a
+    /// display engine reads back as a DMA master, and the CPU fills it a whole
+    /// frame at a time. Mapping it Device-strongly-ordered (as
+    /// [`Self::map_into`] does for registers) forces every one of those
+    /// millions of writes through a separate strongly-ordered device access —
+    /// pathologically slow. It is mapped with the same non-cacheable Normal
+    /// attribute a coherent DMA buffer uses ([`MapFlags::DMA_COHERENT`]): the
+    /// CPU's bulk stores are fast and coalescable, and the frame is visible to
+    /// the scan-out engine with no per-access cache maintenance. Like
+    /// [`Self::map_into`] the frames are the device's, so [`Self::unmap_at`] /
+    /// a space drop releases only the mapping.
+    ///
+    /// # Errors
+    ///
+    /// The same set as [`Self::map_into`].
+    pub fn map_framebuffer_into<P: PageTable>(
+        &mut self,
+        space: &mut AddressSpace<P>,
+        phys_base: u64,
+        len: usize,
+    ) -> Result<MmioRegion, MmioError> {
+        self.map_with_flags(
+            space,
+            phys_base,
+            len,
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER | MapFlags::DMA_COHERENT,
+        )
+    }
+
     /// The shared guard-bracketed mapping mechanism behind [`Self::map_into`]
-    /// (device, caching-disabled) and [`Self::map_cacheable_into`] (shared
-    /// RAM, cacheable): the only difference between the two is the data-page
-    /// `data_flags`, so there is one definition of the slot/guard/rollback
-    /// logic, never two.
+    /// (device, caching-disabled), [`Self::map_cacheable_into`] (shared
+    /// RAM, cacheable), and [`Self::map_framebuffer_into`] (non-cacheable
+    /// Normal scan-out memory): the only difference between them is the
+    /// data-page `data_flags`, so there is one definition of the
+    /// slot/guard/rollback logic, never two.
     fn map_with_flags<P: PageTable>(
         &mut self,
         space: &mut AddressSpace<P>,

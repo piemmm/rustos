@@ -38,22 +38,46 @@ use alloc::vec::Vec;
 use rustos_abi::hwtree::{HwResource, HwResourceKind};
 use rustos_abi::{Errno, MsiAllocation};
 
+/// The memory type a mapped device window is given.
+///
+/// The grant's [`HwResourceKind`] decides this before the mapping is
+/// installed: a register block is [`Self::Device`], a scan-out surface is
+/// [`Self::Framebuffer`]. The distinction is a correctness *and* a
+/// performance one — see [`Self::Framebuffer`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum MmioMemoryKind {
+    /// Device / strongly-ordered registers, caching disabled. The memory a
+    /// [`HwResourceKind::Mmio`] / [`HwResourceKind::BusWindow`] grant names:
+    /// every access is a distinct, ordered hardware transaction.
+    Device,
+    /// A linear framebuffer scan-out surface (a [`HwResourceKind::Framebuffer`]
+    /// grant): non-cacheable **Normal** memory. The CPU fills it a whole frame
+    /// at a time and the display engine reads it back as a DMA master, so
+    /// mapping it Device-strongly-ordered would force every one of millions of
+    /// per-frame writes through a separate ordered transaction (a full-frame
+    /// blit then costs tens of seconds under emulation). Normal-NC keeps the
+    /// bulk stores fast and coalescable while staying visible to the scan-out
+    /// with no cache maintenance.
+    Framebuffer,
+}
+
 /// The kernel-side producer that maps a validated device window into the
 /// caller's own live address space.
 ///
 /// Implemented by the architecture-port-installed producer. The handler
 /// has already resolved + validated the grant (caller ownership, resource
 /// kind, length); this trait performs only the page-table mechanism —
-/// installing a caching-disabled mapping of `[phys_base, phys_base + len)`
-/// into the **caller's own** hardware-isolated address space and reporting
-/// its base user virtual address.
+/// installing a mapping of `[phys_base, phys_base + len)` (with the memory
+/// type its [`MmioMemoryKind`] selects) into the **caller's own**
+/// hardware-isolated address space and reporting its base user virtual
+/// address.
 ///
 /// Implementations must be [`Sync`], shared by the per-CPU handlers exactly
 /// like [`crate::memmap::MemMap`].
 pub trait MmioMapFacility: Sync {
-    /// Map `len` bytes of device physical memory beginning at `phys_base`,
-    /// caching disabled, into the caller's own address space; return the
-    /// base user virtual address of the new mapping.
+    /// Map `len` bytes of device physical memory beginning at `phys_base`
+    /// into the caller's own address space with the memory type `kind`
+    /// selects; return the base user virtual address of the new mapping.
     ///
     /// The handler guarantees `len` is non-zero and that
     /// `phys_base + len` does not overflow before calling this. The
@@ -69,7 +93,7 @@ pub trait MmioMapFacility: Sync {
     /// never a panic), or another stable code the
     /// platform reports. The default producer ([`NullMmioMapFacility`])
     /// returns [`Errno::NotImplemented`] to mark an inert interface.
-    fn map_window(&self, phys_base: u64, len: usize) -> Result<u64, Errno>;
+    fn map_window(&self, phys_base: u64, len: usize, kind: MmioMemoryKind) -> Result<u64, Errno>;
 }
 
 /// A DMA buffer the [`DmaAllocFacility`] carved for a driver.
@@ -169,7 +193,12 @@ pub static NULL_DMA_ALLOC_FACILITY: NullDmaAllocFacility = NullDmaAllocFacility;
 pub struct NullMmioMapFacility;
 
 impl MmioMapFacility for NullMmioMapFacility {
-    fn map_window(&self, _phys_base: u64, _len: usize) -> Result<u64, Errno> {
+    fn map_window(
+        &self,
+        _phys_base: u64,
+        _len: usize,
+        _kind: MmioMemoryKind,
+    ) -> Result<u64, Errno> {
         Err(Errno::NotImplemented)
     }
 }
@@ -565,11 +594,11 @@ mod tests {
     #[test]
     fn null_facility_fails_closed() {
         assert_eq!(
-            NULL_MMIO_MAP_FACILITY.map_window(0xFE00_0000, 0x1000),
+            NULL_MMIO_MAP_FACILITY.map_window(0xFE00_0000, 0x1000, MmioMemoryKind::Device),
             Err(Errno::NotImplemented)
         );
         assert_eq!(
-            NullMmioMapFacility.map_window(0, 0x1000),
+            NullMmioMapFacility.map_window(0, 0x1000, MmioMemoryKind::Framebuffer),
             Err(Errno::NotImplemented)
         );
     }

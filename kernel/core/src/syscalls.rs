@@ -99,7 +99,8 @@ use rustos_kernel_irq::{
     block_until_ready, IrqController, IrqTable, IrqWaitAbort, IrqWaiter, WaitOutcome,
 };
 use rustos_kernel_mem::{
-    copy_in, copy_out, FrameAllocator, PhysMap, UaccessError, UserAddressSpace, VirtAddr, PAGE_SIZE,
+    copy_in, copy_out, FrameAllocator, Page, PhysMap, UaccessError, UserAddressSpace, VirtAddr,
+    PAGE_SIZE,
 };
 use rustos_kernel_sched_api::Priority;
 use rustos_kernel_sec::{
@@ -123,8 +124,8 @@ use crate::bootinfo::KernelArch;
 use crate::console::{ConsoleDevice, NO_CONSOLES};
 use crate::devres::{
     dma_constraint, mappable_subwindow, translate_device_addr, DmaAllocFacility, MmioMapFacility,
-    MsiAllocFacility, SharedMemFacility, NULL_DMA_ALLOC_FACILITY, NULL_MMIO_MAP_FACILITY,
-    NULL_MSI_ALLOC_FACILITY, NULL_SHARED_MEM_FACILITY,
+    MmioMemoryKind, MsiAllocFacility, SharedMemFacility, NULL_DMA_ALLOC_FACILITY,
+    NULL_MMIO_MAP_FACILITY, NULL_MSI_ALLOC_FACILITY, NULL_SHARED_MEM_FACILITY,
 };
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction, UserFaultOutcome};
 use crate::filemap::{FileMap, NULL_FILE_MAP};
@@ -1558,9 +1559,30 @@ where
             // Freshly backed, or already resident because another resolution
             // won the race — either way the page is there.
             Ok(_) | Err(Errno::BadAddress) => {
-                // The fault grew the live space; re-freeze the registry
-                // snapshot so the copy path can see the new page.
-                self.refreeze_task_aspace(task);
+                // The fault grew the live space; publish the new page to the
+                // registry snapshot so the copy path can see it. Applying just
+                // this one page as an in-place delta keeps per-fault work
+                // O(log n): demand-faulting a large mapping backs one page per
+                // fault, and a full re-freeze per fault would make touching it
+                // O(N²) (tens of seconds for a multi-megabyte buffer under
+                // emulation). If the snapshot cannot absorb an in-place delta
+                // (the host double), fall back to a full re-freeze — the delta
+                // is an optimisation, never a correctness dependency.
+                let cpu = SchedulerArch::current_cpu(self.arch);
+                let applied = Page::from_addr(VirtAddr::new(page_va))
+                    .ok()
+                    .and_then(|page| {
+                        crate::kthread::with_current_live_space(cpu, |live| {
+                            live.translate_page(page)
+                        })
+                        .map(|mapping| (page, mapping))
+                    })
+                    .is_some_and(|(page, mapping)| {
+                        self.aspaces.write().note_faulted_page(task, page, mapping)
+                    });
+                if !applied {
+                    self.refreeze_task_aspace(task);
+                }
                 true
             }
             // Frame exhaustion or an uninstalled producer: fatal to the task
@@ -4166,12 +4188,24 @@ where
         // would exhaust the per-task MMIO virtual window and fail closed with
         // `OutOfMemory`.
         let (phys_base, len) = mappable_subwindow(&resource, offset, len)?;
-        // Mechanism: the installed producer maps only that region —
-        // caching disabled, never executable — into the caller's own live
-        // address space and returns its base virtual address. The default
-        // `NULL_MMIO_MAP_FACILITY` fails closed with `NotImplemented`, never pretending a window was mapped; frame
-        // exhaustion surfaces as `OutOfMemory` (deterministic OOM).
-        let result = self.mmio_map_facility.map_window(phys_base, len);
+        // The memory type follows the grant's resource kind: a linear
+        // framebuffer scan-out surface is mapped non-cacheable Normal
+        // (fast bulk CPU fills, visible to the display engine with no cache
+        // maintenance), every other window Device-strongly-ordered. Mapping
+        // a framebuffer Device would force each of a frame's millions of
+        // writes through a separate ordered transaction (a full-frame blit
+        // then costs tens of seconds under emulation).
+        let kind = match resource.kind() {
+            Some(HwResourceKind::Framebuffer) => MmioMemoryKind::Framebuffer,
+            _ => MmioMemoryKind::Device,
+        };
+        // Mechanism: the installed producer maps only that region — with the
+        // memory type `kind` selects, never executable — into the caller's
+        // own live address space and returns its base virtual address. The
+        // default `NULL_MMIO_MAP_FACILITY` fails closed with `NotImplemented`,
+        // never pretending a window was mapped; frame exhaustion surfaces as
+        // `OutOfMemory` (deterministic OOM).
+        let result = self.mmio_map_facility.map_window(phys_base, len, kind);
         // The window grew the caller's live space; re-freeze the registry
         // snapshot so a later copy through the driver's space sees it. Only on success.
         if result.is_ok() {
@@ -17355,6 +17389,19 @@ mod tests {
         fn map_device_window(&mut self, _phys: u64, _len: usize) -> Result<u64, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }
+        fn map_framebuffer_window(
+            &mut self,
+            _phys: u64,
+            _len: usize,
+        ) -> Result<u64, LiveSpaceError> {
+            Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
+        }
+        fn translate_page(
+            &self,
+            page: Page,
+        ) -> Option<(rustos_kernel_mem::Frame, rustos_kernel_mem::MapFlags)> {
+            self.space.translate(page)
+        }
         fn alloc_dma(&mut self, _len: usize, _limit: u64) -> Result<DmaMapping, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }
@@ -17529,11 +17576,18 @@ mod tests {
     /// `kernel/mem` mapping path.
     struct RecordingMmioFacility {
         last: rustos_sync::SpinLock<Option<(u64, usize)>>,
+        last_kind: rustos_sync::SpinLock<Option<MmioMemoryKind>>,
         ret: Result<u64, Errno>,
     }
     impl crate::devres::MmioMapFacility for RecordingMmioFacility {
-        fn map_window(&self, phys_base: u64, len: usize) -> Result<u64, Errno> {
+        fn map_window(
+            &self,
+            phys_base: u64,
+            len: usize,
+            kind: MmioMemoryKind,
+        ) -> Result<u64, Errno> {
             *self.last.lock() = Some((phys_base, len));
+            *self.last_kind.lock() = Some(kind);
             self.ret
         }
     }
@@ -17603,6 +17657,7 @@ mod tests {
         );
         let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
             last: rustos_sync::SpinLock::new(None),
+            last_kind: rustos_sync::SpinLock::new(None),
             ret: Ok(0x9000_0000),
         }));
         let h = KernelSyscallHandlers::new(
@@ -17654,6 +17709,7 @@ mod tests {
         );
         let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
             last: rustos_sync::SpinLock::new(None),
+            last_kind: rustos_sync::SpinLock::new(None),
             ret: Ok(0x9000_0000),
         }));
         let h = KernelSyscallHandlers::new(
@@ -17720,6 +17776,7 @@ mod tests {
         );
         let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
             last: rustos_sync::SpinLock::new(None),
+            last_kind: rustos_sync::SpinLock::new(None),
             ret: Ok(0x9000_0000),
         }));
         let h = KernelSyscallHandlers::new(
@@ -17761,6 +17818,7 @@ mod tests {
         );
         let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
             last: rustos_sync::SpinLock::new(None),
+            last_kind: rustos_sync::SpinLock::new(None),
             ret: Ok(0x9000_0000),
         }));
         let h = KernelSyscallHandlers::new(
