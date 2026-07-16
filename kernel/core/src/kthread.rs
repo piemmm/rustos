@@ -1141,12 +1141,6 @@ where
         publish_resume::<C, S>(cpu, ctl, suspend_thunk_body::<C, S>);
     }
 
-    // This dispatch decision supersedes any timer tick latched before the
-    // switch (the scheduler re-arms the one-shot for a contended CPU on
-    // the same dispatch), so the incoming task starts its quantum without
-    // inheriting a stale reschedule obligation.
-    crate::preempt::clear_preempt_pending(cpu);
-
     // SAFETY: switch into the task. `dispatch_ctx` saves our (the
     // dispatcher's) context; `task_ctx` was made runnable by `prepare`
     // (first step) or a prior `Yielder` suspension (later steps), so it
@@ -1556,23 +1550,24 @@ mod tests {
         assert_eq!(action, TaskAction::Yield);
     }
 
-    /// Switching a task in discards any preemption tick latched before
-    /// the dispatch decision: the scheduler has just re-evaluated (and
-    /// re-armed the one-shot for a contended CPU), so the incoming task
-    /// must not inherit a stale reschedule obligation and spuriously
-    /// yield on its first syscall.
+    /// A quantum that expires after the scheduler arms the timer but before
+    /// the task reaches user mode must survive the dispatch preparation.
+    /// The timer is one-shot, so erasing that latch would enter a CPU-bound
+    /// task with neither an armed timer nor a pending reschedule.
     #[test]
-    fn dispatch_step_clears_a_latched_preemption_tick() {
+    fn dispatch_step_preserves_a_tick_fired_after_policy_arm() {
         // A CPU index no other test latches, so parallel test threads
         // never observe each other through the process-wide slots.
         const CPU: CpuId = 45;
         let rec = recorder();
         let mut control = control_with(RecordingCs(rec), BoxStack::new());
 
+        // Model the timer firing in EL1 after the policy arm and before the
+        // context switch into user mode.
         crate::preempt::note_preempt_tick(CPU);
         let _ = dispatch_step(&mut control, CPU);
 
-        assert!(!crate::preempt::take_preempt_pending(CPU));
+        assert!(crate::preempt::take_preempt_pending(CPU));
     }
 
     #[test]

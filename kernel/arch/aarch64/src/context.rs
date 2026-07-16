@@ -12,10 +12,10 @@
 //! Only the kernel-stack pointer needs persisting in [`TaskCtx`]; the
 //! callee-saved registers live on the outgoing task's stack in a fixed
 //! prologue layout owned by `switch`. AAPCS64 (the ARM Procedure Call
-//! Standard) lists `x19`–`x28`, the frame pointer `x29`, and the link
-//! register `x30` as the registers that must survive a call; `switch`
-//! saves those plus the first argument register `x0` so the first-run
-//! frame can deliver the task's argument.
+//! Standard) lists `x19`–`x28`, the frame pointer `x29`, the link register
+//! `x30`, and the low 64 bits of `v8`–`v15` as state that must survive a
+//! call; `switch` saves those plus the first argument register `x0` so the
+//! first-run frame can deliver the task's argument.
 //!
 //! The `repr(C)` layout pins the field order so the assembly in
 //! `context.s` can address the save slot by a fixed offset (`+0x00`).
@@ -100,6 +100,8 @@ impl TaskCtx {
         //   [sp + 0x50] x29   (frame pointer, seeded to 0)
         //   [sp + 0x58] x30   (link register, seeded to `entry`)
         //   [sp + 0x60] x0    (first-run argument, seeded to `arg`)
+        //   [sp + 0x70] d8    (callee-saved FP/SIMD, seeded to 0)
+        //   ...               (d9..d15, seeded to 0)
         let sp = stack_top - FRAME_BYTES;
         // SAFETY: `stack_top` is non-zero, 16-byte aligned, and at least
         // `FRAME_BYTES` above zero by the checks above. The caller's
@@ -108,9 +110,9 @@ impl TaskCtx {
         // entirely in the topmost `FRAME_BYTES` of that range.
         unsafe {
             let p = sp as *mut u64;
-            // x19..x29 <- 0 (indices 0..=10)
-            for i in 0..=10 {
-                core::ptr::write(p.add(i), 0);
+            // Zero every slot, including padding and d8..d15.
+            for offset in (0..FRAME_BYTES).step_by(size_of::<u64>()) {
+                core::ptr::write((sp + offset) as *mut u64, 0);
             }
             // x30 <- entry (index 11, offset 0x58)
             core::ptr::write(p.add(11), entry as usize as u64);
@@ -134,10 +136,11 @@ pub enum PrepareError {
 }
 
 /// Byte size of the initial resume frame [`TaskCtx::prepare`] writes:
-/// the twelve callee-saved registers (`x19`–`x30`) plus `x0`, padded to
-/// the AAPCS64 16-byte stack alignment. Kept in step with the assembly
-/// in `context.s` by the const-asserts below.
-const FRAME_BYTES: u64 = 112;
+/// the twelve callee-saved general registers (`x19`–`x30`), `x0`, and the
+/// eight callee-saved FP/SIMD halves (`d8`–`d15`), padded to the AAPCS64
+/// 16-byte stack alignment. Kept in step with `context.s` by the
+/// const-asserts below.
+const FRAME_BYTES: u64 = 176;
 
 /// Compile-time pinning of the [`TaskCtx`] layout. The `switch`
 /// assembly addresses `TaskCtx::sp` by the constant offset `0x00`.
@@ -180,8 +183,8 @@ extern "C" {
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub unsafe fn switch(prev: *mut TaskCtx, next: *mut TaskCtx) {
     // SAFETY: forwarded from the caller's contract. The assembly saves
-    // x19..x30/x0 to `*prev`'s stack, swaps `sp`, and restores from
-    // `*next`'s stack.
+    // x19..x30/x0 and d8..d15 to `*prev`'s stack, swaps `sp`, and restores
+    // from `*next`'s stack.
     unsafe { rustos_arch_aarch64_switch(prev, next) }
 }
 
@@ -230,7 +233,7 @@ mod tests {
     #[test]
     fn prepare_rejects_too_small_stack() {
         let mut c = TaskCtx::new();
-        // 16-byte aligned, but below the 112-byte frame.
+        // 16-byte aligned, but below the complete resume frame.
         assert_eq!(
             c.prepare(0x10, host_entry, 0).unwrap_err(),
             PrepareError::TooSmall
@@ -240,13 +243,14 @@ mod tests {
     #[test]
     fn prepare_writes_initial_frame() {
         #[repr(C, align(16))]
-        struct Stack([u64; 16]);
-        let mut stack = Stack([0xDEAD_BEEF_DEAD_BEEFu64; 16]);
-        let top = unsafe { core::ptr::addr_of_mut!(stack.0).cast::<u64>().add(16) } as u64;
+        struct Stack([u64; 24]);
+        let mut stack = Stack([0xDEAD_BEEF_DEAD_BEEFu64; 24]);
+        let top = unsafe { core::ptr::addr_of_mut!(stack.0).cast::<u64>().add(24) } as u64;
         let mut c = TaskCtx::new();
         c.prepare(top, host_entry, 0xCAFE).unwrap();
         assert_eq!(c.sp, top - FRAME_BYTES);
-        let frame = unsafe { core::slice::from_raw_parts(c.sp as *const u64, 14) };
+        let frame_words = usize::try_from(FRAME_BYTES).unwrap() / size_of::<u64>();
+        let frame = unsafe { core::slice::from_raw_parts(c.sp as *const u64, frame_words) };
         // x19..x29 <- 0 (indices 0..=10)
         for slot in &frame[0..=10] {
             assert_eq!(*slot, 0);
@@ -255,5 +259,9 @@ mod tests {
         assert_eq!(frame[11], host_entry as *const () as usize as u64);
         // x0 <- arg (index 12)
         assert_eq!(frame[12], 0xCAFE);
+        // Alignment padding and d8..d15 are deterministic on first entry.
+        for slot in &frame[13..] {
+            assert_eq!(*slot, 0);
+        }
     }
 }

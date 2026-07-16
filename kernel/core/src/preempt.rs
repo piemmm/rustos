@@ -64,10 +64,12 @@ pub trait PreemptCompetitor: Sync {
     /// currently running (an out-of-range `cpu` reports `false`).
     fn has_runnable_competitor(&self, cpu: CpuId) -> bool;
 
-    /// After a fired tick that does **not** owe a context switch (a lone
-    /// runnable task with nothing pending), keep a *non-tickless* policy's
-    /// fixed-frequency tick alive on `cpu` by re-arming its quantum, so
-    /// the CPU keeps re-checking its run queue at the steady HZ cadence
+    /// After a fired tick that does not lead to a dispatch, keep a
+    /// *non-tickless* policy's fixed-frequency tick alive on `cpu` by
+    /// re-arming its quantum. This covers both a lone runnable task with
+    /// nothing pending and a failed immediate suspension: neither path
+    /// reaches the dispatch that normally arms the next deadline. The CPU
+    /// therefore keeps re-checking its run queue at the steady HZ cadence
     /// (the Linux scheduler-tick model) and promptly picks up work later
     /// enqueued here *without* an IPI — a task drained back from overflow,
     /// a rebalance. Re-arms only the timer; it never reschedules-to-self,
@@ -240,6 +242,11 @@ pub fn preempt_current(cpu: CpuId) -> bool {
         return false;
     }
     if !reschedule_current(cpu, RescheduleAction::Yield) {
+        // The fired one-shot was consumed, but no dispatcher ran to arm a
+        // replacement quantum. Restore a non-tickless policy's periodic
+        // deadline before returning; otherwise this CPU can resume a busy
+        // user task with no future preemption interrupt.
+        keep_periodic_tick(cpu);
         return false;
     }
     if let Some(slot) = PREEMPT_COUNT.get(cpu as usize) {
@@ -271,6 +278,34 @@ pub fn total_preemption_count() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestCompetitorGate {
+        periodic_rearms: [AtomicU64; KTHREAD_MAX_CPUS],
+    }
+
+    impl TestCompetitorGate {
+        const fn new() -> Self {
+            Self {
+                periodic_rearms: [const { AtomicU64::new(0) }; KTHREAD_MAX_CPUS],
+            }
+        }
+
+        fn periodic_rearms(&self, cpu: CpuId) -> u64 {
+            self.periodic_rearms[cpu as usize].load(Ordering::Relaxed)
+        }
+    }
+
+    impl PreemptCompetitor for TestCompetitorGate {
+        fn has_runnable_competitor(&self, _cpu: CpuId) -> bool {
+            true
+        }
+
+        fn keep_periodic_tick(&self, cpu: CpuId) {
+            self.periodic_rearms[cpu as usize].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    static TEST_COMPETITOR_GATE: TestCompetitorGate = TestCompetitorGate::new();
 
     /// Tests share the process-wide per-CPU slots; each test uses its own
     /// CPU index so parallel test threads never observe each other.
@@ -335,14 +370,22 @@ mod tests {
 
     /// A latched tick with no published user task fails closed through
     /// [`reschedule_current`] and does **not** advance the count: the
-    /// counter tracks real suspensions only, never a spurious call. The
-    /// latch is consumed regardless (the tick was honoured).
+    /// counter tracks real suspensions only, never a spurious call. CFQ's
+    /// periodic tick is restored because no dispatch occurred to arm the
+    /// next quantum; otherwise a busy user task could run indefinitely
+    /// after this failed suspension.
     #[test]
-    fn preempt_current_with_no_published_task_consumes_latch_without_counting() {
+    fn failed_suspension_keeps_the_periodic_tick_alive() {
         const CPU: CpuId = 46;
+        install_competitor_gate(&TEST_COMPETITOR_GATE);
+        let rearms_before = TEST_COMPETITOR_GATE.periodic_rearms(CPU);
         note_preempt_tick(CPU);
         assert!(!preempt_current(CPU));
         assert_eq!(preemption_count(CPU), 0);
+        assert_eq!(
+            TEST_COMPETITOR_GATE.periodic_rearms(CPU),
+            rearms_before + 1
+        );
         // The latch was taken even though no switch happened.
         assert!(!take_preempt_pending(CPU));
     }

@@ -4,31 +4,29 @@
 //! ## What this test asserts
 //!
 //! `plans/WIRING.md` Stage W6 requires that the aarch64 boot core can
-//! (1) start a secondary core and (2) deliver a directed inter-processor
-//! interrupt to it — the EL1/GICv2 analogue of the riscv64 vertical.
-//! This binary exercises both, end to end, on a two-core `virt` board:
+//! (1) start every secondary core, (2) deliver its local generic-timer PPI,
+//! and (3) deliver a directed inter-processor interrupt to each — the
+//! EL1/GICv2 analogue of the riscv64 vertical. This binary exercises all
+//! three, end to end, on a four-core `virt` board:
 //!
 //! 1. The boot core (core 0) installs the shared IPI callback
 //!    (`preempt::set_ipi_callback`) and the secondary-core entry
 //!    (`smp::set_secondary_entry`), and brings up its own GICv2
 //!    distributor (`gic::init`).
-//! 2. It starts core 1 via `smp::start_secondary` (the PSCI `CPU_ON`
-//!    call), which runs the `smp.s` trampoline → the installed entry on
-//!    core 1.
-//! 3. Core 1 installs the EL1 vector table (`exceptions::init_vectors`),
-//!    brings up its GICv2 CPU interface (`gic::init`), enables the IPI
-//!    SGI (`preempt::enable_ipi`), unmasks IRQs (`exceptions::enable_irq`),
-//!    publishes a `READY` flag, then idles on `wfi`.
-//! 4. The boot core waits for `READY`, then sends an IPI to logical CPU
-//!    1 through `Aarch64Arch::send_ipi` (a GICv2 directed SGI), which
-//!    raises INTID 0 on core 1.
-//! 5. Core 1 takes the IRQ, the IRQ path runs `preempt::on_ipi_interrupt`
-//!    → the IPI callback, recording the core the callback fired on. The
-//!    boot core waits for the callback to fire on core 1, then writes the
-//!    ARM semihosting PASS finisher.
+//! 2. It starts cores 1–3 via the `SecondaryBringup` PSCI `CPU_ON` path;
+//!    each runs the `smp.s` trampoline → the installed entry.
+//! 3. Every secondary installs the EL1 vector table (`exceptions::init_vectors`),
+//!    brings up its GICv2 CPU interface (`gic::init`), enables the timer PPI
+//!    and IPI SGI, arms one local timer quantum, unmasks IRQs, publishes its
+//!    `READY` bit, then idles on `wfi`.
+//! 4. The boot core requires one timer callback from every secondary, then
+//!    sends one IPI to each through `Aarch64Arch::send_ipi`.
+//! 5. Each SGI target takes the IRQ and runs `preempt::on_ipi_interrupt` → the
+//!    IPI callback. The boot core verifies all three callback CPU ids, then
+//!    writes the ARM semihosting PASS finisher.
 //!
-//! A regression that fails to start the secondary core or to deliver the
-//! IPI never reaches the PASS write, so the run times out and the
+//! A regression that fails to start a secondary core or to deliver a timer
+//! PPI or IPI never reaches the PASS write, so the run times out and the
 //! harness reports `Outcome::Timeout` — the documented fail-loud
 //! behaviour.
 //!
@@ -40,7 +38,7 @@
 //! from the canonical `virt` device tree embedded at build time
 //! (`fdt::psci_method`) and fails closed if no PSCI node is found, then
 //! installs *that discovered* conduit on the handle. The secondary core
-//! this test starts is therefore brought up over the conduit read from
+//! each secondary this test starts is therefore brought up over the conduit read from
 //! the tree, mirroring how the production `boot_aarch64` path installs
 //! it (`plans/PI.md` P5). The board tree is embedded, not read from
 //! `x0`, for the same reason as the GIC bases below: QEMU's ELF
@@ -52,8 +50,8 @@
 //! and then reads the GICD/GICC bases from the canonical `virt` device
 //! tree embedded at build time (`gic::configure_from_fdt`), asserting the
 //! base moved off the poison value to the `virt` GICv2 distributor base.
-//! Every subsequent GIC access on both cores — `gic::init`, the directed
-//! SGI, and the CPU interface the secondary brings up — targets that
+//! Every subsequent GIC access on all cores — `gic::init`, the timer PPIs,
+//! directed SGIs, and each secondary CPU interface — targets that
 //! discovered base, so the IPI this test delivers is the runtime proof
 //! the discovered base works (`plans/PI.md` P3). The board tree is
 //! embedded, not read from `x0`, for the same reason as the PSCI conduit
@@ -75,12 +73,12 @@
 #[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicU32, Ordering};
+    use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
     use rustos_arch_aarch64::kernel_arch::{read_cntfrq, SecondaryStart};
     use rustos_arch_aarch64::{
-        exceptions, fdt, gic, handle_panic_via_serial, preempt, qemu_exit, smp, Aarch64Arch,
-        Aarch64ArchStorage, SERIAL_SINK,
+        enable_fp_el1, exceptions, fdt, gic, handle_panic_via_serial, preempt, qemu_exit, smp,
+        Aarch64Arch, Aarch64ArchStorage, SERIAL_SINK,
     };
     use rustos_arch_api::{CpuId, SchedulerArch, SecondaryBringup};
     use rustos_fdt::Fdt;
@@ -98,12 +96,14 @@ mod kernel {
     /// the primary core, and the board assigns it affinity 0.
     const BOOT_CPU: CpuId = 0;
 
-    /// Dense id of the secondary core this test starts.
+    /// Dense id of the first secondary core this test starts.
     const SECONDARY_CPU: CpuId = 1;
 
-    /// `MPIDR_EL1` affinity QEMU assigns each core on the `virt` board:
-    /// the linear core index. Core 1's affinity is therefore 1.
-    const SECONDARY_MPIDR: u64 = SECONDARY_CPU as u64;
+    /// Number of CPUs in the Raspberry Pi 4-shaped QEMU topology.
+    const CPU_COUNT: CpuId = 4;
+
+    /// Local generic-timer frequency used to prove each secondary's PPI.
+    const TICK_HZ: u64 = 100;
 
     /// The PSCI conduit the QEMU `virt` board declares (no EL3 → `hvc`).
     /// This is the *expected* result of discovery, asserted against the
@@ -138,9 +138,15 @@ mod kernel {
     /// with the base read from the device tree.
     const POISON_GIC_BASE: usize = 0xdead_0000;
 
-    /// Set to `1` by the secondary core once its vector table, GICv2
+    /// Bit `cpu` is set by each secondary once its vector table, GICv2
     /// interface, and IPI SGI enable are in place.
     static SECONDARY_READY: AtomicU32 = AtomicU32::new(0);
+
+    /// Bit `cpu` is set after that secondary services its local timer PPI.
+    static TIMER_FIRED: AtomicU32 = AtomicU32::new(0);
+
+    /// Counter ticks in one test quantum, published before secondaries start.
+    static TIMER_INTERVAL: AtomicU64 = AtomicU64::new(0);
 
     /// Count of IPI callbacks serviced (incremented on the core that
     /// takes the SGI IRQ).
@@ -158,24 +164,32 @@ mod kernel {
         IPI_COUNT.fetch_add(1, Ordering::SeqCst);
     }
 
+    /// Record one local generic-timer interrupt on `cpu`.
+    extern "C" fn on_tick(cpu: CpuId) {
+        TIMER_FIRED.fetch_or(1u32 << cpu, Ordering::SeqCst);
+    }
+
     /// Entry the secondary core runs (via the `smp.s` trampoline) once
     /// the boot core starts it. Brings up its interrupt path, signals
     /// ready, and idles waiting for the IPI.
-    extern "C" fn secondary_entry(_cpu: CpuId) -> ! {
+    extern "C" fn secondary_entry(cpu: CpuId) -> ! {
         // SAFETY: this is the secondary core's first action; it has a
         // private stack (smp.s) and no source is armed on it yet. The
         // shared IPI callback was installed by the boot core before it
         // started this core. The vector table and GIC CPU interface are
         // per-CPU, so each must be installed on the core that uses them.
         unsafe {
+            enable_fp_el1();
             exceptions::init_vectors();
             gic::init();
             preempt::enable_ipi();
+            preempt::init_local_preempt(cpu, TIMER_INTERVAL.load(Ordering::Acquire));
+            preempt::arm_oneshot(TIMER_INTERVAL.load(Ordering::Acquire));
             exceptions::enable_irq();
         }
         // Publish readiness only after interrupts are enabled, so the
         // boot core cannot send the IPI before this core can take it.
-        SECONDARY_READY.store(1, Ordering::SeqCst);
+        SECONDARY_READY.fetch_or(1u32 << cpu, Ordering::SeqCst);
 
         loop {
             // SAFETY: `wfi` is a wait-for-interrupt hint with no
@@ -229,20 +243,15 @@ mod kernel {
             qemu_exit::exit_failure(FAIL_PSCI_NOT_DISCOVERED);
         }
 
-        // Build the arch handle with the two-core MPIDR map so
+        // Build the arch handle with the four-core MPIDR map so
         // `current_cpu` reverse-maps each core's affinity and `send_ipi`
         // targets the right GICv2 CPU interface. Install the *discovered*
         // PSCI conduit so the `SecondaryBringup` HAL trait issues `CPU_ON`
         // over the conduit read from the tree (`plans/PI.md` P5).
         // Per-CPU bookkeeping backing for this two-core vertical.
-        static ARCH_STORAGE: Aarch64ArchStorage<2> = Aarch64ArchStorage::new();
-        let arch = Aarch64Arch::with_cpus(
-            &ARCH_STORAGE,
-            BOOT_CPU,
-            counter_hz,
-            &[BOOT_CPU as u64, SECONDARY_MPIDR],
-        )
-        .with_secondary_start(SecondaryStart::Psci(psci_method));
+        static ARCH_STORAGE: Aarch64ArchStorage<4> = Aarch64ArchStorage::new();
+        let arch = Aarch64Arch::with_cpus(&ARCH_STORAGE, BOOT_CPU, counter_hz, &[0, 1, 2, 3])
+            .with_secondary_start(SecondaryStart::Psci(psci_method));
 
         // P3: prove the GICv2 bases are *discovered*, not assumed. Poison
         // the runtime base, then read the GICD/GICC bases from the
@@ -269,38 +278,56 @@ mod kernel {
             gic::init();
         }
 
-        // Register the secondary-core stack pool sized to this two-core
+        // Register the secondary-core stack pool sized to this four-core
         // vertical before any `CPU_ON`; the `smp.s` trampoline reads its
         // published base/stride to seed each started core's stack
         // (the pool scales with the machine's core
         // count, not a fixed `const`).
-        static SECONDARY_STACKS: smp::SecondaryStackPool<2> = smp::SecondaryStackPool::new();
+        static SECONDARY_STACKS: smp::SecondaryStackPool<4> = smp::SecondaryStackPool::new();
         if SECONDARY_STACKS.register().is_err() {
             qemu_exit::exit_failure(FAIL_SECONDARY_START);
         }
 
-        // Install the shared callbacks before starting the secondary
-        // core, so it observes them already in place.
+        // Install the shared callbacks and per-CPU timer storage before
+        // starting any secondary, so every core observes complete state.
         preempt::set_ipi_callback(on_ipi);
+        preempt::set_timer_callback(on_tick);
+        static PREEMPT_STORAGE: preempt::PreemptStorage<4> = preempt::PreemptStorage::new();
+        if PREEMPT_STORAGE.register().is_err() {
+            qemu_exit::exit_failure(FAIL_SECONDARY_START);
+        }
+        TIMER_INTERVAL.store(
+            preempt::interval_for_hz(counter_hz, TICK_HZ),
+            Ordering::Release,
+        );
         if smp::set_secondary_entry(secondary_entry).is_err() {
             qemu_exit::exit_failure(FAIL_SECONDARY_START);
         }
 
-        // Start core 1 through the `SecondaryBringup` Arch HAL trait
+        // Start every secondary through the `SecondaryBringup` Arch HAL trait
         // (`plans/WIRING.md` Stage W14/W15) rather than the port-private
         // `smp::start_secondary`, so this vertical exercises the same
         // neutral bring-up surface the x86_64 SMP verticals use; the
         // handle issues PSCI `CPU_ON` over the installed conduit.
         // SAFETY: called on the boot core after the secondary-stack pool
         // was registered (above) and the secondary entry was installed;
-        // `SECONDARY_CPU` maps to a real, parked, distinct core in the
-        // handle's topology.
-        if unsafe { arch.start_secondary(SECONDARY_CPU) }.is_err() {
-            qemu_exit::exit_failure(FAIL_SECONDARY_START);
+        // each id maps to a real, parked, distinct core in the handle's
+        // topology.
+        for cpu in SECONDARY_CPU..CPU_COUNT {
+            if unsafe { arch.start_secondary(cpu) }.is_err() {
+                qemu_exit::exit_failure(FAIL_SECONDARY_START);
+            }
         }
 
-        // Wait until the secondary core has enabled interrupts.
-        while SECONDARY_READY.load(Ordering::SeqCst) == 0 {
+        // Wait until all three secondary cores have enabled interrupts.
+        let ready_mask = ((1u32 << CPU_COUNT) - 1) & !1;
+        while SECONDARY_READY.load(Ordering::SeqCst) != ready_mask {
+            core::hint::spin_loop();
+        }
+        // Every secondary armed its own physical timer PPI before publishing
+        // readiness. Require all three callbacks before testing SGIs, so the
+        // timer mechanism CPU-bound user tasks depend on is covered too.
+        while TIMER_FIRED.load(Ordering::SeqCst) != ready_mask {
             core::hint::spin_loop();
         }
         log(
@@ -308,35 +335,31 @@ mod kernel {
             &Event {
                 level: Level::Info,
                 id: SMP_SECONDARY_UP,
-                message: "aarch64 IPI/SMP test: secondary core up, sending IPI",
+                message: "aarch64 IPI/SMP test: secondary cores up, sending IPIs",
                 fields: &[],
             },
         );
 
-        // Send a directed IPI to the secondary core through the arch
-        // handle's GICv2 SGI path (the deliverable that replaces the
-        // former single-CPU self-target best-effort send).
-        arch.send_ipi(SECONDARY_CPU);
-
-        // Wait for the secondary core to take the SGI IRQ and run the
-        // callback.
-        while IPI_COUNT.load(Ordering::SeqCst) == 0 {
-            core::hint::spin_loop();
-        }
-
-        // The callback must have fired on the secondary core, not the
-        // boot core.
-        if IPI_CPU.load(Ordering::SeqCst) != SECONDARY_CPU {
-            log(
-                &SERIAL_SINK,
-                &Event {
-                    level: Level::Error,
-                    id: SMP_TEST_FAIL,
-                    message: "aarch64 IPI/SMP test: IPI fired on the wrong core",
-                    fields: &[],
-                },
-            );
-            qemu_exit::exit_failure(FAIL_WRONG_CPU);
+        // Send one directed IPI to each secondary and wait for its callback
+        // before targeting the next. This proves every target-list bit, not
+        // only CPU 1's, reaches the intended GICv2 CPU interface.
+        for cpu in SECONDARY_CPU..CPU_COUNT {
+            arch.send_ipi(cpu);
+            while IPI_COUNT.load(Ordering::SeqCst) < cpu {
+                core::hint::spin_loop();
+            }
+            if IPI_CPU.load(Ordering::SeqCst) != cpu {
+                log(
+                    &SERIAL_SINK,
+                    &Event {
+                        level: Level::Error,
+                        id: SMP_TEST_FAIL,
+                        message: "aarch64 IPI/SMP test: IPI fired on the wrong core",
+                        fields: &[],
+                    },
+                );
+                qemu_exit::exit_failure(FAIL_WRONG_CPU);
+            }
         }
 
         log(
@@ -344,7 +367,7 @@ mod kernel {
             &Event {
                 level: Level::Info,
                 id: SMP_TEST_PASS,
-                message: "aarch64 IPI/SMP test: IPI delivered to secondary core",
+                message: "aarch64 IPI/SMP test: IPIs delivered to every secondary core",
                 fields: &[],
             },
         );

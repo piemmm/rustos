@@ -70,7 +70,7 @@ pub(crate) struct TaskInner {
     /// `cpu_ticks_of` observation for the System Information feed.
     pub run_ticks: AtomicU64,
     /// The task's virtual runtime `vruntime` (fixed point). Advances by
-    /// `SCALE / weight` per dispatch; the smallest vruntime among the
+    /// `elapsed_ticks * SCALE / weight`; the smallest vruntime among the
     /// ready tasks on a CPU is dispatched next (Completely Fair Queuing).
     pub vruntime: AtomicU64,
     /// Tick at which the task last started running. Used by tests for

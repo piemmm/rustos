@@ -1,9 +1,10 @@
 //! `plans/STRESSTEST.md` ST5 QEMU integration test: boot the *production*
 //! aarch64 `rustos-kernel` pipeline on the `virt` board with the planted
 //! whole-disk encrypted-root image, log in as the seeded `root` account,
-//! run a short **`stress`** load under `--timeout` on the console, watch
-//! the run tear itself down back to a clean prompt, and render the
-//! post-load `sysinfo pressure` / `sysinfo reclaim` figures on the
+//! run an oversubscribed background CPU load plus a mixed **`stress`** load
+//! under `--timeout` on the console, prove foreground service progress while
+//! the CPU load is active, watch both runs tear themselves down, and render
+//! the post-load `sysinfo pressure` / `sysinfo reclaim` figures on the
 //! transcript.
 //!
 //! ## What this test asserts
@@ -12,7 +13,14 @@
 //! root, login authenticates `root`/`root`, and the session shell runs the
 //! runner's ordered script:
 //!
-//! 1. `stress --cpu 1 --vm 1 --vm-bytes 16M --io 1 --timeout 2s` — the
+//! 1. `stress --cpu 10 --timeout 4s &` on four emulated CPUs — the shell's
+//!    background-job form returns the prompt, the controller confirms all ten
+//!    workers were dispatched, then `sysinfo uptime` must render `since boot:`
+//!    while all CPUs are saturated. This proves timer-driven CFQ preemption
+//!    keeps the shell, IPC service, and controller progressing while CPU
+//!    workers issue no syscalls. The command-level `--background` detach path
+//!    has separate parser/controller coverage and feeds the same controller.
+//! 2. `stress --cpu 1 --vm 1 --vm-bytes 16M --io 1 --timeout 2s` — the
 //!    store bundle spawns through the full signature + capability +
 //!    interface-hash load gate; the controller pins itself
 //!    (`CAP_MEM_PIN`), opts into the signal intake, and re-enters its own
@@ -22,12 +30,12 @@
 //!    teardown — every worker `Terminate`d, reaped, and the scratch files
 //!    removed — and the prompt returning at all is the reap-and-exit
 //!    witness.
-//! 2. `sysinfo pressure` — the `reserve bytes:` token witnesses the gated
+//! 3. `sysinfo pressure` — the `reserve bytes:` token witnesses the gated
 //!    `MEMORY_PRESSURE` figures rendered after the load.
-//! 3. `sysinfo reclaim` — the `clean-file-data` class row witnesses the
+//! 4. `sysinfo reclaim` — the `clean-file-data` class row witnesses the
 //!    `RECLAIM_STATS` ledger rendered after the io worker churned the
 //!    write path.
-//! 4. `exit` — typed only after both renders appeared.
+//! 5. `exit` — typed only after both renders appeared.
 //!
 //! ## Why the PASS keys on `stress`'s exit *then* the shell's exit
 //!

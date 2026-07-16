@@ -80,8 +80,8 @@ mod kernel {
     use rustos_arch_aarch64::context::TaskCtx;
     use rustos_arch_aarch64::kernel_arch::timer_frequency_hz;
     use rustos_arch_aarch64::{
-        context, exceptions, gic, halt_current_cpu, handle_panic_via_serial, preempt, qemu_exit,
-        Aarch64Arch, SERIAL_SINK,
+        context, enable_fp_el1, exceptions, gic, halt_current_cpu, handle_panic_via_serial,
+        preempt, qemu_exit, Aarch64Arch, SERIAL_SINK,
     };
     use rustos_arch_api::{CpuId, SchedulerArch};
     use rustos_fdt::Fdt;
@@ -284,6 +284,11 @@ mod kernel {
     /// calls (via `rustos_arch_aarch64_main`).
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
+        // SAFETY: this is the boot CPU's first Rust action, before logging
+        // or the context switch can execute an FP/SIMD instruction.
+        unsafe {
+            enable_fp_el1();
+        }
         note(TEST_START, "aarch64 sched-drive test: starting");
 
         // P4: read the board from the embedded `virt` device tree. The

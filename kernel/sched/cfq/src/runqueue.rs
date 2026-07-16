@@ -32,25 +32,25 @@ use crate::TaskId;
 /// uses.
 pub(crate) const SCALE: u64 = 1 << 20;
 
-/// Service charged for a single dispatch (one body invocation).
-///
-/// The cooperative dispatch model runs a task body exactly once per
-/// [`crate::Scheduler::step`]; that counts as one unit of service for
-/// virtual-runtime accounting. A task's vruntime therefore advances by
-/// `SCALE / weight` after each dispatch, so a heavier-weighted task's
-/// vruntime rises more slowly and it is picked more often — proportional
-/// share, the CFS fairness rule.
-pub(crate) const SERVICE_PER_DISPATCH: u64 = 1;
-
-/// Weighted virtual-runtime increment a dispatch of `weight` units of
-/// service costs the running task.
+/// Weighted virtual-runtime increment `service_ticks` of execution costs a
+/// task of `weight`.
 ///
 /// A `weight`-4 task accrues vruntime a quarter as fast as a `weight`-1
-/// task, so over any window it is dispatched roughly four times as often
-/// while neither is ever starved (both vruntimes advance monotonically).
+/// task for the same elapsed service. A zero-tick observation is charged one
+/// tick so coarse host clocks still make deterministic forward progress, and
+/// the quotient/remainder form avoids overflowing `service_ticks * SCALE`.
 #[must_use]
-pub(crate) fn vslice(weight: u64) -> u64 {
-    SERVICE_PER_DISPATCH.saturating_mul(SCALE) / weight.max(1)
+pub(crate) fn vslice(service_ticks: u64, weight: u64) -> u64 {
+    let service = service_ticks.max(1);
+    let divisor = weight.max(1);
+    let whole = service / divisor;
+    let remainder = service % divisor;
+    whole.saturating_mul(SCALE).saturating_add(
+        remainder
+            .saturating_mul(SCALE)
+            .checked_div(divisor)
+            .unwrap_or(0),
+    )
 }
 
 /// A ready task as tracked by a [`RunQueue`].
@@ -243,11 +243,13 @@ mod tests {
     }
 
     #[test]
-    fn vslice_is_inversely_proportional_to_weight() {
-        assert_eq!(vslice(4), SCALE / 4);
-        assert_eq!(vslice(2), SCALE / 2);
-        assert_eq!(vslice(1), SCALE);
+    fn vruntime_delta_scales_elapsed_service_by_weight() {
+        assert_eq!(vslice(8, 4), SCALE * 2);
+        assert_eq!(vslice(8, 2), SCALE * 4);
+        assert_eq!(vslice(8, 1), SCALE * 8);
+        assert_eq!(vslice(0, 4), SCALE / 4);
         // A malformed zero weight cannot divide by zero (fail closed).
-        assert_eq!(vslice(0), SCALE);
+        assert_eq!(vslice(1, 0), SCALE);
+        assert_eq!(vslice(u64::MAX, 1), u64::MAX);
     }
 }

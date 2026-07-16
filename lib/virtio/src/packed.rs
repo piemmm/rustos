@@ -18,6 +18,7 @@ use crate::dma::DmaSlab;
 use crate::host::VirtioHost;
 use crate::transport::{Direction, Transport, VirtioError};
 use rustos_abi::DriverError;
+use rustos_dma_barrier::{dma_rmb, dma_wmb};
 
 /// Size, in bytes, of one packed-ring descriptor (virtio 1.1 §2.7.5).
 const PACKED_DESC_BYTES: usize = 16;
@@ -278,6 +279,7 @@ impl PackedQueue {
             (pos, wrap) = self.advance(pos, wrap);
         }
         // Publish the head, making the whole chain available at once.
+        dma_wmb();
         let ring = self.desc.as_bytes_mut();
         let mut head_desc = read_packed_desc(ring, head);
         head_desc.flags = head_flags;
@@ -292,6 +294,7 @@ impl PackedQueue {
     /// Notify the device that new chain(s) are available on this
     /// queue.
     pub fn kick<T: Transport>(&self, transport: &mut T) {
+        dma_wmb();
         transport.notify(self.queue_index);
     }
 
@@ -308,6 +311,7 @@ impl PackedQueue {
         if !desc_is_used(d.flags, self.used_wrap) {
             return Err(VirtioError::NoCompletion);
         }
+        dma_rmb();
         let buffer_id = d.id;
         let written = d.len;
         let len = self

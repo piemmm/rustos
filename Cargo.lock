@@ -3877,6 +3877,7 @@ name = "rustos-virtio"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-dma-barrier",
  "rustos-fuzzseed",
 ]
 

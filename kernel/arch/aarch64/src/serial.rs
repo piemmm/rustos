@@ -269,6 +269,12 @@ struct RingLock {
 /// [`RingLock::holder`] sentinel for "no CPU holds the lock".
 const NO_HOLDER: u32 = u32::MAX;
 
+/// Maximum non-blocking acquisition probes a producer makes before using
+/// the direct UART fallback. The ring holder's critical section should be
+/// short, but logging must still make bounded progress if another CPU stops
+/// while holding it.
+const PRODUCER_LOCK_PROBES: usize = 256;
+
 // SAFETY: every path to the inner `SerialRing` goes through `try_with`, which
 // hands out the `&mut SerialRing` only after a successful `compare_exchange`
 // on `holder` and releases it before returning — so at most one reference
@@ -311,17 +317,14 @@ impl RingLock {
         Some(result)
     }
 
-    /// Run `f` with exclusive access to the ring, spinning through a
-    /// *cross-CPU* hold so concurrent producers emit whole lines instead
-    /// of interleaving bytes on the wire. Returns `None` — without
-    /// blocking — only for same-CPU re-entrancy (an interrupt that logs
-    /// while this CPU already holds the lock), where spinning would
-    /// deadlock; the caller then falls back to the direct, bounded
-    /// write. Safe to spin: the ring critical section is a bounded
-    /// memcpy plus a non-blocking FIFO drain — the holder never waits on
-    /// the UART inside the lock.
+    /// Run `f` with exclusive access to the ring, probing a bounded number
+    /// of times through a *cross-CPU* hold so concurrent producers normally
+    /// emit whole lines instead of interleaving bytes on the wire. Returns
+    /// `None` for same-CPU re-entrancy or when the bounded probe budget is
+    /// exhausted; the caller then uses the direct, bounded UART fallback.
+    /// A stopped CPU can therefore never strand every other logger.
     fn with_producer<R>(&self, mut f: impl FnMut(&mut SerialRing) -> R) -> Option<R> {
-        loop {
+        for _ in 0..PRODUCER_LOCK_PROBES {
             if let Some(result) = self.try_with(&mut f) {
                 return Some(result);
             }
@@ -330,6 +333,7 @@ impl RingLock {
             }
             core::hint::spin_loop();
         }
+        None
     }
 
     /// Test observer: `true` while some CPU is inside the critical
@@ -1133,6 +1137,16 @@ mod tests {
         // Released cleanly: a fresh acquire succeeds again.
         assert!(!lock.is_locked());
         assert!(lock.try_with(|_r| ()).is_some());
+    }
+
+    #[test]
+    fn producer_lock_bounds_a_foreign_cpu_hold() {
+        let lock = RingLock::new();
+        lock.holder.store(1, Ordering::Relaxed);
+        assert!(lock.with_producer(|_ring| ()).is_none());
+        assert_eq!(lock.holder.load(Ordering::Relaxed), 1);
+        lock.holder.store(NO_HOLDER, Ordering::Relaxed);
+        assert!(lock.with_producer(|_ring| ()).is_some());
     }
 
     #[test]

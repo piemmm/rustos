@@ -11,18 +11,19 @@
 //   0x600 Lower EL (AArch32):   Sync / IRQ / FIQ / SError
 //
 // Each entry tags the exception with a numeric *kind* and branches to a
-// common trampoline that saves the interrupted GP registers, calls the
+// common trampoline that saves the interrupted GP and FP/SIMD registers, calls the
 // Rust handler `rustos_aarch64_trap_handler(kind)`, restores, and
 // `eret`s. The original x0/x1 are spilled *before* the kind is loaded so
 // an IRQ returns with the interrupted context intact.
 //
-// SAFETY-INVARIANTs (audited per AGENTS.md §10):
+// SAFETY-INVARIANTS:
 //   1. The table is 2 KiB aligned (`.balign 0x800`) and each entry is
 //      0x80-aligned, so `VBAR_EL1` addresses every entry correctly.
-//   2. The 288-byte frame is 16-byte aligned (SP stays 16-aligned, an
+//   2. The 816-byte frame is 16-byte aligned (SP stays 16-aligned, an
 //      AArch64 requirement) and holds x0..x30 (offsets 0..240) followed by
 //      the per-exception return state `ELR_EL1`/`SPSR_EL1`/`SP_EL0`
-//      (offsets 248/256/264); callee-saved x19..x28/x29 are preserved by
+//      (offsets 248/256/264), FPCR/FPSR (offsets 272/280), and q0..q31
+//      (offsets 288..799); callee-saved x19..x28/x29 are preserved by
 //      the `extern "C"` handler but saved here anyway so the frame layout
 //      is uniform and the restore is symmetric. The first 31 slots are the
 //      `[u64; SAVED_GPRS]` frame `crate::syscall_entry` reads, so their
@@ -43,105 +44,105 @@ rustos_aarch64_vectors:
 
     // --- Current EL with SP0 (unused: the kernel runs on SP_EL1) ---
     .balign 0x80                 // 0x000 Synchronous
-    sub     sp, sp, #288
+    sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #0
     b       rustos_aarch64_trap_common
 
     .balign 0x80                 // 0x080 IRQ
-    sub     sp, sp, #288
+    sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #1
     b       rustos_aarch64_trap_common
 
     .balign 0x80                 // 0x100 FIQ
-    sub     sp, sp, #288
+    sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #2
     b       rustos_aarch64_trap_common
 
     .balign 0x80                 // 0x180 SError
-    sub     sp, sp, #288
+    sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #3
     b       rustos_aarch64_trap_common
 
     // --- Current EL with SPx (the kernel's own exceptions) ---
     .balign 0x80                 // 0x200 Synchronous (fault)
-    sub     sp, sp, #288
+    sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #4
     b       rustos_aarch64_trap_common
 
     .balign 0x80                 // 0x280 IRQ (timer / SGI)
-    sub     sp, sp, #288
+    sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #5
     b       rustos_aarch64_trap_common
 
     .balign 0x80                 // 0x300 FIQ
-    sub     sp, sp, #288
+    sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #6
     b       rustos_aarch64_trap_common
 
     .balign 0x80                 // 0x380 SError
-    sub     sp, sp, #288
+    sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #7
     b       rustos_aarch64_trap_common
 
     // --- Lower EL using AArch64 (EL0 syscalls / user faults) ---
     .balign 0x80                 // 0x400 Synchronous (svc / user fault)
-    sub     sp, sp, #288
+    sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #8
     b       rustos_aarch64_trap_common
 
     .balign 0x80                 // 0x480 IRQ
-    sub     sp, sp, #288
+    sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #9
     b       rustos_aarch64_trap_common
 
     .balign 0x80                 // 0x500 FIQ
-    sub     sp, sp, #288
+    sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #10
     b       rustos_aarch64_trap_common
 
     .balign 0x80                 // 0x580 SError
-    sub     sp, sp, #288
+    sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #11
     b       rustos_aarch64_trap_common
 
     // --- Lower EL using AArch32 (unsupported on this port) ---
     .balign 0x80                 // 0x600 Synchronous
-    sub     sp, sp, #288
+    sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #12
     b       rustos_aarch64_trap_common
 
     .balign 0x80                 // 0x680 IRQ
-    sub     sp, sp, #288
+    sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #13
     b       rustos_aarch64_trap_common
 
     .balign 0x80                 // 0x700 FIQ
-    sub     sp, sp, #288
+    sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #14
     b       rustos_aarch64_trap_common
 
     .balign 0x80                 // 0x780 SError
-    sub     sp, sp, #288
+    sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #15
     b       rustos_aarch64_trap_common
 
-// Common trampoline. On entry: 288-byte frame reserved, x0/x1 already
+// Common trampoline. On entry: 816-byte frame reserved, x0/x1 already
 // spilled at [sp,#0], x0 = exception kind.
 .balign 4
 rustos_aarch64_trap_common:
@@ -172,6 +173,30 @@ rustos_aarch64_trap_common:
     mrs     x2, SP_EL0
     str     x2, [sp, #264]
 
+    // Preserve the complete interrupted FP/SIMD state. An IRQ can suspend
+    // this handler while another task runs and uses arbitrary vector
+    // registers, so preserving only the AAPCS64 callee-saved subset would
+    // corrupt user state that never crossed a function-call boundary.
+    stp     q0, q1, [sp, #288]
+    stp     q2, q3, [sp, #320]
+    stp     q4, q5, [sp, #352]
+    stp     q6, q7, [sp, #384]
+    stp     q8, q9, [sp, #416]
+    stp     q10, q11, [sp, #448]
+    stp     q12, q13, [sp, #480]
+    stp     q14, q15, [sp, #512]
+    stp     q16, q17, [sp, #544]
+    stp     q18, q19, [sp, #576]
+    stp     q20, q21, [sp, #608]
+    stp     q22, q23, [sp, #640]
+    stp     q24, q25, [sp, #672]
+    stp     q26, q27, [sp, #704]
+    stp     q28, q29, [sp, #736]
+    stp     q30, q31, [sp, #768]
+    mrs     x2, FPCR
+    mrs     x3, FPSR
+    stp     x2, x3, [sp, #272]
+
     // x0 still holds the exception kind; pass the saved-frame base in x1
     // so the handler can read the EL0 syscall registers (x0..x8 at
     // [sp,#0..#64]) and write the syscall result back into the x0 slot
@@ -189,6 +214,26 @@ rustos_aarch64_trap_common:
     ldr     x2, [sp, #264]
     msr     SP_EL0, x2
 
+    ldp     x2, x3, [sp, #272]
+    msr     FPCR, x2
+    msr     FPSR, x3
+    ldp     q30, q31, [sp, #768]
+    ldp     q28, q29, [sp, #736]
+    ldp     q26, q27, [sp, #704]
+    ldp     q24, q25, [sp, #672]
+    ldp     q22, q23, [sp, #640]
+    ldp     q20, q21, [sp, #608]
+    ldp     q18, q19, [sp, #576]
+    ldp     q16, q17, [sp, #544]
+    ldp     q14, q15, [sp, #512]
+    ldp     q12, q13, [sp, #480]
+    ldp     q10, q11, [sp, #448]
+    ldp     q8, q9, [sp, #416]
+    ldp     q6, q7, [sp, #384]
+    ldp     q4, q5, [sp, #352]
+    ldp     q2, q3, [sp, #320]
+    ldp     q0, q1, [sp, #288]
+
     ldr     x30, [sp, #240]
     ldp     x28, x29, [sp, #224]
     ldp     x26, x27, [sp, #208]
@@ -205,5 +250,5 @@ rustos_aarch64_trap_common:
     ldp     x4, x5, [sp, #32]
     ldp     x2, x3, [sp, #16]
     ldp     x0, x1, [sp]
-    add     sp, sp, #288
+    add     sp, sp, #816
     eret

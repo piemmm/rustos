@@ -957,6 +957,13 @@ fn run_dispatch_loop<A: KernelArch>(
 ) {
     arch.set_device_irqs(true);
     loop {
+        // Retire any reschedule obligation left by the task that just
+        // suspended before the policy makes its next decision. CFQ arms
+        // the incoming task's one-shot inside `step`; clearing later in
+        // the task shim would erase a timer that expired between that arm
+        // and the switch to user mode, leaving a CPU-bound task with no
+        // armed timer and no pending reschedule.
+        crate::preempt::clear_preempt_pending(cpu);
         match scheduler.step(cpu) {
             // A task ran. On the boot CPU, stop once every task has
             // exited so `kernel_main` halts; keep dispatching otherwise.
@@ -2254,6 +2261,27 @@ mod tests {
         assert_eq!(state.arch.pump_console_tx_count(), 1);
         service_between_dispatches(state.arch.as_ref());
         assert_eq!(state.arch.pump_console_tx_count(), 2);
+    }
+
+    #[test]
+    fn dispatch_loop_clears_a_stale_tick_before_policy_dispatch() {
+        // A CPU index no other test latches, so parallel test threads
+        // never observe each other through the process-wide slots.
+        const CPU: CpuId = 60;
+        let arch = Arc::new(TestArch::with_cpus(CPU + 1));
+        arch.set_current_cpu(CPU);
+        let scheduler = Scheduler::new(SchedulerConfig::defaults_for(CPU + 1), Arc::clone(&arch))
+            .expect("scheduler builds");
+        scheduler
+            .spawn(CPU, Priority::Normal, |_| {
+                rustos_kernel_sched_api::TaskAction::Exit
+            })
+            .expect("task admitted");
+
+        crate::preempt::note_preempt_tick(CPU);
+        run_dispatch_loop(&scheduler, arch.as_ref(), CPU, DispatchRole::Boot);
+
+        assert!(!crate::preempt::take_preempt_pending(CPU));
     }
 
     /// A [`ProcessSpawn`] recording the `rxe`, capability set, and argument

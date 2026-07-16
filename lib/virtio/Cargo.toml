@@ -18,6 +18,7 @@ workspace = true
 # the stable ABI types in `lib/abi`, so it builds for every Tier-1 target.
 [dependencies]
 rustos-abi = { path = "../abi", version = "=0.0.0" }
+rustos-dma-barrier = { path = "../dma-barrier", version = "=0.0.0" }
 
 [dev-dependencies]
 # The §19.6 fuzz harness draws its inputs through the shared seed/budget

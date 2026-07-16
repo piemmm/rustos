@@ -733,6 +733,9 @@ implementation fixed):
   `parent_exited` (zombie drop, honest orphan liveness, no stranded
   zombie, sibling isolation, stop discard), and the
   `stress_qemu_aarch64` full-boot vertical: login →
+  `stress --cpu 10 --timeout 4s &` across four CPUs → all ten workers
+  dispatched → foreground `sysinfo uptime` service progress while the
+  syscall-free load remains active → clean timeout, followed by
   `stress --cpu 1 --vm 1 --vm-bytes 16M --io 1 --timeout 2s` from the
   store bundle → `dispatching hogs` → `successful run completed` →
   post-load `sysinfo pressure` (`reserve bytes:`) and `sysinfo reclaim`

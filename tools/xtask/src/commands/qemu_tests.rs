@@ -1261,21 +1261,21 @@ const TESTS: &[QemuTest] = &[
     },
     // WIRING Stage W6 (`plans/WIRING.md` §3): the aarch64 multi-core SMP
     // deliverable — the EL1/GICv2 analogue of `ipi_smp_qemu_riscv64`. It
-    // boots the `virt` board with two cores, starts core 1 through
-    // `smp::start_secondary` (the PSCI `CPU_ON` call), waits for that core
-    // to bring up its GICv2 interface and enable the IPI SGI, then sends
-    // it a directed IPI through `Aarch64Arch::send_ipi` (a GICv2 SGI,
+    // boots the `virt` board with four cores, starts cores 1–3 through
+    // the PSCI `CPU_ON` path, waits for each core to bring up its GICv2
+    // interface and enable the IPI SGI, then sends each a directed IPI
+    // through `Aarch64Arch::send_ipi` (a GICv2 SGI,
     // replacing the former single-CPU self-target best-effort send). The
-    // test passes once the secondary core's IRQ path has run the IPI
-    // callback with the secondary core's id — proving both core bring-up
-    // and IPI delivery. A regression that fails to start the core or
+    // test passes once every secondary's IRQ path has run the IPI callback
+    // with that core's id — proving bring-up and all three target-list bits.
+    // A regression that fails to start a core or
     // deliver the IPI never reaches the PASS finisher, so the run times
-    // out. Two CPUs (the point of the test) and a 60-second budget.
+    // out. Four CPUs mirror the Raspberry Pi 4 and use a 60-second budget.
     QemuTest {
         package: "rustos-test-ipi-smp-qemu-aarch64",
         binary: "rustos-test-ipi-smp-qemu-aarch64",
         target: "aarch64-unknown-none",
-        cpus: 2,
+        cpus: 4,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
@@ -3684,11 +3684,15 @@ const TESTS: &[QemuTest] = &[
     // vertical. `rustos-test-stress-qemu-aarch64` boots the *production*
     // aarch64 pipeline with the planted encrypted-root disk, unlocks the
     // root, authenticates `root`/`root` at the console login, and runs a
-    // short `stress --cpu 1 --vm 1 --vm-bytes 16M --io 1 --timeout 2s`
-    // from its store bundle (the load gate verifies the whole on-disk
-    // bundle; the granted `CAP_MEM_PIN` lets the controller pin itself and
-    // `CAP_PROC_SPAWN` lets it re-enter its own attested binary as three
-    // workers through the kernel's `@self` token). The `dispatching hogs`
+    // oversubscribed `stress --cpu 10 --timeout 4s &` load, proves foreground
+    // progress through `sysinfo uptime`, then runs the original
+    // mixed `stress --cpu 1 --vm 1 --vm-bytes 16M --io 1 --timeout 2s`
+    // load. Both launch from the store bundle (the load gate verifies the
+    // whole on-disk bundle; the granted `CAP_MEM_PIN` lets each controller
+    // pin itself and `CAP_PROC_SPAWN` lets it re-enter its own attested binary
+    // as workers through the kernel's `@self` token). The `since boot:` token
+    // proves the shell and sysinfod progress while ten CPU-bound workers
+    // saturate four CPUs. The `dispatching hogs`
     // token witnesses the dispatch line; `successful run completed`
     // witnesses the timeout teardown — every worker `Terminate`d, reaped,
     // and the scratch files removed — with the prompt returning as the
@@ -3705,13 +3709,13 @@ const TESTS: &[QemuTest] = &[
     // (`comm=elsh`), typed only after both renders appeared — the
     // arm-then-exit discipline, immune to the two intervening `sysinfo`
     // exits. A 120-second budget covers boot + bounded PBKDF2 + the
-    // 2 s load + teardown on QEMU TCG; single CPU like the other
-    // full-boot verticals.
+    // bounded loads + teardown on QEMU TCG; four CPUs reproduce the
+    // production SMP saturation shape.
     QemuTest {
         package: "rustos-test-stress-qemu-aarch64",
         binary: "rustos-test-stress-qemu-aarch64",
         target: "aarch64-unknown-none",
-        cpus: 1,
+        cpus: 4,
         timeout: Duration::from_secs(120),
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
@@ -3725,6 +3729,17 @@ const TESTS: &[QemuTest] = &[
             ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
             ("Username:", SESSION_USERNAME_LINE),
             ("Password", SESSION_PASSWORD_LINE),
+            (
+                "root@rustos ~% ",
+                "stress --cpu 10 --timeout 4s &\n",
+            ),
+            // The non-quiet controller prints this only after all ten workers
+            // have been admitted. Querying a service at that point proves
+            // foreground work is scheduled while all four CPUs are saturated.
+            ("dispatching hogs: 10 cpu", "sysinfo uptime\n"),
+            ("since boot:", ""),
+            // Continue the original mixed-load acceptance after the shell
+            // repaint, preserving its spawn/timeout/cleanup coverage.
             (
                 "root@rustos ~% ",
                 "stress --cpu 1 --vm 1 --vm-bytes 16M --io 1 --timeout 2s\n",

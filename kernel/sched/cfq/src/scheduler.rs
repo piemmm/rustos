@@ -545,7 +545,7 @@ impl<A: SchedulerArch> Scheduler<A> {
 
     /// Book one finished body run: bump the task's run count, accumulate
     /// the elapsed ticks, and stamp the CPU's last-run tick.
-    fn settle_run_accounting(&self, cpu: CpuId, task: &TaskInner, started_tick: u64) {
+    fn settle_run_accounting(&self, cpu: CpuId, task: &TaskInner, started_tick: u64) -> u64 {
         task.total_runs.fetch_add(1, Ordering::Relaxed);
         let span = self.arch.ticks_now().saturating_sub(started_tick);
         task.run_ticks.fetch_add(span, Ordering::Relaxed);
@@ -558,6 +558,7 @@ impl<A: SchedulerArch> Scheduler<A> {
         self.cpus[cpu as usize]
             .last_run_tick
             .store(started_tick, Ordering::Release);
+        span
     }
 
     fn dispatch(&self, cpu: CpuId, id: TaskId) -> StepOutcome {
@@ -616,7 +617,7 @@ impl<A: SchedulerArch> Scheduler<A> {
         // `cpu_busy_ticks` / `cpu_ticks_of` count it once (as settled),
         // never also as in-flight.
         self.clear_current(cpu);
-        self.settle_run_accounting(cpu, &task, tick);
+        let service_ticks = self.settle_run_accounting(cpu, &task, tick);
 
         // Charge the weighted service this run consumed so `vruntime`
         // reflects CPU time regardless of *why* the task stopped — CFS
@@ -624,7 +625,9 @@ impl<A: SchedulerArch> Scheduler<A> {
         // then parks must still advance its vruntime; otherwise it would
         // re-enter at the front on every wake (`admit`) and starve a task
         // that has been ready all along.
-        let charged = task.vruntime().saturating_add(vslice(task.weight()));
+        let charged = task
+            .vruntime()
+            .saturating_add(vslice(service_ticks, task.weight()));
         task.set_vruntime(charged);
 
         let observed = task.load_state();
@@ -807,7 +810,13 @@ impl<A: SchedulerArch> Scheduler<A> {
         let task = self.lookup(id)?;
         task.cas_state(TaskState::Running, TaskState::Ready)
             .map_err(|_| SchedError::InvalidState)?;
-        let charged = task.vruntime().saturating_add(vslice(task.weight()));
+        let service_ticks = self
+            .arch
+            .ticks_now()
+            .saturating_sub(task.last_started.load(Ordering::Acquire));
+        let charged = task
+            .vruntime()
+            .saturating_add(vslice(service_ticks, task.weight()));
         task.set_vruntime(charged);
         self.enqueue_home(&task);
         self.clear_current_matching(id);
@@ -1187,6 +1196,94 @@ mod tests {
         assert!(
             ready_runs.load(Ordering::Relaxed) > 0,
             "the always-ready task must get CPU turns despite the frequent waker"
+        );
+    }
+
+    #[test]
+    fn short_interactive_wakes_stay_responsive_among_cpu_hogs() {
+        const HOGS: u64 = 10;
+        const HOG_TICKS: u64 = 100;
+        const MAX_WAKE_TICKS: u64 = HOG_TICKS * HOGS + 1;
+        const WAKE_CYCLES: usize = 64;
+
+        let (arch, sched) = mk(1);
+        arch.set_current_cpu(0);
+        for _ in 0..HOGS {
+            let run_arch = Arc::clone(&arch);
+            sched
+                .spawn(0, Priority::Normal, move |_| {
+                    run_arch.advance_ticks(HOG_TICKS);
+                    TaskAction::Yield
+                })
+                .expect("spawn CPU hog");
+        }
+        let interactive_arch = Arc::clone(&arch);
+        let interactive = sched
+            .spawn(0, Priority::Normal, move |_| {
+                interactive_arch.advance_ticks(1);
+                TaskAction::Park
+            })
+            .expect("spawn interactive task");
+
+        while sched.state_of(interactive) != TaskState::Parked {
+            let _ = sched.step(0).expect("initial dispatch");
+        }
+
+        for cycle in 0..WAKE_CYCLES {
+            sched.unpark(interactive).expect("wake interactive task");
+            let wake_tick = arch.ticks_now();
+            let mut dispatched = false;
+            for _ in 0..=HOGS {
+                if sched.step(0).expect("contended dispatch") == StepOutcome::Ran(interactive) {
+                    dispatched = true;
+                    break;
+                }
+            }
+            assert!(dispatched, "interactive wake {cycle} was starved");
+            let latency = arch.ticks_now().saturating_sub(wake_tick);
+            assert!(
+                latency <= MAX_WAKE_TICKS,
+                "interactive wake {cycle} waited {latency} ticks"
+            );
+        }
+    }
+
+    #[test]
+    fn equal_weight_tasks_receive_equal_cpu_time_not_equal_dispatches() {
+        const LONG_RUN_TICKS: u64 = 100;
+        const DISPATCHES: usize = 2_000;
+
+        let (arch, sched) = mk(1);
+        arch.set_current_cpu(0);
+        let long_arch = Arc::clone(&arch);
+        let long = sched
+            .spawn(0, Priority::Normal, move |_| {
+                long_arch.advance_ticks(LONG_RUN_TICKS);
+                TaskAction::Yield
+            })
+            .expect("spawn long-running task");
+        let short_arch = Arc::clone(&arch);
+        let short = sched
+            .spawn(0, Priority::Normal, move |_| {
+                short_arch.advance_ticks(1);
+                TaskAction::Yield
+            })
+            .expect("spawn short-running task");
+
+        for _ in 0..DISPATCHES {
+            let _ = sched.step(0).expect("fair dispatch");
+        }
+
+        let long_ticks = sched.cpu_ticks_of(long).expect("long task is live");
+        let short_ticks = sched.cpu_ticks_of(short).expect("short task is live");
+        assert!(
+            long_ticks.abs_diff(short_ticks) <= LONG_RUN_TICKS,
+            "equal weights diverged: long={long_ticks} short={short_ticks}"
+        );
+        assert!(
+            sched.run_count(short).expect("short task is live")
+                > sched.run_count(long).expect("long task is live"),
+            "short runs must be dispatched more often to receive equal CPU time"
         );
     }
 

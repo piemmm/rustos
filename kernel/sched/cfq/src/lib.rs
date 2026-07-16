@@ -14,9 +14,11 @@
 //!   `vruntime` is dispatched next (the leftmost node of Linux CFS's
 //!   red-black tree, here an ordered [`alloc::collections::BTreeSet`] keyed
 //!   by `(vruntime, id)` — `O(log n)` pick/insert/remove). A dispatch
-//!   charges the running task `SCALE / weight` of virtual runtime, so a
-//!   heavier task's `vruntime` rises more slowly and it is dispatched more
-//!   often — proportional share, with no band ever starved (every
+//!   charges the running task `elapsed_ticks * SCALE / weight` of virtual
+//!   runtime, so equal-weight tasks receive equal CPU time even when one
+//!   runs briefly and parks while another consumes a full quantum. A
+//!   heavier task's `vruntime` rises more slowly for the same elapsed
+//!   service — proportional share, with no band ever starved (every
 //!   `vruntime` advances monotonically).
 //! * **Non-tickless — the tickless carve-out.** RustOS is otherwise a
 //!   tickless (`NO_HZ`) kernel: a policy arms its preemption one-shot only
@@ -34,8 +36,8 @@
 //!   accounting without a needless switch-to-self. This is the
 //!   charter-blessed non-tickless exception and no other policy may take it.
 //! * **Weight by priority.** The three [`Priority`] bands map to a 4:2:1
-//!   weight ratio (the CFS "nice level" analog): a `High` task is
-//!   dispatched roughly four times as often as a `Low` one.
+//!   weight ratio (the CFS "nice level" analog): for equal demand a `High`
+//!   task receives roughly four times the CPU time of a `Low` one.
 //! * **Per-CPU run queues, work-stealing across cores.** Each CPU owns one
 //!   `vruntime`-ordered [`Scheduler`]-internal run queue with its own
 //!   monotonic `min_vruntime` floor; idle CPUs steal the smallest-vruntime

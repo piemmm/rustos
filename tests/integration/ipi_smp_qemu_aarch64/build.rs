@@ -35,8 +35,9 @@ fn main() {
         );
         println!("cargo:rerun-if-changed={linker_script}");
         println!("cargo:rustc-link-arg=-T{linker_script}");
-        // Two CPUs: this is the SMP vertical (boot core + one secondary).
-        rustos_itest_harness::dump_aarch64_virt_dtb(&out_dir, 2)
+        // Four CPUs exercise every GICv2 target-list bit the Tier-1
+        // Raspberry Pi 4 topology needs (boot core + three secondaries).
+        rustos_itest_harness::dump_aarch64_virt_dtb(&out_dir, 4)
     } else {
         // Host builds compile the bin to a no-op `main`; no DTB needed.
         Vec::new()

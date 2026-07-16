@@ -43,10 +43,11 @@ fn main() {
         );
         println!("cargo:rerun-if-changed={linker_script}");
         println!("cargo:rustc-link-arg=-T{linker_script}");
-        // One CPU: PID 1, the unlock kthread, the console login, and the
-        // spawned session all run in the same cooperative drain loop on
-        // the boot CPU.
-        rustos_itest_harness::dump_aarch64_virt_dtb(&out_dir, 1)
+        // Four CPUs mirror the Raspberry Pi 4 acceptance workload: ten
+        // syscall-free CPU workers must saturate every discovered CPU while
+        // the shell, controller, and system-information service still make
+        // progress through timer-driven preemption.
+        rustos_itest_harness::dump_aarch64_virt_dtb(&out_dir, 4)
     } else {
         // Host builds compile the bin to a no-op `main`; no DTB needed.
         Vec::new()

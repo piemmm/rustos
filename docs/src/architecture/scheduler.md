@@ -47,17 +47,19 @@ virtual runtime `vruntime`; on each CPU the ready task with the
 *smallest* `vruntime` is dispatched next — the leftmost node of Linux
 CFS's red-black tree, here an ordered `BTreeSet<(vruntime, TaskId)>`
 (`O(log n)` pick/insert/remove). A dispatch charges the running task
-`SCALE / weight` of virtual runtime, so a heavier-weighted task's
-`vruntime` rises more slowly and it is dispatched more often —
-proportional share, with no band ever starved (every `vruntime` advances
-monotonically). The three `Priority` bands map to a 4:2:1 weight ratio
-(the CFS "nice level" analog). A per-CPU monotonic `min_vruntime` floor
-places a joining or migrated task at the front of the CPU's timeline, so
-a task that slept at a low `vruntime` cannot leap the running population,
-and a stolen task carries no lag across CPUs. Per-CPU run queues,
-work-stealing, class-based placement, the overflow list, and the
-park/unpark lost-wakeup token are all shared with the sibling policies'
-mechanics.
+`elapsed_ticks * SCALE / weight` of virtual runtime. Equal-weight tasks
+therefore receive equal CPU time even when an interrupt-driven task runs
+briefly and parks while a CPU-bound task consumes a full quantum; a
+heavier-weighted task's `vruntime` rises more slowly for the same elapsed
+service. The result is proportional CPU-time share, with no band ever
+starved (every `vruntime` advances monotonically). The three `Priority`
+bands map to a 4:2:1 weight ratio (the CFS "nice level" analog). A per-CPU
+monotonic `min_vruntime` floor places a joining or migrated task at the
+front of the CPU's timeline, so a task that slept at a low `vruntime`
+cannot leap the running population, and a stolen task carries no lag
+across CPUs. Per-CPU run queues, work-stealing, class-based placement, the
+overflow list, and the park/unpark lost-wakeup token are all shared with
+the sibling policies' mechanics.
 
 ### Non-tickless — the tickless carve-out
 
@@ -363,6 +365,10 @@ Only a genuinely idle CFQ CPU (nothing runnable) disarms. A fired tick
 still only *context-switches* when the switch would change what runs (the
 `preempt_current` gate below) — a lone task's tick does its accounting and
 returns to that same task — so CFQ never needlessly switch-to-self churns.
+Every consumed CFQ tick that does not reach a dispatch re-arms the periodic
+deadline: both the lone-task path and a failed immediate suspension restore
+the next quantum before returning. A busy task therefore cannot resume with
+its fired one-shot cleared and no future preemption interrupt.
 Everything below describes the shared mechanism; only the per-dispatch
 arm/disarm *decision* differs between the tickless policies and CFQ.
 
@@ -459,7 +465,9 @@ syscall's in-kernel work is itself bounded, e.g. `console_write`'s 4 KiB
 clamp); without the latch, a task whose quantum expired mid-syscall
 returned to user mode with no timer armed and could starve every
 competitor until its next voluntary yield — cooperative scheduling in
-preemptive clothing.
+preemptive clothing. If the safe-boundary suspension cannot proceed because
+no resumable user handle is published, the policy's no-dispatch hook restores
+CFQ's periodic deadline; tickless policies leave the hook inert.
 
 A port whose console transmit is buffered (the aarch64 PL011 — §20) keeps
 its in-memory transmit ring draining through

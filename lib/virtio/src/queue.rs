@@ -15,6 +15,7 @@ use crate::host::VirtioHost;
 use crate::transport::{Direction, Transport, VirtioError};
 use core::mem::size_of;
 use rustos_abi::DriverError;
+use rustos_dma_barrier::{dma_rmb, dma_wmb};
 
 /// Wire layout of a virtio split-queue descriptor (virtio 1.1 §2.6.5).
 #[repr(C, align(16))]
@@ -293,8 +294,9 @@ impl SplitQueue {
         // (virtio-input, which pops a buffer when an input event arrives out
         // of band) does not — it reads the ring from a different context and
         // must see a consistent snapshot (no races). The
-        // release fence orders the entry stores before the index store.
-        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+        // The outer-shareable DMA barrier orders the entry stores before
+        // the index store for both coherent and non-coherent devices.
+        dma_wmb();
         // Update the avail.idx field (offset 2, little-endian u16).
         avail_bytes[2..4].copy_from_slice(&self.next_avail_idx.to_le_bytes());
         Ok(head)
@@ -309,7 +311,7 @@ impl SplitQueue {
         // rather than a stale one. Without it an asynchronous device
         // (virtio-input) can observe an empty avail ring and report
         // queue-full on the next event.
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        dma_wmb();
         transport.notify(self.queue_index);
     }
 
@@ -336,7 +338,7 @@ impl SplitQueue {
         // at must be acquired before they are read, so the entry read cannot
         // be reordered ahead of — or read stale relative to — the index that
         // announced it.
-        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+        dma_rmb();
         let slot = (self.last_used_idx % self.queue_size) as usize;
         let entry_off = USED_HEADER_BYTES + slot * size_of::<UsedElem>();
         let id = u32::from_le_bytes(
