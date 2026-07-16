@@ -80,6 +80,9 @@ pub mod attrs {
     pub const PXN: u64 = 1 << 53;
     /// Unprivileged execute-never (bit 54).
     pub const UXN: u64 = 1 << 54;
+    /// Software-defined leaf bit distinguishing write-combining Normal-NC
+    /// framebuffer mappings from bidirectional coherent-DMA mappings.
+    pub const SW_WRITE_COMBINE: u64 = 1 << 55;
 
     /// `MAIR_EL1` attribute index for Normal write-back memory (index 0).
     pub const ATTR_IDX_NORMAL: u64 = 0 << 2;
@@ -1248,6 +1251,8 @@ impl AddressSpace {
             } else {
                 device_leaf_attrs(false)
             }
+        } else if flags.contains(PageFlags::WRITE_COMBINE) {
+            el0_dma_coherent_leaf_attrs() | attrs::SW_WRITE_COMBINE
         } else if flags.contains(PageFlags::DMA_COHERENT) {
             // A buffer shared with a non-I/O-coherent DMA master (the
             // BCM2711 PCIe root complex): Normal Non-Cacheable so the device
@@ -1942,7 +1947,11 @@ fn page_flags_from_leaf(desc: u64) -> PageFlags {
     if attr_idx == attrs::ATTR_IDX_DEVICE {
         out = out | PageFlags::DEVICE;
     } else if attr_idx == attrs::ATTR_IDX_NORMAL_NC {
-        out = out | PageFlags::DMA_COHERENT;
+        if desc & attrs::SW_WRITE_COMBINE != 0 {
+            out = out | PageFlags::WRITE_COMBINE;
+        } else {
+            out = out | PageFlags::DMA_COHERENT;
+        }
     }
     out
 }

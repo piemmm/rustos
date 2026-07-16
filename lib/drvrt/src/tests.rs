@@ -395,7 +395,12 @@ fn maps_a_framebuffer_scanout_window() {
         stride_bytes: 32,
         format: rustos_abi::driver::display::DisplayFormat::Bgra8888,
     };
-    let fb = HwResource::framebuffer(FB_BASE, &mode).expect("valid mode");
+    let fb = HwResource::framebuffer(
+        FB_BASE,
+        &mode,
+        rustos_abi::hwtree::FramebufferMemory::WriteCombine,
+    )
+    .expect("valid mode");
     let len = usize::try_from(fb.length()).expect("small surface");
 
     let mock = MockSyscalls::new();

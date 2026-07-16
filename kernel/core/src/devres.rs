@@ -35,30 +35,46 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::hwtree::{HwResource, HwResourceKind};
+use rustos_abi::hwtree::{FramebufferMemory, HwResource, HwResourceKind};
 use rustos_abi::{Errno, MsiAllocation};
 
 /// The memory type a mapped device window is given.
 ///
 /// The grant's [`HwResourceKind`] decides this before the mapping is
-/// installed: a register block is [`Self::Device`], a scan-out surface is
-/// [`Self::Framebuffer`]. The distinction is a correctness *and* a
-/// performance one — see [`Self::Framebuffer`].
+/// installed: a register block is [`Self::Device`], while a scan-out surface
+/// is [`Self::FramebufferWriteBack`] or [`Self::FramebufferWriteCombine`]
+/// according to its discovered backing. The distinction is both correctness
+/// and performance policy.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum MmioMemoryKind {
     /// Device / strongly-ordered registers, caching disabled. The memory a
     /// [`HwResourceKind::Mmio`] / [`HwResourceKind::BusWindow`] grant names:
     /// every access is a distinct, ordered hardware transaction.
     Device,
-    /// A linear framebuffer scan-out surface (a [`HwResourceKind::Framebuffer`]
-    /// grant): non-cacheable **Normal** memory. The CPU fills it a whole frame
-    /// at a time and the display engine reads it back as a DMA master, so
-    /// mapping it Device-strongly-ordered would force every one of millions of
-    /// per-frame writes through a separate ordered transaction (a full-frame
-    /// blit then costs tens of seconds under emulation). Normal-NC keeps the
-    /// bulk stores fast and coalescable while staying visible to the scan-out
-    /// with no cache maintenance.
-    Framebuffer,
+    /// A framebuffer backed by ordinary coherent RAM, mapped write-back.
+    FramebufferWriteBack,
+    /// A write-mostly display aperture, mapped write-combining.
+    FramebufferWriteCombine,
+}
+
+impl MmioMemoryKind {
+    /// Derive the mapping kind from a validated hardware-tree resource.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Errno::OutOfRange`] for a non-window resource or an unknown
+    /// framebuffer policy, and [`Errno::BadMagic`] for corrupt reserved flag
+    /// bits.
+    pub fn from_resource(resource: &HwResource) -> Result<Self, Errno> {
+        match resource.kind() {
+            Some(HwResourceKind::Framebuffer) => match resource.framebuffer_memory()? {
+                FramebufferMemory::WriteBack => Ok(Self::FramebufferWriteBack),
+                FramebufferMemory::WriteCombine => Ok(Self::FramebufferWriteCombine),
+            },
+            Some(HwResourceKind::Mmio | HwResourceKind::BusWindow) => Ok(Self::Device),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
 }
 
 /// The kernel-side producer that maps a validated device window into the
@@ -598,7 +614,11 @@ mod tests {
             Err(Errno::NotImplemented)
         );
         assert_eq!(
-            NullMmioMapFacility.map_window(0, 0x1000, MmioMemoryKind::Framebuffer),
+            NullMmioMapFacility.map_window(0, 0x1000, MmioMemoryKind::FramebufferWriteBack,),
+            Err(Errno::NotImplemented)
+        );
+        assert_eq!(
+            NullMmioMapFacility.map_window(0, 0x1000, MmioMemoryKind::FramebufferWriteCombine,),
             Err(Errno::NotImplemented)
         );
     }
@@ -628,7 +648,12 @@ mod tests {
             stride_bytes: 5120,
             format: rustos_abi::driver::display::DisplayFormat::Bgra8888,
         };
-        let fb = HwResource::framebuffer(0x4000_0000, &mode).expect("valid mode");
+        let fb = HwResource::framebuffer(
+            0x4000_0000,
+            &mode,
+            rustos_abi::hwtree::FramebufferMemory::WriteCombine,
+        )
+        .expect("valid mode");
         assert_eq!(
             mappable_subwindow(&fb, 0, 5120 * 720),
             Ok((0x4000_0000, 5120 * 720))

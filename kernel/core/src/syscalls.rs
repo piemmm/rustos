@@ -4188,17 +4188,13 @@ where
         // would exhaust the per-task MMIO virtual window and fail closed with
         // `OutOfMemory`.
         let (phys_base, len) = mappable_subwindow(&resource, offset, len)?;
-        // The memory type follows the grant's resource kind: a linear
-        // framebuffer scan-out surface is mapped non-cacheable Normal
-        // (fast bulk CPU fills, visible to the display engine with no cache
-        // maintenance), every other window Device-strongly-ordered. Mapping
-        // a framebuffer Device would force each of a frame's millions of
-        // writes through a separate ordered transaction (a full-frame blit
-        // then costs tens of seconds under emulation).
-        let kind = match resource.kind() {
-            Some(HwResourceKind::Framebuffer) => MmioMemoryKind::Framebuffer,
-            _ => MmioMemoryKind::Device,
-        };
+        // The memory type follows the grant: coherent framebuffer RAM stays
+        // write-back, a display aperture requests write combining, and every
+        // register window is Device-strongly-ordered. Mapping a framebuffer
+        // as Device would force each pixel store through a separate ordered
+        // transaction; mapping coherent guest RAM as WC would needlessly
+        // discard its cacheability.
+        let kind = MmioMemoryKind::from_resource(&resource)?;
         // Mechanism: the installed producer maps only that region — with the
         // memory type `kind` selects, never executable — into the caller's
         // own live address space and returns its base virtual address. The
@@ -17396,6 +17392,13 @@ mod tests {
         ) -> Result<u64, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }
+        fn map_writeback_framebuffer_window(
+            &mut self,
+            _phys: u64,
+            _len: usize,
+        ) -> Result<u64, LiveSpaceError> {
+            Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
+        }
         fn translate_page(
             &self,
             page: Page,
@@ -17723,6 +17726,59 @@ mod tests {
         // never a caller-supplied physical address (here offset 0, full
         // length: the whole granted window).
         assert_eq!(*facility.last.lock(), Some((0xFE98_0000, 0x4000)));
+        assert_eq!(*facility.last_kind.lock(), Some(MmioMemoryKind::Device));
+    }
+
+    #[test]
+    fn mmio_map_routes_each_framebuffer_memory_policy() {
+        use rustos_abi::driver::display::{DisplayFormat, DisplayMode};
+        use rustos_abi::hwtree::{FramebufferMemory, HwResource};
+
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let mode = DisplayMode {
+            width_px: 4,
+            height_px: 2,
+            stride_bytes: 16,
+            format: DisplayFormat::Bgra8888,
+        };
+        let write_back = aspaces.write().mint_grant(
+            SecTaskId(2),
+            HwResource::framebuffer(0x8000_0000, &mode, FramebufferMemory::WriteBack)
+                .expect("valid WB framebuffer"),
+        );
+        let write_combine = aspaces.write().mint_grant(
+            SecTaskId(2),
+            HwResource::framebuffer(0x9000_0000, &mode, FramebufferMemory::WriteCombine)
+                .expect("valid WC framebuffer"),
+        );
+        let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
+            last: rustos_sync::SpinLock::new(None),
+            last_kind: rustos_sync::SpinLock::new(None),
+            ret: Ok(0xA000_0000),
+        }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_mmio_map_facility(facility);
+
+        assert_eq!(h.mmio_map(&ctx, write_back, 0, 32), Ok(0xA000_0000));
+        assert_eq!(
+            *facility.last_kind.lock(),
+            Some(MmioMemoryKind::FramebufferWriteBack)
+        );
+        assert_eq!(h.mmio_map(&ctx, write_combine, 0, 32), Ok(0xA000_0000));
+        assert_eq!(
+            *facility.last_kind.lock(),
+            Some(MmioMemoryKind::FramebufferWriteCombine)
+        );
     }
 
     /// A valid, owned grant whose mechanism is unwired holds

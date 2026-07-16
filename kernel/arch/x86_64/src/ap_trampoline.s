@@ -97,11 +97,11 @@ _ap_trampoline_start:
     movl    AP_BOOT_SLOT_OFFSET + AP_BOOT_SLOT_CR3, %eax
     movl    %eax, %cr3
 
-    // Set EFER.LME = 1. wrmsr requires CPL = 0; we are in real mode at
-    // CPL = 0.
+    // Arm long mode and execute-disable before paging can consume an NX leaf.
+    // wrmsr requires CPL = 0; we are in real mode at CPL = 0.
     movl    $0xC0000080, %ecx
     rdmsr
-    orl     $(1 << 8), %eax
+    orl     $(1 << 8) | (1 << 11), %eax       // LME | NXE
     wrmsr
 
     // Enable PE and PG simultaneously in one MOV to CR0. Per SDM §10.8.5

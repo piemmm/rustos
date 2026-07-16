@@ -1558,7 +1558,12 @@ mod tests {
             stride_bytes: 2560,
             format: crate::driver::display::DisplayFormat::Bgra8888,
         };
-        let fb = HwResource::framebuffer(0x4000_0000, &mode).expect("valid mode");
+        let fb = HwResource::framebuffer(
+            0x4000_0000,
+            &mode,
+            crate::hwtree::FramebufferMemory::WriteCombine,
+        )
+        .expect("valid mode");
         // The surface resolves alongside unrelated grants.
         let grants = [HwResource::irq(33, 1), fb];
         assert_eq!(sole_framebuffer(grants.iter()), Ok((0x4000_0000, mode)));

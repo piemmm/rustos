@@ -593,6 +593,9 @@ impl MmuAddressSpace for AddressSpace {
         if flags.is_write_exec() {
             return Err(MapError::InvalidFlags);
         }
+        if flags.contains(PageFlags::WRITE_COMBINE) {
+            return Err(MapError::Unsupported);
+        }
         if self.leaf_present(vaddr) {
             return Err(MapError::AlreadyMapped);
         }

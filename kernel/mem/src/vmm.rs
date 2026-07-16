@@ -181,6 +181,9 @@ bitflags_like! {
         /// RAM. Distinct from [`Self::NO_CACHE`] (Device/MMIO): a DMA buffer
         /// is accessed with ordinary loads/stores.
         const DMA_COHERENT = 0b0010_0000;
+        /// Page is a write-mostly framebuffer aperture whose stores may be
+        /// gathered and combined.
+        const WRITE_COMBINE = 0b0100_0000;
     }
 }
 
@@ -259,6 +262,9 @@ fn to_page_flags(flags: MapFlags) -> PageFlags {
     if flags.contains(MapFlags::DMA_COHERENT) {
         out = out | PageFlags::DMA_COHERENT;
     }
+    if flags.contains(MapFlags::WRITE_COMBINE) {
+        out = out | PageFlags::WRITE_COMBINE;
+    }
     out
 }
 
@@ -283,6 +289,9 @@ fn from_page_flags(flags: PageFlags) -> MapFlags {
     }
     if flags.contains(PageFlags::DMA_COHERENT) {
         out = out | MapFlags::DMA_COHERENT;
+    }
+    if flags.contains(PageFlags::WRITE_COMBINE) {
+        out = out | MapFlags::WRITE_COMBINE;
     }
     out
 }

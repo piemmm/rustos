@@ -164,25 +164,12 @@ impl<'h> RpiHvs<'h> {
         })
     }
 
-    /// Copy `frame[..scanout_len]` into the mapped scan-out window,
-    /// word by word with a byte tail (the software fallback path).
+    /// Copy `frame[..scanout_len]` into the mapped scan-out window with one
+    /// bounds-checked bulk transfer (the software fallback path).
     fn blit_scanout(&self, frame: &[u8]) -> Result<(), DriverError> {
-        let whole_words = self.scanout_len / 4;
-        for word in 0..whole_words {
-            let off = word * 4;
-            let value =
-                u32::from_le_bytes([frame[off], frame[off + 1], frame[off + 2], frame[off + 3]]);
-            self.scanout
-                .write_u32(off, value)
-                .map_err(WindowError::as_driver_error)?;
-        }
-        let tail_start = whole_words * 4;
-        for (i, &byte) in frame[tail_start..self.scanout_len].iter().enumerate() {
-            self.scanout
-                .write_u8(tail_start + i, byte)
-                .map_err(WindowError::as_driver_error)?;
-        }
-        Ok(())
+        self.scanout
+            .write_bytes(0, &frame[..self.scanout_len])
+            .map_err(WindowError::as_driver_error)
     }
 
     /// Upload one layer's pixels into its plane buffer.
@@ -194,28 +181,10 @@ impl<'h> RpiHvs<'h> {
         if need > plane.len {
             return Err(DriverError::LengthOutOfRange);
         }
-        let whole_words = need / 4;
-        for word in 0..whole_words {
-            let off = word * 4;
-            let value = u32::from_le_bytes([
-                layer.pixels[off],
-                layer.pixels[off + 1],
-                layer.pixels[off + 2],
-                layer.pixels[off + 3],
-            ]);
-            plane
-                .window
-                .write_u32(off, value)
-                .map_err(WindowError::as_driver_error)?;
-        }
-        let tail_start = whole_words * 4;
-        for (i, &byte) in layer.pixels[tail_start..need].iter().enumerate() {
-            plane
-                .window
-                .write_u8(tail_start + i, byte)
-                .map_err(WindowError::as_driver_error)?;
-        }
-        Ok(())
+        plane
+            .window
+            .write_bytes(0, &layer.pixels[..need])
+            .map_err(WindowError::as_driver_error)
     }
 }
 

@@ -272,7 +272,7 @@ impl MmioWindowMap {
 
     /// Map `len` bytes of a **linear framebuffer** beginning at `phys_base`
     /// into the borrowed `space` as guard-bracketed, `RW|USER`, never
-    /// executable, non-cacheable **Normal** memory, returning the
+    /// executable, write-combining memory, returning the
     /// [`MmioRegion`].
     ///
     /// A scan-out surface is not a register block: it is bulk pixel memory a
@@ -280,10 +280,9 @@ impl MmioWindowMap {
     /// frame at a time. Mapping it Device-strongly-ordered (as
     /// [`Self::map_into`] does for registers) forces every one of those
     /// millions of writes through a separate strongly-ordered device access —
-    /// pathologically slow. It is mapped with the same non-cacheable Normal
-    /// attribute a coherent DMA buffer uses ([`MapFlags::DMA_COHERENT`]): the
-    /// CPU's bulk stores are fast and coalescable, and the frame is visible to
-    /// the scan-out engine with no per-access cache maintenance. Like
+    /// pathologically slow. [`MapFlags::WRITE_COMBINE`] lets the architecture
+    /// gather sequential stores without giving the aperture ordinary
+    /// write-back cache semantics. Like
     /// [`Self::map_into`] the frames are the device's, so [`Self::unmap_at`] /
     /// a space drop releases only the mapping.
     ///
@@ -300,7 +299,7 @@ impl MmioWindowMap {
             space,
             phys_base,
             len,
-            MapFlags::READ | MapFlags::WRITE | MapFlags::USER | MapFlags::DMA_COHERENT,
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER | MapFlags::WRITE_COMBINE,
         )
     }
 

@@ -1186,6 +1186,7 @@ fn audit_root_storage_binding(
                 height_px: video.height_px,
                 stride_bytes: video.stride_bytes,
                 format: video.format,
+                memory: rustos_abi::hwtree::FramebufferMemory::WriteBack,
             },
             &mut sink,
         );

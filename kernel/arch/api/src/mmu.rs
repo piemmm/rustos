@@ -99,6 +99,10 @@ impl PageFlags {
     /// (the kernel owns the platform coherency, so
     /// the user-space driver stays arch-neutral).
     pub const DMA_COHERENT: Self = Self(0b0010_0000);
+    /// Page is a write-mostly framebuffer aperture. CPU stores may be
+    /// gathered and combined, reads remain valid, and the mapping is never
+    /// executable. Distinct from bidirectional [`Self::DMA_COHERENT`].
+    pub const WRITE_COMBINE: Self = Self(0b0100_0000);
 
     /// The empty set.
     #[must_use]
@@ -130,7 +134,8 @@ impl PageFlags {
             | PageFlags::EXEC.0
             | PageFlags::USER.0
             | PageFlags::DEVICE.0
-            | PageFlags::DMA_COHERENT.0;
+            | PageFlags::DMA_COHERENT.0
+            | PageFlags::WRITE_COMBINE.0;
         if bits & !ALL == 0 {
             Some(Self(bits))
         } else {

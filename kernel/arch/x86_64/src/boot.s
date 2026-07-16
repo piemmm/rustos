@@ -200,10 +200,10 @@ boot_common:
     orl  $(1 << 5), %eax
     movl %eax, %cr4
 
-    // EFER.LME = 1
+    // Arm long mode and execute-disable before paging can consume an NX leaf.
     movl $0xC0000080, %ecx
     rdmsr
-    orl  $(1 << 8), %eax
+    orl  $(1 << 8) | (1 << 11), %eax              // LME | NXE
     wrmsr
 
     // CR0.PG = 1 (paging on); we're now in compatibility mode.

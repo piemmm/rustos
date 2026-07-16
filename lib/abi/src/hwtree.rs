@@ -440,6 +440,37 @@ pub enum HwResourceKind {
     Framebuffer = 7,
 }
 
+/// CPU mapping policy for a linear framebuffer resource.
+///
+/// The platform discovery path reports the policy from the surface's actual
+/// backing: emulated scan-out over ordinary coherent RAM is [`WriteBack`](Self::WriteBack),
+/// while a CPU-written display aperture is [`WriteCombine`](Self::WriteCombine).
+/// Drivers never guess from an address or a board name.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum FramebufferMemory {
+    /// Ordinary coherent RAM, mapped with the architecture's normal
+    /// write-back policy.
+    WriteBack = 1,
+    /// A write-mostly display aperture, mapped with the architecture's
+    /// write-combining policy.
+    WriteCombine = 2,
+}
+
+impl FramebufferMemory {
+    const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    const fn from_u8(value: u8) -> Result<Self, Errno> {
+        match value {
+            1 => Ok(Self::WriteBack),
+            2 => Ok(Self::WriteCombine),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
 impl HwResourceKind {
     /// Raw on-wire discriminant.
     #[must_use]
@@ -537,6 +568,12 @@ impl HwResource {
     /// Encoded size on the wire.
     pub const WIRE_LEN: usize = 32;
 
+    const FRAMEBUFFER_FORMAT_MASK: u32 = 0x0000_00FF;
+    const FRAMEBUFFER_MEMORY_MASK: u32 = 0x0000_FF00;
+    const FRAMEBUFFER_MEMORY_SHIFT: u32 = 8;
+    const FRAMEBUFFER_FLAGS_MASK: u32 =
+        Self::FRAMEBUFFER_FORMAT_MASK | Self::FRAMEBUFFER_MEMORY_MASK;
+
     /// A memory-mapped register/framebuffer window.
     #[must_use]
     pub fn mmio(base: u64, len: u64) -> Self {
@@ -616,7 +653,11 @@ impl HwResource {
     /// [`Errno::LengthOutOfRange`] if `mode` is degenerate: a zero
     /// extent, a stride that cannot hold one scanline of `mode.format`
     /// pixels, or a surface length that overflows.
-    pub fn framebuffer(base: u64, mode: &DisplayMode) -> Result<Self, Errno> {
+    pub fn framebuffer(
+        base: u64,
+        mode: &DisplayMode,
+        memory: FramebufferMemory,
+    ) -> Result<Self, Errno> {
         if mode.width_px == 0 || mode.height_px == 0 {
             return Err(Errno::LengthOutOfRange);
         }
@@ -628,13 +669,34 @@ impl HwResource {
             .checked_mul(u64::from(mode.height_px))
             .ok_or(Errno::LengthOutOfRange)?;
         let xlate = u64::from(mode.width_px) | (u64::from(mode.height_px) << 32);
+        let flags = u32::from(mode.format.as_u8())
+            | (u32::from(memory.as_u8()) << Self::FRAMEBUFFER_MEMORY_SHIFT);
         Ok(Self::new_xlate(
             HwResourceKind::Framebuffer,
             base,
             len,
-            u32::from(mode.format.as_u8()),
+            flags,
             xlate,
         ))
+    }
+
+    /// Recover the CPU mapping policy carried by a framebuffer resource.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::OutOfRange`] — not a framebuffer resource, or the policy
+    ///   discriminant is unknown.
+    /// * [`Errno::BadMagic`] — reserved framebuffer flag bits are set.
+    pub fn framebuffer_memory(&self) -> Result<FramebufferMemory, Errno> {
+        if self.kind() != Some(HwResourceKind::Framebuffer) {
+            return Err(Errno::OutOfRange);
+        }
+        if self.flags & !Self::FRAMEBUFFER_FLAGS_MASK != 0 {
+            return Err(Errno::BadMagic);
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let encoded = (self.flags >> Self::FRAMEBUFFER_MEMORY_SHIFT) as u8;
+        FramebufferMemory::from_u8(encoded)
     }
 
     /// Recover the [`DisplayMode`] a [`Framebuffer`](HwResourceKind::Framebuffer)
@@ -655,11 +717,12 @@ impl HwResource {
         if self.kind() != Some(HwResourceKind::Framebuffer) {
             return Err(Errno::OutOfRange);
         }
-        if self.flags > u32::from(u8::MAX) {
+        if self.flags & !Self::FRAMEBUFFER_FLAGS_MASK != 0 {
             return Err(Errno::BadMagic);
         }
+        self.framebuffer_memory()?;
         #[allow(clippy::cast_possible_truncation)]
-        let format = DisplayFormat::from_u8(self.flags as u8)?;
+        let format = DisplayFormat::from_u8((self.flags & Self::FRAMEBUFFER_FORMAT_MASK) as u8)?;
         #[allow(clippy::cast_possible_truncation)]
         let width_px = self.xlate as u32;
         let height_px = u32::try_from(self.xlate >> 32).map_err(|_| Errno::LengthOutOfRange)?;
@@ -1585,7 +1648,8 @@ mod tests {
             stride_bytes: 5120,
             format: DisplayFormat::Bgra8888,
         };
-        let fb = HwResource::framebuffer(0x4000_0000, &mode).expect("valid mode");
+        let fb = HwResource::framebuffer(0x4000_0000, &mode, FramebufferMemory::WriteCombine)
+            .expect("valid mode");
         assert_eq!(fb.kind(), Some(HwResourceKind::Framebuffer));
         assert_eq!(fb.base(), 0x4000_0000);
         assert_eq!(fb.length(), 5120 * 720);
@@ -1600,6 +1664,25 @@ mod tests {
     }
 
     #[test]
+    fn framebuffer_resource_round_trips_its_memory_policy() {
+        let mode = DisplayMode {
+            width_px: 1280,
+            height_px: 720,
+            stride_bytes: 5120,
+            format: DisplayFormat::Bgra8888,
+        };
+        for memory in [
+            FramebufferMemory::WriteBack,
+            FramebufferMemory::WriteCombine,
+        ] {
+            let fb = HwResource::framebuffer(0x4000_0000, &mode, memory).expect("valid mode");
+            assert_eq!(fb.framebuffer_memory(), Ok(memory));
+            let decoded = HwResource::from_bytes(&fb.to_le_bytes()).expect("resource decodes");
+            assert_eq!(decoded.framebuffer_memory(), Ok(memory));
+        }
+    }
+
+    #[test]
     fn framebuffer_constructor_refuses_degenerate_modes() {
         let mode = |w: u32, h: u32, stride: u32| DisplayMode {
             width_px: w,
@@ -1608,16 +1691,16 @@ mod tests {
             format: DisplayFormat::Rgba8888,
         };
         assert_eq!(
-            HwResource::framebuffer(0, &mode(0, 720, 5120)),
+            HwResource::framebuffer(0, &mode(0, 720, 5120), FramebufferMemory::WriteCombine),
             Err(Errno::LengthOutOfRange)
         );
         assert_eq!(
-            HwResource::framebuffer(0, &mode(1280, 0, 5120)),
+            HwResource::framebuffer(0, &mode(1280, 0, 5120), FramebufferMemory::WriteCombine),
             Err(Errno::LengthOutOfRange)
         );
         // A stride that cannot hold one 1280-px scanline (needs 5120).
         assert_eq!(
-            HwResource::framebuffer(0, &mode(1280, 720, 5119)),
+            HwResource::framebuffer(0, &mode(1280, 720, 5119), FramebufferMemory::WriteCombine,),
             Err(Errno::LengthOutOfRange)
         );
     }
@@ -1630,29 +1713,49 @@ mod tests {
             stride_bytes: 16,
             format: DisplayFormat::Bgra8888,
         };
-        let good = HwResource::framebuffer(0x1000, &mode).expect("valid mode");
+        let good = HwResource::framebuffer(0x1000, &mode, FramebufferMemory::WriteCombine)
+            .expect("valid mode");
+        let valid_flags = u32::from(DisplayFormat::Bgra8888.as_u8())
+            | (u32::from(FramebufferMemory::WriteCombine.as_u8())
+                << HwResource::FRAMEBUFFER_MEMORY_SHIFT);
 
         // Not a framebuffer resource at all.
         assert_eq!(
             HwResource::mmio(0x1000, 32).framebuffer_mode(),
             Err(Errno::OutOfRange)
         );
-        // Reserved format bits / unknown format byte.
-        let dirty_flags = HwResource::new(HwResourceKind::Framebuffer, 0x1000, 32, 0x100);
+        // Reserved flag bits / unknown format byte.
+        let dirty_flags = HwResource::new(
+            HwResourceKind::Framebuffer,
+            0x1000,
+            32,
+            valid_flags | 0x1_0000,
+        );
         assert_eq!(dirty_flags.framebuffer_mode(), Err(Errno::BadMagic));
-        let bad_format = HwResource::new(HwResourceKind::Framebuffer, 0x1000, 32, 9);
+        let bad_format = HwResource::new(
+            HwResourceKind::Framebuffer,
+            0x1000,
+            32,
+            (valid_flags & !HwResource::FRAMEBUFFER_FORMAT_MASK) | 9,
+        );
         assert_eq!(bad_format.framebuffer_mode(), Err(Errno::OutOfRange));
         // Zero geometry, a non-exact length, an undersized stride.
-        let zero_geo = HwResource::new_xlate(HwResourceKind::Framebuffer, 0x1000, 32, 2, 0);
+        let zero_geo =
+            HwResource::new_xlate(HwResourceKind::Framebuffer, 0x1000, 32, valid_flags, 0);
         assert_eq!(zero_geo.framebuffer_mode(), Err(Errno::LengthOutOfRange));
-        let ragged =
-            HwResource::new_xlate(HwResourceKind::Framebuffer, 0x1000, 33, 2, 4 | (2u64 << 32));
+        let ragged = HwResource::new_xlate(
+            HwResourceKind::Framebuffer,
+            0x1000,
+            33,
+            valid_flags,
+            4 | (2u64 << 32),
+        );
         assert_eq!(ragged.framebuffer_mode(), Err(Errno::LengthOutOfRange));
         let thin = HwResource::new_xlate(
             HwResourceKind::Framebuffer,
             0x1000,
             24, // stride 12 < 4 px × 4 bytes
-            2,
+            valid_flags,
             4 | (2u64 << 32),
         );
         assert_eq!(thin.framebuffer_mode(), Err(Errno::LengthOutOfRange));
@@ -1668,18 +1771,28 @@ mod tests {
             stride_bytes: 16,
             format: DisplayFormat::Bgra8888,
         };
-        let fb = HwResource::framebuffer(0x1000, &mode).expect("valid mode");
+        let fb = HwResource::framebuffer(0x1000, &mode, FramebufferMemory::WriteCombine)
+            .expect("valid mode");
         // Identical surface: covered.
-        assert!(fb.covers(&HwResource::framebuffer(0x1000, &mode).unwrap()));
+        assert!(fb.covers(
+            &HwResource::framebuffer(0x1000, &mode, FramebufferMemory::WriteCombine).unwrap()
+        ));
         // A different window or geometry is not.
-        assert!(!fb.covers(&HwResource::framebuffer(0x2000, &mode).unwrap()));
+        assert!(!fb.covers(
+            &HwResource::framebuffer(0x2000, &mode, FramebufferMemory::WriteCombine).unwrap()
+        ));
         let other = DisplayMode {
             width_px: 2,
             height_px: 4,
             stride_bytes: 8,
             format: DisplayFormat::Bgra8888,
         };
-        assert!(!fb.covers(&HwResource::framebuffer(0x1000, &other).unwrap()));
+        assert!(!fb.covers(
+            &HwResource::framebuffer(0x1000, &other, FramebufferMemory::WriteCombine).unwrap()
+        ));
+        assert!(!fb.covers(
+            &HwResource::framebuffer(0x1000, &mode, FramebufferMemory::WriteBack).unwrap()
+        ));
         // A plain window over the surface memory covers the described
         // surface; a disjoint or short window does not, and the
         // geometry-carrying grant never covers a plain window.

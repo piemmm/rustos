@@ -710,20 +710,15 @@ fn run_fmt(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     ctx.run(if apply { "fmt --fix" } else { "fmt --check" }, cmd)
 }
 
+const DOCS_RUSTDOCFLAGS: &str = "-D warnings";
+
 fn run_docs_check(ctx: &Context, _args: &[OsString]) -> Result<(), String> {
     // rustdoc with warnings denied — broken intra-doc links fail the build.
     //
-    // Cargo already runs one `rustdoc` per crate in parallel, but each
-    // `rustdoc` is single-threaded by default, so the tail of the run — where
-    // the workspace dependency graph funnels into the top crates
-    // (`rustos-kernel`, the userland binaries) and only a couple of doc units
-    // remain runnable — pins the build to a single core. `-Z threads=0` turns
-    // on rustdoc's parallel front-end (`0` = all logical CPUs), which
-    // parallelises *within* each `rustdoc` invocation and so keeps the
-    // many-core CI host busy through that serial tail. Nightly-only and
-    // experimental, but the toolchain is pinned nightly already (it likewise
-    // backs `-Z build-std`), so this is consistent with the project's posture.
-    // The `-Z` flag carries this rationale comment.
+    // Cargo already schedules independent rustdoc units concurrently. Each
+    // rustdoc therefore retains its single-threaded default: enabling all
+    // host threads inside every unit multiplies Cargo's parallelism and can
+    // exhaust memory on a clean build of this large workspace.
     //
     // `-Z rustdoc-mergeable-info` (a cargo `-Z` flag, RFC 3662) makes cargo
     // drive rustdoc's mergeable cross-crate-info: each crate writes its
@@ -744,7 +739,7 @@ fn run_docs_check(ctx: &Context, _args: &[OsString]) -> Result<(), String> {
         "-Z",
         "rustdoc-mergeable-info",
     ])
-    .env("RUSTDOCFLAGS", "-D warnings -Z threads=0");
+    .env("RUSTDOCFLAGS", DOCS_RUSTDOCFLAGS);
     ctx.run("docs-check (rustdoc)", doc)?;
 
     // mdBook build. The book lives in `docs/`.
@@ -1724,7 +1719,8 @@ fn relative(base: &Path, path: &Path) -> String {
 mod tests {
     use super::{
         cargo_subcommand_available, dir_size, format_bytes, kernel_build_profile, parse_run_args,
-        parse_test_options, Command, RunBudget, DEFAULT_RUN_CPUS, TEST_SOAK_SECS,
+        parse_test_options, Command, RunBudget, DEFAULT_RUN_CPUS, DOCS_RUSTDOCFLAGS,
+        TEST_SOAK_SECS,
     };
     use crate::Context;
     use std::ffi::OsString;
@@ -1786,6 +1782,11 @@ mod tests {
         assert!(parse_run_args(&argv(&["--cpus", "0"])).is_err());
         assert!(parse_run_args(&argv(&["--cpus", "many"])).is_err());
         assert!(parse_run_args(&argv(&["--cpus"])).is_err());
+    }
+
+    #[test]
+    fn docs_rustdoc_does_not_multiply_cargo_parallelism() {
+        assert_eq!(DOCS_RUSTDOCFLAGS, "-D warnings");
     }
 
     /// `prune` is a first-class, parseable subcommand listed in the closed

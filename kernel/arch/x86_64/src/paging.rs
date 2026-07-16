@@ -69,6 +69,10 @@ pub mod flags {
     /// leaf **and** on every intermediate entry on the walk, otherwise
     /// the CPU denies the ring-3 access (Intel SDM Vol 3A §4.6).
     pub const USER: u64 = 1 << 2;
+    /// Page-level write-through/PAT index bit.
+    pub const WRITE_THROUGH: u64 = 1 << 3;
+    /// Page-level cache-disable/PAT index bit.
+    pub const CACHE_DISABLE: u64 = 1 << 4;
     /// Page Size (1 for huge pages at PD or PDPT level).
     pub const HUGE: u64 = 1 << 7;
     /// No-Execute (bit 63): an instruction fetch from the page faults.
@@ -373,7 +377,7 @@ impl AddressSpace {
         paddr: u64,
         writable: bool,
     ) -> Option<()> {
-        self.map_4k_inner(frames, vaddr, paddr, writable, false, false)
+        self.map_4k_inner(frames, vaddr, paddr, writable, false, false, 0)
     }
 
     /// Map `paddr` at `vaddr` (4 KiB granularity) **user-accessible**:
@@ -392,7 +396,7 @@ impl AddressSpace {
         paddr: u64,
         writable: bool,
     ) -> Option<()> {
-        self.map_4k_inner(frames, vaddr, paddr, writable, true, false)
+        self.map_4k_inner(frames, vaddr, paddr, writable, true, false, 0)
     }
 
     /// Map `paddr` at `vaddr` (4 KiB granularity) **user-accessible** with
@@ -416,7 +420,7 @@ impl AddressSpace {
         writable: bool,
         executable: bool,
     ) -> Option<()> {
-        self.map_4k_inner(frames, vaddr, paddr, writable, true, !executable)
+        self.map_4k_inner(frames, vaddr, paddr, writable, true, !executable, 0)
     }
 
     /// Shared 4 KiB mapping walk for [`Self::map_4k`] and
@@ -433,6 +437,7 @@ impl AddressSpace {
         writable: bool,
         user: bool,
         no_execute: bool,
+        memory_attrs: u64,
     ) -> Option<()> {
         assert_eq!(vaddr & 0xFFF, 0, "vaddr must be page-aligned");
         assert_eq!(paddr & 0xFFF, 0, "paddr must be page-aligned");
@@ -447,6 +452,7 @@ impl AddressSpace {
         if no_execute {
             flags_ |= flags::NO_EXECUTE;
         }
+        flags_ |= memory_attrs;
 
         let i4 = ((vaddr >> 39) & 0x1FF) as usize;
         let i3 = ((vaddr >> 30) & 0x1FF) as usize;
@@ -803,6 +809,9 @@ impl MmuAddressSpace for AddressSpace {
         if flags.is_write_exec() {
             return Err(MapError::InvalidFlags);
         }
+        if flags.contains(PageFlags::WRITE_COMBINE) {
+            return Err(MapError::Unsupported);
+        }
         // The four-level walk is only valid on the bare-metal target (it
         // recovers tables through the low identity map). `map_page` is
         // therefore proven by the `memory_isolation` QEMU vertical, not a
@@ -814,12 +823,22 @@ impl MmuAddressSpace for AddressSpace {
             }
             let frames = self.frames;
             let writable = flags.contains(PageFlags::WRITE);
-            let result = if flags.contains(PageFlags::USER) {
-                let executable = flags.contains(PageFlags::EXEC);
-                self.map_4k_user_wx(frames, vaddr, paddr, writable, executable)
+            let user = flags.contains(PageFlags::USER);
+            let executable = flags.contains(PageFlags::EXEC);
+            let memory_attrs = if flags.contains(PageFlags::DEVICE) {
+                flags::CACHE_DISABLE | flags::WRITE_THROUGH
             } else {
-                self.map_4k(frames, vaddr, paddr, writable)
+                0
             };
+            let result = self.map_4k_inner(
+                frames,
+                vaddr,
+                paddr,
+                writable,
+                user,
+                !executable,
+                memory_attrs,
+            );
             // Alignment and prior-mapping are ruled out, so the only
             // remaining failure is page-table-pool exhaustion.
             result.ok_or(MapError::PoolExhausted)
@@ -1090,6 +1109,11 @@ fn page_flags_from_pte(pte: u64) -> PageFlags {
     }
     if pte & flags::USER != 0 {
         out = out | PageFlags::USER;
+    }
+    if pte & (flags::CACHE_DISABLE | flags::WRITE_THROUGH)
+        == (flags::CACHE_DISABLE | flags::WRITE_THROUGH)
+    {
+        out = out | PageFlags::DEVICE;
     }
     if pte & flags::NO_EXECUTE == 0 {
         out = out | PageFlags::EXEC;

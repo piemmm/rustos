@@ -408,6 +408,13 @@ is the only difference).
   driver's own blit to scanout (a direct-scanout driver may eliminate
   even that by scanning out the granted region itself — the region stays
   mapped, so the protocol already permits it).
+- **Framebuffer memory policy is discovered, never guessed.** A linear
+  framebuffer resource carries `WriteBack` for coherent RAM (QEMU `ramfb`)
+  or `WriteCombine` for a CPU-written aperture. The kernel preserves that
+  policy into the page-table mapping; unsupported WC fails closed. The HVS
+  fallback and plane uploads use one bulk transfer. Scanout y-wrap remains
+  disabled unless a backend explicitly proves wrap or bounded-pan semantics;
+  neither current `ramfb` nor the Pi mailbox does.
 - **The lease is checked kernel-side, per present, with no oracle.** The
   service never trusts a claimed lease: it asks the kernel whether the
   *in-flight caller of its own endpoint* holds the live lease

@@ -274,6 +274,18 @@ pub trait LiveUserSpace: Send {
     fn map_framebuffer_window(&mut self, phys_base: u64, len: usize)
         -> Result<u64, LiveSpaceError>;
 
+    /// Map a linear framebuffer backed by ordinary coherent RAM as
+    /// guard-bracketed, non-executable, write-back memory.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveSpaceError::Mmio`] carrying the precise [`MmioError`].
+    fn map_writeback_framebuffer_window(
+        &mut self,
+        phys_base: u64,
+        len: usize,
+    ) -> Result<u64, LiveSpaceError>;
+
     /// Carve a physically-contiguous, zeroed, coherent DMA buffer of `len`
     /// bytes into this space, returning its CPU virtual base and its
     /// physically-contiguous base ([`DmaMapping`]).
@@ -725,6 +737,17 @@ where
         let region = self
             .mmio
             .map_framebuffer_into(&mut self.space, phys_base, len)?;
+        Ok(region.virt().as_u64())
+    }
+
+    fn map_writeback_framebuffer_window(
+        &mut self,
+        phys_base: u64,
+        len: usize,
+    ) -> Result<u64, LiveSpaceError> {
+        let region = self
+            .mmio
+            .map_cacheable_into(&mut self.space, phys_base, len)?;
         Ok(region.virt().as_u64())
     }
 

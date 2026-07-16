@@ -263,7 +263,10 @@ where
         let cpu = self.arch.current_cpu();
         with_current_live_space(cpu, |space| match kind {
             MmioMemoryKind::Device => space.map_device_window(phys_base, len),
-            MmioMemoryKind::Framebuffer => space.map_framebuffer_window(phys_base, len),
+            MmioMemoryKind::FramebufferWriteBack => {
+                space.map_writeback_framebuffer_window(phys_base, len)
+            }
+            MmioMemoryKind::FramebufferWriteCombine => space.map_framebuffer_window(phys_base, len),
         })
         .ok_or(Errno::NotImplemented)?
         .map_err(live_errno)
@@ -507,6 +510,7 @@ mod tests {
         anon_reserves_at: Vec<(u64, u64)>,
         anon_unmaps: Vec<(u64, u64)>,
         device_maps: Vec<(u64, usize)>,
+        writeback_framebuffer_maps: Vec<(u64, usize)>,
         framebuffer_maps: Vec<(u64, usize)>,
         dma_allocs: Vec<(usize, u64)>,
         dma_frees: Vec<u64>,
@@ -622,6 +626,18 @@ mod tests {
             match self.next.take() {
                 Some(err) => Err(err),
                 None => Ok(0x9000_2000),
+            }
+        }
+
+        fn map_writeback_framebuffer_window(
+            &mut self,
+            phys_base: u64,
+            len: usize,
+        ) -> Result<u64, LiveSpaceError> {
+            self.writeback_framebuffer_maps.push((phys_base, len));
+            match self.next.take() {
+                Some(err) => Err(err),
+                None => Ok(0x9000_3000),
             }
         }
 
@@ -896,17 +912,21 @@ mod tests {
         // SAFETY: see above.
         let recorded = unsafe { &*ptr };
         assert_eq!(recorded.device_maps, std::vec![(0xFE98_0000, 0x4000)]);
-        // A device window never takes the framebuffer (non-cacheable) path.
+        // A device window never takes either framebuffer path.
         assert!(recorded.framebuffer_maps.is_empty());
     }
 
     #[test]
-    fn mmio_map_routes_a_framebuffer_to_the_non_cacheable_scanout_path() {
+    fn mmio_map_routes_a_write_combining_framebuffer_to_the_scanout_path() {
         let (fake, ptr) = leak_fake();
         let _guard = publish_live_space_for_test(9, fake);
 
         let producer = LiveMmioMap::new(arch_at(9));
-        let va = producer.map_window(0x8000_0000, 0x30_0000, MmioMemoryKind::Framebuffer);
+        let va = producer.map_window(
+            0x8000_0000,
+            0x30_0000,
+            MmioMemoryKind::FramebufferWriteCombine,
+        );
         assert_eq!(va, Ok(0x9000_2000));
         // SAFETY: the producer's `&mut` has ended; single-threaded read.
         let recorded = unsafe { &*ptr };

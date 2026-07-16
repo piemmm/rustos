@@ -105,6 +105,24 @@ is byte-preserving: it copies the caller's frame verbatim into the
 mapped window, bounds-checked at every write; `present_region` blits
 only the validated damage rectangle.
 
+The hardware-tree framebuffer resource also carries its discovered CPU
+memory policy. QEMU `ramfb` scans ordinary coherent guest RAM and therefore
+stays write-back cacheable. A true CPU-written display aperture requests the
+separate write-combining page attribute; a port that cannot encode WC refuses
+that mapping rather than silently substituting Device or WB memory. On
+aarch64, WC is Normal Non-Cacheable and remains distinct from bidirectional
+coherent DMA in the software PTE metadata. The HVS software fallback and its
+plane uploads use one bounds-checked bulk transfer rather than millions of
+individually checked volatile word stores.
+
+No current backend advertises Linux-style y-wrap. Linux enables y-wrap only
+when the driver explicitly reports hardware wrap and the visible and virtual
+heights align to text rows. QEMU `ramfb` has no wrap primitive, and the Pi
+firmware mailbox exposes virtual panning but does not prove wrap-at-end
+semantics; treating either as wrap could scan beyond the allocation. The
+retained console grid therefore keeps its correct coalesced damage repaint
+until a discovered backend can guarantee bounded pan or true wrap.
+
 The service binds the reserved `DISPLAY_ENDPOINT` (its manifest's
 `CAP_IPC_BIND_PRIVILEGED` — a squatter cannot intercept presents) and
 serves the `lib/display` protocol from a wait-set park: every request

@@ -23,7 +23,7 @@
 //! (`plans/DISPLAY.md` D6).
 
 use rustos_abi::driver::display::{DisplayFormat, DisplayMode};
-use rustos_abi::hwtree::HwResource;
+use rustos_abi::hwtree::{FramebufferMemory, HwResource};
 use rustos_abi::{
     HwDeviceClass, HwMatchKey, HwNode, HW_NODE_ROOT_ID, SIMPLE_FRAMEBUFFER_COMPATIBLE,
 };
@@ -52,6 +52,8 @@ pub struct BootScanout {
     pub stride_bytes: u32,
     /// Pixel encoding the platform programmed the surface with.
     pub format: DisplayFormat,
+    /// CPU mapping policy required by the discovered surface backing.
+    pub memory: FramebufferMemory,
 }
 
 /// Emit the boot display node for `scanout` into `sink`.
@@ -79,7 +81,7 @@ pub fn observe_boot_display(
         stride_bytes: scanout.stride_bytes,
         format: scanout.format,
     };
-    let Ok(resource) = HwResource::framebuffer(scanout.base, &mode) else {
+    let Ok(resource) = HwResource::framebuffer(scanout.base, &mode, scanout.memory) else {
         return Ok(());
     };
     let Ok(key) = HwMatchKey::compatible(SIMPLE_FRAMEBUFFER_COMPATIBLE) else {
@@ -124,6 +126,7 @@ mod tests {
             height_px: 768,
             stride_bytes: 1024 * 4,
             format: DisplayFormat::Bgra8888,
+            memory: FramebufferMemory::WriteBack,
         }
     }
 
@@ -154,6 +157,10 @@ mod tests {
         assert_eq!(mode.height_px, 768);
         assert_eq!(mode.stride_bytes, 4096);
         assert_eq!(mode.format, DisplayFormat::Bgra8888);
+        assert_eq!(
+            resource.framebuffer_memory(),
+            Ok(FramebufferMemory::WriteBack)
+        );
     }
 
     #[test]
