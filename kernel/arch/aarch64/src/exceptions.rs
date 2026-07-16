@@ -176,6 +176,22 @@ extern "C" {
 /// `vectors.s`, satisfying the `VBAR_EL1` alignment requirement.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub unsafe fn init_vectors() {
+    // The vector entry/exit path (`vectors.s`) unconditionally saves and
+    // restores the full FP/SIMD register file (q0..q31, FPCR, FPSR), so
+    // FP/SIMD must not trap at EL1 before the first exception is taken:
+    // otherwise the handler's first `stp q0, q1` would itself trap back
+    // into this same synchronous vector and recurse forever, hanging the
+    // core. Enabling it here — the one chokepoint that arms the FP-using
+    // table — makes installing the vectors and enabling the FP their
+    // handler needs one indivisible step, so no consumer can arm the
+    // table without it. Idempotent, so a caller that already enabled FP
+    // for its own early NEON code loses nothing.
+    // SAFETY: `enable_fp_el1` only clears this CPU's `CPACR_EL1` FP/SIMD
+    // trap; it confers no cross-privilege authority and this routine runs
+    // before the CPU takes any exception.
+    unsafe {
+        crate::kernel_arch::enable_fp_el1();
+    }
     // Arm the fault-windowed user copy alongside the vector table: the
     // two are one mechanism (the handler below redirects an in-window
     // same-EL data abort to the copy's fix-up), so no consumer can
