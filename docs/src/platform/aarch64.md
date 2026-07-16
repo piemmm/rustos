@@ -2312,6 +2312,20 @@ single-CPU self-target best-effort send. The `rustos-test-ipi-smp-qemu-aarch64`
 vertical above proves the full start-core → enable-IPI → directed-SGI →
 callback path on two emulated cores.
 
+`gic::send_sgi` issues a `dsb ishst` (`GicMmio::publish_barrier`)
+immediately before the `GICD_SGIR` write. Raising the reschedule IPI is a
+cross-CPU hand-off: the waker enqueues the woken task (a normal-memory
+store in `Scheduler::wake_from_parked`) and *then* signals the target.
+On a weakly-ordered PE the enqueue is not guaranteed observable to the
+target before it takes the SGI, so without the barrier the target's next
+dispatch can read a stale, empty run queue and re-park, stranding the
+woken task — a lost wake-up that hangs the system. It reproduced only on
+real multi-core hardware (the Pi 4's Cortex-A72), never under QEMU's
+stronger emulated ordering. The barrier is the store analogue of the
+mask-before-wake fence `GicController::mask` issues, and the host
+`send_sgi_publishes_prior_stores_before_raising_the_interrupt` test pins
+the publish-before-signal order.
+
 Secondary bring-up is reached through the Arch HAL `SecondaryBringup`
 slice (`rustos_arch_api::smp`, `plans/WIRING.md` Stage W14):
 `Aarch64Arch::start_secondary(cpu)` resolves the dense `CpuId` to its

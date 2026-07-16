@@ -29,9 +29,9 @@
 
 use core::convert::Infallible;
 
-use rustos_abi::driver::dma::PoolId;
+use rustos_abi::driver::dma::{DmaHost, DmaSlab, PoolId};
 use rustos_abi::driver::sole_register_window;
-use rustos_abi::{CapabilityId, DriverHost, DriverKind, IrqHandle, MmioMapper};
+use rustos_abi::{CapabilityId, DriverError, DriverHost, DriverKind, IrqHandle, MmioMapper};
 use rustos_arch_aarch64::fdt::gic_device_intid;
 use rustos_arch_aarch64::paging::{
     configured_identity_gigapages, AddressSpace as ArchAddressSpace, PageTablePool,
@@ -48,12 +48,15 @@ use rustos_kernel_core::{
 };
 use rustos_kernel_irq::{IrqTable, WaitOutcome};
 use rustos_kernel_mem::{
-    AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, MemoryPressure, MmioMap, VirtAddr,
+    AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, MemoryPressure, MmioMap, PageTable,
+    VirtAddr,
 };
 use rustos_kernel_sec::captable::TaskCapabilities;
+use rustos_kernel_sec::dma::{alloc_dma, DmaGateError};
 use rustos_kernel_sec::identity::UserId;
 use rustos_kernel_virtio::{provision_virtio_mmio, KernelMmioMapper, KernelVirtioHost};
 use rustos_log::{Level, Sink};
+use rustos_sync::SpinLock;
 
 use crate::aarch64::arch_wrapper::{
     UART_CONSOLE, UART_CONSOLE_READ, VIDEO_CONSOLE, VIDEO_KEYBOARD,
@@ -517,7 +520,7 @@ fn run_unlock(
 
     match binding.driver_path {
         VIRTIO_BLK_PATH => virtio_blk_unlock(&coop, caller, dtb, frames, env),
-        EMMC2_PATH => emmc2_unlock(&coop, caller, binding, dtb, env),
+        EMMC2_PATH => emmc2_unlock(&coop, caller, binding, dtb, frames, env),
         _ => Err("root-unlock: bound block driver is not a known floor driver"),
     }
 }
@@ -668,24 +671,25 @@ fn virtio_blk_unlock<'a>(
 /// path and hand it to the shared [`finish_unlock`] tail (`plans/PI.md`
 /// P8/B4).
 ///
-/// Unlike the virtio path there is no DMA pool — EMMC2 transfers move data
-/// through the SDHCI buffer-data port (programmed I/O) — but the controller's
+/// Like the virtio path it wires a per-driver DMA pool so the SDHCI engine
+/// moves transfers by ADMA2 (the fast path), and the controller's
 /// completions are taken on its **bound GIC interrupt line**, never by
-/// busy-spinning a status register. Two
-/// resources are therefore wired: the SDHCI register window (the matched
-/// node's sole register-window grant) is mapped under
-/// `CAP_MMIO_MAP` through the kernel mapper, and the controller's GIC SPI —
-/// discovered from the firmware device tree ([`emmc2_spi`]), never a board
-/// constant — is bound, routed, and armed on the
-/// published IRQ table so the driver blocks on completion through the shared
-/// parking waiter ([`Emmc2Completion`]). `raspi4b`
-/// cannot model EMMC2 (`plans/PI.md` §0.4), so this path is host-tested at
-/// the driver level and metal-gated here.
+/// busy-spinning a status register. Three resources are therefore wired:
+/// the SDHCI register window (the matched node's sole register-window
+/// grant) is mapped under `CAP_MMIO_MAP` through the kernel mapper; a DMA
+/// staging region is carved from a `CAP_MEM_DMA`-gated [`DmaPool`] through
+/// the [`Emmc2DmaHost`]; and the controller's GIC SPI — discovered from the
+/// firmware device tree ([`emmc2_spi`]), never a board constant — is bound,
+/// routed, and armed on the published IRQ table so the driver blocks on
+/// completion through the shared parking waiter ([`Emmc2Completion`]).
+/// `raspi4b` cannot model EMMC2 (`plans/PI.md` §0.4), so this path is
+/// host-tested at the driver level and metal-gated here.
 fn emmc2_unlock<'a>(
     coop: &'a CooperativeYield<'a>,
     caller: &'static TaskCapabilities,
     binding: &RootBlockBinding,
     dtb: u64,
+    frames: &'static FrameAllocator,
     env: UnlockEnv,
 ) -> Result<Infallible, &'static str> {
     let audit = env.audit;
@@ -770,13 +774,34 @@ fn emmc2_unlock<'a>(
         .map_err(|_| "root-unlock: mmio map")?,
     ));
 
-    // Map the window under `CAP_MMIO_MAP` and bring the card online. The
-    // opened `Emmc2` retains a `RegisterWindow` pointing into the leaked
-    // `'static` `mmio` window backing, so it stays valid for life. The
-    // mapper/host borrow of `mmio` ends with this block.
+    // Mint the per-driver DMA host the SDHCI engine carves its one ADMA2
+    // staging region from (the fast path). A second throwaway *bookkeeping*
+    // page table backs the DMA pool (device access is via the identity map
+    // through `phys`). Boot-leaked to `'static` like the rest of the device
+    // backing: the pool's frames must outlive the shared-for-life `Emmc2`,
+    // and the slab it mints is itself leaked (kernel state is never freed).
+    let dma_space = ArchAddressSpace::new_identity_gigapages(&UNLOCK_PT_POOL, gib)
+        .ok_or("root-unlock: emmc2 dma bookkeeping space")?;
+    let dma_pool = DmaPool::new(
+        AddressSpace::new(dma_space),
+        VirtAddr::new(POOL_VBASE),
+        POOL_PAGES,
+        frames,
+        phys,
+    )
+    .map_err(|_| "root-unlock: emmc2 dma pool")?;
+    let dma_host: &'static Emmc2DmaHost<'static, _, dyn Sink + Sync> = alloc::boxed::Box::leak(
+        alloc::boxed::Box::new(Emmc2DmaHost::new(dma_pool, caller, audit, PoolId::fresh())),
+    );
+
+    // Map the window under `CAP_MMIO_MAP` and bring the card online over the
+    // ADMA2 fast path (`CAP_MEM_DMA`-gated DMA host). The opened `Emmc2`
+    // retains a `RegisterWindow` pointing into the leaked `'static` `mmio`
+    // window backing and owns its DMA staging slab, so both stay valid for
+    // life. The mapper/host borrow ends with this block.
     let blk = {
         let mapper = KernelMmioMapper::new(mmio, caller, audit);
-        let host = Emmc2Host::new(*caller.effective(), &mapper);
+        let host = Emmc2Host::new(*caller.effective(), &mapper, Some(dma_host));
         rustos_drv_storage_emmc2::wiring::open_discovered(&host, regs_phys, waiter).map_err(
             |fault| {
                 // `raspi4b` cannot model EMMC2 (`plans/PI.md` §0.4), so the metal
@@ -806,26 +831,29 @@ fn emmc2_unlock<'a>(
     )
 }
 
-/// A minimal in-kernel [`DriverHost`] exposing only a capability-gated
-/// [`MmioMapper`] — the host the bootstrap-floor EMMC2 SD driver is brought
-/// up over.
+/// A minimal in-kernel [`DriverHost`] exposing a capability-gated
+/// [`MmioMapper`] and, for the fast transfer path, a [`DmaHost`] — the host
+/// the bootstrap-floor EMMC2 SD driver is brought up over.
 ///
-/// EMMC2 is programmed-I/O, so it needs no virtio/DMA host: the only host
-/// service it uses is [`MmioMapper::map_window`] for its SDHCI register
-/// block. Every map is re-checked kernel-side against `caps` by the wrapped
-/// [`KernelMmioMapper`], so the host cannot widen its own
-/// authority. Kept local to this bring-up rather than generalised, since it
-/// is the only in-kernel MMIO-only host today.
+/// The driver uses [`MmioMapper::map_window`] for its SDHCI register block
+/// and, when present, [`DmaHost::alloc_dma_zeroed`] for the one device-
+/// shared ADMA2 staging region it drives transfers through. Every map and
+/// DMA carve is re-checked kernel-side against `caps` (by the wrapped
+/// [`KernelMmioMapper`] and [`alloc_dma`]), so the host cannot widen its
+/// own authority. Kept local to this bring-up rather than generalised,
+/// since it is the only in-kernel MMIO/DMA host of this shape today.
 struct Emmc2Host<'a> {
     caps: CapabilitySet,
     mmio: &'a dyn MmioMapper,
+    dma: Option<&'a dyn DmaHost>,
 }
 
 impl<'a> Emmc2Host<'a> {
-    /// Build the host over the floor driver's `caps` and the kernel's `mmio`
-    /// mapper.
-    fn new(caps: CapabilitySet, mmio: &'a dyn MmioMapper) -> Self {
-        Self { caps, mmio }
+    /// Build the host over the floor driver's `caps`, the kernel's `mmio`
+    /// mapper, and an optional `dma` host (the ADMA2 fast path; `None`
+    /// leaves the driver on programmed I/O).
+    fn new(caps: CapabilitySet, mmio: &'a dyn MmioMapper, dma: Option<&'a dyn DmaHost>) -> Self {
+        Self { caps, mmio, dma }
     }
 }
 
@@ -842,6 +870,71 @@ impl DriverHost for Emmc2Host<'_> {
 
     fn mmio_mapper(&self) -> Option<&dyn MmioMapper> {
         Some(self.mmio)
+    }
+
+    fn dma_host(&self) -> Option<&dyn DmaHost> {
+        self.dma
+    }
+}
+
+/// A minimal boot-floor [`DmaHost`]: carves one coherent staging region for
+/// the EMMC2 driver's ADMA2 transfers from a [`DmaPool`].
+///
+/// This is deliberately *not* the tracked/freeable
+/// `KernelVirtioHost` DMA host: the root device is boot-leaked to `'static`
+/// and lives for the whole life of the kernel (kernel state is never
+/// freed), so the carve is minted with [`DmaSlab::from_leaked`] — no live
+/// slab map and no free shim — and the host carries none of the virtio
+/// interrupt machinery. `alloc_dma` re-checks `CAP_MEM_DMA` against
+/// `caller` and audits every grant, so the host adds no authority.
+struct Emmc2DmaHost<'a, P: PageTable, S: Sink + Sync + ?Sized> {
+    /// The per-driver DMA pool, behind a [`SpinLock`] so the host is
+    /// [`Sync`] (it is leaked `'static` like the rest of the device
+    /// backing). Effectively uncontended — the boot bring-up carves once.
+    pool: SpinLock<DmaPool<'a, P>>,
+    caller: &'a TaskCapabilities,
+    audit: &'a S,
+    id: PoolId,
+}
+
+impl<'a, P: PageTable, S: Sink + Sync + ?Sized> Emmc2DmaHost<'a, P, S> {
+    /// Take ownership of a [`DmaPool`] behind the capability-checking host.
+    fn new(pool: DmaPool<'a, P>, caller: &'a TaskCapabilities, audit: &'a S, id: PoolId) -> Self {
+        Self {
+            pool: SpinLock::new(pool),
+            caller,
+            audit,
+            id,
+        }
+    }
+}
+
+impl<P: PageTable, S: Sink + Sync + ?Sized> DmaHost for Emmc2DmaHost<'_, P, S> {
+    fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError> {
+        if size == 0 {
+            return Err(DriverError::BufferTooSmall);
+        }
+        let mut pool = self.pool.lock();
+        let buf = alloc_dma(&mut *pool, self.caller, size, self.audit).map_err(|e| match e {
+            DmaGateError::CapabilityMissing => DriverError::PermissionDenied,
+            // Pool exhaustion / oversize carve, and any future gate error:
+            // fail closed. The driver then degrades to programmed I/O.
+            _ => DriverError::LengthOutOfRange,
+        })?;
+        let base = pool
+            .slot_base(&buf)
+            .map_err(|_| DriverError::LengthOutOfRange)?;
+        let phys = buf.phys().as_u64();
+        let len = buf.len();
+        // SAFETY: `alloc_dma` carved exactly `len` bytes of zeroed,
+        // physically-contiguous, coherent, guard-bracketed DMA memory; `base`
+        // is its non-null CPU base and `phys` its device-visible base. The
+        // buffer is exclusively this slab's (a fresh carve). The buffer is
+        // intentionally leaked (no free shim): this host and its pool are
+        // boot-leaked to `'static`, so the frames stay valid for the life of
+        // the kernel and are never reclaimed — the sanctioned "kernel state
+        // is never freed" pattern for the root device.
+        Ok(unsafe { DmaSlab::from_leaked(phys, base, len, self.id, 0) })
     }
 }
 

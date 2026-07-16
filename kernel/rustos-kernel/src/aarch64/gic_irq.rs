@@ -1139,6 +1139,7 @@ mod tests {
             0
         }
         fn gicc_write(&self, _off: usize, _val: u32) {}
+        fn publish_barrier(&self) {}
     }
 
     // SAFETY: the mock holds only `Cell`s and is never shared across

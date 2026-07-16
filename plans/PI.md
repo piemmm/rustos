@@ -2004,7 +2004,7 @@ Pi 4 with the UART fallback proven by the detached-display boot — done
 (operator metal acceptance); everything host-provable is landed and
 tested — done.
 
-### P8 — SD-card storage (EMMC2) `[x]` (read + write paths; metal-accepted)
+### P8 — SD-card storage (EMMC2) `[x]` (ADMA2 DMA + PIO read/write; PIO metal-accepted, DMA metal-pending)
 
 **Depends on `PLAN.md` Stage 4.HW** (bind table + `devmgr` + the drvhost
 `.rxe` process-spawn path) — all landed: the aarch64 walk emits a
@@ -2030,9 +2030,9 @@ root block node against this floor is landed (`rustos_kernel::root_storage`,
 the `4135` `ROOT_STORAGE_AUTOLOAD` bind gate — Chunk B-2 below); bringing
 the bound driver up and mounting the volume is the rest of Chunk B-2.
 
-**Landed — the PIO block driver (read + write).** `drivers/storage/emmc2`
-(`rustos-drv-storage-emmc2`) is an Arasan / SDHCI-5.1 PIO block driver
-implementing `rustos_abi::driver::block::Block`:
+**Landed — the block driver (ADMA2 DMA fast path + PIO fallback).**
+`drivers/storage/emmc2` (`rustos-drv-storage-emmc2`) is an Arasan /
+SDHCI-5.1 block driver implementing `rustos_abi::driver::block::Block`:
 
 - The SDHCI command/response and block-transfer state machine (`Emmc2`)
   is written against the `SdhciHost` register seam (the one register
@@ -2046,29 +2046,52 @@ implementing `rustos_abi::driver::block::Block`:
   derives the geometry from the card CSD (`command::geometry_from_csd`,
   CSD v2). Only high-capacity, block-addressed (SDHC/SDXC) cards are
   supported; a byte-addressed, pre-v2, or CSD-v1 card is rejected
-  fail-closed (`Unsupported`, §5.4). Transfers are PIO through the
-  buffer data port in both directions — `CMD17`/`CMD18` reads,
-  `CMD24`/`CMD25` writes — so no DMA capability is needed. Every
-  controller wait (including the write buffer-ready wait) is
-  poll-budget-bounded and fails closed (`DeviceFault`) rather than
-  spinning (§2.1 / §24.4).
+  fail-closed (`Unsupported`, §5.4).
+- **Transfers use 32-bit ADMA2 DMA where possible, PIO otherwise.** When
+  the host grants a device-shared DMA staging region (`SdhciHost::
+  dma_region`, at least `DMA_REGION_BYTES` and 32-bit-addressable), the
+  engine selects ADMA2: the controller masters a whole 64 KiB chunk
+  (`DMA_STAGE_BLOCKS` = 128 blocks) over the DAT lines through a one-entry
+  descriptor (`adma::encode_tran`) the engine stages in the region, so a
+  multi-block transfer completes on a single transfer-complete interrupt
+  instead of a per-block PIO handshake, larger requests looping over the
+  chunk. Non-coherent ordering is handled with `dma_wmb`/`dma_rmb`
+  (`lib/dma-barrier`) around the doorbell — the region is Normal-NC, no
+  cache maintenance. With no DMA region the engine falls back to PIO
+  through the buffer data port (`CMD17`/`CMD18` reads, `CMD24`/`CMD25`
+  writes) — no DMA capability needed. The command/transfer-mode encoding
+  is shared between both paths (`read_command`/`write_command`, §2.2).
+  Every controller wait is poll-budget-bounded and fails closed
+  (`DeviceFault`) rather than spinning (§2.1 / §24.4).
 - `wiring::open_discovered` is the host bring-up seam: it checks
   `CAP_MMIO_MAP`, maps the discovered register window through the host's
-  `MmioMapper` (never a `const` base), and opens the engine over it.
-- 23 host tests cover `CMDTM`/CSD decode, full identification + geometry,
-  single/multi-block reads and writes (writes read back through the same
-  mock card, neighbouring blocks proven untouched), shape/range rejection
-  on both paths, the unsupported-card paths, command-error (read and
-  write) and stalled-controller fail-closed, and the `wiring` capability
-  gate. Docs: `docs/src/drivers/block.md`. **No QEMU vertical,
-  deliberately** — QEMU models no Pi EMMC2 controller (§0.4); the
-  emulation artefact is the host state-machine test.
+  `MmioMapper` (never a `const` base), carves the ADMA2 staging slab
+  through the host's `DmaHost` when present (`CAP_MEM_DMA`; PIO fallback
+  on refusal), and opens the engine over it.
+- 46 host tests cover `CMDTM`/CSD decode, ADMA2 descriptor encoding, full
+  identification + geometry, single/multi-block **and** DMA reads and
+  writes (writes read back through the same mock card, neighbouring blocks
+  proven untouched), the multi-chunk DMA split/reassembly and round trip,
+  the ADMA2-select-on-bring-up (and PIO-only-stays-PIO) branch,
+  shape/range rejection on both paths, the unsupported-card paths,
+  command-error (read and write, DMA and PIO) and stalled-controller
+  fail-closed, and the `wiring` capability gate. The `MockSdhci` models
+  the ADMA2 engine (it walks the staged descriptor table and moves the
+  data) as well as the PIO buffer port. Docs: `docs/src/drivers/block.md`.
+  **No QEMU vertical, deliberately** — QEMU models no Pi EMMC2 controller
+  (§0.4); the emulation artefact is the host state-machine test.
 
-**Accepted on metal.** A real Pi 4 boots the P9 image, reads the FAT boot
-partition and mounts the RustFS root from the SD card; the operator's UART
-log is the recorded acceptance artefact. The interrupt-driven SDHCI
-wait-parking (no busy-poll) that made the boot-time driver-store scan fast
-is landed in the driver and the aarch64 root-unlock path.
+**Metal acceptance — PIO accepted, DMA pending.** A real Pi 4 boots the P9
+image, reads the FAT boot partition and mounts the RustFS root from the SD
+card; the operator's UART log is the recorded acceptance artefact. That
+acceptance predates the DMA fast path and exercised the PIO path. The
+ADMA2 DMA fast path — now the default the aarch64 root-unlock bring-up
+wires (`emmc2_unlock` carves the staging slab from a `CAP_MEM_DMA`-gated
+`Emmc2DmaHost`) — is host-proven against the ADMA2 mock but **not yet
+metal-accepted**; re-running the metal boot checklist to confirm the DMA
+path on real hardware is the remaining P8/B4 item. The interrupt-driven
+SDHCI wait-parking (no busy-poll) is landed in the driver and the
+root-unlock path.
 
 **Done when:** host unit tests cover the SDHCI command/response + block
 transfer state machine (both transfer directions) against a mock host —
