@@ -176,6 +176,61 @@ fn a_covered_unicode_scalar_renders_its_own_glyph() {
 }
 
 #[test]
+fn hebrew_glyphs_paint_distinct_single_cells() {
+    let (mut console, mut pixels) = console_of(6, 1);
+    console.write_bytes(&mut pixels, "שלוםa".as_bytes());
+    let geometry = *console.geometry();
+    for column in 0..5 {
+        assert!(
+            cell_has(&pixels, &geometry, column, 0, DEFAULT_FOREGROUND),
+            "column {column} has no glyph ink"
+        );
+    }
+    assert_ne!(
+        cell(&pixels, &geometry, 0, 0),
+        cell(&pixels, &geometry, 1, 0)
+    );
+    assert_ne!(
+        cell(&pixels, &geometry, 1, 0),
+        cell(&pixels, &geometry, 2, 0)
+    );
+    assert_ne!(
+        cell(&pixels, &geometry, 2, 0),
+        cell(&pixels, &geometry, 3, 0)
+    );
+}
+
+#[test]
+fn hebrew_ink_survives_a_coloured_background_and_local_overwrite() {
+    let (mut console, mut pixels) = console_of(3, 1);
+    console.write_bytes(&mut pixels, "\u{1B}[48;2;10;20;30mאב".as_bytes());
+    let geometry = *console.geometry();
+    let background = pack_rgb(10, 20, 30);
+    for column in 0..2 {
+        assert!(
+            cell(&pixels, &geometry, column, 0)
+                .iter()
+                .any(|&pixel| pixel != background),
+            "Hebrew cell {column} contains only background"
+        );
+    }
+
+    console.write_bytes(&mut pixels, "\u{1B}[1;2H ".as_bytes());
+    assert!(
+        cell(&pixels, &geometry, 0, 0)
+            .iter()
+            .any(|&pixel| pixel != background),
+        "overwriting the second cell erased the first glyph"
+    );
+    assert!(
+        cell(&pixels, &geometry, 1, 0)
+            .iter()
+            .all(|&pixel| pixel == background),
+        "space did not erase exactly the selected Hebrew cell"
+    );
+}
+
+#[test]
 fn an_uncovered_scalar_renders_the_replacement_glyph() {
     // Hangul is outside the merged family: the scalar renders U+FFFD, visibly
     // wrong rather than dropped. It is double-width, so the lead cell holds the

@@ -1,11 +1,12 @@
 //! `cargo xtask font-atlas` implementation.
 //!
-//! The system text family combines Inconsolata EX (Latin, Greek, Cyrillic)
-//! with M PLUS 1 Code Regular (Japanese), both under SIL OFL 1.1 and committed
-//! as TrueType sources under `lib/font/assets/`. Inconsolata has precedence;
-//! M PLUS fills only codepoints it does not map. The renderers never parse
-//! TrueType at runtime: this command rasterises the merged repertoire into a
-//! fixed-cell, 4-bit-coverage bitmap atlas and emits it as
+//! The system text family combines Inconsolata EX (Latin, Greek, Cyrillic),
+//! M PLUS 1 Code Regular (Japanese), and Noto Sans Hebrew `ExtraCondensed`, all
+//! under SIL OFL 1.1 and committed as TrueType sources under `lib/font/assets/`.
+//! Faces have precedence in that order and each companion fills only codepoints
+//! earlier faces do not map. The renderers never parse TrueType at runtime:
+//! this command rasterises the merged repertoire into a fixed-cell,
+//! 4-bit-coverage bitmap atlas and emits it as
 //! generated data (`lib/font/src/atlas.rs` + `lib/font/src/atlas_coverage.bin`)
 //! that `lib/font` compiles in. With no arguments the command verifies the
 //! committed atlas matches a fresh generation (the `ci` drift guard, exactly
@@ -36,7 +37,9 @@ use std::path::Path;
 /// Workspace-relative path of the committed TrueType source.
 pub const DEFAULT_TTF_PATH: &str = "lib/font/assets/Inconsolata-EX.ttf";
 /// Workspace-relative path of the committed Japanese companion face.
-pub const FALLBACK_TTF_PATH: &str = "lib/font/assets/MPLUS1Code-Regular.ttf";
+pub const JAPANESE_TTF_PATH: &str = "lib/font/assets/MPLUS1Code-Regular.ttf";
+/// Workspace-relative path of the committed Hebrew companion face.
+pub const HEBREW_TTF_PATH: &str = "lib/font/assets/NotoSansHebrew-ExtraCondensed.ttf";
 /// Workspace-relative path of the generated Rust atlas view.
 pub const DEFAULT_ATLAS_RS_PATH: &str = "lib/font/src/atlas.rs";
 /// Workspace-relative path of the generated coverage payload.
@@ -861,42 +864,44 @@ struct Atlas {
     fallback: u32,
 }
 
-/// Rasterise the primary face plus codepoints supplied only by the fallback
-/// face into an [`Atlas`].
-fn build_atlas(primary_data: &[u8], fallback_data: &[u8]) -> Result<Atlas, String> {
-    let primary = Face::parse(primary_data)?;
-    let fallback_face = Face::parse(fallback_data)?;
+/// Rasterise an ordered family of faces into an [`Atlas`].
+///
+/// For an overlapping codepoint, the earliest face supplies the outline.
+fn build_atlas(face_data: &[&[u8]]) -> Result<Atlas, String> {
+    let faces = face_data
+        .iter()
+        .map(|data| Face::parse(data))
+        .collect::<Result<Vec<_>, _>>()?;
+    let primary = faces
+        .first()
+        .ok_or_else(|| parse_err("font family has no primary face"))?;
     let advance = primary.uniform_advance()?;
-    let geometry = CellGeometry::derive(&primary, advance)?;
+    let geometry = CellGeometry::derive(primary, advance)?;
     let glyph_width = geometry.width * MAX_GLYPH_CELLS;
     let mut ranges: Vec<AtlasRange> = Vec::new();
-    let mut cells = Vec::with_capacity(primary.mapped.len() + fallback_face.mapped.len());
+    let mut cells = Vec::with_capacity(faces.iter().map(|face| face.mapped.len()).sum());
     let mut fallback = None;
-    let mut primary_index = 0;
-    let mut fallback_index = 0;
-    while primary_index < primary.mapped.len() || fallback_index < fallback_face.mapped.len() {
-        let primary_mapping = primary.mapped.get(primary_index).copied();
-        let fallback_mapping = fallback_face.mapped.get(fallback_index).copied();
-        let (face, code, glyph) = match (primary_mapping, fallback_mapping) {
-            (Some((primary_code, primary_glyph)), Some((fallback_code, _)))
-                if primary_code <= fallback_code =>
+    let mut face_indices = vec![0usize; faces.len()];
+    while let Some((face_index, code, glyph)) = faces
+        .iter()
+        .enumerate()
+        .filter_map(|(face_index, face)| {
+            face.mapped
+                .get(face_indices[face_index])
+                .map(|&(code, glyph)| (face_index, code, glyph))
+        })
+        .min_by_key(|&(face_index, code, _)| (code, face_index))
+    {
+        let face = &faces[face_index];
+        for (other_face, index) in faces.iter().zip(face_indices.iter_mut()) {
+            if other_face
+                .mapped
+                .get(*index)
+                .is_some_and(|&(other_code, _)| other_code == code)
             {
-                primary_index += 1;
-                if primary_code == fallback_code {
-                    fallback_index += 1;
-                }
-                (&primary, primary_code, primary_glyph)
+                *index += 1;
             }
-            (Some((primary_code, primary_glyph)), None) => {
-                primary_index += 1;
-                (&primary, primary_code, primary_glyph)
-            }
-            (_, Some((fallback_code, fallback_glyph))) => {
-                fallback_index += 1;
-                (&fallback_face, fallback_code, fallback_glyph)
-            }
-            (None, None) => break,
-        };
+        }
         // A zero-advance combining mark rasterises like any other glyph: the
         // face draws mark outlines inside the advance-wide cell, so each
         // mark lands in its own cell — the one-scalar-per-cell model the
@@ -969,14 +974,16 @@ impl Atlas {
              //\n\
              // Emitted by `cargo xtask font-atlas --write` from the committed faces\n\
              // under `lib/font/assets/` (SIL OFL 1.1; see\n\
-             // `lib/font/assets/OFL.txt`). `cargo xtask font-atlas` (run by `ci`)\n\
+             // `lib/font/assets/OFL.txt` and `NotoSansHebrew-OFL.txt`).\n\
+             // `cargo xtask font-atlas` (run by `ci`)\n\
              // fails closed if this file drifts from a fresh generation\n\
              // (AGENTS.md §2.2: generated views are never hand-maintained).\n\n",
         );
         out.push_str(
-            "//! The generated Inconsolata EX + M PLUS 1 Code glyph atlas: fixed-cell\n\
-             //! 4-bit coverage bitmaps for the merged repertoire, plus the codepoint\n\
-             //! → glyph-index range table. Pure data; lookup and blitting live in\n\
+            "//! The generated Inconsolata EX + M PLUS 1 Code + Noto Sans Hebrew\n\
+             //! glyph atlas: fixed-cell 4-bit coverage bitmaps for the merged\n\
+             //! repertoire, plus the codepoint → glyph-index range table. Pure data;\n\
+             //! lookup and blitting live in\n\
              //! the hand-written modules of this crate.\n\n",
         );
         let _ = writeln!(
@@ -1059,13 +1066,17 @@ impl Atlas {
 /// Generate the atlas from the committed face, returning the two artefacts
 /// as `(rust_view, coverage_payload)`.
 fn generate(workspace_root: &Path) -> Result<(String, Vec<u8>), String> {
-    let ttf_path = workspace_root.join(DEFAULT_TTF_PATH);
-    let fallback_path = workspace_root.join(FALLBACK_TTF_PATH);
-    let primary_data = std::fs::read(&ttf_path)
-        .map_err(|e| format!("font-atlas: cannot read {}: {e}", ttf_path.display()))?;
-    let fallback_data = std::fs::read(&fallback_path)
-        .map_err(|e| format!("font-atlas: cannot read {}: {e}", fallback_path.display()))?;
-    let atlas = build_atlas(&primary_data, &fallback_data)?;
+    let paths = [DEFAULT_TTF_PATH, JAPANESE_TTF_PATH, HEBREW_TTF_PATH];
+    let face_data = paths
+        .map(|path| {
+            let path = workspace_root.join(path);
+            std::fs::read(&path)
+                .map_err(|e| format!("font-atlas: cannot read {}: {e}", path.display()))
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    let faces = face_data.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let atlas = build_atlas(&faces)?;
     Ok((atlas.render_rust(), atlas.coverage_bytes()))
 }
 
@@ -1123,11 +1134,18 @@ mod tests {
     }
 
     fn committed_fallback_face() -> Vec<u8> {
-        std::fs::read(workspace_root().join(FALLBACK_TTF_PATH)).expect("committed fallback face")
+        std::fs::read(workspace_root().join(JAPANESE_TTF_PATH)).expect("committed fallback face")
+    }
+
+    fn committed_hebrew_face() -> Vec<u8> {
+        std::fs::read(workspace_root().join(HEBREW_TTF_PATH)).expect("committed Hebrew face")
     }
 
     fn committed_atlas() -> Atlas {
-        build_atlas(&committed_face(), &committed_fallback_face()).expect("atlas builds")
+        let primary = committed_face();
+        let japanese = committed_fallback_face();
+        let hebrew = committed_hebrew_face();
+        build_atlas(&[&primary, &japanese, &hebrew]).expect("atlas builds")
     }
 
     /// The coverage cell for `code`, unpacked to one nibble value per pixel.
@@ -1257,6 +1275,28 @@ mod tests {
     }
 
     #[test]
+    fn hebrew_is_covered_with_single_cell_glyphs() {
+        let atlas = committed_atlas();
+        let width = atlas.geometry.width as usize * MAX_GLYPH_CELLS as usize;
+        for ch in [
+            'א', 'ב', 'ה', 'ו', 'ל', 'ם', 'ש', 'ך', 'ן', 'ף', 'ץ', '־', '׳', '״', '\u{05B0}',
+            '\u{05B8}', '\u{05BC}',
+        ] {
+            let glyph = cell_of(&atlas, u32::from(ch));
+            assert!(
+                glyph.iter().any(|&coverage| coverage > 0),
+                "{ch:?} has no ink"
+            );
+            assert!(
+                glyph
+                    .chunks(width)
+                    .all(|row| row[atlas.geometry.width as usize..].iter().all(|&c| c == 0)),
+                "{ch:?} reaches beyond its terminal cell"
+            );
+        }
+    }
+
+    #[test]
     fn fallback_is_the_replacement_character() {
         let atlas = committed_atlas();
         let cell = cell_of(&atlas, 0xFFFD);
@@ -1273,8 +1313,10 @@ mod tests {
     fn generation_is_deterministic() {
         let face = committed_face();
         let fallback_face = committed_fallback_face();
-        let a = build_atlas(&face, &fallback_face).expect("atlas builds");
-        let b = build_atlas(&face, &fallback_face).expect("atlas builds");
+        let hebrew_face = committed_hebrew_face();
+        let faces = [&face[..], &fallback_face[..], &hebrew_face[..]];
+        let a = build_atlas(&faces).expect("atlas builds");
+        let b = build_atlas(&faces).expect("atlas builds");
         assert_eq!(a.render_rust(), b.render_rust());
         assert_eq!(a.coverage_bytes(), b.coverage_bytes());
     }
@@ -1283,9 +1325,20 @@ mod tests {
     fn truncated_face_fails_closed() {
         let face = committed_face();
         let fallback_face = committed_fallback_face();
-        assert!(build_atlas(&face[..64], &fallback_face).is_err());
-        assert!(build_atlas(&face[..face.len() / 2], &fallback_face).is_err());
-        assert!(build_atlas(&face, &fallback_face[..64]).is_err());
-        assert!(build_atlas(&face, &fallback_face[..fallback_face.len() / 2]).is_err());
+        let hebrew_face = committed_hebrew_face();
+        assert!(build_atlas(&[]).is_err());
+        assert!(build_atlas(&[&face[..64], &fallback_face, &hebrew_face]).is_err());
+        assert!(build_atlas(&[&face[..face.len() / 2], &fallback_face, &hebrew_face]).is_err());
+        assert!(build_atlas(&[&face, &fallback_face[..64], &hebrew_face]).is_err());
+        assert!(build_atlas(&[
+            &face,
+            &fallback_face[..fallback_face.len() / 2],
+            &hebrew_face,
+        ])
+        .is_err());
+        assert!(build_atlas(&[&face, &fallback_face, &hebrew_face[..64]]).is_err());
+        assert!(
+            build_atlas(&[&face, &fallback_face, &hebrew_face[..hebrew_face.len() / 2],]).is_err()
+        );
     }
 }

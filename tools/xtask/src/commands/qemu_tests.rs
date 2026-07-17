@@ -12,10 +12,10 @@
 //! per-binary backing images, a `-serial stdio` console, and a unique unix
 //! monitor socket), so the only resource they contend for is host CPU. The
 //! runner weights each guest by its emulated-CPU count plus one unit for
-//! emulator/I/O work against half the host's effective logical capacity.
-//! Reserving SMT/headroom keeps process-level QEMU work from competing with a
-//! matrix that fills every reported thread with TCG vCPUs, so no guest is
-//! starved past its wall-clock deadline. See [`run_once`].
+//! emulator/I/O work against one less than half the host's effective logical
+//! capacity. Reserving SMT and host-runner headroom keeps process-level QEMU
+//! work from competing with a matrix that fills every reported thread with TCG
+//! vCPUs, so no guest is starved past its wall-clock deadline. See [`run_once`].
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -4564,11 +4564,12 @@ pub(crate) fn qemu_job_weight(cpus: u32) -> usize {
 ///
 /// TCG vCPU threads are sustained compute workloads, so two SMT siblings do
 /// not provide the same wall-clock capacity as two independent cores. Use at
-/// most half the reported logical capacity; the weighted runner still lets a
-/// heavier guest run alone when its weight exceeds this budget.
+/// most half the reported logical capacity, then reserve one unit for the host
+/// scheduler and runner; the weighted runner still lets a heavier guest run
+/// alone when its weight exceeds this budget.
 #[must_use]
 pub(crate) fn qemu_host_budget_for(logical_cpus: usize) -> usize {
-    logical_cpus.max(1).div_ceil(2)
+    logical_cpus.max(1).div_ceil(2).saturating_sub(1).max(1)
 }
 
 /// QEMU matrix capacity for this host.
@@ -4588,9 +4589,10 @@ pub(crate) fn qemu_host_budget() -> usize {
 /// whose QEMU monitor is a unique per-run unix socket, so two guests share
 /// no host resource except CPU. They are therefore run through the shared
 /// weighted-concurrency runner ([`super::parallel`]): each guest's weight is
-/// its emulated-CPU count plus one emulator/I/O unit and the budget is half
-/// the host's effective logical-CPU count, so QEMU's non-vCPU work retains
-/// capacity without treating SMT siblings as full independent TCG cores.
+/// its emulated-CPU count plus one emulator/I/O unit and the budget is one less
+/// than half the host's effective logical-CPU count, so QEMU's non-vCPU work
+/// and the host retain capacity without treating SMT siblings as full
+/// independent TCG cores.
 /// That keeps every guest's wall-clock deadline as reachable as it is for a
 /// solo run (no TCG starvation), so co-scheduling does not make a test flaky. On a single-core host the budget collapses to one and the matrix
 /// runs strictly sequentially.
@@ -5514,12 +5516,13 @@ mod tests {
     }
 
     #[test]
-    fn qemu_budget_reserves_smt_headroom() {
+    fn qemu_budget_reserves_smt_and_host_headroom() {
         assert_eq!(qemu_host_budget_for(0), 1);
         assert_eq!(qemu_host_budget_for(1), 1);
         assert_eq!(qemu_host_budget_for(2), 1);
-        assert_eq!(qemu_host_budget_for(8), 4);
-        assert_eq!(qemu_host_budget_for(9), 5);
+        assert_eq!(qemu_host_budget_for(8), 3);
+        assert_eq!(qemu_host_budget_for(9), 4);
+        assert_eq!(qemu_host_budget_for(22), 10);
     }
 
     /// The smallest wall-clock budget any enrolment may carry.

@@ -1,9 +1,9 @@
 //! The system bitmap font and the glyph blitter that draws it onto a
 //! [`Surface`].
 //!
-//! [`BitmapFont`] couples the generated Inconsolata EX + M PLUS 1 Code atlas
-//! with its metrics (cell size, pen advance, line height) and the
-//! coverage-aware blitter.
+//! [`BitmapFont`] couples the generated Inconsolata EX + M PLUS 1 Code + Noto
+//! Sans Hebrew atlas with its metrics (cell size, pen advance, line height) and
+//! the coverage-aware blitter.
 //! [`BitmapFont::draw_text`] composites each glyph onto a `lib/raster`
 //! [`Surface`] through that crate's single premultiplied-alpha
 //! [`Pixel::over`] path: the text colour is premultiplied once, scaled per
@@ -18,7 +18,7 @@ use crate::atlas;
 use crate::glyph::{lookup_or_fallback, Glyph};
 
 /// The system monospace bitmap font: Inconsolata EX with its M PLUS 1 Code
-/// Japanese companion, plus their shared layout metrics.
+/// Japanese and Noto Sans Hebrew companions, plus their shared layout metrics.
 ///
 /// The face's uniform advance already carries the inter-glyph side bearings
 /// and its ascent + descent carry the line box, so the pen advances by
@@ -27,8 +27,8 @@ use crate::glyph::{lookup_or_fallback, Glyph};
 pub struct BitmapFont(());
 
 impl BitmapFont {
-    /// The built-in family, with Inconsolata EX primary and M PLUS 1 Code for
-    /// Japanese coverage.
+    /// The built-in family, with Inconsolata EX primary, M PLUS 1 Code for
+    /// Japanese coverage, and Noto Sans Hebrew for Hebrew and Yiddish.
     #[must_use]
     pub const fn inconsolata() -> Self {
         Self(())

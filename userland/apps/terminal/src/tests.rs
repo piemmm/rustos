@@ -343,6 +343,35 @@ fn render_produces_a_surface_of_the_viewport_size() {
 }
 
 #[test]
+fn hebrew_glyphs_occupy_distinct_single_cells() {
+    let grid = render_bytes(5, 1, "אבםa".as_bytes());
+    assert_eq!(row_text(&grid, 0), "אבםa");
+
+    let overwritten = render_bytes(3, 1, "אב\u{1B}[1;2H ".as_bytes());
+    assert_eq!(glyph(&overwritten, 0, 0), 'א');
+    assert_eq!(glyph(&overwritten, 1, 0), ' ');
+}
+
+#[test]
+fn render_keeps_hebrew_ink_inside_each_coloured_cell() {
+    let mut term = Terminal::new(4, 1, QueueShell::default()).expect("valid size");
+    term.feed("\u{1B}[?25l\u{1B}[48;2;10;20;30mאבם".as_bytes());
+    let surface = crate::render(&term, &Theme::dark(), Rect::new(0, 0, 60, 28)).expect("surface");
+    let background = Color::rgb(10, 20, 30);
+    for column in 0..3 {
+        let first_x = column * 15;
+        assert!(
+            (first_x..first_x + 15).any(|x| {
+                (0..28).any(|y| {
+                    surface.get(x, y).map(rustos_raster::Pixel::unpremultiply) != Some(background)
+                })
+            }),
+            "Hebrew cell {column} contains only background"
+        );
+    }
+}
+
+#[test]
 fn render_keeps_wide_japanese_ink_over_a_coloured_background() {
     let mut term = Terminal::new(3, 1, QueueShell::default()).expect("valid size");
     term.feed("\u{1B}[?25l\u{1B}[48;2;10;20;30m日".as_bytes());

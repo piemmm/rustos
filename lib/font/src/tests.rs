@@ -74,6 +74,19 @@ fn japanese_text_has_distinct_glyphs_with_ink() {
 }
 
 #[test]
+fn hebrew_text_has_distinct_glyphs_with_ink() {
+    for ch in [
+        'א', 'ב', 'ה', 'ו', 'ל', 'ם', 'ש', 'ך', 'ן', 'ף', 'ץ', '־', '׳', '״', '\u{05B0}',
+        '\u{05B8}', '\u{05BC}',
+    ] {
+        let glyph = lookup(ch);
+        assert!(glyph.is_some(), "{ch:?} has no glyph");
+        assert_ne!(glyph, lookup('\u{FFFD}'), "{ch:?} uses the fallback glyph");
+        assert!(!lookup_or_fallback(ch).is_blank(), "{ch:?} has no ink");
+    }
+}
+
+#[test]
 fn unmapped_scalars_fall_back_to_the_replacement_glyph() {
     // Hangul and emoji remain outside the merged system family's repertoire.
     for ch in ['한', '🦀'] {

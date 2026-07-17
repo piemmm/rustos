@@ -1,4 +1,5 @@
-//! Glyph lookup over the generated Inconsolata EX + M PLUS 1 Code atlas.
+//! Glyph lookup over the generated Inconsolata EX + M PLUS 1 Code + Noto Sans
+//! Hebrew atlas.
 //!
 //! [`lookup`] maps any `char` to its atlas cell by binary search over the
 //! generated codepoint ranges ([`crate::atlas::RANGES`]); a scalar the face

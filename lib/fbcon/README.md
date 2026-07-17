@@ -7,9 +7,10 @@ tree. It turns a byte stream into on-screen text by feeding it to the single
 shared `rustos_vt::Parser`, applying each parsed `rustos_vt::Op` to a retained
 cell grid, and repainting the dirtied cells once per write onto a borrowed
 32-bit scan-out surface (`&mut [u32]`), rendering glyphs with
-the shared `rustos_font` Inconsolata EX + M PLUS 1 Code coverage atlas (15×28
-cells, 16-level anti-aliasing, the merged family's Unicode repertoire with a
-U+FFFD fallback and two-cell double-width glyphs). It is a full
+the shared `rustos_font` Inconsolata EX + M PLUS 1 Code + Noto Sans Hebrew
+coverage atlas (15×28 cells, 16-level anti-aliasing, the merged family's
+Unicode repertoire with a U+FFFD fallback and two-cell double-width glyphs).
+It is a full
 ANSI/VT/xterm-256color terminal: SGR colour (16 / 256 / truecolour), bold,
 reverse video, cursor motion, erase, DEC scroll regions, and — reaching the
 bottom of the screen — scrolling up like a real terminal rather than wrapping

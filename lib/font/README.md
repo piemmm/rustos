@@ -13,17 +13,24 @@ without duplicating a blitter (`AGENTS.md` §17.4, §2.2).
 ## The built-in family
 
 The system family keeps **Inconsolata EX** as its primary face for Latin,
-Greek, and Cyrillic, and uses **M PLUS 1 Code Regular** as its Japanese
-companion. Both are licensed under SIL Open Font License 1.1. The TrueType
-sources and licence are committed under `assets/`; nothing parses TrueType at
-runtime. Inconsolata has precedence for every overlapping codepoint, so adding
-Japanese does not change existing glyphs.
+Greek, and Cyrillic, uses **M PLUS 1 Code Regular** as its Japanese companion,
+and uses **Noto Sans Hebrew ExtraCondensed** for Hebrew and Yiddish. All three
+are licensed under SIL Open Font License 1.1. The TrueType sources and licence
+notices are committed under `assets/`; nothing parses TrueType at runtime.
+Faces have precedence in that order, so each companion fills only codepoints
+the earlier faces do not map and existing glyphs remain unchanged.
 
 The M PLUS source is the static Regular TTF from upstream commit
 `4bf69824e45a175b9121b248c46abff103569051`, SHA-256
 `c5b8c7a2dc8fe8430afa741e3525032b4878c77bc1220be5ab22bf6f21ddb405`.
 Copyright 2021 The M+ FONTS Project Authors
 (<https://github.com/coz-m/MPLUS_FONTS>).
+The Noto Sans Hebrew source is the static ExtraCondensed Regular TTF from
+upstream commit `a8c864f84fa0967d319b70a56d62f417d3142c67`, SHA-256
+`cb46b5153a5fb971b8b1a63c390d20521acf8f659f603c391d8f262459e5b8c2`.
+Copyright 2019 The Noto Project Authors
+(<https://github.com/notofonts/noto-sans-hebrew>); its upstream licence notice
+is `assets/NotoSansHebrew-OFL.txt`.
 `cargo xtask font-atlas --write` rasterises the merged repertoire into
 the generated atlas (`src/atlas.rs` + `src/atlas_coverage.bin`), and
 `cargo xtask font-atlas` (run by `ci`) fails closed if the committed atlas
@@ -42,10 +49,10 @@ TrueType reader and an anti-aliasing scanline rasteriser in
 - `glyph` — Unicode lookup over the atlas: binary search of the range table,
   the packed-nibble accessor, and the U+FFFD fallback for any scalar the face
   does not map (visibly wrong rather than silently dropped, `AGENTS.md` §2.9).
-  Coverage spans the merged 8,803-glyph repertoire: Latin and its extensions,
+  Coverage spans the merged 8,943-glyph repertoire: Latin and its extensions,
   Greek, Cyrillic (including the full Ukrainian alphabet), box drawing and
   block elements, arrows, punctuation, currency, hiragana, katakana, and
-  Japanese kanji.
+  Japanese kanji, plus Hebrew and Yiddish letters, punctuation, and marks.
 - `font::BitmapFont` — the face's metrics (cell size, pen advance, line
   height) plus the glyph blitter. `draw_text` composites each covered pixel
   onto a `lib/raster` `Surface` through that crate's single
