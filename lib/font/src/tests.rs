@@ -7,14 +7,13 @@ use crate::glyph::{lookup, lookup_or_fallback, Glyph};
 fn atlas_payload_matches_its_declared_shape() {
     assert_eq!(
         atlas::COVERAGE.len(),
-        atlas::CELL_COUNT as usize * atlas::BYTES_PER_CELL,
+        atlas::CELL_COUNT as usize * atlas::BYTES_PER_GLYPH,
         "payload length disagrees with the declared cell count"
     );
     assert_eq!(
-        atlas::COVERAGE.len()
-            % ((atlas::CELL_WIDTH as usize).div_ceil(2) * atlas::CELL_HEIGHT as usize),
+        atlas::COVERAGE.len() % atlas::BYTES_PER_GLYPH,
         0,
-        "payload is not whole packed cells"
+        "payload is not whole packed glyphs"
     );
     assert!(
         lookup('\u{FFFD}').is_some(),
@@ -65,9 +64,19 @@ fn ukrainian_cyrillic_has_glyphs_with_ink() {
 }
 
 #[test]
+fn japanese_text_has_distinct_glyphs_with_ink() {
+    for ch in ['あ', 'ア', '漢', '字', '日', '本', '語', '。', '「', '」'] {
+        let glyph = lookup(ch);
+        assert!(glyph.is_some(), "{ch:?} has no glyph");
+        assert_ne!(glyph, lookup('\u{FFFD}'), "{ch:?} uses the fallback glyph");
+        assert!(!lookup_or_fallback(ch).is_blank(), "{ch:?} has no ink");
+    }
+}
+
+#[test]
 fn unmapped_scalars_fall_back_to_the_replacement_glyph() {
-    // CJK, Hangul, and emoji are outside Inconsolata EX's repertoire.
-    for ch in ['一', '한', '🦀'] {
+    // Hangul and emoji remain outside the merged system family's repertoire.
+    for ch in ['한', '🦀'] {
         assert_eq!(lookup(ch), None);
         assert_eq!(lookup_or_fallback(ch), lookup_or_fallback('\u{FFFD}'));
     }
@@ -107,9 +116,12 @@ fn full_block_is_solid_with_no_holes() {
 }
 
 #[test]
-fn coverage_is_transparent_outside_the_cell() {
+fn coverage_is_transparent_outside_the_glyph() {
     let glyph = lookup_or_fallback('A');
-    assert_eq!(glyph.coverage(atlas::CELL_WIDTH, 0), 0);
+    for x in atlas::CELL_WIDTH..atlas::GLYPH_WIDTH {
+        assert_eq!(glyph.coverage(x, 0), 0, "narrow glyph spills at x={x}");
+    }
+    assert_eq!(glyph.coverage(atlas::GLYPH_WIDTH, 0), 0);
     assert_eq!(glyph.coverage(0, atlas::CELL_HEIGHT), 0);
     assert_eq!(glyph.coverage(u32::MAX, u32::MAX), 0);
 }
@@ -148,6 +160,7 @@ mod render {
         assert_eq!(font.text_width("abc"), 3 * font.advance());
         // Chars, not bytes: a two-byte UTF-8 scalar is still one cell.
         assert_eq!(font.text_width("é"), font.advance());
+        assert_eq!(font.text_width("日本"), 4 * font.advance());
     }
 
     #[test]
@@ -158,6 +171,8 @@ mod render {
         assert_eq!(font.truncate_to_width("hello", 3 * advance), "hel");
         assert_eq!(font.truncate_to_width("hello", advance - 1), "");
         assert_eq!(font.truncate_to_width("ééé", 2 * advance), "éé");
+        assert_eq!(font.truncate_to_width("a日本", 3 * advance), "a日");
+        assert_eq!(font.truncate_to_width("日本", advance), "");
     }
 
     #[test]
@@ -167,6 +182,20 @@ mod render {
         let pen = font.draw_text(&mut surface, 0, 0, "Hi", WHITE);
         assert_eq!(pen, i32::try_from(2 * font.advance()).expect("fits"));
         assert!(surface.pixels().iter().any(|p| p.a > 0), "no ink was drawn");
+    }
+
+    #[test]
+    fn draw_text_paints_japanese_across_two_cells() {
+        let font = BitmapFont::inconsolata();
+        let mut surface = surface();
+        let pen = font.draw_text(&mut surface, 0, 0, "日", WHITE);
+        assert_eq!(pen, i32::try_from(2 * font.advance()).expect("fits"));
+        assert!(
+            (font.advance()..2 * font.advance()).any(|x| {
+                (0..font.glyph_height()).any(|y| surface.get(x, y).is_some_and(|pixel| pixel.a > 0))
+            }),
+            "Japanese glyph has no ink in its continuation cell"
+        );
     }
 
     #[test]

@@ -1,11 +1,11 @@
 //! `cargo xtask font-atlas` implementation.
 //!
-//! The system text face is Inconsolata EX (SIL OFL 1.1), the Inconsolata-LGC
-//! project's extended build of Inconsolata covering Latin, Greek, and
-//! Cyrillic, committed as the TrueType source
-//! `lib/font/assets/Inconsolata-EX.ttf`. The renderers never parse TrueType
-//! at runtime: this command rasterises every glyph the
-//! face maps into a fixed-cell, 4-bit-coverage bitmap atlas and emits it as
+//! The system text family combines Inconsolata EX (Latin, Greek, Cyrillic)
+//! with M PLUS 1 Code Regular (Japanese), both under SIL OFL 1.1 and committed
+//! as TrueType sources under `lib/font/assets/`. Inconsolata has precedence;
+//! M PLUS fills only codepoints it does not map. The renderers never parse
+//! TrueType at runtime: this command rasterises the merged repertoire into a
+//! fixed-cell, 4-bit-coverage bitmap atlas and emits it as
 //! generated data (`lib/font/src/atlas.rs` + `lib/font/src/atlas_coverage.bin`)
 //! that `lib/font` compiles in. With no arguments the command verifies the
 //! committed atlas matches a fresh generation (the `ci` drift guard, exactly
@@ -18,11 +18,13 @@
 //! coverage). Identical input bytes produce identical output bytes on every
 //! host, so the drift guard is meaningful.
 //!
-//! Pixel geometry: the em square is [`EM_PX`] pixels tall. The face is
+//! Pixel geometry: the em square is [`EM_PX`] pixels tall. Inconsolata is
 //! strictly monospace: every spacing glyph advances by one uniform width the
-//! generator reads from the face itself, and the cell is that advance
-//! rounded to whole pixels; the cell height and baseline derive from the
-//! face's ascent and descent. Zero-advance combining marks rasterise like
+//! generator reads from the face itself, and that advance defines the terminal
+//! cell. Every bitmap slot is two cells wide so Japanese full-width outlines
+//! can cover the continuation cell reserved by `lib/vt`; narrow outlines leave
+//! the second cell transparent. Cell height and baseline derive from the
+//! primary face. Zero-advance combining marks rasterise like
 //! any other glyph — the face draws their outlines inside the advance-wide
 //! cell (GPOS anchor repositioning is a shaping concern the cell grid
 //! deliberately does not have), so each mark lands in its own cell: the same
@@ -33,6 +35,8 @@ use std::path::Path;
 
 /// Workspace-relative path of the committed TrueType source.
 pub const DEFAULT_TTF_PATH: &str = "lib/font/assets/Inconsolata-EX.ttf";
+/// Workspace-relative path of the committed Japanese companion face.
+pub const FALLBACK_TTF_PATH: &str = "lib/font/assets/MPLUS1Code-Regular.ttf";
 /// Workspace-relative path of the generated Rust atlas view.
 pub const DEFAULT_ATLAS_RS_PATH: &str = "lib/font/src/atlas.rs";
 /// Workspace-relative path of the generated coverage payload.
@@ -47,6 +51,9 @@ pub const DEFAULT_ATLAS_BIN_PATH: &str = "lib/font/src/atlas_coverage.bin";
 /// unhinted anti-aliased strokes stay crisp, small enough that a 1080p
 /// console keeps 38 rows at scale 1.
 const EM_PX: u32 = 25;
+
+/// Maximum terminal cells occupied by one generated glyph bitmap.
+const MAX_GLYPH_CELLS: u32 = 2;
 
 /// Coverage sample rows per pixel row (vertical supersampling).
 const SAMPLE_ROWS: u32 = 4;
@@ -715,13 +722,10 @@ struct CellGeometry {
     height: u32,
     /// Baseline row: pixel rows above the baseline.
     baseline: u32,
-    /// Pixels per font unit.
-    scale: f64,
 }
 
 impl CellGeometry {
     fn derive(face: &Face<'_>, advance: u16) -> Result<Self, String> {
-        let scale = f64::from(EM_PX) / f64::from(face.units_per_em);
         let units = i64::from(face.units_per_em);
         // Round the uniform advance to the nearest whole pixel: the cell grid
         // needs an integral width, and half-up rounding keeps the distortion
@@ -744,7 +748,6 @@ impl CellGeometry {
             width,
             height,
             baseline,
-            scale,
         })
     }
 }
@@ -755,8 +758,8 @@ impl CellGeometry {
 /// Non-zero winding fill: each of the [`SAMPLE_ROWS`] sample rows per pixel
 /// row contributes `1 / SAMPLE_ROWS` of a pixel's coverage, distributed over
 /// the pixels its filled spans cross with exact fractional x extents.
-fn rasterise(segments: &[Segment], geometry: &CellGeometry) -> Vec<u8> {
-    let width = geometry.width as usize;
+fn rasterise(segments: &[Segment], geometry: &CellGeometry, width: u32) -> Vec<u8> {
+    let width = width as usize;
     let mut coverage = vec![0f64; width * geometry.height as usize];
     let row_weight = 1.0 / f64::from(SAMPLE_ROWS);
     let mut crossings: Vec<(f64, i32)> = Vec::new();
@@ -851,35 +854,62 @@ struct AtlasRange {
 struct Atlas {
     geometry: CellGeometry,
     ranges: Vec<AtlasRange>,
-    /// One cell of unpacked 4-bit coverage values per mapped codepoint, in
-    /// codepoint order.
+    /// One two-cell-capable bitmap of unpacked 4-bit coverage values per
+    /// mapped codepoint, in codepoint order.
     cells: Vec<Vec<u8>>,
     /// Index of the U+FFFD replacement-character cell.
     fallback: u32,
 }
 
-/// Rasterise every mapped codepoint of `face` into an [`Atlas`].
-fn build_atlas(data: &[u8]) -> Result<Atlas, String> {
-    let face = Face::parse(data)?;
-    let advance = face.uniform_advance()?;
-    let geometry = CellGeometry::derive(&face, advance)?;
+/// Rasterise the primary face plus codepoints supplied only by the fallback
+/// face into an [`Atlas`].
+fn build_atlas(primary_data: &[u8], fallback_data: &[u8]) -> Result<Atlas, String> {
+    let primary = Face::parse(primary_data)?;
+    let fallback_face = Face::parse(fallback_data)?;
+    let advance = primary.uniform_advance()?;
+    let geometry = CellGeometry::derive(&primary, advance)?;
+    let glyph_width = geometry.width * MAX_GLYPH_CELLS;
     let mut ranges: Vec<AtlasRange> = Vec::new();
-    let mut cells = Vec::with_capacity(face.mapped.len());
+    let mut cells = Vec::with_capacity(primary.mapped.len() + fallback_face.mapped.len());
     let mut fallback = None;
-    for &(code, glyph) in &face.mapped {
+    let mut primary_index = 0;
+    let mut fallback_index = 0;
+    while primary_index < primary.mapped.len() || fallback_index < fallback_face.mapped.len() {
+        let primary_mapping = primary.mapped.get(primary_index).copied();
+        let fallback_mapping = fallback_face.mapped.get(fallback_index).copied();
+        let (face, code, glyph) = match (primary_mapping, fallback_mapping) {
+            (Some((primary_code, primary_glyph)), Some((fallback_code, _)))
+                if primary_code <= fallback_code =>
+            {
+                primary_index += 1;
+                if primary_code == fallback_code {
+                    fallback_index += 1;
+                }
+                (&primary, primary_code, primary_glyph)
+            }
+            (Some((primary_code, primary_glyph)), None) => {
+                primary_index += 1;
+                (&primary, primary_code, primary_glyph)
+            }
+            (_, Some((fallback_code, fallback_glyph))) => {
+                fallback_index += 1;
+                (&fallback_face, fallback_code, fallback_glyph)
+            }
+            (None, None) => break,
+        };
         // A zero-advance combining mark rasterises like any other glyph: the
         // face draws mark outlines inside the advance-wide cell, so each
         // mark lands in its own cell — the one-scalar-per-cell model the
         // terminal stack documents.
         let mut sink = OutlineSink {
             segments: Vec::new(),
-            scale: geometry.scale,
+            scale: f64::from(EM_PX) / f64::from(face.units_per_em),
             origin_x: 0.0,
             baseline_y: f64::from(geometry.baseline),
             transform: Affine::IDENTITY,
         };
-        outline_glyph(&face, glyph, &mut sink, 0)?;
-        let cell = rasterise(&sink.segments, &geometry);
+        outline_glyph(face, glyph, &mut sink, 0)?;
+        let cell = rasterise(&sink.segments, &geometry, glyph_width);
         let index = u32::try_from(cells.len())
             .map_err(|_| parse_err("more mapped codepoints than fit a u32 index"))?;
         if code == u32::from(char::REPLACEMENT_CHARACTER) {
@@ -906,18 +936,19 @@ fn build_atlas(data: &[u8]) -> Result<Atlas, String> {
 }
 
 impl Atlas {
-    /// Packed bytes per glyph cell: two 4-bit pixels per byte, rows padded to
-    /// whole bytes.
-    fn bytes_per_cell(&self) -> usize {
-        (self.geometry.width as usize).div_ceil(2) * self.geometry.height as usize
+    /// Packed bytes per glyph bitmap: two 4-bit pixels per byte, rows padded
+    /// to whole bytes.
+    fn bytes_per_glyph(&self) -> usize {
+        (self.geometry.width as usize * MAX_GLYPH_CELLS as usize).div_ceil(2)
+            * self.geometry.height as usize
     }
 
-    /// The packed coverage payload: every cell concatenated in codepoint
+    /// The packed coverage payload: every glyph bitmap concatenated in codepoint
     /// order, each row packed two pixels per byte, left pixel in the high
     /// nibble.
     fn coverage_bytes(&self) -> Vec<u8> {
-        let width = self.geometry.width as usize;
-        let mut bytes = Vec::with_capacity(self.cells.len() * self.bytes_per_cell());
+        let width = self.geometry.width as usize * MAX_GLYPH_CELLS as usize;
+        let mut bytes = Vec::with_capacity(self.cells.len() * self.bytes_per_glyph());
         for cell in &self.cells {
             for row in cell.chunks(width) {
                 for pair in row.chunks(2) {
@@ -936,16 +967,16 @@ impl Atlas {
         out.push_str(
             "// GENERATED FILE — DO NOT EDIT.\n\
              //\n\
-             // Emitted by `cargo xtask font-atlas --write` from the committed face\n\
-             // `lib/font/assets/Inconsolata-EX.ttf` (SIL OFL 1.1; see\n\
+             // Emitted by `cargo xtask font-atlas --write` from the committed faces\n\
+             // under `lib/font/assets/` (SIL OFL 1.1; see\n\
              // `lib/font/assets/OFL.txt`). `cargo xtask font-atlas` (run by `ci`)\n\
              // fails closed if this file drifts from a fresh generation\n\
              // (AGENTS.md §2.2: generated views are never hand-maintained).\n\n",
         );
         out.push_str(
-            "//! The generated Inconsolata EX glyph atlas: fixed-cell 4-bit coverage\n\
-             //! bitmaps for every codepoint the face maps, plus the codepoint →\n\
-             //! cell-index range table. Pure data; the lookup and blitting live in\n\
+            "//! The generated Inconsolata EX + M PLUS 1 Code glyph atlas: fixed-cell\n\
+             //! 4-bit coverage bitmaps for the merged repertoire, plus the codepoint\n\
+             //! → glyph-index range table. Pure data; lookup and blitting live in\n\
              //! the hand-written modules of this crate.\n\n",
         );
         let _ = writeln!(
@@ -954,6 +985,13 @@ impl Atlas {
              /// whole pixels).\n\
              pub const CELL_WIDTH: u32 = {};\n",
             self.geometry.width
+        );
+        let _ = writeln!(
+            out,
+            "/// Maximum glyph bitmap width in pixels. Wide glyphs may cover both\n\
+             /// terminal cells; narrow glyphs leave the second cell transparent.\n\
+             pub const GLYPH_WIDTH: u32 = {};\n",
+            self.geometry.width * MAX_GLYPH_CELLS
         );
         let _ = writeln!(
             out,
@@ -972,7 +1010,13 @@ impl Atlas {
             "/// Packed bytes per glyph cell (two 4-bit pixels per byte, rows padded\n\
              /// to whole bytes).\n\
              pub const BYTES_PER_CELL: usize = {};\n",
-            self.bytes_per_cell()
+            (self.geometry.width as usize).div_ceil(2) * self.geometry.height as usize
+        );
+        let _ = writeln!(
+            out,
+            "/// Packed bytes per two-cell-capable glyph bitmap.\n\
+             pub const BYTES_PER_GLYPH: usize = {};\n",
+            self.bytes_per_glyph()
         );
         let _ = writeln!(
             out,
@@ -983,7 +1027,7 @@ impl Atlas {
         );
         let _ = writeln!(
             out,
-            "/// Total glyph cells in [`COVERAGE`].\n\
+            "/// Total glyph bitmaps in [`COVERAGE`].\n\
              pub const CELL_COUNT: u32 = {};\n",
             self.cells.len()
         );
@@ -1002,8 +1046,8 @@ impl Atlas {
         }
         out.push_str("];\n\n");
         out.push_str(
-            "/// The packed coverage payload: [`CELL_COUNT`] cells of\n\
-             /// [`BYTES_PER_CELL`] bytes each, in range order. Within a cell: row\n\
+            "/// The packed coverage payload: [`CELL_COUNT`] glyph bitmaps of\n\
+             /// [`BYTES_PER_GLYPH`] bytes each, in range order. Within a bitmap: row\n\
              /// major, two 4-bit pixels per byte, left pixel in the high nibble,\n\
              /// `0` transparent through `15` fully covered.\n\
              pub static COVERAGE: &[u8] = include_bytes!(\"atlas_coverage.bin\");\n",
@@ -1016,9 +1060,12 @@ impl Atlas {
 /// as `(rust_view, coverage_payload)`.
 fn generate(workspace_root: &Path) -> Result<(String, Vec<u8>), String> {
     let ttf_path = workspace_root.join(DEFAULT_TTF_PATH);
-    let data = std::fs::read(&ttf_path)
+    let fallback_path = workspace_root.join(FALLBACK_TTF_PATH);
+    let primary_data = std::fs::read(&ttf_path)
         .map_err(|e| format!("font-atlas: cannot read {}: {e}", ttf_path.display()))?;
-    let atlas = build_atlas(&data)?;
+    let fallback_data = std::fs::read(&fallback_path)
+        .map_err(|e| format!("font-atlas: cannot read {}: {e}", fallback_path.display()))?;
+    let atlas = build_atlas(&primary_data, &fallback_data)?;
     Ok((atlas.render_rust(), atlas.coverage_bytes()))
 }
 
@@ -1045,7 +1092,7 @@ pub fn check_sync(workspace_root: &Path) -> Result<(), String> {
             "font-atlas: `{}` is out of sync with `{}`; \
              run `cargo xtask font-atlas --write` and commit the result.",
             path.display(),
-            DEFAULT_TTF_PATH,
+            "the committed font sources",
         )
     };
     let committed_rs = std::fs::read(&rs_path).map_err(|_| drifted(&rs_path))?;
@@ -1075,6 +1122,14 @@ mod tests {
         std::fs::read(workspace_root().join(DEFAULT_TTF_PATH)).expect("committed face")
     }
 
+    fn committed_fallback_face() -> Vec<u8> {
+        std::fs::read(workspace_root().join(FALLBACK_TTF_PATH)).expect("committed fallback face")
+    }
+
+    fn committed_atlas() -> Atlas {
+        build_atlas(&committed_face(), &committed_fallback_face()).expect("atlas builds")
+    }
+
     /// The coverage cell for `code`, unpacked to one nibble value per pixel.
     fn cell_of(atlas: &Atlas, code: u32) -> &[u8] {
         let range = atlas
@@ -1088,18 +1143,18 @@ mod tests {
 
     #[test]
     fn geometry_matches_the_face_metrics() {
-        let atlas = build_atlas(&committed_face()).expect("atlas builds");
+        let atlas = committed_atlas();
         // Inconsolata EX: 1024 upm, ascent 939, descent 198, advance 613,
         // at a 25 px em.
         assert_eq!(atlas.geometry.width, 15);
         assert_eq!(atlas.geometry.height, 28);
         assert_eq!(atlas.geometry.baseline, 23);
-        assert_eq!(atlas.bytes_per_cell(), 8 * 28);
+        assert_eq!(atlas.bytes_per_glyph(), 15 * 28);
     }
 
     #[test]
     fn ranges_are_sorted_dense_and_non_overlapping() {
-        let atlas = build_atlas(&committed_face()).expect("atlas builds");
+        let atlas = committed_atlas();
         let mut previous_end = 0u32;
         let mut expected_base = 0u32;
         for range in &atlas.ranges {
@@ -1117,7 +1172,7 @@ mod tests {
 
     #[test]
     fn printable_ascii_is_covered_and_space_is_blank() {
-        let atlas = build_atlas(&committed_face()).expect("atlas builds");
+        let atlas = committed_atlas();
         for code in 0x20..=0x7Eu32 {
             assert!(
                 atlas
@@ -1139,7 +1194,7 @@ mod tests {
 
     #[test]
     fn box_drawing_full_block_is_solid() {
-        let atlas = build_atlas(&committed_face()).expect("atlas builds");
+        let atlas = committed_atlas();
         // U+2588 FULL BLOCK: a monospace face draws it edge to edge, so the
         // whole cell interior must be fully covered.
         let cell = cell_of(&atlas, 0x2588);
@@ -1147,7 +1202,7 @@ mod tests {
             .iter()
             .fold(0usize, |count, &c| count + usize::from(c == 15));
         assert!(
-            solid * 10 >= cell.len() * 9,
+            solid * 10 >= (cell.len() / 2) * 9,
             "full block is only {solid}/{} solid",
             cell.len()
         );
@@ -1155,7 +1210,7 @@ mod tests {
 
     #[test]
     fn combining_mark_is_rendered_as_a_spacing_glyph() {
-        let atlas = build_atlas(&committed_face()).expect("atlas builds");
+        let atlas = committed_atlas();
         // U+0301 COMBINING ACUTE ACCENT: zero advance, but the face draws
         // its outline inside the advance-wide cell, so it must have visible
         // ink.
@@ -1167,7 +1222,7 @@ mod tests {
 
     #[test]
     fn cyrillic_is_covered_with_ink() {
-        let atlas = build_atlas(&committed_face()).expect("atlas builds");
+        let atlas = committed_atlas();
         // The whole Cyrillic block the face maps must rasterise with real
         // ink, not fall back to U+FFFD — the Ukrainian console regression:
         // і ї є ґ plus the base alphabet.
@@ -1180,8 +1235,30 @@ mod tests {
     }
 
     #[test]
+    fn japanese_is_covered_with_two_cell_glyphs() {
+        let atlas = committed_atlas();
+        let width = atlas.geometry.width as usize * MAX_GLYPH_CELLS as usize;
+        for ch in ['あ', 'ア', '漢', '字', '日', '本', '語', '。', '「', '」'] {
+            let glyph = cell_of(&atlas, u32::from(ch));
+            assert!(
+                glyph.iter().any(|&coverage| coverage > 0),
+                "{ch:?} has no ink"
+            );
+        }
+        for ch in ['あ', 'ア', '漢', '字', '日', '本', '語'] {
+            let glyph = cell_of(&atlas, u32::from(ch));
+            assert!(
+                glyph
+                    .chunks(width)
+                    .any(|row| row[atlas.geometry.width as usize..].iter().any(|&c| c > 0)),
+                "{ch:?} never reaches its continuation cell"
+            );
+        }
+    }
+
+    #[test]
     fn fallback_is_the_replacement_character() {
-        let atlas = build_atlas(&committed_face()).expect("atlas builds");
+        let atlas = committed_atlas();
         let cell = cell_of(&atlas, 0xFFFD);
         assert!(cell.iter().any(|&c| c > 0), "U+FFFD has no ink");
         let range = atlas
@@ -1195,8 +1272,9 @@ mod tests {
     #[test]
     fn generation_is_deterministic() {
         let face = committed_face();
-        let a = build_atlas(&face).expect("atlas builds");
-        let b = build_atlas(&face).expect("atlas builds");
+        let fallback_face = committed_fallback_face();
+        let a = build_atlas(&face, &fallback_face).expect("atlas builds");
+        let b = build_atlas(&face, &fallback_face).expect("atlas builds");
         assert_eq!(a.render_rust(), b.render_rust());
         assert_eq!(a.coverage_bytes(), b.coverage_bytes());
     }
@@ -1204,7 +1282,10 @@ mod tests {
     #[test]
     fn truncated_face_fails_closed() {
         let face = committed_face();
-        assert!(build_atlas(&face[..64]).is_err());
-        assert!(build_atlas(&face[..face.len() / 2]).is_err());
+        let fallback_face = committed_fallback_face();
+        assert!(build_atlas(&face[..64], &fallback_face).is_err());
+        assert!(build_atlas(&face[..face.len() / 2], &fallback_face).is_err());
+        assert!(build_atlas(&face, &fallback_face[..64]).is_err());
+        assert!(build_atlas(&face, &fallback_face[..fallback_face.len() / 2]).is_err());
     }
 }

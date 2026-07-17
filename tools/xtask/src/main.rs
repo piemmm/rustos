@@ -36,8 +36,8 @@
 //!   its source of truth in `lib/abi`
 //! - `c-header`     — generates (`--write`) or verifies the C ABI
 //!   development header in `include/` from the `lib/abi` source of truth
-//! - `font-atlas`   — generates (`--write`) or verifies the Inconsolata EX
-//!   glyph atlas in `lib/font/src/` from the committed face in
+//! - `font-atlas`   — generates (`--write`) or verifies the system font
+//!   glyph atlas in `lib/font/src/` from the committed faces in
 //!   `lib/font/assets/`
 //! - `devids`       — verifies the compact PCI/USB ID-database tables (each
 //!   inside its consuming command bundle's `Resources/`) against the vetted

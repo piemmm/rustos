@@ -1,4 +1,4 @@
-//! Glyph lookup over the generated Inconsolata EX atlas.
+//! Glyph lookup over the generated Inconsolata EX + M PLUS 1 Code atlas.
 //!
 //! [`lookup`] maps any `char` to its atlas cell by binary search over the
 //! generated codepoint ranges ([`crate::atlas::RANGES`]); a scalar the face
@@ -10,24 +10,25 @@
 
 use crate::atlas;
 
-/// One glyph cell: [`atlas::CELL_WIDTH`] × [`atlas::CELL_HEIGHT`] pixels of
-/// 4-bit coverage.
+/// One glyph bitmap: up to [`atlas::GLYPH_WIDTH`] × [`atlas::CELL_HEIGHT`]
+/// pixels of 4-bit coverage. Narrow glyphs leave the second cell transparent;
+/// full-width glyphs may cover it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Glyph {
-    /// The cell's [`atlas::BYTES_PER_CELL`] packed bytes: row major, two
+    /// The glyph's [`atlas::BYTES_PER_GLYPH`] packed bytes: row major, two
     /// pixels per byte, left pixel in the high nibble.
     data: &'static [u8],
 }
 
 /// Packed bytes per glyph row (two 4-bit pixels per byte).
-const BYTES_PER_ROW: usize = (atlas::CELL_WIDTH as usize).div_ceil(2);
+const BYTES_PER_ROW: usize = (atlas::GLYPH_WIDTH as usize).div_ceil(2);
 
 impl Glyph {
     /// The atlas cell at `index`, or `None` when the index (or the payload
     /// itself) is short — fail closed, never out of bounds.
     fn at(index: u32) -> Option<Self> {
-        let start = index as usize * atlas::BYTES_PER_CELL;
-        let data = atlas::COVERAGE.get(start..start + atlas::BYTES_PER_CELL)?;
+        let start = index as usize * atlas::BYTES_PER_GLYPH;
+        let data = atlas::COVERAGE.get(start..start + atlas::BYTES_PER_GLYPH)?;
         Some(Self { data })
     }
 
@@ -41,10 +42,10 @@ impl Glyph {
     }
 
     /// The coverage of pixel `(x, y)`: `0` (transparent) through `15` (fully
-    /// covered). Out-of-cell coordinates are transparent.
+    /// covered). Out-of-glyph coordinates are transparent.
     #[must_use]
     pub fn coverage(&self, x: u32, y: u32) -> u8 {
-        if x >= atlas::CELL_WIDTH || y >= atlas::CELL_HEIGHT {
+        if x >= atlas::GLYPH_WIDTH || y >= atlas::CELL_HEIGHT {
             return 0;
         }
         let byte = self

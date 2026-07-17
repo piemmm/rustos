@@ -145,6 +145,34 @@ fn a_wide_glyph_on_a_one_column_grid_never_leaks_into_the_next_row() {
 }
 
 #[test]
+fn overwriting_either_half_of_a_wide_glyph_clears_the_other_half() {
+    for col in [0, 1] {
+        let mut grid = Grid::new(4, 1).expect("valid size");
+        grid.write_char('日');
+        grid.move_to(col, 0);
+        grid.write_char('x');
+
+        assert_eq!(glyph(&grid, col, 0), 'x');
+        assert_eq!(glyph(&grid, 1 - col, 0), ' ');
+    }
+}
+
+#[test]
+fn partial_erase_expands_to_clear_a_complete_wide_glyph() {
+    let mut grid = Grid::new(4, 1).expect("valid size");
+    grid.write_char('日');
+    grid.move_to(0, 0);
+    grid.erase_in_line(rustos_vt::EraseMode::ToStart);
+    assert_eq!((glyph(&grid, 0, 0), glyph(&grid, 1, 0)), (' ', ' '));
+
+    grid.move_to(0, 0);
+    grid.write_char('日');
+    grid.move_to(1, 0);
+    grid.erase_in_line(rustos_vt::EraseMode::ToEnd);
+    assert_eq!((glyph(&grid, 0, 0), glyph(&grid, 1, 0)), (' ', ' '));
+}
+
+#[test]
 fn writing_text_fills_cells_and_advances_cursor() {
     let grid = render_bytes(20, 3, b"hi");
     assert_eq!(row_text(&grid, 0), "hi");
@@ -312,6 +340,22 @@ fn render_produces_a_surface_of_the_viewport_size() {
     let surface = crate::render(&term, &theme, Rect::new(0, 0, 120, 40)).expect("surface");
     assert_eq!(surface.width(), 120);
     assert_eq!(surface.height(), 40);
+}
+
+#[test]
+fn render_keeps_wide_japanese_ink_over_a_coloured_background() {
+    let mut term = Terminal::new(3, 1, QueueShell::default()).expect("valid size");
+    term.feed("\u{1B}[?25l\u{1B}[48;2;10;20;30m日".as_bytes());
+    let surface = crate::render(&term, &Theme::dark(), Rect::new(0, 0, 45, 28)).expect("surface");
+    let background = Color::rgb(10, 20, 30);
+    assert!(
+        (15..30).any(|x| {
+            (0..28).any(|y| {
+                surface.get(x, y).map(rustos_raster::Pixel::unpremultiply) != Some(background)
+            })
+        }),
+        "the continuation cell contains only background"
+    );
 }
 
 #[test]

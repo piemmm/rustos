@@ -15,12 +15,15 @@ publish.workspace = true
 # Optional: the `glyphs` atlas alone is `const` data, and atlas-only
 # consumers (the aarch64 framebuffer boot console) must stay `alloc`-free.
 rustos-raster = { path = "../raster", version = "=0.0.0", optional = true }
+# The one Unicode terminal-column width definition. The bitmap blitter uses it
+# to advance wide CJK scalars by the same two cells every terminal grid reserves.
+rustos-vt = { path = "../vt", version = "=0.0.0", optional = true }
 
 [features]
 default = ["render"]
 # The `lib/raster`-backed glyph blitter (`font::BitmapFont`). Disable
 # default features for the atlas-only, allocator-free view.
-render = ["dep:rustos-raster"]
+render = ["dep:rustos-raster", "dep:rustos-vt"]
 
 [lints]
 workspace = true

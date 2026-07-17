@@ -159,7 +159,10 @@ unchanged (`AGENTS.md` §5.4).
 
 `render(terminal, theme, viewport)` paints the grid into a `rustos-raster`
 `Surface` sized to the viewport, using the theme's palette and the shared
-`rustos-font` monospace face. Each cell is drawn with its own rendition: its
+`rustos-font` monospace family (Inconsolata EX plus the M PLUS 1 Code Japanese
+companion). A Japanese full-width bitmap paints its lead and continuation cells
+as one unit, so a continuation-cell background cannot erase half the glyph.
+Each cell is drawn with its own rendition: its
 `lib/vt` `Attributes` select the foreground and background, resolved one way
 (`AGENTS.md` §2.2) — a `Default` colour takes the theme's `on_surface` /
 `surface` roles, the 16 basic colours and the 256-colour palette map through

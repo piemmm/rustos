@@ -32,7 +32,7 @@ use rustos_font::BitmapFont;
 use rustos_geometry::Rect;
 use rustos_raster::{Color, Surface};
 use rustos_theme::{Palette, Theme};
-use rustos_vt::{Attributes, BasicColor, Color as VtColor, CONTINUATION};
+use rustos_vt::{char_width, Attributes, BasicColor, Color as VtColor, CONTINUATION};
 
 use crate::grid::Grid;
 use crate::shell::ShellSource;
@@ -87,20 +87,30 @@ fn draw_cells(
     let base = Color::from(palette.surface);
     for row in 0..grid.rows() {
         let y = line_height.saturating_mul(u32::from(row));
-        for col in 0..grid.cols() {
+        let mut col = 0;
+        while col < grid.cols() {
             let Some(cell) = grid.cell(col, row) else {
+                col += 1;
                 continue;
             };
+            if cell.ch == CONTINUATION {
+                col += 1;
+                continue;
+            }
             let x = cell_width.saturating_mul(u32::from(col));
             let (fg, bg) = resolve_colors(cell.attrs, palette);
+            let cells = char_width(cell.ch);
             if bg != base {
-                surface.fill_rect(x, y, cell_width, line_height, bg);
+                surface.fill_rect(
+                    x,
+                    y,
+                    cell_width.saturating_mul(u32::from(cells)),
+                    line_height,
+                    bg,
+                );
             }
-            // A wide glyph's continuation cell is covered by the lead glyph;
-            // it paints background only, never a glyph of its own.
-            if cell.ch != CONTINUATION {
-                draw_glyph(surface, font, to_i32(x), to_i32(y), cell.ch, fg);
-            }
+            draw_glyph(surface, font, to_i32(x), to_i32(y), cell.ch, fg);
+            col = col.saturating_add(cells);
         }
     }
 }

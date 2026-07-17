@@ -199,12 +199,17 @@ impl Grid {
         }
         let pen = self.pen;
         if width == 2 && self.cursor_col.saturating_add(1) >= self.cols {
+            self.clear_wide_at(self.cursor_col, self.cursor_row);
             let index = self.index(self.cursor_col, self.cursor_row);
             if let Some(cell) = self.cells.get_mut(index) {
                 *cell = Cell::styled(' ', pen);
             }
             self.carriage_return();
             self.line_feed();
+        }
+        self.clear_wide_at(self.cursor_col, self.cursor_row);
+        if width == 2 {
+            self.clear_wide_at(self.cursor_col.saturating_add(1), self.cursor_row);
         }
         let index = self.index(self.cursor_col, self.cursor_row);
         if let Some(cell) = self.cells.get_mut(index) {
@@ -435,13 +440,53 @@ impl Grid {
         usize::from(row) * usize::from(self.cols) + usize::from(col)
     }
 
-    /// Blank the half-open cell range `start..end`, clamped to the buffer.
+    /// Clear the complete wide glyph, if any, intersecting `(col, row)`.
+    fn clear_wide_at(&mut self, col: u16, row: u16) {
+        if col >= self.cols || row >= self.rows {
+            return;
+        }
+        let index = self.index(col, row);
+        let Some(cell) = self.cells.get(index).copied() else {
+            return;
+        };
+        let blank = Cell::styled(' ', self.pen);
+        if cell.ch == CONTINUATION && col > 0 {
+            if let Some(span) = self.cells.get_mut(index - 1..=index) {
+                span.fill(blank);
+            }
+        } else if char_width(cell.ch) == 2 {
+            let end = (index + 2).min(self.cells.len());
+            if let Some(span) = self.cells.get_mut(index..end) {
+                span.fill(blank);
+            }
+        }
+    }
+
+    /// Blank the half-open cell range `start..end`, expanding its boundaries
+    /// to clear any wide glyph it intersects.
     fn blank(&mut self, start: usize, end: usize) {
         let len = self.cells.len();
-        let start = start.min(len);
-        let end = end.min(len);
+        let mut start = start.min(len);
+        let mut end = end.min(len);
+        if start < end
+            && self
+                .cells
+                .get(start)
+                .is_some_and(|cell| cell.ch == CONTINUATION)
+        {
+            start = start.saturating_sub(1);
+        }
+        if start < end
+            && self
+                .cells
+                .get(end - 1)
+                .is_some_and(|cell| char_width(cell.ch) == 2)
+        {
+            end = end.saturating_add(1).min(len);
+        }
+        let blank = Cell::styled(' ', self.pen);
         if let Some(slice) = self.cells.get_mut(start..end) {
-            slice.fill(Cell::BLANK);
+            slice.fill(blank);
         }
     }
 

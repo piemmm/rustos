@@ -177,10 +177,11 @@ fn a_covered_unicode_scalar_renders_its_own_glyph() {
 
 #[test]
 fn an_uncovered_scalar_renders_the_replacement_glyph() {
-    // Inconsolata EX has no CJK: the scalar renders U+FFFD, visibly wrong rather
-    // than dropped. It is double-width, so the lead cell holds the glyph.
+    // Hangul is outside the merged family: the scalar renders U+FFFD, visibly
+    // wrong rather than dropped. It is double-width, so the lead cell holds the
+    // fallback glyph.
     let (mut console, mut pixels) = small_console();
-    console.write_bytes(&mut pixels, "一".as_bytes());
+    console.write_bytes(&mut pixels, "한".as_bytes());
     let geometry = *console.geometry();
     let lead = cell(&pixels, &geometry, 0, 0);
     let (mut reference, mut ref_pixels) = small_console();
@@ -189,19 +190,67 @@ fn an_uncovered_scalar_renders_the_replacement_glyph() {
 }
 
 #[test]
-fn a_wide_glyph_occupies_two_cells_and_blanks_its_continuation() {
+fn a_japanese_glyph_paints_both_cells_and_advances_by_two() {
     let (mut console, mut pixels) = console_of(4, 1);
     console.write_bytes(&mut pixels, "世a".as_bytes());
     let geometry = *console.geometry();
-    // The lead cell shows the (replacement) glyph, the continuation cell is
-    // background, and the narrow `a` lands in the third column — the same
-    // two-column layout the curses window writer assumes.
+    // The lead and continuation cells both carry the full-width glyph, and the
+    // narrow `a` lands in the third column — the same two-column layout the
+    // curses window writer assumes.
     assert!(!cell_blank(&pixels, &geometry, 0, 0), "lead glyph drawn");
-    assert!(cell_blank(&pixels, &geometry, 1, 0), "continuation blank");
+    assert!(
+        cell_has(&pixels, &geometry, 1, 0, DEFAULT_FOREGROUND),
+        "continuation has glyph ink"
+    );
     assert!(
         cell_has(&pixels, &geometry, 2, 0, DEFAULT_FOREGROUND),
         "a in column 2"
     );
+}
+
+#[test]
+fn japanese_continuation_ink_survives_a_coloured_background() {
+    let (mut console, mut pixels) = console_of(2, 1);
+    console.write_bytes(&mut pixels, "\u{1B}[48;2;10;20;30m日".as_bytes());
+    let geometry = *console.geometry();
+    let background = pack_rgb(10, 20, 30);
+    assert!(
+        cell(&pixels, &geometry, 1, 0)
+            .iter()
+            .any(|&pixel| pixel != background),
+        "the continuation cell contains only background"
+    );
+}
+
+#[test]
+fn positioned_overwrite_clears_the_other_half_of_a_japanese_glyph() {
+    for column in [1, 2] {
+        let (mut console, mut pixels) = console_of(4, 1);
+        let sequence = alloc::format!("日\u{1B}[1;{column}Hx");
+        console.write_bytes(&mut pixels, sequence.as_bytes());
+        let geometry = *console.geometry();
+        let overwritten = column - 1;
+        let cleared = 1 - overwritten;
+        assert!(
+            cell_has(&pixels, &geometry, overwritten, 0, DEFAULT_FOREGROUND),
+            "replacement glyph is visible"
+        );
+        assert!(
+            cell_blank(&pixels, &geometry, cleared, 0),
+            "the other half is cleared"
+        );
+    }
+}
+
+#[test]
+fn partial_erase_clears_a_complete_japanese_glyph() {
+    for sequence in ["日\u{1B}[1;1H\u{1B}[1K", "日\u{1B}[1;2H\u{1B}[0K"] {
+        let (mut console, mut pixels) = console_of(3, 1);
+        console.write_bytes(&mut pixels, sequence.as_bytes());
+        let geometry = *console.geometry();
+        assert!(cell_blank(&pixels, &geometry, 0, 0));
+        assert!(cell_blank(&pixels, &geometry, 1, 0));
+    }
 }
 
 #[test]
@@ -220,8 +269,8 @@ fn a_wide_glyph_wraps_whole_when_one_column_remains() {
         "lead wrapped to row 1"
     );
     assert!(
-        cell_blank(&pixels, &geometry, 1, 1),
-        "continuation on row 1"
+        cell_has(&pixels, &geometry, 1, 1, DEFAULT_FOREGROUND),
+        "continuation ink on row 1"
     );
 }
 
@@ -502,6 +551,24 @@ fn the_cursor_follows_text_and_restores_the_cell_it_leaves() {
     console.write_bytes(&mut pixels, b"\r");
     assert!(cell_blank(&pixels, &geometry, 1, 0));
     assert!(cell_has(&pixels, &geometry, 0, 0, DEFAULT_FOREGROUND));
+}
+
+#[test]
+fn a_cursor_leaving_a_wide_continuation_restores_its_ink() {
+    let (mut console, mut pixels) = cursor_console_of(3, 1);
+    console.write_bytes(&mut pixels, "日".as_bytes());
+    let geometry = *console.geometry();
+    let expected = cell(&pixels, &geometry, 1, 0);
+
+    console.write_bytes(&mut pixels, b"\x1b[1;2H");
+    assert_ne!(
+        cell(&pixels, &geometry, 1, 0),
+        expected,
+        "cursor overlays tail"
+    );
+    console.write_bytes(&mut pixels, b"\x1b[1;3H");
+
+    assert_eq!(cell(&pixels, &geometry, 1, 0), expected);
 }
 
 #[test]

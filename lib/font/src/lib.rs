@@ -1,8 +1,8 @@
 //! Shared text rasterisation primitives (`lib/font`).
 //!
 //! This crate is the single home of the system's text rendering: the
-//! generated Inconsolata EX glyph atlas ([`atlas`], emitted by
-//! `cargo xtask font-atlas --write` from the committed SIL OFL 1.1 face in
+//! generated Inconsolata EX + M PLUS 1 Code glyph atlas ([`atlas`], emitted by
+//! `cargo xtask font-atlas --write` from the committed SIL OFL 1.1 faces in
 //! `assets/`), the Unicode glyph lookup over it ([`glyph`]), and the blitter
 //! that draws it onto a `lib/raster` `Surface` ([`font`], behind the
 //! default-on `render` feature). Font rendering is one of the curated
@@ -10,13 +10,13 @@
 //! `lib/raster`, it lives in `lib/*` so the taskbar and the default apps can
 //! draw text without depending on the window manager.
 //!
-//! Unicode coverage is the face's: every scalar Inconsolata EX maps (Latin
-//! plus its extensions, Greek, Cyrillic, box drawing and block elements,
-//! arrows, common punctuation and currency — 3061 codepoints) renders its real
-//! glyph; anything else renders the U+FFFD replacement glyph, visibly wrong
-//! rather than silently dropped. The cell model is one scalar per cell — the
-//! same deliberate simplification `lib/vt` / `lib/curses` document — so a
-//! zero-advance combining mark occupies its own cell.
+//! Inconsolata EX remains primary for Latin, Greek, Cyrillic, box drawing,
+//! arrows, punctuation, and currency; M PLUS 1 Code fills missing Japanese
+//! hiragana, katakana, punctuation, and kanji. Anything outside the merged
+//! repertoire renders U+FFFD, visibly wrong rather than silently dropped. The
+//! cell model is one scalar per grid entry: a zero-advance combining mark
+//! occupies its own cell, while a wide Japanese bitmap may cover the lead and
+//! continuation cells reserved by `rustos_vt::char_width`.
 //!
 //! The [`atlas`] and [`glyph`] modules are dependency-free `no_std` data and
 //! lookup, so a consumer that brings its own blitter — the framebuffer

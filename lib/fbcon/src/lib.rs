@@ -443,6 +443,47 @@ impl<'a> Screen<'a> {
         }
     }
 
+    /// Clear the complete wide glyph, if any, intersecting `(col, row)`, and
+    /// return the cells that must be repainted.
+    fn clear_wide_at(&mut self, col: u32, row: u32) -> Option<CellRect> {
+        if col >= self.cols() || row >= self.rows() {
+            return None;
+        }
+        let cell = self.cell_at(col, row);
+        let blank = self.blank_cell();
+        if cell.ch == CONTINUATION && col > 0 {
+            self.grid_set(col - 1, row, blank);
+            self.grid_set(col, row, blank);
+            merge_rects(
+                Some(CellRect::cell(col - 1, row)),
+                Some(CellRect::cell(col, row)),
+            )
+        } else if char_width(cell.ch) == 2 {
+            self.grid_set(col, row, blank);
+            self.grid_set(col + 1, row, blank);
+            merge_rects(
+                Some(CellRect::cell(col, row)),
+                Some(CellRect::cell(col + 1, row)),
+            )
+        } else {
+            None
+        }
+    }
+
+    /// Expand a row-local half-open range to cover complete wide glyphs.
+    fn expand_wide_range(&self, mut start: u32, mut end: u32, row: u32) -> (u32, u32) {
+        let cols = self.cols();
+        start = start.min(cols);
+        end = end.min(cols);
+        if start < end && self.cell_at(start, row).ch == CONTINUATION {
+            start = start.saturating_sub(1);
+        }
+        if start < end && char_width(self.cell_at(end - 1, row).ch) == 2 {
+            end = end.saturating_add(1).min(cols);
+        }
+        (start, end)
+    }
+
     /// Fill columns `[from_col, to_col)` of active-grid `row` with `cell`.
     fn grid_fill_cells(&mut self, from_col: u32, to_col: u32, row: u32, cell: Cell) {
         let cols = self.cols();
@@ -591,7 +632,14 @@ impl<'a> Screen<'a> {
     /// paints.
     fn undraw_cursor(&mut self) -> Option<CellRect> {
         let (col, row) = self.overlay.take()?;
-        Some(CellRect::cell(col, row))
+        if col > 0 && self.cell_at(col, row).ch == CONTINUATION {
+            merge_rects(
+                Some(CellRect::cell(col - 1, row)),
+                Some(CellRect::cell(col, row)),
+            )
+        } else {
+            Some(CellRect::cell(col, row))
+        }
     }
 
     /// Paint the cursor overlay — the cell at the cursor in reverse video —
@@ -634,13 +682,18 @@ impl<'a> Screen<'a> {
             let (col, row) = (self.column, self.row);
             if col < self.cols() {
                 // A wide glyph with one column left: blank the leftover cell.
+                dirty = merge_rects(dirty, self.clear_wide_at(col, row));
                 self.grid_set(col, row, self.blank_cell());
-                dirty = Some(CellRect::cell(col, row));
+                dirty = merge_rects(dirty, Some(CellRect::cell(col, row)));
             }
             self.column = 0;
             dirty = merge_rects(dirty, self.line_feed());
         }
         let (col, row, pen) = (self.column, self.row, self.pen);
+        dirty = merge_rects(dirty, self.clear_wide_at(col, row));
+        if width == 2 {
+            dirty = merge_rects(dirty, self.clear_wide_at(col + 1, row));
+        }
         self.grid_set(col, row, Cell::styled(ch, pen));
         let mut rect = CellRect::cell(col, row);
         // On a degenerate one-column surface there is no second cell; writing
@@ -740,13 +793,14 @@ impl<'a> Screen<'a> {
         let (col, row, cols, rows) = (self.column, self.row, self.cols(), self.rows());
         match mode {
             EraseMode::ToEnd => {
-                self.grid_fill_cells(col, cols, row, blank);
+                let (start, end) = self.expand_wide_range(col, cols, row);
+                self.grid_fill_cells(start, end, row, blank);
                 self.grid_fill_rows(row + 1, rows, blank);
                 // The union of the partial row and the full rows below it.
                 merge_rects(
                     Some(CellRect {
-                        col0: col,
-                        col1: cols,
+                        col0: start,
+                        col1: end,
                         row0: row,
                         row1: row + 1,
                     }),
@@ -756,12 +810,13 @@ impl<'a> Screen<'a> {
             }
             EraseMode::ToStart => {
                 self.grid_fill_rows(0, row, blank);
-                self.grid_fill_cells(0, col + 1, row, blank);
+                let (start, end) = self.expand_wide_range(0, col + 1, row);
+                self.grid_fill_cells(start, end, row, blank);
                 merge_rects(
                     (row > 0).then_some(CellRect::rows(cols, 0, row)),
                     Some(CellRect {
-                        col0: 0,
-                        col1: col + 1,
+                        col0: start,
+                        col1: end,
                         row0: row,
                         row1: row + 1,
                     }),
@@ -785,6 +840,7 @@ impl<'a> Screen<'a> {
             EraseMode::ToStart => (0, col + 1),
             EraseMode::All => (0, self.cols()),
         };
+        let (start, end) = self.expand_wide_range(start, end, row);
         self.grid_fill_cells(start, end, row, blank);
         CellRect {
             col0: start,
@@ -887,7 +943,7 @@ impl<'a> Screen<'a> {
                     self.fill_cells(pixels, start, col, row, bg);
                 } else {
                     self.blit_cell(pixels, col, row, cell.ch, cell.attrs);
-                    col += 1;
+                    col += u32::from(char_width(cell.ch));
                 }
             }
         }
@@ -933,11 +989,12 @@ impl<'a> Screen<'a> {
         let ramp = coverage_ramp(fg, bg);
         let shown = if ch == CONTINUATION { ' ' } else { ch };
         let glyph = lookup_or_fallback(shown);
+        let glyph_width = CELL_WIDTH.saturating_mul(u32::from(char_width(shown)));
         let geometry = &self.geometry;
         let x0 = col * geometry.cell_width_px();
         let y0 = row * geometry.cell_height_px();
         for cell_y in 0..CELL_HEIGHT {
-            for cell_x in 0..CELL_WIDTH {
+            for cell_x in 0..glyph_width.min(atlas::GLYPH_WIDTH) {
                 let colour = ramp[usize::from(glyph.coverage(cell_x, cell_y))];
                 for sub_y in 0..geometry.scale {
                     let y = (y0 + cell_y * geometry.scale + sub_y) as usize;

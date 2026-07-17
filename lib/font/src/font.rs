@@ -1,8 +1,9 @@
 //! The system bitmap font and the glyph blitter that draws it onto a
 //! [`Surface`].
 //!
-//! [`BitmapFont`] couples the generated Inconsolata EX atlas with its metrics
-//! (cell size, pen advance, line height) and the coverage-aware blitter.
+//! [`BitmapFont`] couples the generated Inconsolata EX + M PLUS 1 Code atlas
+//! with its metrics (cell size, pen advance, line height) and the
+//! coverage-aware blitter.
 //! [`BitmapFont::draw_text`] composites each glyph onto a `lib/raster`
 //! [`Surface`] through that crate's single premultiplied-alpha
 //! [`Pixel::over`] path: the text colour is premultiplied once, scaled per
@@ -11,12 +12,13 @@
 //! colour arithmetic duplicated here.
 
 use rustos_raster::{Color, Pixel, Surface};
+use rustos_vt::{char_width, truncate_to_width as truncate_to_columns};
 
 use crate::atlas;
 use crate::glyph::{lookup_or_fallback, Glyph};
 
-/// The system monospace bitmap font: the generated Inconsolata EX atlas plus
-/// its layout metrics.
+/// The system monospace bitmap font: Inconsolata EX with its M PLUS 1 Code
+/// Japanese companion, plus their shared layout metrics.
 ///
 /// The face's uniform advance already carries the inter-glyph side bearings
 /// and its ascent + descent carry the line box, so the pen advances by
@@ -25,7 +27,8 @@ use crate::glyph::{lookup_or_fallback, Glyph};
 pub struct BitmapFont(());
 
 impl BitmapFont {
-    /// The built-in Inconsolata EX face.
+    /// The built-in family, with Inconsolata EX primary and M PLUS 1 Code for
+    /// Japanese coverage.
     #[must_use]
     pub const fn inconsolata() -> Self {
         Self(())
@@ -55,15 +58,16 @@ impl BitmapFont {
         atlas::CELL_HEIGHT
     }
 
-    /// The pixel width of `text` rendered on one line. An empty string is
-    /// zero wide.
+    /// The pixel width of `text` rendered on one line, including two-cell
+    /// advances for wide Unicode scalars. An empty string is zero wide.
     ///
     /// Arithmetic saturates, so a pathologically long string reports
     /// [`u32::MAX`] rather than wrapping.
     #[must_use]
     pub fn text_width(&self, text: &str) -> u32 {
-        let count = u32::try_from(text.chars().count()).unwrap_or(u32::MAX);
-        self.advance().saturating_mul(count)
+        text.chars().fold(0, |width, ch| {
+            width.saturating_add(self.advance().saturating_mul(u32::from(char_width(ch))))
+        })
     }
 
     /// The longest prefix of `text` whose rendered width fits within `width`
@@ -77,17 +81,13 @@ impl BitmapFont {
     /// string; a `text` that already fits is returned whole.
     #[must_use]
     pub fn truncate_to_width<'a>(&self, text: &'a str, width: u32) -> &'a str {
-        let capacity = (width / self.advance()) as usize;
-        match text.char_indices().nth(capacity) {
-            Some((byte, _)) => &text[..byte],
-            None => text,
-        }
+        truncate_to_columns(text, (width / self.advance()) as usize)
     }
 
     /// Draw `text` onto `surface` with its top-left corner at `(x, y)` in
     /// `color`, returning the pen x-coordinate after the last glyph.
     ///
-    /// The pen advances by [`advance`](Self::advance) per character. Pixels
+    /// The pen advances by [`advance`](Self::advance) per terminal cell. Pixels
     /// that fall outside the surface (including at negative coordinates) are
     /// skipped, so off-screen text clips rather than panicking. Each covered
     /// glyph pixel is composited over the destination at its anti-aliased
@@ -105,8 +105,16 @@ impl BitmapFont {
         let sources = coverage_sources(color);
         let mut pen = x;
         for ch in text.chars() {
-            draw_glyph(surface, pen, y, lookup_or_fallback(ch), &sources);
-            pen = pen.saturating_add(advance_step(self.advance()));
+            let cells = u32::from(char_width(ch));
+            draw_glyph(
+                surface,
+                pen,
+                y,
+                lookup_or_fallback(ch),
+                self.advance().saturating_mul(cells),
+                &sources,
+            );
+            pen = pen.saturating_add(advance_step(self.advance().saturating_mul(cells)));
         }
         pen
     }
@@ -128,11 +136,18 @@ fn coverage_sources(color: Color) -> [Pixel; 16] {
 }
 
 /// Blit one glyph at top-left `(x, y)`, blending each covered pixel.
-fn draw_glyph(surface: &mut Surface, x: i32, y: i32, glyph: Glyph, sources: &[Pixel; 16]) {
+fn draw_glyph(
+    surface: &mut Surface,
+    x: i32,
+    y: i32,
+    glyph: Glyph,
+    width: u32,
+    sources: &[Pixel; 16],
+) {
     for row in 0..atlas::CELL_HEIGHT {
         let py = y.saturating_add(step(row));
         let Ok(uy) = u32::try_from(py) else { continue };
-        for col in 0..atlas::CELL_WIDTH {
+        for col in 0..width.min(atlas::GLYPH_WIDTH) {
             let coverage = glyph.coverage(col, row);
             if coverage == 0 {
                 continue;

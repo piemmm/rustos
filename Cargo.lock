@@ -1139,6 +1139,7 @@ name = "rustos-font"
 version = "0.0.0"
 dependencies = [
  "rustos-raster",
+ "rustos-vt",
 ]
 
 [[package]]
