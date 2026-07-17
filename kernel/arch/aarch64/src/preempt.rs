@@ -453,10 +453,12 @@ fn reprogram(cpu: CpuId) {
     #[cfg(all(target_arch = "aarch64", target_os = "none"))]
     {
         match target {
-            Some(abs) => {
-                let now = crate::kernel_arch::read_cntpct();
-                arm_oneshot(rustos_arch_api::wakeup::ticks_from_now(abs, now));
-            }
+            // Program the absolute compare directly: the combined deadline
+            // is already an absolute `CNTPCT_EL0` value, and arming the
+            // 64-bit compare avoids the 32-bit `CNTP_TVAL_EL0` truncation a
+            // far-future blocking-wait deadline would otherwise hit (see
+            // [`arm_oneshot_at`]).
+            Some(abs) => arm_oneshot_at(abs),
             None => disarm(),
         }
     }
@@ -533,35 +535,60 @@ pub const fn interval_for_hz(counter_hz: u64, hz: u64) -> u64 {
 
 // --- Freestanding timer programming -------------------------------
 
-/// Write `CNTP_TVAL_EL0` (the down-counter) to arm the next tick.
+/// Arm the EL1 physical generic timer **one-shot** to fire once when the
+/// physical count reaches the absolute `deadline` (a `CNTPCT_EL0` value),
+/// then stop until armed again.
+///
+/// Programs the 64-bit **compare value** `CNTP_CVAL_EL0` directly, rather
+/// than the 32-bit down-counter `CNTP_TVAL_EL0`: `TVAL` is a *signed
+/// 32-bit* view (`CVAL = CNTPCT + SignExtend(TVAL[31:0])`), so a relative
+/// interval beyond ~2^31 ticks — a blocking-wait timeout more than ~34 s
+/// ahead at a 62.5 MHz counter — would truncate to a negative offset and
+/// arm a deadline in the *past*, making the timer assert immediately and
+/// re-fire on every re-arm (an interrupt livelock that starves the very
+/// dispatch loop that must run the timed-wake sweep). The absolute 64-bit
+/// compare has no such limit, so a far-future deadline is honoured exactly.
+///
+/// A `deadline` already at or behind the current count arms the soonest
+/// possible interrupt (the compare is immediately satisfied), which is the
+/// correct behaviour for a genuinely-due wakeup. There is **no** periodic
+/// re-arm: once it fires, the next fire happens only if the scheduler arms
+/// it again via [`crate::kernel_arch::Aarch64Arch`]'s `set_preemption` /
+/// `set_wakeup` (tickless / `NO_HZ`). The GIC PPI must already be enabled
+/// (done by [`init_local_preempt`]).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-fn write_tval(interval: u64) {
-    // SAFETY: `CNTP_TVAL_EL0` is writable at EL1; setting it programs the
-    // physical timer's countdown and has no other side effects.
+pub fn arm_oneshot_at(deadline: u64) {
+    // SAFETY: `CNTP_CVAL_EL0` is writable at EL1; it sets the absolute
+    // compare value and has no other side effect. Enabling
+    // `CNTP_CTL_EL0.ENABLE` with `IMASK` clear starts the comparison and
+    // lets the timer raise PPI 30 once `CNTPCT_EL0 >= CVAL`; no memory
+    // side effects beyond the system registers.
     unsafe {
-        core::arch::asm!("msr CNTP_TVAL_EL0, {}", in(reg) interval, options(nomem, nostack));
+        core::arch::asm!(
+            "msr CNTP_CVAL_EL0, {deadline}",
+            "msr CNTP_CTL_EL0, {ctl}",
+            deadline = in(reg) deadline,
+            ctl = in(reg) CNTP_CTL_ENABLE,
+            options(nomem, nostack),
+        );
     }
 }
 
 /// Arm the EL1 physical generic timer **one-shot** to fire once after
 /// `ticks_from_now` counter ticks, then stop until armed again.
 ///
-/// The down-counter is loaded with `ticks_from_now` (clamped to at least
-/// one tick so a degenerate `0` cannot re-trap with no progress) and the timer is enabled with its interrupt unmasked
-/// (`CNTP_CTL_EL0.ENABLE`, `IMASK = 0`). There is **no** periodic re-arm:
-/// once it fires, the next fire happens only if the scheduler arms it
-/// again via [`crate::kernel_arch::Aarch64Arch`]'s `set_preemption`
-/// (tickless / `NO_HZ`). The GIC PPI must already be
-/// enabled (done by [`init_local_preempt`]).
+/// A thin convenience over [`arm_oneshot_at`] for callers that hold a
+/// *relative* interval (the fixed per-quantum tick of the preemption
+/// verticals) rather than an absolute deadline: it reads the live
+/// `CNTPCT_EL0` and arms the absolute compare `now + ticks_from_now`
+/// (clamped to at least one tick so a degenerate `0` cannot arm the
+/// current instant with no forward progress). Programming the 64-bit
+/// compare means even a large relative interval never truncates (see
+/// [`arm_oneshot_at`]).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub fn arm_oneshot(ticks_from_now: u64) {
-    write_tval(ticks_from_now.max(1));
-    // SAFETY: enabling `CNTP_CTL_EL0.ENABLE` with `IMASK` clear starts the
-    // timer and lets it raise PPI 30 once the down-counter reaches zero;
-    // no memory side effects beyond the system register.
-    unsafe {
-        core::arch::asm!("msr CNTP_CTL_EL0, {}", in(reg) CNTP_CTL_ENABLE, options(nomem, nostack));
-    }
+    let now = crate::kernel_arch::read_cntpct();
+    arm_oneshot_at(now.saturating_add(ticks_from_now.max(1)));
 }
 
 /// Disarm the EL1 physical generic timer so no further interrupt fires
