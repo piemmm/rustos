@@ -1003,7 +1003,12 @@ system-register/assembly/MMIO operations to the freestanding target.
   always-granting monitor stayed green). MMU-off allocation is
   single-threaded by construction — only the pre-SMP boot CPU runs
   Rust with translation off and a pool in hand — and once translation
-  is live the counter reverts to `fetch_add`. `switch`
+  is live the counter reverts to `fetch_add`. `switch` applies the same
+  rule to the permanent park-root publication: the MMU programming
+  routine returns a private live-translation witness only after the
+  `SCTLR_EL1` write and trailing `isb`, and only that witness can issue
+  the set-once atomic publication. No LDXR/STXR retry loop can therefore
+  run in the MMU-off activation prefix. `switch`
   programs `MAIR_EL1`/`TCR_EL1`/`TTBR0_EL1`, orders the pre-MMU table
   stores with a full-system `dsb sy` (MMU-off stores are Device-nGnRnE,
   outside the inner-shareable domain an `ish` barrier covers), and

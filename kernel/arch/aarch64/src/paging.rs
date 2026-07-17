@@ -1306,12 +1306,30 @@ impl AddressSpace {
         // architecturally UNKNOWN EL1 reset bits (`WXN`, `EE`, …) into
         // translated execution, which hangs real silicon (see
         // [`SCTLR_MMU_OFF`]).
+        let translation = unsafe { program_stage1_translation(self.root_phys) };
         // The first fully-configured space activated on the metal is the
         // permanent boot space: publish its root, set-once, as the park
         // root teardown and the dispatcher's suspend path re-install so a
         // dead user root is never left active (see [`park_kernel_root`]).
-        let _ = PARK_ROOT.compare_exchange(0, self.root_phys, Ordering::AcqRel, Ordering::Relaxed);
-        unsafe { program_stage1_translation(self.root_phys) }
+        // Publication must follow the MMU-on transition: the atomic RMW's
+        // exclusive accesses are not guaranteed on Device-nGnRnE memory.
+        translation.publish_park_root(&PARK_ROOT, self.root_phys);
+    }
+}
+
+/// Proof that the calling CPU completed the stage-1 MMU-on sequence.
+///
+/// Operations that require cacheable Normal memory consume this witness so
+/// they cannot be placed in the MMU-off prefix by accident.
+#[cfg(any(all(target_arch = "aarch64", target_os = "none"), test))]
+struct Stage1TranslationEnabled;
+
+#[cfg(any(all(target_arch = "aarch64", target_os = "none"), test))]
+impl Stage1TranslationEnabled {
+    /// Publish the permanent kernel root once translated execution is live.
+    fn publish_park_root(self, park_root: &AtomicU64, root_phys: u64) {
+        let Stage1TranslationEnabled = self;
+        let _ = park_root.compare_exchange(0, root_phys, Ordering::AcqRel, Ordering::Relaxed);
     }
 }
 
@@ -1326,9 +1344,10 @@ impl AddressSpace {
 /// stack, and every MMIO region touched before the next switch, and must
 /// be observable at the point of coherency (written MMU-off, or cleaned
 /// with [`clean_invalidate_range_to_poc`]). Runs with interrupts masked
-/// on the calling CPU.
+/// on the calling CPU. Returns only after the trailing `isb` makes the
+/// translated execution regime live.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-unsafe fn program_stage1_translation(root_phys: u64) {
+unsafe fn program_stage1_translation(root_phys: u64) -> Stage1TranslationEnabled {
     // SAFETY: the caller asserts the mapping/coherency contract above.
     // Programming MAIR/TCR/TTBR0 then writing `SCTLR_EL1` is the
     // documented stage-1 enable sequence; the first barrier is `dsb sy`
@@ -1362,6 +1381,7 @@ unsafe fn program_stage1_translation(root_phys: u64) {
             options(nostack, preserves_flags),
         );
     }
+    Stage1TranslationEnabled
 }
 
 // The `_invalidate_local_dcache_to_poc` leaf routine: invalidate the

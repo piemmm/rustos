@@ -46,6 +46,16 @@ fn mmu_disciplines_share_one_counter() {
 }
 
 #[test]
+fn park_root_publication_requires_live_stage1_and_is_set_once() {
+    let park_root = AtomicU64::new(0);
+    Stage1TranslationEnabled.publish_park_root(&park_root, 0x4000_0000);
+    assert_eq!(park_root.load(Ordering::Acquire), 0x4000_0000);
+
+    Stage1TranslationEnabled.publish_park_root(&park_root, 0x8000_0000);
+    assert_eq!(park_root.load(Ordering::Acquire), 0x4000_0000);
+}
+
+#[test]
 fn identity_window_covers_highest_masked_gigapage() {
     let mut device = [0u64; GIGAPAGE_MASK_WORDS];
     let mut ram = [0u64; GIGAPAGE_MASK_WORDS];

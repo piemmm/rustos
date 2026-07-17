@@ -250,7 +250,11 @@ counter is translation-aware: MMU-off it advances by plain load + store
 (LDXR/STXR exclusives never succeed on the BCM2711's MMU-off
 Device-nGnRnE accesses, so a `fetch_add` spins forever on metal while
 QEMU stays green; MMU-off allocation is pre-SMP boot-CPU-only by
-construction) and reverts to `fetch_add` once translation is live.
+construction) and reverts to `fetch_add` once translation is live. The
+permanent park root follows the same boundary: `program_stage1_translation`
+returns a private live-translation witness after `SCTLR_EL1` + `isb`, and
+only that witness performs the set-once atomic publication, so the MMU-off
+activation prefix contains no exclusive retry loop.
 With those fixes the metal Pi 4B (8 GB) boots the production pipeline
 end to end **through user space**: the
 stage-p1 boot line, the kernel-core phase log, PID 1 `init`'s EL0 entry

@@ -743,7 +743,11 @@ implementation fixed):
   controller teardown and do not invoke `exit`. The QEMU matrix retains
   emulator/I/O headroom for one-vCPU guests and admits an SMP TCG guest alone,
   so mutually synchronising guest CPUs cannot be starved by another emulator
-  past a wall-clock deadline. The aarch64
+  past a wall-clock deadline. Its stdout/stderr drains retry interrupted host
+  reads, turn a hard read error or drain panic into an immediate named harness
+  failure, and distinguish a serial channel that closes while QEMU remains
+  live from a guest timeout; marker-gated login input can never silently stop
+  and masquerade as a guest failure. The aarch64
   context switch preserves each suspended continuation's `DAIF` in its
   on-stack native frame; without that state, a blocking syscall could return
   to the dispatcher with IRQs masked and starve the same service-progress

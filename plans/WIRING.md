@@ -398,7 +398,11 @@ EL0/kernel/device leaf attrs; x86_64 user/kernel + W^X), a read-only
 `leaf_present` walk for the `AlreadyMapped` guard, and `activate`
 forwarding to the gated `switch` — reusing the existing walk (one walk,
 §2.2) so the inherent `map_4k*` methods (used by the spawn/c-program/
-abi-sys verticals) keep their signatures. riscv64 + aarch64 run
+abi-sys verticals) keep their signatures. AArch64's `switch` completes
+the `SCTLR_EL1` + `isb` transition before a private live-translation
+witness permits the set-once atomic park-root publication; its MMU-off
+prefix therefore contains no Device-nGnRnE LDXR/STXR retry loop.
+riscv64 + aarch64 run
 `passes_mmu_conformance` on the host (their walk recovers tables through
 the identity map); x86_64's walk reaches tables through the higher-half
 window (phys ≠ virt), so it is not host-runnable and its `map_page`/

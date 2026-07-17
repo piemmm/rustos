@@ -35,6 +35,11 @@
 //!   cannot block subsequent tests.
 //! * Inherits QEMU's stdout/stderr through capture so the failure report can
 //!   include the full serial log without interleaving with later tests.
+//! * Retries interrupted pipe reads, fails immediately on a drain error or
+//!   panic, and distinguishes a prematurely closed serial channel from a guest
+//!   timeout if QEMU remains running; marker-gated input can therefore never
+//!   fail with a misleading diagnosis because the host stopped observing
+//!   output.
 //!
 //! # Per-architecture surface
 //!
@@ -997,6 +1002,7 @@ fn supervise(
         screendump_markers_seen,
         reader,
     } = spawn_serial_drain(&mut child, spec);
+    let mut reader = Some(reader);
 
     // The piped stdin handle the serial injection writes through. Held
     // for the rest of the run: dropping it closes the guest's serial
@@ -1015,6 +1021,7 @@ fn supervise(
         let stderr = child.stderr.take();
         std::thread::spawn(move || drain_stream(stderr, &captured_err, &[]))
     };
+    let mut err_reader = Some(err_reader);
 
     // Poll for completion in short ticks so the deadline is precise to
     // the millisecond. We deliberately do *not* sleep until the deadline
@@ -1029,6 +1036,7 @@ fn supervise(
     // after a refused login) anchors its own step rather than re-firing
     // on the first occurrence.
     let mut serial_script = SerialScriptState::default();
+    let mut serial_closed = false;
     let done = 'run: loop {
         if let Some(status) = child.try_wait()? {
             break 'run exit_reason(
@@ -1039,6 +1047,19 @@ fn supervise(
                 injections.screendumps_verified(spec),
                 status,
             );
+        }
+        if let Some(result) = completed_drain_result(&mut reader, "serial output") {
+            serial_closed = result.is_ok();
+            if let Err(reason) = result {
+                let _ = child.kill();
+                let _ = child.wait();
+                break 'run DoneReason::DrainFailed(reason);
+            }
+        }
+        if let Some(Err(reason)) = completed_drain_result(&mut err_reader, "qemu stderr") {
+            let _ = child.kill();
+            let _ = child.wait();
+            break 'run DoneReason::DrainFailed(reason);
         }
         if let Err(e) = injections.drive(
             spec,
@@ -1072,7 +1093,11 @@ fn supervise(
             // effort so we don't leave a zombie behind.
             let _ = child.kill();
             let _ = child.wait();
-            break 'run DoneReason::TimedOut;
+            break 'run if serial_closed {
+                DoneReason::DrainFailed(String::from("serial output closed before QEMU exited"))
+            } else {
+                DoneReason::TimedOut
+            };
         }
         std::thread::sleep(tick);
     };
@@ -1083,20 +1108,30 @@ fn supervise(
     // complete.
     drop(injections);
     drop(serial_stdin);
-    let _ = reader.join();
-    let _ = err_reader.join();
+    let drain_failure = finish_drain(reader.take(), "serial output")
+        .or_else(|| finish_drain(err_reader.take(), "qemu stderr"));
+    let done = match drain_failure {
+        Some(reason) => DoneReason::DrainFailed(reason),
+        None => done,
+    };
     let mut serial = captured
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     append_stderr(&mut serial, &captured_err);
+    Ok(outcome_from_done(done, spec, serial))
+}
+
+/// Convert the completed supervision reason and captured output into the
+/// architecture-specific public outcome.
+fn outcome_from_done(done: DoneReason, spec: &Spec, mut serial: String) -> Outcome {
     match done {
-        DoneReason::Exited(code) => Ok(spec.arch.outcome_from_status(code, serial)),
-        DoneReason::TimedOut => Ok(Outcome::Timeout {
+        DoneReason::Exited(code) => spec.arch.outcome_from_status(code, serial),
+        DoneReason::TimedOut => Outcome::Timeout {
             budget: spec.timeout,
             serial,
-        }),
-        DoneReason::InjectionFailed(reason) => {
+        },
+        DoneReason::InjectionFailed(reason) | DoneReason::DrainFailed(reason) => {
             // The failure message rides the serial log so the report
             // explains *why* the run was cut short, exactly as a guest
             // diagnostic would.
@@ -1106,7 +1141,7 @@ fn supervise(
             serial.push_str("rustos-qemu: ");
             serial.push_str(&reason);
             serial.push('\n');
-            Ok(Outcome::Fail { status: -1, serial })
+            Outcome::Fail { status: -1, serial }
         }
     }
 }
@@ -1227,6 +1262,9 @@ enum DoneReason {
     /// A requested key/serial injection could not be delivered; the
     /// child was killed. The message explains which injection and why.
     InjectionFailed(String),
+    /// A QEMU output drain failed, panicked, or closed before the child;
+    /// the child was killed. The message identifies the failed channel.
+    DrainFailed(String),
 }
 
 /// A reserved path for QEMU's monitor unix socket.
@@ -1282,7 +1320,7 @@ struct SerialDrain {
     /// [`Spec::screendumps`].
     screendump_markers_seen: Vec<Arc<AtomicBool>>,
     /// The drain thread, joined once the child has exited.
-    reader: std::thread::JoinHandle<()>,
+    reader: std::thread::JoinHandle<io::Result<()>>,
 }
 
 /// Start the background stdout drain for a spawned QEMU child.
@@ -1346,9 +1384,7 @@ fn spawn_serial_drain(child: &mut Child, spec: &Spec) -> SerialDrain {
                 Arc::clone(seen),
             ));
         }
-        std::thread::spawn(move || {
-            drain_stream(stdout, &captured, &markers);
-        })
+        std::thread::spawn(move || drain_stream(stdout, &captured, &markers))
     };
     SerialDrain {
         captured,
@@ -1363,7 +1399,9 @@ fn spawn_serial_drain(child: &mut Child, spec: &Spec) -> SerialDrain {
 /// Read one of QEMU's output pipes to EOF, appending every chunk to
 /// `captured` and raising each marker's flag once its substring has
 /// appeared the required number of times in the stream so far.
-/// Best-effort: a read error simply ends the drain.
+/// An interrupted read is retried. Any other read error is returned to
+/// [`supervise`], which fails the run rather than silently losing the serial
+/// channel and waiting for an unrelated guest timeout.
 ///
 /// Used for both stdout (serial, with the key/serial-injection readiness
 /// markers) and stderr (QEMU's own diagnostics, marker-free), so the two
@@ -1376,12 +1414,14 @@ fn drain_stream(
     stream: Option<impl Read>,
     captured: &Mutex<String>,
     markers: &[(String, u32, Arc<AtomicBool>)],
-) {
-    let Some(mut r) = stream else { return };
+) -> io::Result<()> {
+    let Some(mut r) = stream else { return Ok(()) };
     let mut buf = [0u8; 4096];
     loop {
         match r.read(&mut buf) {
-            Ok(0) | Err(_) => return,
+            Ok(0) => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
             Ok(n) => {
                 let chunk = String::from_utf8_lossy(&buf[..n]);
                 let mut guard = captured
@@ -1397,6 +1437,45 @@ fn drain_stream(
                 }
             }
         }
+    }
+}
+
+/// Join a finished output-drain thread, distinguishing clean EOF from a
+/// fail-loud read or panic diagnostic.
+fn completed_drain_result(
+    reader: &mut Option<std::thread::JoinHandle<io::Result<()>>>,
+    channel: &str,
+) -> Option<Result<(), String>> {
+    if !reader
+        .as_ref()
+        .is_some_and(std::thread::JoinHandle::is_finished)
+    {
+        return None;
+    }
+    let handle = reader.take()?;
+    Some(drain_join_result(handle.join(), channel))
+}
+
+/// Join an output drain after QEMU has exited, preserving read and panic
+/// failures as harness diagnostics.
+fn finish_drain(
+    reader: Option<std::thread::JoinHandle<io::Result<()>>>,
+    channel: &str,
+) -> Option<String> {
+    let handle = reader?;
+    drain_join_result(handle.join(), channel).err()
+}
+
+/// Decode one joined output-drain result without conflating clean EOF, read
+/// failure, and thread panic.
+fn drain_join_result(
+    joined: std::thread::Result<io::Result<()>>,
+    channel: &str,
+) -> Result<(), String> {
+    match joined {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(format!("{channel} drain failed: {e}")),
+        Err(_) => Err(format!("{channel} drain thread panicked")),
     }
 }
 
@@ -1935,6 +2014,76 @@ mod tests {
         assert!(s.serial_input.is_empty());
     }
 
+    struct InterruptedOnceReader {
+        step: u8,
+    }
+
+    impl Read for InterruptedOnceReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let bytes = match self.step {
+                0 => b"boot\n".as_slice(),
+                1 => {
+                    self.step += 1;
+                    return Err(io::Error::from(io::ErrorKind::Interrupted));
+                }
+                2 => b"ready marker\n".as_slice(),
+                _ => return Ok(0),
+            };
+            self.step += 1;
+            buf[..bytes.len()].copy_from_slice(bytes);
+            Ok(bytes.len())
+        }
+    }
+
+    #[test]
+    fn drain_stream_retries_an_interrupted_read() {
+        let captured = Mutex::new(String::new());
+        let seen = Arc::new(AtomicBool::new(false));
+        let markers = [(String::from("ready marker"), 1, Arc::clone(&seen))];
+        let reader = InterruptedOnceReader { step: 0 };
+
+        drain_stream(Some(reader), &captured, &markers).expect("drain after interruption");
+
+        assert!(seen.load(Ordering::Acquire));
+        assert_eq!(
+            captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_str(),
+            "boot\nready marker\n"
+        );
+    }
+
+    struct FailedReader;
+
+    impl Read for FailedReader {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "fixture failure"))
+        }
+    }
+
+    #[test]
+    fn drain_stream_propagates_a_hard_read_error() {
+        let captured = Mutex::new(String::new());
+        let err = drain_stream(Some(FailedReader), &captured, &[]).expect_err("hard read error");
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+        assert!(err.to_string().contains("fixture failure"));
+    }
+
+    #[test]
+    fn drain_join_distinguishes_clean_eof_from_failure() {
+        assert_eq!(drain_join_result(Ok(Ok(())), "serial output"), Ok(()));
+
+        let read_error = io::Error::new(io::ErrorKind::BrokenPipe, "fixture failure");
+        let err = drain_join_result(Ok(Err(read_error)), "serial output")
+            .expect_err("hard drain failure");
+        assert!(err.contains("serial output drain failed"));
+
+        let panic: std::thread::Result<io::Result<()>> = Err(Box::new("fixture panic"));
+        let err = drain_join_result(panic, "qemu stderr").expect_err("drain panic");
+        assert_eq!(err, "qemu stderr drain thread panicked");
+    }
+
     #[test]
     fn drain_stream_raises_each_marker_flag_independently() {
         // Two markers watched on one stream: each flag flips exactly when
@@ -1948,7 +2097,7 @@ mod tests {
             (String::from("rustos$ "), 1, Arc::clone(&second)),
         ];
         let feed: &[u8] = b"boot ok\nqueue armed\nbanner\nrustos$ ";
-        drain_stream(Some(feed), &captured, &markers);
+        drain_stream(Some(feed), &captured, &markers).expect("drain markers");
         assert!(first.load(Ordering::Acquire));
         assert!(second.load(Ordering::Acquire));
         assert_eq!(
@@ -1970,13 +2119,13 @@ mod tests {
         let seen = Arc::new(AtomicBool::new(false));
         let markers = [(String::from("sc=irq_bind"), 2, Arc::clone(&seen))];
         let first_only: &[u8] = b"boot\nsc=irq_bind task=5\n";
-        drain_stream(Some(first_only), &captured, &markers);
+        drain_stream(Some(first_only), &captured, &markers).expect("drain first marker");
         assert!(
             !seen.load(Ordering::Acquire),
             "one occurrence must not satisfy a two-occurrence marker"
         );
         let second: &[u8] = b"more\nsc=irq_bind task=8\n";
-        drain_stream(Some(second), &captured, &markers);
+        drain_stream(Some(second), &captured, &markers).expect("drain second marker");
         assert!(seen.load(Ordering::Acquire));
     }
 
